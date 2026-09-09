@@ -13,6 +13,7 @@ import std.editor as editor
 import std.editor_view as editor_view
 import std.timeline as timeline
 import std.math as math
+import std.vector_font as font
 import "app.ai" as app
 import "layout.ai" as layout
 
@@ -121,13 +122,16 @@ pub type Control = struct {
   value: f64,
   low: f64,
   high: f64,
-  step: f64
+  step: f64,
+  // The type size this control's box was MEASURED at. The painter draws at the same size,
+  // so a label can never be wider than the button built for it.
+  size: f64
 }
 
 fn blank() -> Control effects {alloc} {
   Control {action: act_none(), style: style_text(), domain: domain_none(), target: 0,
     kind: string.new(), name: string.new(), label: string.new(), area: layout.rect(0.0, 0.0, 0.0, 0.0),
-    on: false, enabled: true, value: 0.0, low: 0.0, high: 1.0, step: 0.1}
+    on: false, enabled: true, value: 0.0, low: 0.0, high: 1.0, step: 0.1, size: 0.0}
 }
 
 pub fn button(action: u32, label: str, area: layout.Rect, on: bool) -> Control effects {alloc} {
@@ -177,42 +181,69 @@ pub fn hit(controls: ref<array<Control>>, x: f64, y: f64) -> option<u64> effects
 // ---------------------------------------------------------------------------
 // The top toolbar.
 
+// Toolbar type. The top toolbar has the whole window width and uses the title size. The
+// timeline toolbar carries fourteen buttons in the narrower column left of the dock and has
+// to come down a step to fit them; ten is the floor, below which the letterforms go.
+pub fn top_bar_type() -> f64 effects {} { 12.0 }
+pub fn timeline_bar_type() -> f64 effects {} { 10.0 }
+fn bar_pad() -> f64 effects {} { 8.0 }
+
 fn strip(out: ref<array<Control>>, left: f64, top: f64, height: f64, action: u32,
-         label: str, on: bool, toggling: bool) -> f64 effects {alloc} {
-  let text_width: f64 = 6.4 * cast.float(str.len(label))
-  let wide: f64 = text_width + 16.0
+         label: str, on: bool, toggling: bool, size: f64) -> f64 effects {alloc} {
+  let wide: f64 = font.text_vector_width(label, size) + bar_pad() * 2.0
   var made: Control = button(action, label, layout.rect(left, top, left + wide, top + height), on)
+  struct.set(made, size, field=size)
   if toggling { struct.set(made, style_toggle(), field=style) }
   array.push(out, made)
-  left + wide + 4.0
+  left + wide + 3.0
 }
 
 pub fn toolbar(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.toolbar
+  let size: f64 = top_bar_type()
   let top: f64 = area.top + 4.0
   let height: f64 = layout.toolbar_height() - 8.0
   var x: f64 = 8.0
-  x = strip(out, x, top, height, act_import(), "Add", false, false)
-  x = strip(out, x, top, height, act_open(), "Open", false, false)
-  x = strip(out, x, top, height, act_save(), "Save", app.dirty(state), false)
-  x = strip(out, x, top, height, act_new(), "New", false, false)
-  x = strip(out, x, top, height, act_render(), "Render", false, false)
+  x = strip(out, x, top, height, act_import(), "Add", false, false, size)
+  x = strip(out, x, top, height, act_open(), "Open", false, false, size)
+  x = strip(out, x, top, height, act_save(), "Save", app.dirty(state), false, size)
+  x = strip(out, x, top, height, act_new(), "New", false, false, size)
+  x = strip(out, x, top, height, act_render(), "Render", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_undo(), "Undo", false, false)
-  x = strip(out, x, top, height, act_redo(), "Redo", false, false)
+  x = strip(out, x, top, height, act_undo(), "Undo", false, false, size)
+  x = strip(out, x, top, height, act_redo(), "Redo", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_razor_all(), "Razor all tracks", false, false)
+  x = strip(out, x, top, height, act_razor_all(), "Razor all tracks", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_go_start(), "Start", false, false)
-  x = strip(out, x, top, height, act_step_back(), "Prev", false, false)
+  x = strip(out, x, top, height, act_go_start(), "Start", false, false, size)
+  x = strip(out, x, top, height, act_step_back(), "Prev", false, false, size)
   let playing: bool = editor.playing(struct.borrow(state, field=document))
-  x = strip(out, x, top, height, act_play(), if playing { "Pause" } else { "Play" }, playing, true)
-  x = strip(out, x, top, height, act_step_forward(), "Next", false, false)
-  x = strip(out, x, top, height, act_go_end(), "End", false, false)
+  x = strip(out, x, top, height, act_play(), if playing { "Pause" } else { "Play" }, playing, true, size)
+  x = strip(out, x, top, height, act_step_forward(), "Next", false, false, size)
+  x = strip(out, x, top, height, act_go_end(), "End", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_reload(), "Reload", false, false)
+  x = strip(out, x, top, height, act_reload(), "Reload", false, false, size)
   out
+}
+
+// The timeline toolbar.
+//
+// It carries the most buttons of any strip and sits in the narrowest column, so it MEASURES
+// before it lays out: the zoom cluster is reserved at the right, the main run is priced at
+// each candidate size, and the largest size that fits is the one used. Laying out first and
+// hoping is how the Group and Snap buttons ended up underneath Zoom out, where a click on
+// either of them zoomed instead.
+fn run_width(labels: ref<array<string>>, size: f64) -> f64 effects {alloc} {
+  var total: f64 = 0.0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(labels) { break }
+    let owned: string = string.copy(str.view(array.borrow(labels, index)))
+    total = total + font.text_vector_width(str.view(owned), size) + bar_pad() * 2.0 + 3.0
+    index = index + 1
+  }
+  total
 }
 
 pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
@@ -220,36 +251,57 @@ pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   let area: layout.Rect = frame.tbar
   let top: f64 = area.top + 3.0
   let height: f64 = layout.tbar_height() - 6.0
-  var x: f64 = area.left + 4.0
-  x = strip(out, x, top, height, act_split(), "Split", false, false)
-  x = strip(out, x, top, height, act_razor_all(), "Razor all", false, false)
-  x = strip(out, x, top, height, act_lift(), "Lift", false, false)
-  x = strip(out, x, top, height, act_ripple(), "Ripple", false, false)
-  x = x + 8.0
-  x = strip(out, x, top, height, act_cut(), "Cut", false, false)
-  x = strip(out, x, top, height, act_copy(), "Copy", false, false)
-  x = strip(out, x, top, height, act_paste(), "Paste", app.has_clipboard(state), false)
-  x = x + 8.0
-  x = strip(out, x, top, height, act_append(), "Append", false, false)
-  x = strip(out, x, top, height, act_overwrite(), "Overwrite", false, false)
-  x = strip(out, x, top, height, act_insert(), "Insert", false, false)
-  x = x + 8.0
-  x = strip(out, x, top, height, act_marker(), "Marker", false, false)
-  x = strip(out, x, top, height, act_transition(), "Transition", false, false)
-  x = strip(out, x, top, height, act_group(), "Group", false, false)
-  x = strip(out, x, top, height, act_snap(), "Snap", app.snap(state), true)
-  // Zoom sits at the right end, where an editor looks for it.
-  var right: f64 = area.right - 4.0
-  var index: u64 = 0
+
+  let playing_paste: bool = app.has_clipboard(state)
+  let snapping: bool = app.snap(state)
+  var labels: array<string> = ["Split", "Razor all", "Lift", "Ripple", "Cut", "Copy",
+    "Paste", "Append", "Overwrite", "Insert", "Marker", "Transition", "Group", "Snap"]
+  var actions: array<u32> = [act_split(), act_razor_all(), act_lift(), act_ripple(),
+    act_cut(), act_copy(), act_paste(), act_append(), act_overwrite(), act_insert(),
+    act_marker(), act_transition(), act_group(), act_snap()]
   var zoom_labels: array<string> = ["Zoom in", "Fit", "Zoom out"]
   var zoom_actions: array<u32> = [act_zoom_in(), act_zoom_fit(), act_zoom_out()]
+
+  // Pick the size, then reserve the zoom cluster from the right at that size.
+  var size: f64 = timeline_bar_type()
+  loop {
+    if size <= 8.0 { break }
+    let needed: f64 = run_width(labels, size) + run_width(zoom_labels, size) + 16.0
+    if needed <= layout.width_of(area) { break }
+    size = size - 1.0
+  }
+  var right: f64 = area.right - 4.0
+  var index: u64 = 0
   loop {
     if index >= array.len(zoom_labels) { break }
     let text: str = str.view(array.borrow(zoom_labels, index))
-    let wide: f64 = 6.4 * cast.float(str.len(text)) + 16.0
-    array.push(out, button(array.get(zoom_actions, index), text,
-      layout.rect(right - wide, top, right, top + height), false))
-    right = right - wide - 4.0
+    let wide: f64 = font.text_vector_width(text, size) + bar_pad() * 2.0
+    var zoomer: Control = button(array.get(zoom_actions, index), text,
+      layout.rect(right - wide, top, right, top + height), false)
+    struct.set(zoomer, size, field=size)
+    array.push(out, zoomer)
+    right = right - wide - 3.0
+    index = index + 1
+  }
+  let limit: f64 = right - 6.0
+
+  var x: f64 = area.left + 4.0
+  index = 0
+  loop {
+    if index >= array.len(labels) { break }
+    let text: str = str.view(array.borrow(labels, index))
+    let wide: f64 = font.text_vector_width(text, size) + bar_pad() * 2.0
+    // A button that will not fit is NOT built. An unbuilt button is not painted and cannot
+    // be clicked, which is better than one drawn on top of another control's rectangle.
+    if x + wide > limit { break }
+    let action: u32 = array.get(actions, index)
+    var made: Control = button(action, text, layout.rect(x, top, x + wide, top + height),
+      if action == act_paste() { playing_paste } else if action == act_snap() { snapping }
+      else { false })
+    struct.set(made, size, field=size)
+    if action == act_snap() { struct.set(made, style_toggle(), field=style) }
+    array.push(out, made)
+    x = x + wide + 3.0
     index = index + 1
   }
   out
@@ -270,22 +322,60 @@ pub fn tab_name(which: u32) -> string effects {alloc} {
   string.copy("Properties")
 }
 
+// The largest type size at which every label fits across `width` with `padding` on each
+// side of each one, down to a floor of eight.
+fn fitted_size(labels: ref<array<string>>, width: f64, padding: f64,
+               start: f64) -> f64 effects {alloc} {
+  var characters: f64 = 0.0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(labels) { break }
+    characters = characters + cast.float(str.len(str.view(array.borrow(labels, index))))
+    index = index + 1
+  }
+  let slots: f64 = cast.float(array.len(labels))
+  var size: f64 = start
+  loop {
+    if size <= 8.0 { break }
+    if characters * size + padding * 2.0 * slots <= width { break }
+    size = size - 1.0
+  }
+  size
+}
+
 pub fn dock_tabs(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.dock_tabs
-  let each: f64 = layout.width_of(area) / 4.0
   let chosen: u32 = app.dock_tab(state)
+  // Tabs are as wide as their own names, not an equal quarter each: "Properties" is twice
+  // "Audio", and splitting the strip evenly clipped it to "Propert".
+  var names: array<string> = array.new()
+  var total: f64 = 0.0
   var index: u32 = 0
   loop {
     if index >= 4 { break }
-    let widened: u64 = cast.wrap(index)
-    let seat: f64 = cast.float(widened)
-    var made: Control = button(act_tab(), str.view(tab_name(index)),
-      layout.rect(area.left + seat * each, area.top, area.left + (seat + 1.0) * each,
-                  area.bottom), index == chosen)
+    array.push(names, tab_name(index))
+    total = total + cast.float(str.len(str.view(array.borrow(names, cast.wrap(index)))))
+    index = index + 1
+  }
+  let padding: f64 = 6.0
+  let size: f64 = fitted_size(names, layout.width_of(area), padding, top_bar_type())
+  // Any width the names do not use is shared out, so the strip still spans the dock.
+  let slack: f64 = (layout.width_of(area) - total * size - padding * 8.0) / 4.0
+  var left: f64 = area.left
+  index = 0
+  loop {
+    if index >= 4 { break }
+    let seat: u64 = cast.wrap(index)
+    let text: str = str.view(array.borrow(names, seat))
+    let wide: f64 = font.text_vector_width(text, size) + padding * 2.0 + slack
+    var made: Control = button(act_tab(), text,
+      layout.rect(left, area.top, left + wide, area.bottom), index == chosen)
     struct.set(made, style_tab(), field=style)
-    struct.set(made, cast.wrap(index), field=target)
+    struct.set(made, seat, field=target)
+    struct.set(made, size, field=size)
     array.push(out, made)
+    left = left + wide
     index = index + 1
   }
   out
@@ -515,8 +605,8 @@ pub fn blend_name(mode: f64) -> string effects {alloc} {
 // produced but marked disabled and clipped away by the painter, so a scroll position never
 // changes which row an action belongs to.
 
-pub fn row_height() -> f64 effects {} { 17.0 }
-pub fn head_height() -> f64 effects {} { 20.0 }
+pub fn row_height() -> f64 effects {} { 22.0 }
+pub fn head_height() -> f64 effects {} { 26.0 }
 
 fn heading(out: ref<array<Control>>, area: layout.Rect, top: f64,
            text: str) -> f64 effects {alloc} {
@@ -545,23 +635,28 @@ fn param_row(out: ref<array<Control>>, area: layout.Rect, top: f64, domain: u32,
   let bottom: f64 = top + row_height()
   let left: f64 = area.left + 4.0
   let right: f64 = area.right - 4.0
-  let bar_left: f64 = left + 122.0
-  let bar_right: f64 = right - 78.0
+  // Label, decrement, bar, increment, keyframe, reading — in that order, with the reading
+  // painted just past the keyframe button. Every offset is relative to the bar so the row
+  // stays correct if the dock's width changes.
+  let bar_left: f64 = left + 152.0
+  let bar_right: f64 = right - 112.0
 
-  var lab: Control = button(act_none(), text, layout.rect(left, top, bar_left - 20.0, bottom), false)
+  var lab: Control = button(act_none(), text, layout.rect(left, top, bar_left - 30.0, bottom), false)
   struct.set(lab, style_row(), field=style)
   struct.set(lab, value, field=value)
   array.push(out, lab)
 
   var down: Control = button(act_param_dec(), "-",
-    layout.rect(bar_left - 18.0, top + 1.0, bar_left - 2.0, bottom - 1.0), false)
+    layout.rect(bar_left - 26.0, top + 1.0, bar_left - 4.0, bottom - 1.0), false)
   var bar: Control = button(act_param_set(), text, layout.rect(bar_left, top + 2.0, bar_right,
     bottom - 2.0), live)
   struct.set(bar, style_slider(), field=style)
   var up: Control = button(act_param_inc(), "+",
-    layout.rect(bar_right + 2.0, top + 1.0, bar_right + 18.0, bottom - 1.0), false)
-  var key: Control = button(act_param_key(), "K",
-    layout.rect(bar_right + 20.0, top + 1.0, bar_right + 36.0, bottom - 1.0), false)
+    layout.rect(bar_right + 2.0, top + 1.0, bar_right + 24.0, bottom - 1.0), false)
+  let keyable: bool = domain != domain_track()
+  var key: Control = button(if keyable { act_param_key() } else { act_none() }, "K",
+    layout.rect(bar_right + 26.0, top + 1.0, bar_right + 48.0, bottom - 1.0), false)
+  struct.set(key, keyable, field=enabled)
 
   struct.set(down, domain, field=domain)
   struct.set(bar, domain, field=domain)
@@ -683,7 +778,7 @@ fn effect_switch(out: ref<array<Control>>, area: layout.Rect, top: f64,
 
 fn drop_button(area: layout.Rect, top: f64, id: u64, kind: str) -> Control effects {alloc} {
   var made: Control = button(act_filter_remove(), "x",
-    layout.rect(area.right - 22.0, top + 1.0, area.right - 6.0, top + row_height() - 1.0), false)
+    layout.rect(area.right - 34.0, top + 1.0, area.right - 8.0, top + row_height() - 1.0), false)
   struct.set(made, domain_filter(), field=domain)
   struct.set(made, id, field=target)
   let _ = ref.swap(struct.borrow(made, field=kind), string.copy(kind))
@@ -751,7 +846,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
       let shown: string = math.format_fixed(value.speed, 3)
       cursor = text_row(out, area, cursor, "Speed", str.view(shown))
       cursor = text_row(out, area, cursor, "Reverse", if value.reverse { "on" } else { "off" })
-      cursor = text_row(out, area, cursor, "note", "std.editor exposes no speed setter — see docs/AIR_GAPS.md")
+      cursor = text_row(out, area, cursor, "note", "read only in std.editor")
     },
   }
 
@@ -813,13 +908,13 @@ pub fn panel_extent(controls: ref<array<Control>>, area: layout.Rect) -> f64 eff
 
 fn library_grid(out: ref<array<Control>>, area: layout.Rect, origin: f64,
                 kinds: ref<array<string>>) -> f64 effects {alloc} {
-  let columns: f64 = 3.0
+  let columns: f64 = 2.0
   let each: f64 = (layout.width_of(area) - 12.0) / columns
   var index: u64 = 0
   loop {
     if index >= array.len(kinds) { break }
-    let column: f64 = cast.float(index - (index / 3) * 3)
-    let row: f64 = cast.float(index / 3)
+    let column: f64 = cast.float(index - (index / 2) * 2)
+    let row: f64 = cast.float(index / 2)
     let left: f64 = area.left + 6.0 + column * each
     let top: f64 = origin + row * (row_height() + 1.0)
     let owned: string = string.copy(str.view(array.borrow(kinds, index)))
@@ -831,7 +926,7 @@ fn library_grid(out: ref<array<Control>>, area: layout.Rect, origin: f64,
     array.push(out, made)
     index = index + 1
   }
-  let rows: f64 = cast.float((array.len(kinds) + 2) / 3)
+  let rows: f64 = cast.float((array.len(kinds) + 1) / 2)
   origin + rows * (row_height() + 1.0) + 4.0
 }
 
@@ -863,27 +958,27 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
           let widened_position: u64 = cast.wrap(position)
           let top: f64 = cursor
           var name_button: Control = toggle(act_filter_pick(), str.view(owned),
-            layout.rect(area.left + 4.0, top, area.right - 96.0, top + row_height()),
+            layout.rect(area.left + 4.0, top, area.right - 118.0, top + row_height()),
             id == picked)
           struct.set(name_button, domain_filter(), field=domain)
           struct.set(name_button, id, field=target)
           struct.set(name_button, on, field=enabled)
           array.push(out, name_button)
           var eye: Control = toggle(act_filter_toggle(), if on { "on" } else { "off" },
-            layout.rect(area.right - 94.0, top + 1.0, area.right - 72.0,
+            layout.rect(area.right - 116.0, top + 1.0, area.right - 88.0,
                         top + row_height() - 1.0), on)
           struct.set(eye, domain_filter(), field=domain)
           struct.set(eye, id, field=target)
           array.push(out, eye)
           var up: Control = button(act_filter_up(), "Up",
-            layout.rect(area.right - 70.0, top + 1.0, area.right - 48.0,
+            layout.rect(area.right - 86.0, top + 1.0, area.right - 62.0,
                         top + row_height() - 1.0), false)
           struct.set(up, domain_filter(), field=domain)
           struct.set(up, id, field=target)
           struct.set(up, cast.float(widened_position), field=value)
           array.push(out, up)
           var down: Control = button(act_filter_down(), "Dn",
-            layout.rect(area.right - 46.0, top + 1.0, area.right - 24.0,
+            layout.rect(area.right - 60.0, top + 1.0, area.right - 36.0,
                         top + row_height() - 1.0), false)
           struct.set(down, domain_filter(), field=domain)
           struct.set(down, id, field=target)
@@ -965,7 +1060,7 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
   out
 }
 
-pub fn meter_height() -> f64 effects {} { 118.0 }
+pub fn meter_height() -> f64 effects {} { 128.0 }
 
 // ---------------------------------------------------------------------------
 // Scopes: the readouts are painted from the program frame; these are their switches.
@@ -973,14 +1068,12 @@ pub fn meter_height() -> f64 effects {} { 118.0 }
 pub fn scopes_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.dock_body
-  var cursor: f64 = area.bottom - row_height() - 6.0
-  let top: f64 = cursor
-  let each: f64 = (layout.width_of(area) - 8.0) / 2.0
-  var reload: Control = button(act_reload(), "Refresh from program",
-    layout.rect(area.left + 4.0, top, area.left + 4.0 + each - 2.0, top + row_height()), false)
-  array.push(out, reload)
+  // The scopes are read from the program frame the monitor already fetched on this repaint,
+  // so there is nothing to refresh; the only action here is exporting what is on screen.
+  let top: f64 = area.bottom - row_height() - 6.0
   var render: Control = button(act_render(), "Render still",
-    layout.rect(area.left + 6.0 + each, top, area.right - 4.0, top + row_height()), false)
+    layout.rect(area.left + 6.0, top, area.right - 6.0, top + row_height()), false)
+  struct.set(render, top_bar_type(), field=size)
   array.push(out, render)
   out
 }
@@ -1018,7 +1111,7 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
       },
     }
     let row: f64 = top + 18.0
-    let size: f64 = 15.0
+    let size: f64 = 18.0
     var x: f64 = area.left + 8.0
     var index: u64 = 0
     var labels: array<string> = ["eye", "L", "M", "S", "x"]
@@ -1029,23 +1122,23 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
       if index >= array.len(labels) { break }
       let text: str = str.view(array.borrow(labels, index))
       var made: Control = toggle(array.get(actions, index), text,
-        layout.rect(x, row, x + size + 6.0, row + size), array.get(flags, index))
+        layout.rect(x, row, x + size + 14.0, row + size), array.get(flags, index))
       struct.set(made, domain_track(), field=domain)
       struct.set(made, id, field=target)
       if index == 4 { struct.set(made, style_button(), field=style) }
       array.push(out, made)
-      x = x + size + 8.0
+      x = x + size + 17.0
       index = index + 1
     }
     lane = lane + 1
   }
   // The two track-adding buttons sit under the last lane, as in every editor.
-  let foot: f64 = area.bottom - 22.0
+  let foot: f64 = area.bottom - 26.0
   var add_video: Control = button(act_add_video_track(), "+V",
-    layout.rect(area.left + 8.0, foot, area.left + 44.0, foot + 17.0), false)
+    layout.rect(area.left + 8.0, foot, area.left + 52.0, foot + 21.0), false)
   array.push(out, add_video)
   var add_audio: Control = button(act_add_audio_track(), "+A",
-    layout.rect(area.left + 50.0, foot, area.left + 86.0, foot + 17.0), false)
+    layout.rect(area.left + 58.0, foot, area.left + 102.0, foot + 21.0), false)
   array.push(out, add_audio)
   out
 }
@@ -1053,7 +1146,7 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
 // ---------------------------------------------------------------------------
 // The media pool: one control per row, plus the actions that apply to the highlighted one.
 
-pub fn pool_row_height() -> f64 effects {} { 26.0 }
+pub fn pool_row_height() -> f64 effects {} { 32.0 }
 
 pub fn pool_controls(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
   var out: array<Control> = array.new()
@@ -1061,7 +1154,7 @@ pub fn pool_controls(frame: layout.Frame, state: ref<app.App>) -> array<Control>
   let highlighted: u64 = app.pool_row(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   let count: u64 = editor.source_count(doc)
-  let foot: f64 = area.bottom - 24.0
+  let foot: f64 = area.bottom - 28.0
   var y: f64 = area.top + 22.0
   var index: u64 = 0
   loop {
@@ -1085,21 +1178,33 @@ pub fn pool_controls(frame: layout.Frame, state: ref<app.App>) -> array<Control>
   if highlighted < count {
     chosen = struct.get(array.borrow(struct.borrow(doc, field=sources), highlighted), field=id)
   }
-  let each: f64 = (layout.width_of(area) - 16.0) / 3.0
-  var x: f64 = area.left + 6.0
-  var labels: array<string> = ["Relink", "Add as clip", "Source"]
+  var labels: array<string> = ["Relink", "Add clip", "Source"]
   var actions: array<u32> = [act_pool_relink(), act_pool_add_clip(), act_pool_source()]
+  let padding: f64 = 5.0
+  let available: f64 = layout.width_of(area) - 12.0
+  let size: f64 = fitted_size(labels, available, padding, top_bar_type())
+  var characters: f64 = 0.0
+  var count: u64 = 0
+  loop {
+    if count >= array.len(labels) { break }
+    characters = characters + cast.float(str.len(str.view(array.borrow(labels, count))))
+    count = count + 1
+  }
+  let slack: f64 = (available - characters * size - padding * 6.0) / 3.0
+  var x: f64 = area.left + 6.0
   var index2: u64 = 0
   loop {
     if index2 >= 3 { break }
-    var made: Control = button(array.get(actions, index2),
-      str.view(array.borrow(labels, index2)),
-      layout.rect(x, foot + 2.0, x + each - 3.0, foot + 19.0), false)
+    let text: str = str.view(array.borrow(labels, index2))
+    let wide: f64 = font.text_vector_width(text, size) + padding * 2.0 + slack
+    var made: Control = button(array.get(actions, index2), text,
+      layout.rect(x, foot + 2.0, x + wide - 3.0, foot + 23.0), false)
     struct.set(made, domain_source(), field=domain)
     struct.set(made, chosen, field=target)
     struct.set(made, chosen != 0, field=enabled)
+    struct.set(made, size, field=size)
     array.push(out, made)
-    x = x + each
+    x = x + wide
     index2 = index2 + 1
   }
   out

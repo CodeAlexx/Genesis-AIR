@@ -60,9 +60,31 @@ fn outline(canvas: ref<draw.Canvas>, area: layout.Rect, value: draw.Color) -> un
     none => (),
   }
 }
+// The type scale.
+//
+// `std.vector_font` is a 5x7 stroke font: `size` is the cap height in pixels and the pen
+// advances exactly `size` per character.
+//
+// Both numbers below are measured from a ladder of every size and weight this application
+// might use, not guessed. SIZE is what legibility turns on — below about ten pixels the
+// letterforms stop separating and `Render` reads as `Rsndsr`. WEIGHT cuts the other way:
+// the glyphs are single strokes and their counters are only one or two grid units across,
+// so a heavy pen closes the bowls of `a`, `e` and `o` and they all collapse to `s`. One is
+// the right weight for this font; heavier is worse, not bolder.
+pub fn type_small() -> f64 effects {} { 10.0 }
+pub fn type_body() -> f64 effects {} { 11.0 }
+pub fn type_title() -> f64 effects {} { 12.0 }
+pub fn ink() -> f64 effects {} { 1.0 }
+
+// Characters that fit in a given width at a given size.
+pub fn fits(width: f64, size: f64) -> u64 effects {} {
+  if size <= 0.0 { return 0 }
+  cast.sat(width / size)
+}
+
 fn label(canvas: ref<draw.Canvas>, x: f64, y: f64, text: str, size: f64,
          value: draw.Color) -> unit effects {alloc} {
-  font.draw_text_filled(canvas, x, y, text, value, size, 1.0)
+  font.draw_text_filled(canvas, x, y, text, value, size, ink())
   ()
 }
 
@@ -73,7 +95,7 @@ fn panel(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect, title: str,
   fill(canvas, area, colors.panel)
   fill_at(canvas, area.left, area.top, area.right, area.top + 18.0, colors.panel_head)
   outline(canvas, area, if focused { colors.focus } else { colors.edge })
-  label(canvas, area.left + 7.0, area.top + 5.0, title, 7.0, colors.text)
+  label(canvas, area.left + 7.0, area.top + 5.0, title, type_title(), colors.text)
   ()
 }
 
@@ -91,8 +113,8 @@ fn paint_menu(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   loop {
     if index >= array.len(entries) { break }
     let text: str = str.view(array.borrow(entries, index))
-    label(canvas, x, 8.0, text, 7.0, colors.text)
-    x = x + 22.0 + font.text_vector_width(text, 7.0)
+    label(canvas, x, 8.0, text, type_title(), colors.text)
+    x = x + 22.0 + font.text_vector_width(text, type_title())
     index = index + 1
   }
   var title: string = string.copy("Genesis AIR    ")
@@ -100,7 +122,7 @@ fn paint_menu(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   if str.len(str.view(where)) == 0 { string.append(title, "untitled") }
   else { string.append(title, str.view(where)) }
   if app.dirty(state) { string.append(title, "   EDITED") }
-  label(canvas, area.right - 430.0, 8.0, str.view(title), 7.0, colors.dim)
+  label(canvas, area.right - 430.0, 8.0, str.view(title), type_title(), colors.dim)
   ()
 }
 
@@ -129,7 +151,7 @@ fn paint_pool(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     fill_at(canvas, row.left + 4.0, row.top + 3.0, row.left + 30.0, row.bottom - 3.0,
       if online { draw.rgb(66, 102, 160) } else { draw.rgb(94, 58, 62) })
     let named: string = chrome.label_of(entry)
-    label(canvas, row.left + 34.0, row.top + 2.0, str.view(named), 7.0,
+    label(canvas, row.left + 34.0, row.top + 2.0, str.view(named), type_title(),
       if online { colors.text } else { colors.dim })
     var detail: string = string.new()
     let frames: i64 = editor.source_frames(document, source)
@@ -138,11 +160,11 @@ fn paint_pool(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
       string.append(detail, " frames")
     } else { string.append(detail, "length unknown") }
     if not online { string.append(detail, "   OFFLINE") }
-    label(canvas, row.left + 34.0, row.top + 12.0, str.view(detail), 6.0, colors.dim)
+    label(canvas, row.left + 34.0, row.top + 17.0, str.view(detail), type_small(), colors.dim)
     index = index + 1
   }
   if editor.source_count(document) == 0 {
-    label(canvas, area.left + 10.0, area.top + 30.0, "no media imported - press Add", 6.0,
+    label(canvas, area.left + 10.0, area.top + 30.0, "no media imported - press Add", type_small(),
       colors.dim)
   }
   ()
@@ -200,7 +222,7 @@ fn paint_monitor(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect, tit
   fill_at(canvas, head - 1.0, bar_top - 3.0, head + 2.0, bar_top + 10.0, draw.rgb(244, 78, 78))
   var line: string = string.copy(str.view(timeline.timecode(frame, fps)))
   string.append(line, if playing { "   PLAY" } else { "   PAUSE" })
-  label(canvas, area.left + 8.0, bar_top + 11.0, str.view(line), 7.0, colors.text)
+  label(canvas, area.left + 8.0, bar_top + 11.0, str.view(line), type_title(), colors.text)
   ()
 }
 
@@ -236,19 +258,40 @@ fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   fill(canvas, area, draw.rgb(22, 24, 29))
   outline(canvas, area, colors.edge)
   let step: i64 = if fps >= 1.0 { cast.sat(math.round(fps)) } else { 1 }
+  // A timecode is eleven characters wide, so at close zoom only every Nth second can carry
+  // one. Ticking every second while labelling every Nth is what keeps them from colliding.
+  let stamp_width: f64 = font.text_vector_width("00 00 00 00", type_small()) + 10.0
+  let ticks_per_second: f64 = cast.float(step)
+  let per_tick: f64 = ticks_per_second * app.zoom(state)
+  var every: i64 = 1
+  loop {
+    if every > 3600 { break }
+    let spacing: f64 = cast.float(every)
+    if spacing * per_tick >= stamp_width { break }
+    every = every + 1
+  }
   var frame: i64 = app.scroll(state)
+  // Start on a whole second so the labelled ticks do not shift while scrolling.
+  frame = frame - (frame - (frame / step) * step)
+  var ticks: i64 = frame / step
   var guard: u64 = 0
   loop {
     if guard > 4096 { break }
     let x: f64 = timeline.frame_to_x(model, frame)
     if x > area.right { break }
     if x >= area.left {
-      draw.line(canvas, geometry.vec2(x, area.bottom - 7.0), geometry.vec2(x, area.bottom),
-        colors.edge, 1.0)
-      label(canvas, x + 3.0, area.top + 3.0, str.view(timeline.timecode(frame, fps)), 6.0,
-        colors.dim)
+      let labelled: bool = ticks - (ticks / every) * every == 0
+      draw.line(canvas, geometry.vec2(x, if labelled { area.top + 2.0 } else { area.bottom - 6.0 }),
+        geometry.vec2(x, area.bottom), colors.edge, 1.0)
+      // A label that would run past the ruler is dropped rather than drawn: the panel to the
+      // right of the ruler is the inspector, and text does not belong in it.
+      if labelled and x + 4.0 + stamp_width <= area.right {
+        let stamp: string = timeline.timecode(frame, fps)
+        label(canvas, x + 4.0, area.top + 4.0, str.view(stamp), type_small(), colors.dim)
+      }
     }
     frame = frame + step
+    ticks = ticks + 1
     guard = guard + 1
   }
   // Markers ride the ruler, where an editor expects them.
@@ -290,7 +333,7 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
       some(box) => { draw.stroke_rect(canvas, box, colors.edge, 1.0) },
       none => { },
     }
-    label(canvas, area.left + 8.0, top + 5.0, str.view(editor.track_name(document, id)), 7.0,
+    label(canvas, area.left + 8.0, top + 4.0, str.view(editor.track_name(document, id)), type_title(),
       colors.text)
     lane = lane + 1
   }
@@ -364,11 +407,11 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     var asking: string = app.prompt_label(state)
     string.append(asking, ":  ")
     string.append(asking, str.view(app.prompt_text(state)))
-    label(canvas, 8.0, area.top + 6.0, str.view(asking), 7.0, colors.accent)
-    let caret: f64 = 8.0 + font.text_vector_width(str.view(asking), 7.0) + 2.0
+    label(canvas, 8.0, area.top + 6.0, str.view(asking), type_title(), colors.accent)
+    let caret: f64 = 8.0 + font.text_vector_width(str.view(asking), type_title()) + 2.0
     fill_at(canvas, caret, area.top + 5.0, caret + 5.0, area.top + 14.0, colors.accent)
     label(canvas, area.right - 260.0, area.top + 6.0,
-      "Enter to accept    Escape to cancel", 6.0, colors.dim)
+      "Enter to accept    Escape to cancel", type_small(), colors.dim)
     return ()
   }
   var line: string = app.status(state)
@@ -389,7 +432,7 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     string.append(line, str.view(number(count)))
     string.append(line, " clip(s) with an unverifiable source length")
   }
-  label(canvas, 8.0, area.top + 6.0, str.view(line), 7.0, colors.text)
+  label(canvas, 8.0, area.top + 6.0, str.view(line), type_title(), colors.text)
   ()
 }
 
@@ -418,20 +461,20 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
 
   if style == chrome.style_heading() {
     fill_at(canvas, area.left, area.bottom - 8.0, area.right, area.bottom - 7.0, colors.edge)
-    label(canvas, area.left + 2.0, area.top + 4.0, str.view(text), 6.0, colors.accent)
+    label(canvas, area.left + 2.0, area.top + 4.0, str.view(text), type_small(), colors.accent)
     return ()
   }
   if style == chrome.style_text() {
     let detail: string = chrome.name_of(control)
-    label(canvas, area.left + 2.0, area.top + 4.0, str.view(text), 6.0, colors.dim)
-    let wide: f64 = font.text_vector_width(str.view(detail), 6.0)
+    label(canvas, area.left + 2.0, area.top + 4.0, str.view(text), type_small(), colors.dim)
+    let wide: f64 = font.text_vector_width(str.view(detail), type_small())
     let x: f64 = area.right - 4.0 - wide
     label(canvas, if x < area.left + 90.0 { area.left + 90.0 } else { x }, area.top + 4.0,
-      str.view(detail), 6.0, colors.text)
+      str.view(detail), type_small(), colors.text)
     return ()
   }
   if style == chrome.style_row() {
-    label(canvas, area.left + 2.0, area.top + 5.0, str.view(text), 6.0, colors.text)
+    label(canvas, area.left + 2.0, area.top + 5.0, str.view(text), type_small(), colors.text)
     return ()
   }
   if style == chrome.style_slider() {
@@ -454,7 +497,7 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
         colors.dim, 1.0)
     }
     let shown: string = math.format_fixed(value, 2)
-    label(canvas, area.right + 40.0, area.top - 1.0, str.view(shown), 6.0,
+    label(canvas, area.right + 52.0, area.top + 1.0, str.view(shown), type_small(),
       if on { colors.text } else { colors.dim })
     return ()
   }
@@ -462,7 +505,10 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
     fill(canvas, area, if on { colors.panel } else { draw.rgb(22, 24, 29) })
     if on { fill_at(canvas, area.left, area.top, area.right, area.top + 2.0, colors.accent) }
     outline(canvas, area, colors.edge)
-    text_centre(canvas, area, str.view(text), 7.0, if on { colors.text } else { colors.dim })
+    let tab_size: f64 = struct.get(control, field=size)
+    text_centre(canvas, area, str.view(text),
+      if tab_size >= 8.0 { tab_size } else { type_title() },
+      if on { colors.text } else { colors.dim })
     return ()
   }
   // Buttons and toggles.
@@ -470,7 +516,9 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
     else if live { draw.rgb(38, 41, 50) } else { draw.rgb(28, 30, 36) }
   fill(canvas, area, face)
   outline(canvas, area, if on { colors.focus } else { colors.edge })
-  text_centre(canvas, area, str.view(text), 6.0,
+  let measured: f64 = struct.get(control, field=size)
+  let size: f64 = if measured >= 8.0 and measured <= 20.0 { measured } else { type_small() }
+  text_centre(canvas, area, str.view(text), size,
     if live or on { colors.text } else { colors.dim })
   ()
 }
@@ -505,8 +553,8 @@ fn paint_toolbar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     string.append(line, "   failures ")
     string.append(line, str.view(number(failures)))
   }
-  let wide: f64 = font.text_vector_width(str.view(line), 6.0)
-  label(canvas, frame.width - wide - 10.0, frame.toolbar.top + 10.0, str.view(line), 6.0,
+  let wide: f64 = font.text_vector_width(str.view(line), type_small())
+  label(canvas, frame.width - wide - 10.0, frame.toolbar.top + 11.0, str.view(line), type_small(),
     if failures == 0 { colors.dim } else { colors.warn })
   ()
 }
@@ -528,7 +576,7 @@ fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
   let wide: u32 = draw.surface_width(image)
   let tall: u32 = draw.surface_height(image)
   if wide == 0 or tall == 0 {
-    label(canvas, area.left + 8.0, area.top + 12.0, "no program frame", 6.0, colors.dim)
+    label(canvas, area.left + 8.0, area.top + 12.0, "no program frame", type_small(), colors.dim)
     return ()
   }
   // One pass over a sampled grid fills the histogram and the parade at once, so the scopes
@@ -595,7 +643,7 @@ fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
   let panel_wide: f64 = layout.width_of(area) - 12.0
   let column: f64 = panel_wide / 64.0
 
-  label(canvas, area.left + 6.0, top, "HISTOGRAM", 6.0, colors.accent)
+  label(canvas, area.left + 6.0, top, "HISTOGRAM", type_small(), colors.accent)
   top = top + 12.0
   let hist_height: f64 = 96.0
   fill_at(canvas, area.left + 6.0, top, area.right - 6.0, top + hist_height, draw.rgb(12, 13, 16))
@@ -618,7 +666,7 @@ fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
     colors.edge)
   top = top + hist_height + 10.0
 
-  label(canvas, area.left + 6.0, top, "RGB PARADE", 6.0, colors.accent)
+  label(canvas, area.left + 6.0, top, "RGB PARADE", type_small(), colors.accent)
   top = top + 12.0
   let parade_height: f64 = 72.0
   let each: f64 = (panel_wide - 8.0) / 3.0
@@ -647,7 +695,7 @@ fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
   }
   top = top + parade_height + 10.0
 
-  label(canvas, area.left + 6.0, top, "LUMA WAVEFORM", 6.0, colors.accent)
+  label(canvas, area.left + 6.0, top, "LUMA WAVEFORM", type_small(), colors.accent)
   top = top + 12.0
   let wave_height: f64 = 72.0
   fill_at(canvas, area.left + 6.0, top, area.right - 6.0, top + wave_height, draw.rgb(12, 13, 16))
@@ -669,8 +717,6 @@ fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
 
   let shown_wide: u64 = cast.wrap(wide)
   let shown_tall: u64 = cast.wrap(tall)
-  let shown_wide: u64 = cast.wrap(wide)
-  let shown_tall: u64 = cast.wrap(tall)
   var summary: string = string.copy("sampled ")
   let sampled: i64 = cast.sat(counted)
   string.append(summary, str.view(number(sampled)))
@@ -678,7 +724,7 @@ fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
   string.append(summary, str.view(number(cast.sat(shown_wide))))
   string.append(summary, "x")
   string.append(summary, str.view(number(cast.sat(shown_tall))))
-  label(canvas, area.left + 6.0, top, str.view(summary), 6.0, colors.dim)
+  label(canvas, area.left + 6.0, top, str.view(summary), type_small(), colors.dim)
   ()
 }
 
@@ -747,7 +793,7 @@ fn paint_meters(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   let height: f64 = chrome.meter_height()
   fill_at(canvas, area.left + 4.0, area.top + 2.0, area.right - 4.0, area.top + height,
     draw.rgb(12, 13, 16))
-  label(canvas, area.left + 8.0, area.top + 4.0, "METERS", 6.0, colors.accent)
+  label(canvas, area.left + 8.0, area.top + 4.0, "METERS", type_small(), colors.accent)
   let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
   var tracks: array<u64> = audio_tracks(state)
   let top: f64 = area.top + 18.0
@@ -768,7 +814,7 @@ fn paint_meters(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     fill_at(canvas, x, lit, x + 18.0, bottom, tone)
     outline(canvas, layout.rect(x, top, x + 18.0, bottom), colors.edge)
     let named: string = editor.track_name(struct.borrow(state, field=document), id)
-    label(canvas, x, bottom + 2.0, str.view(named), 6.0, colors.dim)
+    label(canvas, x, bottom + 2.0, str.view(named), type_small(), colors.dim)
     x = x + 26.0
     index = index + 1
   }

@@ -80,8 +80,20 @@ advance the pen but draw nothing, so they render as gaps.
 button. The first build of the toolbar had transport buttons labelled `|<` `<` `>` `>|` and
 they came out blank.
 
-**Smallest fix.** Additional entries in `glyph_points` for the printable ASCII punctuation,
-in the same two-value polyline format the existing glyphs use. No API change.
+There is a second, sharper limitation in the same module, found by measuring a ladder of
+every size and weight: the glyphs are single strokes whose counters are one or two grid
+units across, so the font is only legible in a narrow band. Below about ten pixels of cap
+height the letterforms stop separating — `Render` reads as `Rsndsr` — and above a stroke
+weight of about 1.0 the pen closes the bowls, so `a`, `e` and `o` all collapse to `s`. There
+is no size and weight at which the font is comfortable; ten to twelve pixels at weight one
+is the whole usable window.
+
+**Smallest fix.** Two, independent. For the missing characters: additional entries in
+`glyph_points` for the printable ASCII punctuation, in the same two-value polyline format the
+existing glyphs use — no API change. For legibility: the letterforms themselves need more
+distinct bowls (a wider grid than 5x7 for the lowercase, or a second set of glyph outlines
+intended for filling rather than stroking), which is a larger piece of work and a real design
+decision rather than a patch.
 
 **Affected file.** `stdlib/vector_font.ai` (AIR).
 
@@ -89,8 +101,12 @@ in the same two-value polyline format the existing glyphs use. No API change.
 `font.glyph_points(60)` returns an empty array.
 
 **What Genesis AIR does instead.** Every control label is spelled with supported characters
-(`Start`, `Prev`, `Next`, `End`, `Up`, `Dn`, `Zoom in`, `Zoom out`), and the prompt's caret
-is a drawn rectangle rather than an underscore.
+(`Start`, `Prev`, `Next`, `End`, `Up`, `Dn`, `Zoom in`, `Zoom out`), the prompt's caret is a
+drawn rectangle rather than an underscore, and the type scale is pinned inside the font's
+usable window: ten, eleven and twelve pixels at weight one, named in `genesis.view` so no
+call site can pick a size the font cannot draw. Every strip that has to hold a row of labels
+— the toolbars, the dock tabs, the media pool's actions — measures its labels first and
+steps the size down until they fit, rather than laying out at a fixed size and clipping.
 
 ---
 

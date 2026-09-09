@@ -151,6 +151,55 @@ def run(argv, env, timeout=900):
     return done
 
 
+def controls(airc, stdlib):
+    """Click every control the chrome builds and check what it actually did.
+
+    Two properties are asserted, and both catch a class of bug that is invisible in a
+    screenshot: no two enabled controls in a panel may overlap — an overlapped control is
+    unreachable, and the click silently runs the control on top of it — and every control
+    must report an outcome, so a button that is drawn but wired to nothing shows up.
+    """
+    env = dict(os.environ, AIR_STDLIB=str(stdlib))
+    overlaps = []
+    dead = []
+    seen = 0
+    with TemporaryDirectory(prefix="genesis-air-controls-") as temporary:
+        root = Path(temporary)
+        env["XDG_CACHE_HOME"] = str(root / "cache")
+        for tab in ("properties", "filters", "scopes", "audio"):
+            argv = [airc, "run", HERE / "controls.ai", "--mode", "release", "--", str(root)]
+            if tab != "properties":
+                argv.append(tab)
+            done = run(argv, env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            rows = []
+            boxes = []
+            for line in done.stdout.splitlines():
+                if not line.strip() or line.startswith("BASE"):
+                    continue
+                f = line.split("\t")
+                if f[0] == "RECT":
+                    boxes.append((f[1], f[2], *(int(v) for v in f[3].split(","))))
+                    continue
+                panel, label, kind, param = f[0], f[3], f[4], f[5]
+                note = f[8] if len(f) > 8 else ""
+                rows.append((panel, label or f"{kind}.{param}", note))
+            seen += len(rows)
+            for panel in {b[0] for b in boxes}:
+                items = [b for b in boxes if b[0] == panel]
+                for i in range(len(items)):
+                    for j in range(i + 1, len(items)):
+                        a, b = items[i], items[j]
+                        wide = min(a[4], b[4]) - max(a[2], b[2])
+                        tall = min(a[5], b[5]) - max(a[3], b[3])
+                        if wide > 1 and tall > 1:
+                            overlaps.append(f"{tab}/{panel}: {a[1]} over {b[1]} ({wide}x{tall}px)")
+            dead += [f"{tab}/{r[0]}: {r[1]}" for r in rows if not r[2].strip()]
+    assert not overlaps, "controls overlap, so a click runs the wrong one:\n  " + "\n  ".join(sorted(set(overlaps)))
+    assert not dead, "controls that reported no outcome:\n  " + "\n  ".join(sorted(set(dead)))
+    print(f"  controls: {seen} clicks across 4 tabs, no overlaps, every control reported")
+
+
 def headless(airc, stdlib):
     env = dict(os.environ, AIR_STDLIB=str(stdlib))
     with TemporaryDirectory(prefix="genesis-air-") as temporary:
@@ -276,6 +325,7 @@ def main():
         return 1
 
     headless(airc, stdlib)
+    controls(airc, stdlib)
 
     if binary.exists():
         render_smoke(binary, stdlib)

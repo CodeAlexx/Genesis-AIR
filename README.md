@@ -190,6 +190,13 @@ python3 tests/run_tests.py --media SMALL_CLIP.mp4           # adds the real gcom
   rather than two that happen to agree. The drag gesture is asserted to land as a single
   undo step, and the prompt is asserted to route a committed line to the action that opened
   it.
+- **453 control clicks** across the four inspector tabs. Every control the chrome builds is
+  clicked at the centre of the rectangle it was built with, and the resulting document and
+  application state is diffed against a baseline. Two properties are asserted, and both catch
+  bugs that a screenshot cannot show: **no two enabled controls in a panel may overlap** — an
+  overlapped control is unreachable and the click silently runs the one on top of it — and
+  **every control must report an outcome**, so a button drawn but wired to nothing shows up.
+  Rows below the fold are scrolled into view first, the way a person would.
 - **Render smoke**: the demo project paints a 1600×980 frame and saves its project.
 - **gcompose smoke** (bounded): open one real file, read its real frame count, place a short
   clip, decode one source frame, paint, exit — with no worker left behind.

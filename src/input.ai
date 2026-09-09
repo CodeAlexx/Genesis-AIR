@@ -9,6 +9,7 @@
 module genesis.input
 
 import std.editor as editor
+import std.math as math
 import std.editor_view as editor_view
 import std.timeline as timeline
 import std.widgets as widgets
@@ -346,10 +347,8 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
       str.view(kind), str.view(name), next)
     if not landed.ok { return commands.message(landed) }
     var line: string = chrome.label_of(control)
-    string.append(line, " ")
-    let shown: i64 = cast.sat(next * 100.0)
-    string.append(line, str.view(string.from_int(shown)))
-    string.append(line, "/100")
+    string.append(line, " = ")
+    string.append(line, str.view(math.format_fixed(next, 2)))
     return line
   }
   if action == chrome.act_param_key() {
@@ -388,20 +387,10 @@ fn perform_slider(state: ref<app.App>, control: ref<chrome.Control>,
   if not landed.ok { return commands.message(landed) }
   var line: string = chrome.label_of(control)
   string.append(line, " = ")
-  string.append(line, str.view(math_text(next)))
+  string.append(line, str.view(math.format_fixed(next, 2)))
   line
 }
 
-fn math_text(value: f64) -> string effects {alloc} {
-  let scaled: i64 = cast.sat(value * 100.0)
-  var line: string = string.from_int(scaled / 100)
-  string.append(line, ".")
-  let remainder: i64 = if scaled < 0 { 0 - scaled } else { scaled }
-  let fraction: i64 = remainder - (remainder / 100) * 100
-  if fraction < 10 { string.append(line, "0") }
-  string.append(line, str.view(string.from_int(fraction)))
-  line
-}
 
 // ---------------------------------------------------------------------------
 // The pointer
