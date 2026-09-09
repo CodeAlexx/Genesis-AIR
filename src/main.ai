@@ -18,6 +18,7 @@ import std.png_tools as png_tools
 import std.widgets as widgets
 import "app.ai" as app
 import "commands.ai" as commands
+import "chrome.ai" as chrome
 import "input.ai" as input
 import "provider.ai" as provider
 import "view.ai" as painter
@@ -267,6 +268,16 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               let my: u64 = cast.wrap(point.y)
               pointer_x = cast.float(mx)
               pointer_y = cast.float(my)
+              if app.gesture_kind(state) != app.drag_none() {
+                let w: u64 = cast.wrap(width)
+                let h: u64 = cast.wrap(height)
+                var moving: string = input.pointer_move(state, cast.float(w), cast.float(h),
+                  pointer_x, pointer_y)
+                if str.len(str.view(moving)) != 0 {
+                  app.set_status(state, str.view(moving))
+                  dirty = true
+                }
+              }
             },
             Scroll(wheel) => {
               var note: string = input.wheel(state, wheel.down, wheel.lines, control)
@@ -276,13 +287,45 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             Key(press) => {
               control = press.control
               shift = press.shift
-              var note: string = input.key(state, press.code, press.control, press.shift)
-              if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              // The window owns the canvas, so a committed "render" prompt is performed
+              // here rather than in the input layer.
+              if input.prompt_is_render(state) and press.code == widgets.key_return() {
+                var where: string = app.prompt_text(state)
+                app.end_prompt(state)
+                if str.len(str.view(where)) == 0 {
+                  app.set_status(state, "cancelled")
+                } else {
+                  match gui.screenshot(window, str.view(where)) {
+                    ok(written) => { var said: string = string.copy("wrote ")
+                      string.append(said, str.view(where))
+                      app.set_status(state, str.view(said)) },
+                    err(problem) => { app.set_status(state, "the still could not be written") },
+                  }
+                }
+              } else {
+                var note: string = input.key(state, press.code, press.control, press.shift)
+                if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              }
               dirty = true
             },
             Resize(extent) => { dirty = true },
             Tick => { },
-            PointerUp(point) => { },
+            PointerUp(point) => {
+              let ux: u64 = cast.wrap(point.x)
+              let uy: u64 = cast.wrap(point.y)
+              pointer_x = cast.float(ux)
+              pointer_y = cast.float(uy)
+              if app.gesture_kind(state) != app.drag_none() {
+                let w: u64 = cast.wrap(width)
+                let h: u64 = cast.wrap(height)
+                var released: string = input.pointer_up(state, cast.float(w), cast.float(h),
+                  pointer_x, pointer_y)
+                if str.len(str.view(released)) != 0 {
+                  app.set_status(state, str.view(released))
+                }
+                dirty = true
+              }
+            },
             Text(entry) => { },
             Progress(step) => { },
           }
@@ -310,6 +353,17 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   match env.get("GENESIS_SCRATCH") { some(value) => { scratch = value }, none => { }, }
   var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
   var state: app.App = app.app(engine)
+  // Which inspector tab a headless render shows, so every panel is checkable without a
+  // screen. The window path starts on Properties like any other launch.
+  match env.get("GENESIS_TAB") {
+    some(value) => {
+      let named: string = value
+      if str.eq(str.view(named), "filters") { app.set_dock_tab(state, chrome.tab_filters()) }
+      else if str.eq(str.view(named), "scopes") { app.set_dock_tab(state, chrome.tab_scopes()) }
+      else if str.eq(str.view(named), "audio") { app.set_dock_tab(state, chrome.tab_audio()) }
+    },
+    none => { },
+  }
 
   if str.eq(verb, "render") {
     if view.len(args) < 3 { say("render needs an output path")

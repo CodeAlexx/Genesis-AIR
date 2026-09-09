@@ -33,6 +33,15 @@ fi
 mkdir -p "$here/build"
 mode=${MODE:-release}
 echo "genesis-air: building against AIR $AIR_SDK_COMMIT ($mode)"
+# Capture the report even when the compile fails: the diagnostics live inside it, and
+# dying before the reporter runs is how a build error turns into silence.
+set +e
 "$AIRC" build "$here/src/main.ai" -o "$here/build/genesis-air" --mode "$mode" --json > "$here/build/build.json"
-python3 "$here/report_build.py" "$here/build/build.json"
+status=$?
+set -e
+python3 "$here/report_build.py" "$here/build/build.json" || true
+if [ "$status" -ne 0 ]; then
+  echo "genesis-air: build failed ($status)" >&2
+  exit "$status"
+fi
 echo "genesis-air: build/genesis-air"

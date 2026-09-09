@@ -8,7 +8,9 @@ module genesis.tests
 import std.draw as draw
 import std.editor as editor
 import std.files as files
+import std.timeline as timeline
 import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
 import "../src/input.ai" as input
 import "../src/layout.ai" as layout
@@ -34,6 +36,112 @@ fn emit_b(name: str, value: bool) -> unit effects {io.write, alloc} {
 }
 fn emit_result(name: str, value: ref<commands.Result>) -> unit effects {io.write, alloc} {
   emit(name, str.view(commands.message(value)))
+}
+
+// Find a control by the action it names, and click the centre of the rectangle it was
+// built with. Nothing here recomputes geometry.
+fn found_action(controls: ref<array<chrome.Control>>, action: u32) -> bool effects {} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(controls) { break }
+    if struct.get(array.borrow(controls, index), field=action) == action { return true }
+    index = index + 1
+  }
+  false
+}
+
+fn click_at(state: ref<app.App>, area: layout.Rect) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+  input.pointer_down(state, 1600.0, 980.0, (area.left + area.right) * 0.5,
+    (area.top + area.bottom) * 0.5)
+}
+
+fn click_action(state: ref<app.App>, controls: ref<array<chrome.Control>>,
+                slot: u64) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+  if slot >= array.len(controls) { return string.new() }
+  click_at(state, struct.get(array.borrow(controls, slot), field=area))
+}
+
+fn click_kind(state: ref<app.App>, controls: ref<array<chrome.Control>>,
+              kind: str) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(controls) { break }
+    let entry: ref<chrome.Control> = array.borrow(controls, index)
+    if struct.get(entry, field=action) == chrome.act_filter_add() {
+      let owned: string = chrome.kind_of(entry)
+      if str.eq(str.view(owned), kind) { return click_at(state, struct.get(entry, field=area)) }
+    }
+    index = index + 1
+  }
+  string.new()
+}
+
+// Click a named parameter's bar a quarter of the way along it.
+fn click_param(state: ref<app.App>, controls: ref<array<chrome.Control>>,
+               name: str) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(controls) { break }
+    let entry: ref<chrome.Control> = array.borrow(controls, index)
+    if struct.get(entry, field=action) == chrome.act_param_set() {
+      let owned: string = chrome.name_of(entry)
+      if str.eq(str.view(owned), name) {
+        let area: layout.Rect = struct.get(entry, field=area)
+        return input.pointer_down(state, 1600.0, 980.0,
+          area.left + layout.width_of(area) * 0.25, (area.top + area.bottom) * 0.5)
+      }
+    }
+    index = index + 1
+  }
+  string.new()
+}
+
+fn first_clip_on(state: ref<app.App>, track: u64) -> u64 effects {alloc} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      some(value) => { if value.track == track { return value.id } },
+      none => { },
+    }
+    index = index + 1
+  }
+  0
+}
+
+fn clip_start(state: ref<app.App>, clip: u64) -> i64 effects {alloc} {
+  match editor.clip(struct.borrow(state, field=document), clip) {
+    some(value) => value.start,
+    none => -1,
+  }
+}
+
+fn clip_centre_x(state: ref<app.App>, model: ref<timeline.Timeline>,
+                 clip: u64) -> f64 effects {alloc} {
+  match editor.clip(struct.borrow(state, field=document), clip) {
+    none => 0.0,
+    some(value) => (timeline.frame_to_x(model, value.start)
+      + timeline.frame_to_x(model, value.start + value.length)) * 0.5,
+  }
+}
+
+fn clip_centre_y(state: ref<app.App>, model: ref<timeline.Timeline>,
+                 clip: u64) -> f64 effects {alloc} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(model, field=clips)) { break }
+    let entry: ref<timeline.Clip> = array.borrow(struct.borrow(model, field=clips), index)
+    if struct.get(entry, field=id) == clip {
+      let lane: u64 = struct.get(entry, field=track)
+      let top: f64 = timeline.track_top(model, lane)
+      let height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane),
+        field=height)
+      return top + height * 0.5
+    }
+    index = index + 1
+  }
+  0.0
 }
 
 // A compact digest of the document, so undo and redo can be compared exactly.
@@ -180,7 +288,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_u("filters_after_remove", editor.filter_count(struct.borrow(state, field=document), second.value))
 
   // I. mixer, including the toolkit's solo-wins policy
-  let a2: u64 = second_audio_track(state)
+  let a2: u64 = other_audio_track(state, a1)
   let _ = commands.set_track_gain(state, a1, 0.6)
   let _ = commands.set_track_pan(state, a1, -0.5)
   emit("gain", str.view(math_text(editor.track_gain(struct.borrow(state, field=document), a1))))
@@ -214,8 +322,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_b("focus_is_pool", app.focus(state) == app.panel_pool())
   emit_u("pool_row", app.pool_row(state))
   var note2: string = input.pointer_down(state, 1600.0, 980.0,
-    frame.mixer.left + 20.0, frame.mixer.top + 30.0)
-  emit_b("focus_is_mixer", app.focus(state) == app.panel_mixer())
+    frame.dock_body.left + 20.0, frame.dock_body.top + 30.0)
+  emit_b("focus_is_dock", app.focus(state) == app.panel_dock())
   // the ruler scrubs
   var note3: string = input.pointer_down(state, 1600.0, 980.0,
     frame.ruler.left + 100.0, frame.ruler.top + 6.0)
@@ -245,6 +353,93 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_b("redo_1_exact", str.eq(str.view(digest(state)), str.view(after_add)))
   var redo2: commands.Result = commands.redo(state)
   emit_b("redo_2_exact", str.eq(str.view(digest(state)), str.view(after_delete)))
+
+  // H. the chrome: every control is clicked at the centre of the rectangle it was BUILT
+  // with, so what is proved is that painting and dispatch share one geometry.
+  let chrome_frame: layout.Frame = layout.frame(1600.0, 980.0)
+
+  var toolbar: array<chrome.Control> = chrome.toolbar(chrome_frame, state)
+  emit_b("toolbar_built", array.len(toolbar) > 10)
+  emit_b("toolbar_has_undo", found_action(toolbar, chrome.act_undo()))
+
+  var tbar: array<chrome.Control> = chrome.timeline_bar(chrome_frame, state)
+  emit_b("tbar_has_split", found_action(tbar, chrome.act_split()))
+  emit_b("tbar_has_snap", found_action(tbar, chrome.act_snap()))
+
+  // A click on the Filters tab reaches the dock, and the panel it then builds is the
+  // filters panel rather than the properties one.
+  var tabs: array<chrome.Control> = chrome.dock_tabs(chrome_frame, state)
+  let filters_tab: u64 = cast.wrap(chrome.tab_filters())
+  var tab_note: string = click_action(state, tabs, filters_tab)
+  emit_u("dock_tab_after_click", cast.wrap(app.dock_tab(state)))
+
+  // The library grid adds a filter to the selected clip by kind.
+  let subject: u64 = app.current_clip(state)
+  let before_filters: u64 = editor.filter_count(struct.borrow(state, field=document), subject)
+  var panel: array<chrome.Control> = chrome.dock_panel(chrome_frame, state)
+  var added: string = click_kind(state, panel, "vignette")
+  emit_b("library_added_filter",
+    editor.filter_count(struct.borrow(state, field=document), subject) == before_filters + 1)
+
+  // Back to Properties, and a click part-way along a parameter bar writes that parameter.
+  app.set_dock_tab(state, chrome.tab_properties())
+  var properties: array<chrome.Control> = chrome.dock_panel(chrome_frame, state)
+  emit_u("properties_controls", array.len(properties))
+  var slid: string = click_param(state, properties, "opacity")
+  let opacity_filter: u64 = chrome.filter_of_kind(struct.borrow(state, field=document),
+    subject, "size_position")
+  emit_b("slider_materialised_filter", opacity_filter != 0)
+  emit_b("slider_wrote_value",
+    editor.filter_param(struct.borrow(state, field=document), opacity_filter, "opacity", -1.0)
+      != -1.0)
+
+  // Clipboard: copy the selected clip, paste it at the playhead.
+  let clips_before_paste: u64 = editor.clip_count(struct.borrow(state, field=document))
+  var copied: commands.Result = commands.copy_clip(state, subject)
+  emit_b("copied", copied.ok)
+  emit_b("clipboard_filled", app.has_clipboard(state))
+  var pasted: commands.Result = commands.paste_clip(state, v1, 600)
+  emit_b("pasted", pasted.ok)
+  emit_b("paste_added_clip",
+    editor.clip_count(struct.borrow(state, field=document)) > clips_before_paste)
+
+  // Razor across every track at the playhead.
+  let _ = commands.seek(state, 60)
+  var razored: commands.Result = commands.razor_all(state)
+  emit_b("razor_all", razored.ok)
+  emit_b("razor_cut_more_than_one", razored.value > 1)
+
+  // A track switch in the header column.
+  var header_model: timeline.Timeline = painter.timeline_model(state, chrome_frame.timeline)
+  var header_buttons: array<chrome.Control> = chrome.track_controls(chrome_frame, state,
+    header_model)
+  emit_b("header_has_eye", found_action(header_buttons, chrome.act_track_hidden()))
+  emit_b("header_has_add_video", found_action(header_buttons, chrome.act_add_video_track()))
+
+  // A drag: press on a clip, move, release. It must land as ONE undo step.
+  var drag_model: timeline.Timeline = painter.timeline_model(state, chrome_frame.timeline)
+  let dragged: u64 = first_clip_on(state, v1)
+  let grab_x: f64 = clip_centre_x(state, drag_model, dragged)
+  let grab_y: f64 = clip_centre_y(state, drag_model, dragged)
+  let start_before: i64 = clip_start(state, dragged)
+  var before_drag: string = digest(state)
+  let _ = input.pointer_down(state, 1600.0, 980.0, grab_x, grab_y)
+  let _ = input.pointer_move(state, 1600.0, 980.0, grab_x + 60.0, grab_y)
+  var released: string = input.pointer_up(state, 1600.0, 980.0, grab_x + 60.0, grab_y)
+  emit_b("drag_moved_clip", clip_start(state, dragged) != start_before)
+  var undo_drag: commands.Result = commands.undo(state)
+  emit_b("drag_is_one_undo_step", str.eq(str.view(digest(state)), str.view(before_drag)))
+  let _ = commands.redo(state)
+
+  // The prompt: opening one, typing into it and committing routes to the action that
+  // opened it rather than to whatever is focused now.
+  app.begin_prompt(state, chrome.act_save(), "Save project as", "")
+  emit_b("prompt_open", app.prompt_active(state))
+  let _ = input.key(state, 47, false, false)
+  let _ = input.key(state, 97, false, false)
+  emit_b("prompt_takes_text", str.len(str.view(app.prompt_text(state))) != 0)
+  let _ = input.key(state, 65307, false, false)
+  emit_b("prompt_escapes", not app.prompt_active(state))
 
   // B. save and load round trip
   var saved: commands.Result = commands.save_project(state, project)
@@ -292,18 +487,19 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
 
 fn math_text(value: f64) -> string effects {alloc} { string.from_float(value) }
 
-fn second_audio_track(state: ref<app.App>) -> u64 effects {} {
+// The audio track that is NOT the given one. Asking for "the second in document order"
+// would alias with `default_audio_track`, which picks by lane order, not document order.
+fn other_audio_track(state: ref<app.App>, besides: u64) -> u64 effects {} {
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
-  var seen: u64 = 0
   var index: u64 = 0
   loop {
     if index >= editor.track_count(document) { break }
     let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
     if struct.get(entry, field=owner) == sequence
-      and struct.get(entry, field=kind) == editor.track_audio() {
-      if seen == 1 { return struct.get(entry, field=id) }
-      seen = seen + 1
+      and struct.get(entry, field=kind) == editor.track_audio()
+      and struct.get(entry, field=id) != besides {
+      return struct.get(entry, field=id)
     }
     index = index + 1
   }

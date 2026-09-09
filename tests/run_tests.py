@@ -86,7 +86,7 @@ EXPECTED = {
     "pool_click": "Opened wide.mov",
     "focus_is_pool": "true",
     "pool_row": "0",
-    "focus_is_mixer": "true",
+    "focus_is_dock": "true",
     "ruler_scrubbed": "true",
     "space_plays": "true",
     "space_pauses": "true",
@@ -112,6 +112,34 @@ EXPECTED = {
     "render_width": "1600",
     "render_height": "980",
     "paints": "1",
+    # --- the chrome ---------------------------------------------------------
+    # Every control is clicked at the centre of the rectangle it was BUILT with, so these
+    # prove that painting and dispatch share one geometry rather than two that agree today.
+    "toolbar_built": "true",
+    "toolbar_has_undo": "true",
+    "tbar_has_split": "true",
+    "tbar_has_snap": "true",
+    "dock_tab_after_click": "1",          # chrome.tab_filters()
+    "library_added_filter": "true",
+    # The inspector shows every parameter of every offered filter, present or not: 169
+    # controls for this project. A drop here means a section stopped being built.
+    "properties_controls": "169",
+    "slider_materialised_filter": "true",
+    "slider_wrote_value": "true",
+    "copied": "true",
+    "clipboard_filled": "true",
+    "pasted": "true",
+    "paste_added_clip": "true",
+    "razor_all": "true",
+    "razor_cut_more_than_one": "true",
+    "header_has_eye": "true",
+    "header_has_add_video": "true",
+    "drag_moved_clip": "true",
+    # A whole drag is ONE undo step: nothing is written until the pointer is released.
+    "drag_is_one_undo_step": "true",
+    "prompt_open": "true",
+    "prompt_takes_text": "true",
+    "prompt_escapes": "true",
 }
 
 APPROX = {"filter_param": 0.4, "gain": 0.6}

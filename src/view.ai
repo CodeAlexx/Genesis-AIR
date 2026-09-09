@@ -17,6 +17,7 @@ import std.math as math
 import std.timeline as timeline
 import std.vector_font as font
 import "app.ai" as app
+import "chrome.ai" as chrome
 import "layout.ai" as layout
 import "provider.ai" as provider
 
@@ -94,48 +95,55 @@ fn paint_menu(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     x = x + 22.0 + font.text_vector_width(text, 7.0)
     index = index + 1
   }
-  var title: string = string.copy("Genesis AIR  —  ")
+  var title: string = string.copy("Genesis AIR    ")
   let where: string = app.project_path(state)
   if str.len(str.view(where)) == 0 { string.append(title, "untitled") }
   else { string.append(title, str.view(where)) }
-  if app.dirty(state) { string.append(title, " *") }
+  if app.dirty(state) { string.append(title, "   EDITED") }
   label(canvas, area.right - 430.0, 8.0, str.view(title), 7.0, colors.dim)
   ()
 }
 
 fn paint_pool(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
-              area: layout.Rect) -> unit effects {alloc} {
-  panel(canvas, colors, area, "MEDIA POOL", app.focus(state) == app.panel_pool())
-  let highlighted: u64 = app.pool_row(state)
+              frame: layout.Frame) -> unit effects {alloc} {
+  let area: layout.Rect = frame.pool
+  panel(canvas, colors, area, "MEDIA", app.focus(state) == app.panel_pool())
+  var controls: array<chrome.Control> = chrome.pool_controls(frame, state)
   let document: ref<editor.Document> = struct.borrow(state, field=document)
-  var y: f64 = area.top + 24.0
   var index: u64 = 0
   loop {
-    if index >= editor.source_count(document) { break }
-    if y + 26.0 > area.bottom { break }
-    let entry: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), index)
-    let online: bool = struct.get(entry, field=online)
-    let frames: i64 = struct.get(entry, field=frames)
-    let chosen: bool = index == highlighted
-    fill_at(canvas, area.left + 4.0, y, area.right - 4.0, y + 23.0,
-      if chosen { draw.rgb(44, 60, 84) } else { draw.rgb(32, 35, 42) })
-    fill_at(canvas, area.left + 8.0, y + 4.0, area.left + 30.0, y + 19.0,
+    if index >= array.len(controls) { break }
+    let entry: ref<chrome.Control> = array.borrow(controls, index)
+    if struct.get(entry, field=action) != chrome.act_pool_pick() {
+      paint_control(canvas, colors, entry)
+      index = index + 1
+      continue
+    }
+    let row: layout.Rect = struct.get(entry, field=area)
+    let chosen: bool = struct.get(entry, field=on)
+    let online: bool = struct.get(entry, field=enabled)
+    let source: u64 = struct.get(entry, field=target)
+    fill(canvas, row, if chosen { draw.rgb(44, 60, 84) } else { draw.rgb(32, 35, 42) })
+    outline(canvas, row, if chosen { colors.focus } else { colors.edge })
+    // A stand-in for the thumbnail the provider will fill in.
+    fill_at(canvas, row.left + 4.0, row.top + 3.0, row.left + 30.0, row.bottom - 3.0,
       if online { draw.rgb(66, 102, 160) } else { draw.rgb(94, 58, 62) })
-    label(canvas, area.left + 34.0, y + 3.0,
-      str.view(string.copy(str.view(struct.borrow(entry, field=name)))), 7.0,
+    let named: string = chrome.label_of(entry)
+    label(canvas, row.left + 34.0, row.top + 2.0, str.view(named), 7.0,
       if online { colors.text } else { colors.dim })
     var detail: string = string.new()
+    let frames: i64 = editor.source_frames(document, source)
     if frames > 0 {
       string.append(detail, str.view(number(frames)))
       string.append(detail, " frames")
     } else { string.append(detail, "length unknown") }
-    if not online { string.append(detail, "  OFFLINE") }
-    label(canvas, area.left + 34.0, y + 13.0, str.view(detail), 6.0, colors.dim)
-    y = y + 26.0
+    if not online { string.append(detail, "   OFFLINE") }
+    label(canvas, row.left + 34.0, row.top + 12.0, str.view(detail), 6.0, colors.dim)
     index = index + 1
   }
   if editor.source_count(document) == 0 {
-    label(canvas, area.left + 10.0, area.top + 30.0, "no media imported", 7.0, colors.dim)
+    label(canvas, area.left + 10.0, area.top + 30.0, "no media imported - press Add", 6.0,
+      colors.dim)
   }
   ()
 }
@@ -193,134 +201,6 @@ fn paint_monitor(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect, tit
   var line: string = string.copy(str.view(timeline.timecode(frame, fps)))
   string.append(line, if playing { "   PLAY" } else { "   PAUSE" })
   label(canvas, area.left + 8.0, bar_top + 11.0, str.view(line), 7.0, colors.text)
-  ()
-}
-
-fn paint_filters(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
-                 area: layout.Rect, clip: u64) -> unit effects {alloc} {
-  panel(canvas, colors, area, "FILTERS", app.focus(state) == app.panel_filters())
-  let picked: u64 = app.selected_filter(state)
-  let document: ref<editor.Document> = struct.borrow(state, field=document)
-  if clip == 0 {
-    label(canvas, area.left + 8.0, area.top + 26.0, "no clip selected", 6.0, colors.dim)
-    return ()
-  }
-  let count: u64 = editor.filter_count(document, clip)
-  if count == 0 {
-    label(canvas, area.left + 8.0, area.top + 26.0, "no filters applied", 6.0, colors.dim)
-    return ()
-  }
-  var y: f64 = area.top + 24.0
-  var position: u32 = 0
-  loop {
-    let seen: u64 = cast.wrap(position)
-    if seen >= count { break }
-    if y + 16.0 > area.bottom { break }
-    match editor.filter_at(document, clip, position) {
-      none => { },
-      some(id) => {
-        let on: bool = editor.filter_enabled(document, id)
-        let chosen: bool = id == picked
-        fill_at(canvas, area.left + 4.0, y, area.right - 4.0, y + 14.0,
-          if chosen { draw.rgb(44, 60, 84) } else { draw.rgb(32, 35, 42) })
-        fill_at(canvas, area.left + 8.0, y + 4.0, area.left + 15.0, y + 11.0,
-          if on { draw.rgb(120, 200, 150) } else { draw.rgb(70, 74, 84) })
-        label(canvas, area.left + 20.0, y + 3.0, str.view(editor.filter_kind(document, id)),
-          6.0, if on { colors.text } else { colors.dim })
-      },
-    }
-    y = y + 16.0
-    position = position + 1
-  }
-  ()
-}
-
-fn paint_properties(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
-                    area: layout.Rect, clip: u64) -> unit effects {alloc} {
-  panel(canvas, colors, area, "PROPERTIES", app.focus(state) == app.panel_properties())
-  let document: ref<editor.Document> = struct.borrow(state, field=document)
-  match editor.clip(document, clip) {
-    none => { label(canvas, area.left + 8.0, area.top + 26.0, "no clip selected", 6.0, colors.dim) },
-    some(value) => {
-      var y: f64 = area.top + 24.0
-      label(canvas, area.left + 8.0, y, str.view(editor.source_name(document, value.source)),
-        7.0, colors.text)
-      y = y + 13.0
-      var range: string = string.copy("source ")
-      string.append(range, str.view(number(value.source_in)))
-      string.append(range, " + ")
-      string.append(range, str.view(number(value.length)))
-      match editor.source_limit(document, value) {
-        some(limit) => { string.append(range, " of ")
-          string.append(range, str.view(number(limit))) },
-        none => { string.append(range, " of unknown") },
-      }
-      label(canvas, area.left + 8.0, y, str.view(range), 6.0, colors.dim)
-      y = y + 11.0
-      var span: string = string.copy("timeline ")
-      string.append(span, str.view(number(value.start)))
-      string.append(span, " .. ")
-      string.append(span, str.view(number(editor.clip_end(value))))
-      label(canvas, area.left + 8.0, y, str.view(span), 6.0, colors.dim)
-      y = y + 11.0
-      var mix: string = string.copy("gain ")
-      string.append(mix, str.view(math.format_fixed(editor.effective_gain(document, clip), 2)))
-      string.append(mix, "   fades ")
-      string.append(mix, str.view(number(value.fade_in)))
-      string.append(mix, "/")
-      string.append(mix, str.view(number(value.fade_out)))
-      label(canvas, area.left + 8.0, y, str.view(mix), 6.0, colors.dim)
-      y = y + 11.0
-      if value.group != 0 {
-        var grouped: string = string.copy("group ")
-        string.append(grouped, str.view(number(cast.sat(value.group))))
-        label(canvas, area.left + 8.0, y, str.view(grouped), 6.0, colors.accent)
-      }
-    },
-  }
-  ()
-}
-
-fn paint_mixer(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
-               area: layout.Rect) -> unit effects {alloc} {
-  panel(canvas, colors, area, "MIXER", app.focus(state) == app.panel_mixer())
-  let document: ref<editor.Document> = struct.borrow(state, field=document)
-  let sequence: u64 = document.active
-  var lanes: array<u64> = editor_view.lanes(document, sequence)
-  var x: f64 = area.left + 8.0
-  var index: u64 = 0
-  loop {
-    if index >= array.len(lanes) { break }
-    let id: u64 = array.get(lanes, index)
-    if editor.track_kind(document, id) == editor.track_audio() {
-      if x + 46.0 > area.right { break }
-      let top: f64 = area.top + 24.0
-      let bottom: f64 = area.bottom - 18.0
-      fill_at(canvas, x, top, x + 40.0, bottom, draw.rgb(32, 35, 42))
-      let audible: bool = editor.track_audible(document, id)
-      let gain: f64 = math.min(1.0, editor.track_gain(document, id))
-      let level: f64 = bottom - (bottom - top - 8.0) * gain
-      fill_at(canvas, x + 14.0, level - 3.0, x + 26.0, level + 3.0,
-        if audible { draw.rgb(120, 200, 150) } else { colors.dim })
-      draw.line(canvas, geometry.vec2(x + 20.0, top + 4.0), geometry.vec2(x + 20.0, bottom - 4.0),
-        colors.edge, 1.0)
-      let pan: f64 = editor.track_pan(document, id)
-      let pan_x: f64 = x + 20.0 + pan * 16.0
-      fill_at(canvas, pan_x - 2.0, bottom - 16.0, pan_x + 2.0, bottom - 12.0, colors.accent)
-      var flags: string = string.copy(str.view(editor.track_name(document, id)))
-      match editor.track_slot(document, id) {
-        none => { },
-        some(slot) => {
-          let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), slot)
-          if struct.get(entry, field=muted) { string.append(flags, " M") }
-          if struct.get(entry, field=solo) { string.append(flags, " S") }
-        },
-      }
-      label(canvas, x + 2.0, area.bottom - 14.0, str.view(flags), 6.0, colors.dim)
-      x = x + 46.0
-    }
-    index = index + 1
-  }
   ()
 }
 
@@ -412,18 +292,6 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     }
     label(canvas, area.left + 8.0, top + 5.0, str.view(editor.track_name(document, id)), 7.0,
       colors.text)
-    var flags: string = string.new()
-    match editor.track_slot(document, id) {
-      none => { },
-      some(slot) => {
-        let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), slot)
-        if struct.get(entry, field=locked) { string.append(flags, "LOCK ") }
-        if struct.get(entry, field=hidden) { string.append(flags, "HIDE ") }
-        if struct.get(entry, field=muted) { string.append(flags, "MUTE ") }
-        if struct.get(entry, field=solo) { string.append(flags, "SOLO") }
-      },
-    }
-    label(canvas, area.left + 8.0, top + 17.0, str.view(flags), 6.0, colors.accent)
     lane = lane + 1
   }
   ()
@@ -489,6 +357,20 @@ fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                 area: layout.Rect) -> unit effects {alloc} {
   fill(canvas, area, colors.panel_head)
+  // While a prompt is open the status line IS the prompt, so there is never a doubt about
+  // where the next keystroke goes.
+  if app.prompt_active(state) {
+    fill(canvas, area, draw.rgb(46, 40, 22))
+    var asking: string = app.prompt_label(state)
+    string.append(asking, ":  ")
+    string.append(asking, str.view(app.prompt_text(state)))
+    label(canvas, 8.0, area.top + 6.0, str.view(asking), 7.0, colors.accent)
+    let caret: f64 = 8.0 + font.text_vector_width(str.view(asking), 7.0) + 2.0
+    fill_at(canvas, caret, area.top + 5.0, caret + 5.0, area.top + 14.0, colors.accent)
+    label(canvas, area.right - 260.0, area.top + 6.0,
+      "Enter to accept    Escape to cancel", 6.0, colors.dim)
+    return ()
+  }
   var line: string = app.status(state)
   string.append(line, "   |   ")
   let document: ref<editor.Document> = struct.borrow(state, field=document)
@@ -511,6 +393,430 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   ()
 }
 
+// ---------------------------------------------------------------------------
+// Controls
+//
+// Everything clickable is painted from the list `genesis.chrome` built. The painter never
+// invents a rectangle, so a control cannot be drawn anywhere other than where it responds.
+
+fn text_centre(canvas: ref<draw.Canvas>, area: layout.Rect, text: str, size: f64,
+               value: draw.Color) -> unit effects {alloc} {
+  let wide: f64 = font.text_vector_width(text, size)
+  let x: f64 = area.left + (layout.width_of(area) - wide) * 0.5
+  let y: f64 = area.top + (layout.height_of(area) - size) * 0.5
+  label(canvas, if x < area.left + 2.0 { area.left + 2.0 } else { x }, y, text, size, value)
+  ()
+}
+
+fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
+                 control: ref<chrome.Control>) -> unit effects {alloc} {
+  let style: u32 = struct.get(control, field=style)
+  let area: layout.Rect = struct.get(control, field=area)
+  let on: bool = struct.get(control, field=on)
+  let live: bool = struct.get(control, field=enabled)
+  let text: string = chrome.label_of(control)
+
+  if style == chrome.style_heading() {
+    fill_at(canvas, area.left, area.bottom - 8.0, area.right, area.bottom - 7.0, colors.edge)
+    label(canvas, area.left + 2.0, area.top + 4.0, str.view(text), 6.0, colors.accent)
+    return ()
+  }
+  if style == chrome.style_text() {
+    let detail: string = chrome.name_of(control)
+    label(canvas, area.left + 2.0, area.top + 4.0, str.view(text), 6.0, colors.dim)
+    let wide: f64 = font.text_vector_width(str.view(detail), 6.0)
+    let x: f64 = area.right - 4.0 - wide
+    label(canvas, if x < area.left + 90.0 { area.left + 90.0 } else { x }, area.top + 4.0,
+      str.view(detail), 6.0, colors.text)
+    return ()
+  }
+  if style == chrome.style_row() {
+    label(canvas, area.left + 2.0, area.top + 5.0, str.view(text), 6.0, colors.text)
+    return ()
+  }
+  if style == chrome.style_slider() {
+    let low: f64 = struct.get(control, field=low)
+    let high: f64 = struct.get(control, field=high)
+    let value: f64 = struct.get(control, field=value)
+    let span: f64 = if high - low == 0.0 { 1.0 } else { high - low }
+    var portion: f64 = (value - low) / span
+    if portion < 0.0 { portion = 0.0 }
+    if portion > 1.0 { portion = 1.0 }
+    fill(canvas, area, draw.rgb(20, 22, 27))
+    let filled: f64 = area.left + layout.width_of(area) * portion
+    fill_at(canvas, area.left, area.top, filled, area.bottom,
+      if on { draw.rgb(62, 104, 160) } else { draw.rgb(52, 58, 70) })
+    outline(canvas, area, colors.edge)
+    // Zero sits where it belongs on a signed range, so a cut is visibly below centre.
+    if low < 0.0 and high > 0.0 {
+      let zero: f64 = area.left + layout.width_of(area) * (0.0 - low) / span
+      draw.line(canvas, geometry.vec2(zero, area.top), geometry.vec2(zero, area.bottom),
+        colors.dim, 1.0)
+    }
+    let shown: string = math.format_fixed(value, 2)
+    label(canvas, area.right + 40.0, area.top - 1.0, str.view(shown), 6.0,
+      if on { colors.text } else { colors.dim })
+    return ()
+  }
+  if style == chrome.style_tab() {
+    fill(canvas, area, if on { colors.panel } else { draw.rgb(22, 24, 29) })
+    if on { fill_at(canvas, area.left, area.top, area.right, area.top + 2.0, colors.accent) }
+    outline(canvas, area, colors.edge)
+    text_centre(canvas, area, str.view(text), 7.0, if on { colors.text } else { colors.dim })
+    return ()
+  }
+  // Buttons and toggles.
+  let face: draw.Color = if on { draw.rgb(52, 84, 128) }
+    else if live { draw.rgb(38, 41, 50) } else { draw.rgb(28, 30, 36) }
+  fill(canvas, area, face)
+  outline(canvas, area, if on { colors.focus } else { colors.edge })
+  text_centre(canvas, area, str.view(text), 6.0,
+    if live or on { colors.text } else { colors.dim })
+  ()
+}
+
+fn paint_controls(canvas: ref<draw.Canvas>, colors: Theme,
+                  controls: ref<array<chrome.Control>>) -> unit effects {alloc} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(controls) { break }
+    paint_control(canvas, colors, array.borrow(controls, index))
+    index = index + 1
+  }
+  ()
+}
+
+fn paint_toolbar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                 frame: layout.Frame) -> unit effects {alloc} {
+  fill(canvas, frame.toolbar, draw.rgb(30, 33, 40))
+  fill_at(canvas, 0.0, frame.toolbar.bottom - 1.0, frame.width, frame.toolbar.bottom,
+    colors.edge)
+  var controls: array<chrome.Control> = chrome.toolbar(frame, state)
+  paint_controls(canvas, colors, controls)
+  // The worker readout: which media provider is actually answering.
+  let engine: string = provider.describe(struct.borrow(state, field=provider))
+  let calls: i64 = cast.sat(provider.calls(struct.borrow(state, field=provider)))
+  let failures: i64 = cast.sat(provider.failures(struct.borrow(state, field=provider)))
+  var line: string = string.copy("worker: ")
+  string.append(line, str.view(engine))
+  string.append(line, "   calls ")
+  string.append(line, str.view(number(calls)))
+  if failures != 0 {
+    string.append(line, "   failures ")
+    string.append(line, str.view(number(failures)))
+  }
+  let wide: f64 = font.text_vector_width(str.view(line), 6.0)
+  label(canvas, frame.width - wide - 10.0, frame.toolbar.top + 10.0, str.view(line), 6.0,
+    if failures == 0 { colors.dim } else { colors.warn })
+  ()
+}
+
+fn paint_timeline_bar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                      frame: layout.Frame) -> unit effects {alloc} {
+  fill(canvas, frame.tbar, draw.rgb(26, 28, 34))
+  outline(canvas, frame.tbar, colors.edge)
+  var controls: array<chrome.Control> = chrome.timeline_bar(frame, state)
+  paint_controls(canvas, colors, controls)
+  ()
+}
+
+// ---------------------------------------------------------------------------
+// Scopes, read off the program frame that was already fetched for the monitor.
+
+fn paint_scopes(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect,
+                image: ref<draw.Surface>) -> unit effects {alloc} {
+  let wide: u32 = draw.surface_width(image)
+  let tall: u32 = draw.surface_height(image)
+  if wide == 0 or tall == 0 {
+    label(canvas, area.left + 8.0, area.top + 12.0, "no program frame", 6.0, colors.dim)
+    return ()
+  }
+  // One pass over a sampled grid fills the histogram and the parade at once, so the scopes
+  // cannot disagree about what frame they are showing.
+  var red: array<f64> = array.new()
+  var green: array<f64> = array.new()
+  var blue: array<f64> = array.new()
+  var luma: array<f64> = array.new()
+  var slot: u64 = 0
+  loop {
+    if slot >= 64 { break }
+    array.push(red, 0.0)
+    array.push(green, 0.0)
+    array.push(blue, 0.0)
+    array.push(luma, 0.0)
+    slot = slot + 1
+  }
+  let step_x: u32 = if wide > 128 { wide / 128 } else { 1 }
+  let step_y: u32 = if tall > 96 { tall / 96 } else { 1 }
+  var counted: f64 = 0.0
+  var y: u32 = 0
+  loop {
+    if y >= tall { break }
+    var x: u32 = 0
+    loop {
+      if x >= wide { break }
+      match draw.surface_pixel(image, x, y) {
+        none => { },
+        some(colour) => {
+          let r: u64 = cast.wrap(colour.r)
+          let g: u64 = cast.wrap(colour.g)
+          let b: u64 = cast.wrap(colour.b)
+          let bucket_r: u64 = r / 4
+          let bucket_g: u64 = g / 4
+          let bucket_b: u64 = b / 4
+          let grey: u64 = (r * 30 + g * 59 + b * 11) / 100
+          let bucket_l: u64 = grey / 4
+          let seen_r: f64 = array.get(red, bucket_r)
+          let seen_g: f64 = array.get(green, bucket_g)
+          let seen_b: f64 = array.get(blue, bucket_b)
+          let seen_l: f64 = array.get(luma, bucket_l)
+          array.set(red, bucket_r, seen_r + 1.0)
+          array.set(green, bucket_g, seen_g + 1.0)
+          array.set(blue, bucket_b, seen_b + 1.0)
+          array.set(luma, bucket_l, seen_l + 1.0)
+          counted = counted + 1.0
+        },
+      }
+      x = x + step_x
+    }
+    y = y + step_y
+  }
+  if counted == 0.0 { return () }
+  var peak: f64 = 1.0
+  var scan: u64 = 0
+  loop {
+    if scan >= 64 { break }
+    peak = math.max(peak, math.max(array.get(luma, scan),
+      math.max(array.get(red, scan), math.max(array.get(green, scan), array.get(blue, scan)))))
+    scan = scan + 1
+  }
+
+  var top: f64 = area.top + 6.0
+  let panel_wide: f64 = layout.width_of(area) - 12.0
+  let column: f64 = panel_wide / 64.0
+
+  label(canvas, area.left + 6.0, top, "HISTOGRAM", 6.0, colors.accent)
+  top = top + 12.0
+  let hist_height: f64 = 96.0
+  fill_at(canvas, area.left + 6.0, top, area.right - 6.0, top + hist_height, draw.rgb(12, 13, 16))
+  var index: u64 = 0
+  loop {
+    if index >= 64 { break }
+    let x0: f64 = area.left + 6.0 + cast.float(index) * column
+    let hr: f64 = hist_height * array.get(red, index) / peak
+    let hg: f64 = hist_height * array.get(green, index) / peak
+    let hb: f64 = hist_height * array.get(blue, index) / peak
+    fill_at(canvas, x0, top + hist_height - hr, x0 + column - 0.5, top + hist_height,
+      draw.rgb(180, 70, 70))
+    fill_at(canvas, x0, top + hist_height - hg, x0 + column - 0.5, top + hist_height - hr,
+      draw.rgb(70, 170, 90))
+    fill_at(canvas, x0, top + hist_height - hb, x0 + column - 0.5, top + hist_height - hg,
+      draw.rgb(70, 110, 200))
+    index = index + 1
+  }
+  outline(canvas, layout.rect(area.left + 6.0, top, area.right - 6.0, top + hist_height),
+    colors.edge)
+  top = top + hist_height + 10.0
+
+  label(canvas, area.left + 6.0, top, "RGB PARADE", 6.0, colors.accent)
+  top = top + 12.0
+  let parade_height: f64 = 72.0
+  let each: f64 = (panel_wide - 8.0) / 3.0
+  var channel: u64 = 0
+  loop {
+    if channel >= 3 { break }
+    let left: f64 = area.left + 6.0 + cast.float(channel) * (each + 4.0)
+    fill_at(canvas, left, top, left + each, top + parade_height, draw.rgb(12, 13, 16))
+    var bucket: u64 = 0
+    loop {
+      if bucket >= 64 { break }
+      let amount: f64 = if channel == 0 { array.get(red, bucket) }
+        else if channel == 1 { array.get(green, bucket) } else { array.get(blue, bucket) }
+      if amount > 0.0 {
+        let level: f64 = top + parade_height
+          - parade_height * cast.float(bucket) / 63.0
+        let bar: f64 = each * math.min(1.0, amount / peak)
+        let tone: draw.Color = if channel == 0 { draw.rgb(200, 80, 80) }
+          else if channel == 1 { draw.rgb(80, 190, 100) } else { draw.rgb(80, 120, 215) }
+        fill_at(canvas, left, level - 1.5, left + bar, level + 1.5, tone)
+      }
+      bucket = bucket + 1
+    }
+    outline(canvas, layout.rect(left, top, left + each, top + parade_height), colors.edge)
+    channel = channel + 1
+  }
+  top = top + parade_height + 10.0
+
+  label(canvas, area.left + 6.0, top, "LUMA WAVEFORM", 6.0, colors.accent)
+  top = top + 12.0
+  let wave_height: f64 = 72.0
+  fill_at(canvas, area.left + 6.0, top, area.right - 6.0, top + wave_height, draw.rgb(12, 13, 16))
+  index = 0
+  loop {
+    if index >= 64 { break }
+    let amount: f64 = array.get(luma, index)
+    if amount > 0.0 {
+      let x0: f64 = area.left + 6.0 + cast.float(index) * column
+      let height: f64 = wave_height * math.min(1.0, amount / peak)
+      fill_at(canvas, x0, top + wave_height - height, x0 + column - 0.5, top + wave_height,
+        draw.rgb(150, 200, 160))
+    }
+    index = index + 1
+  }
+  outline(canvas, layout.rect(area.left + 6.0, top, area.right - 6.0, top + wave_height),
+    colors.edge)
+  top = top + wave_height + 10.0
+
+  let shown_wide: u64 = cast.wrap(wide)
+  let shown_tall: u64 = cast.wrap(tall)
+  let shown_wide: u64 = cast.wrap(wide)
+  let shown_tall: u64 = cast.wrap(tall)
+  var summary: string = string.copy("sampled ")
+  let sampled: i64 = cast.sat(counted)
+  string.append(summary, str.view(number(sampled)))
+  string.append(summary, " px of ")
+  string.append(summary, str.view(number(cast.sat(shown_wide))))
+  string.append(summary, "x")
+  string.append(summary, str.view(number(cast.sat(shown_tall))))
+  label(canvas, area.left + 6.0, top, str.view(summary), 6.0, colors.dim)
+  ()
+}
+
+// ---------------------------------------------------------------------------
+// Audio meters, driven by the peak cache the application already refreshed.
+
+// What a meter needs to know about the clip under the playhead. Reading it in its own
+// function is what ends the document borrow before the waveform cache is touched.
+type Reading = struct { clip: u64, start: i64, length: i64, gain: f64 }
+
+fn reading(state: ref<app.App>, track: u64, playhead: i64) -> Reading effects {alloc} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var found: u64 = 0
+  match editor.clip_spanning(document, track, playhead) {
+    some(clip) => { found = clip },
+    none => { },
+  }
+  if found == 0 { return Reading {clip: 0, start: 0, length: 0, gain: 0.0} }
+  match editor.clip(document, found) {
+    none => Reading {clip: 0, start: 0, length: 0, gain: 0.0},
+    some(value) => Reading {clip: found, start: value.start, length: value.length,
+      gain: editor.effective_gain(document, found)},
+  }
+}
+
+// The level a meter shows: the loudest cached peak under the playhead on this track,
+// scaled by the gain the mixer would apply. No sample is read at paint time.
+fn track_level(state: ref<app.App>, track: u64, playhead: i64) -> f64 effects {alloc} {
+  let found: Reading = reading(state, track, playhead)
+  if found.clip == 0 or found.length <= 0 { return 0.0 }
+  var level: f64 = 0.0
+  match app.waveform_slot(state, found.clip) {
+    none => { },
+    some(slot) => {
+      let peaks: ref<array<f64>> = struct.borrow(
+        array.borrow(struct.borrow(state, field=waveforms), slot), field=peaks)
+      let count: u64 = array.len(peaks)
+      if count != 0 {
+        let along: f64 = cast.float(playhead - found.start)
+        let span: f64 = cast.float(found.length)
+        var position: u64 = cast.sat(along * cast.float(count) / span)
+        if position >= count { position = count - 1 }
+        level = array.get(peaks, position)
+      }
+    },
+  }
+  math.min(1.0, level * found.gain)
+}
+
+fn audio_tracks(state: ref<app.App>) -> array<u64> effects {alloc} {
+  var out: array<u64> = array.new()
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var lanes: array<u64> = editor_view.lanes(document, document.active)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(lanes) { break }
+    let id: u64 = array.get(lanes, index)
+    if editor.track_kind(document, id) == editor.track_audio() { array.push(out, id) }
+    index = index + 1
+  }
+  out
+}
+
+fn paint_meters(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                area: layout.Rect) -> unit effects {alloc} {
+  let height: f64 = chrome.meter_height()
+  fill_at(canvas, area.left + 4.0, area.top + 2.0, area.right - 4.0, area.top + height,
+    draw.rgb(12, 13, 16))
+  label(canvas, area.left + 8.0, area.top + 4.0, "METERS", 6.0, colors.accent)
+  let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
+  var tracks: array<u64> = audio_tracks(state)
+  let top: f64 = area.top + 18.0
+  let bottom: f64 = area.top + height - 14.0
+  var x: f64 = area.left + 10.0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(tracks) { break }
+    if x + 26.0 > area.right - 6.0 { break }
+    let id: u64 = array.get(tracks, index)
+    let level: f64 = track_level(state, id, playhead)
+    fill_at(canvas, x, top, x + 18.0, bottom, draw.rgb(20, 22, 27))
+    let lit: f64 = bottom - (bottom - top) * level
+    // Green below the amber knee, amber approaching the ceiling, red at it.
+    var tone: draw.Color = draw.rgb(90, 190, 110)
+    if level > 0.70 { tone = draw.rgb(228, 190, 90) }
+    if level > 0.90 { tone = draw.rgb(232, 96, 96) }
+    fill_at(canvas, x, lit, x + 18.0, bottom, tone)
+    outline(canvas, layout.rect(x, top, x + 18.0, bottom), colors.edge)
+    let named: string = editor.track_name(struct.borrow(state, field=document), id)
+    label(canvas, x, bottom + 2.0, str.view(named), 6.0, colors.dim)
+    x = x + 26.0
+    index = index + 1
+  }
+  ()
+}
+
+// ---------------------------------------------------------------------------
+// The dock.
+
+fn paint_dock(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+              frame: layout.Frame, program_image: ref<draw.Surface>) -> unit effects {alloc} {
+  fill(canvas, frame.dock, colors.panel)
+  outline(canvas, frame.dock, if app.focus(state) == app.panel_dock() { colors.focus }
+    else { colors.edge })
+  var tabs: array<chrome.Control> = chrome.dock_tabs(frame, state)
+  paint_controls(canvas, colors, tabs)
+
+  let which: u32 = app.dock_tab(state)
+  let body: layout.Rect = frame.dock_body
+  let saved: draw.State = draw.state(canvas)
+  match geometry.rect(body.left, body.top, body.right, body.bottom) {
+    some(box) => { let _ = draw.clip_rect(canvas, box) },
+    none => { },
+  }
+  if which == chrome.tab_scopes() {
+    paint_scopes(canvas, colors, body, program_image)
+  } else {
+    if which == chrome.tab_audio() { paint_meters(canvas, colors, state, body) }
+    var controls: array<chrome.Control> = chrome.dock_panel(frame, state)
+    paint_controls(canvas, colors, controls)
+  }
+  draw.restore(canvas, saved)
+
+  // A scroll indicator, so a long inspector does not look like a short one.
+  if which != chrome.tab_scopes() {
+    var controls: array<chrome.Control> = chrome.dock_panel(frame, state)
+    let extent: f64 = chrome.panel_extent(controls, body) + app.dock_scroll(state)
+    let visible: f64 = layout.height_of(body)
+    if extent > visible {
+      let portion: f64 = visible / extent
+      let offset: f64 = app.dock_scroll(state) / extent
+      fill_at(canvas, body.right - 4.0, body.top + visible * offset, body.right - 1.0,
+        body.top + visible * offset + visible * portion, colors.edge)
+    }
+  }
+  ()
+}
+
 // Paint the whole application. `source_image` and `program_image` are the frames the
 // provider returned for this repaint; the view never calls the provider itself, so painting
 // stays free of media work.
@@ -520,7 +826,8 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   let frame: layout.Frame = layout.frame(width, height)
   draw.clear(canvas, colors.background)
   paint_menu(canvas, colors, state, frame.menu)
-  paint_pool(canvas, colors, state, frame.pool)
+  paint_toolbar(canvas, colors, state, frame)
+  paint_pool(canvas, colors, state, frame)
 
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
@@ -537,15 +844,22 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
     if total > 0 { total - 1 } else { 0 }, program.mark_in, program.mark_out, fps,
     program.playing, program_image, focus == app.panel_program())
 
-  let chosen: u64 = app.current_clip(state)
-  paint_filters(canvas, colors, state, frame.filters, chosen)
-  paint_properties(canvas, colors, state, frame.properties, chosen)
-  paint_mixer(canvas, colors, state, frame.mixer)
+  paint_dock(canvas, colors, state, frame, program_image)
+  paint_timeline_bar(canvas, colors, state, frame)
 
   var model: timeline.Timeline = timeline_model(state, frame.timeline)
   paint_ruler(canvas, colors, state, frame.ruler, model, fps)
   paint_timeline(canvas, colors, state, frame.timeline, model)
   paint_headers(canvas, colors, state, frame.headers, model)
+  var track_buttons: array<chrome.Control> = chrome.track_controls(frame, state, model)
+  let saved: draw.State = draw.state(canvas)
+  match geometry.rect(frame.headers.left, frame.headers.top, frame.headers.right,
+                      frame.headers.bottom) {
+    some(box) => { let _ = draw.clip_rect(canvas, box) },
+    none => { },
+  }
+  paint_controls(canvas, colors, track_buttons)
+  draw.restore(canvas, saved)
   paint_status(canvas, colors, state, frame.status)
   app.count_paint(state)
   ()

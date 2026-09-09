@@ -11,7 +11,10 @@ for entry in report.get("diagnostics", []):
     span = entry.get("span") or {}
     subject = entry.get("subject") or {}
     where = "{}:{}:{}".format(span.get("file", "?"), span.get("line", "?"), span.get("col", "?"))
+    detail = entry.get("message") or entry.get("actual") or ""
+    if entry.get("expected") and entry.get("actual"):
+        detail = "{} (expected {}, found {})".format(detail, entry["expected"], entry["actual"])
     print("  {} {} [{}] {}".format(entry.get("code"), where,
                                    subject.get("fn") or subject.get("module") or "",
-                                   entry.get("actual") or ""), file=sys.stderr)
+                                   detail), file=sys.stderr)
 sys.exit(1)

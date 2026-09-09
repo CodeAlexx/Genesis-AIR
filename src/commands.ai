@@ -11,6 +11,7 @@ module genesis.commands
 
 import std.editor as editor
 import std.editor_io as editor_io
+import std.curve as curve
 import std.files as files
 import std.codec as codec
 import "app.ai" as app
@@ -39,10 +40,10 @@ pub fn new_project(state: ref<app.App>) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   var fresh: editor.Document = editor.document(30.0, 1920, 1080)
   let sequence: u64 = fresh.active
+  let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A2")
+  let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A1")
   let _ = editor.add_track(fresh, sequence, editor.track_video(), "V1")
   let _ = editor.add_track(fresh, sequence, editor.track_video(), "V2")
-  let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A1")
-  let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A2")
   let _ = ref.swap(struct.borrow(state, field=document), fresh)
   app.set_project_path(state, "")
   app.mark_dirty(state, false)
@@ -564,4 +565,186 @@ pub fn redo(state: ref<app.App>) -> Result effects {alloc} {
   app.mark_dirty(state, true)
   app.set_status(state, "Redone")
   done("redone", 0)
+}
+
+// ---------------------------------------------------------------------------
+// Generic parameter writes.
+//
+// The inspector shows a parameter whether or not the filter carrying it exists yet, so
+// writing one may have to materialise the filter first. That is the only "arithmetic" here
+// and it is bookkeeping, not editing: the value itself is stored by `std.editor`.
+
+pub fn ensure_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effects {alloc} {
+  if clip == 0 { return refused("no clip selected") }
+  let existing: u64 = chrome_filter_of_kind(state, clip, kind)
+  if existing != 0 { return done("filter present", existing) }
+  add_filter(state, clip, kind)
+}
+
+// Kept here rather than imported from the chrome module so the command layer does not
+// depend on the view; it is the same three-line scan.
+fn chrome_filter_of_kind(state: ref<app.App>, clip: u64, kind: str) -> u64 effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let count: u64 = editor.filter_count(doc, clip)
+  var position: u32 = 0
+  loop {
+    let seen: u64 = cast.wrap(position)
+    if seen >= count { break }
+    match editor.filter_at(doc, clip, position) {
+      some(id) => {
+        let owned: string = editor.filter_kind(doc, id)
+        if str.eq(str.view(owned), kind) { return id }
+      },
+      none => { },
+    }
+    position = position + 1
+  }
+  0
+}
+
+pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let frames: i64 = cast.sat(value)
+  let ok: bool = if str.eq(name, "fade_in") {
+      editor.set_fade_in(struct.borrow(state, field=document), clip, frames)
+    } else if str.eq(name, "fade_out") {
+      editor.set_fade_out(struct.borrow(state, field=document), clip, frames)
+    } else if str.eq(name, "gain") {
+      editor.set_clip_gain(struct.borrow(state, field=document), clip, value)
+    } else { false }
+  if not ok { return refused("that clip property is not settable") }
+  app.mark_dirty(state, true)
+  done("clip property set", clip)
+}
+
+pub fn set_track_field(state: ref<app.App>, track: u64, name: str, value: f64) -> Result effects {alloc} {
+  if str.eq(name, "gain") { return set_track_gain(state, track, value) }
+  if str.eq(name, "pan") { return set_track_pan(state, track, value) }
+  refused("that track property is not settable")
+}
+
+// One entry point for every inspector control: the domain says what is being written.
+pub fn set_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str, name: str,
+                     value: f64) -> Result effects {alloc} {
+  if domain == 1 { return set_clip_field(state, target, name, value) }
+  if domain == 3 { return set_track_field(state, target, name, value) }
+  if domain != 2 { return refused("nothing to set") }
+  var filter: u64 = target
+  if filter == 0 {
+    let clip: u64 = app.current_clip(state)
+    var made: Result = ensure_filter(state, clip, kind)
+    if not made.ok { return made }
+    filter = made.value
+  }
+  set_filter_param(state, filter, name, value)
+}
+
+// A keyframe on the parameter under the pointer, at the playhead. Clip-local frames are the
+// toolkit's contract, so the value is handed over as-is.
+pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str,
+                          name: str, value: f64) -> Result effects {alloc} {
+  let clip: u64 = app.current_clip(state)
+  if clip == 0 { return refused("no clip selected") }
+  let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+  var qualified: string = string.copy(kind)
+  if str.len(kind) != 0 { string.append(qualified, ".") }
+  string.append(qualified, name)
+  set_key(state, clip, str.view(qualified), frame, value, curve.linear())
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard. A copy records the SOURCE and range, never a clip id, so a paste survives the
+// original being deleted.
+
+pub fn copy_clip(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  match editor.clip(struct.borrow(state, field=document), clip) {
+    none => refused("no clip selected"),
+    some(value) => { app.set_clipboard(state, value.source, value.source_in, value.length)
+      done("copied", clip) },
+  }
+}
+
+pub fn cut_clip(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  var copied: Result = copy_clip(state, clip)
+  if not copied.ok { return copied }
+  ripple_delete(state, clip)
+}
+
+pub fn paste_clip(state: ref<app.App>, track: u64, at: i64) -> Result effects {alloc} {
+  if not app.has_clipboard(state) { return refused("clipboard is empty") }
+  let held: app.Clipboard = app.clipboard(state)
+  overwrite_clip(state, track, held.source, held.source_in, held.length, at)
+}
+
+// ---------------------------------------------------------------------------
+// Tracks
+
+pub fn toggle_track_hidden(state: ref<app.App>, track: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var now: bool = false
+  match editor.track_slot(document, track) {
+    none => { return refused("no such track") },
+    some(slot) => { now = struct.get(array.borrow(struct.borrow(document, field=tracks), slot),
+      field=hidden) },
+  }
+  if not editor.set_track_hidden(struct.borrow(state, field=document), track, not now) {
+    return refused("no such track")
+  }
+  app.mark_dirty(state, true)
+  done(if now { "track shown" } else { "track hidden" }, track)
+}
+
+// ---------------------------------------------------------------------------
+// Razor across every track: split whatever the playhead crosses, on every lane at once.
+// The split itself is `std.editor.split`; this only enumerates the lanes.
+
+pub fn razor_all(state: ref<app.App>) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  let frame: i64 = editor.playhead(document)
+  var targets: array<u64> = array.new()
+  var index: u64 = 0
+  loop {
+    if index >= editor.track_count(document) { break }
+    let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
+    if struct.get(entry, field=owner) == sequence and not struct.get(entry, field=locked) {
+      let id: u64 = struct.get(entry, field=id)
+      match editor.clip_spanning(document, id, frame) {
+        some(clip) => { array.push(targets, clip) },
+        none => { },
+      }
+    }
+    index = index + 1
+  }
+  var cut: u64 = 0
+  index = 0
+  loop {
+    if index >= array.len(targets) { break }
+    match editor.split(struct.borrow(state, field=document), array.get(targets, index), frame) {
+      some(made) => { cut = cut + 1 },
+      none => { },
+    }
+    index = index + 1
+  }
+  if cut == 0 { return refused("nothing under the playhead to razor") }
+  app.mark_dirty(state, true)
+  var line: string = string.copy("razored ")
+  let shown: i64 = cast.sat(cut)
+  string.append(line, str.view(string.from_int(shown)))
+  string.append(line, " clips")
+  done(str.view(line), cut)
+}
+
+// A transition centred on the cut nearest the playhead on the selected clip's track.
+pub fn transition_at_playhead(state: ref<app.App>, duration: i64) -> Result effects {alloc} {
+  let clip: u64 = app.current_clip(state)
+  if clip == 0 { return refused("select a clip beside the cut first") }
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  match editor.clip(document, clip) {
+    none => refused("no such clip"),
+    some(value) => { add_transition(state, value.track, editor.clip_end(value), duration,
+      "dissolve") },
+  }
 }

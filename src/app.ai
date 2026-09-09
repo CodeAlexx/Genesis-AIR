@@ -13,13 +13,15 @@ import std.editor as editor
 import std.editor_io as editor_io
 import "provider.ai" as provider
 
+// The panels a keystroke can be aimed at. The filter stack, the properties column and the
+// mixer used to be panels of their own; they are tabs of the dock now, and `chrome` decides
+// which tab is showing, so there is one place that knows and not four.
 pub fn panel_pool() -> u32 effects {} { 0 }
 pub fn panel_source() -> u32 effects {} { 1 }
 pub fn panel_program() -> u32 effects {} { 2 }
-pub fn panel_filters() -> u32 effects {} { 3 }
-pub fn panel_properties() -> u32 effects {} { 4 }
-pub fn panel_mixer() -> u32 effects {} { 5 }
 pub fn panel_timeline() -> u32 effects {} { 6 }
+pub fn panel_dock() -> u32 effects {} { 7 }
+pub fn panel_toolbar() -> u32 effects {} { 8 }
 
 // The timeline viewport. `std.editor_view` derives its geometry from these, so zoom and pan
 // are ordinary application state rather than a hidden second model. The NLE toolkit records
@@ -31,6 +33,38 @@ pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_he
 // refresh step fills it, so painting never calls the media provider.
 pub type Waveform = struct { clip: u64, peaks: array<f64> }
 
+// What a press on a clip started. A drag is view state, not a project fact: nothing is
+// written to the document until the gesture resolves into a command.
+pub fn drag_none() -> u32 effects {} { 0 }
+pub fn drag_move() -> u32 effects {} { 1 }
+pub fn drag_trim_start() -> u32 effects {} { 2 }
+pub fn drag_trim_end() -> u32 effects {} { 3 }
+
+pub type Drag = struct {
+  kind: u32,
+  clip: u64,
+  grab_frame: i64,
+  origin_start: i64,
+  origin_in: i64,
+  origin_length: i64,
+  origin_track: u64,
+  moved: bool
+}
+
+pub fn drag() -> Drag effects {} {
+  Drag {kind: drag_none(), clip: 0, grab_frame: 0, origin_start: 0, origin_in: 0,
+    origin_length: 0, origin_track: 0, moved: false}
+}
+
+// One clip's worth of material, held for paste. Copying records the SOURCE and its range,
+// never a clip id, so a paste survives the original being deleted.
+pub type Clipboard = struct { source: u64, source_in: i64, length: i64, filled: bool }
+
+// A one-line prompt. There is no file dialog on this platform's canvas window, so the
+// actions that need a path ask for one in the status line. The prompt holds the action it
+// will run when the line is committed, so a keystroke cannot be misrouted.
+pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string }
+
 pub type App = struct {
   document: editor.Document,
   history: editor.History,
@@ -39,6 +73,12 @@ pub type App = struct {
   focus: u32,
   pool_row: u64,
   selected_filter: u64,
+  dock_tab: u32,
+  dock_scroll: f64,
+  snap: bool,
+  clipboard: Clipboard,
+  gesture: Drag,
+  prompt: Prompt,
   project_path: string,
   status: string,
   dirty: bool,
@@ -55,12 +95,18 @@ pub fn viewport() -> Viewport effects {} {
 pub fn app(engine: provider.Provider own) -> App effects {alloc} {
   var document: editor.Document = editor.document(30.0, 1920, 1080)
   let sequence: u64 = document.active
+  // Created bottom-up: `editor_view.lanes` orders by the track's own `order` and the
+  // timeline draws the last lane at the TOP, so this is what puts video above audio.
+  let _ = editor.add_track(document, sequence, editor.track_audio(), "A2")
+  let _ = editor.add_track(document, sequence, editor.track_audio(), "A1")
   let _ = editor.add_track(document, sequence, editor.track_video(), "V1")
   let _ = editor.add_track(document, sequence, editor.track_video(), "V2")
-  let _ = editor.add_track(document, sequence, editor.track_audio(), "A1")
-  let _ = editor.add_track(document, sequence, editor.track_audio(), "A2")
   App {document: document, history: editor.history(64), provider: engine,
     viewport: viewport(), focus: panel_timeline(), pool_row: 0, selected_filter: 0,
+    dock_tab: 0, dock_scroll: 0.0, snap: true,
+    clipboard: Clipboard {source: 0, source_in: 0, length: 0, filled: false},
+    gesture: drag(),
+    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
     project_path: string.new(), status: string.copy("New project"), dirty: false,
     running: true, frames_painted: 0, waveforms: array.new()}
 }
@@ -104,6 +150,120 @@ pub fn set_selected_filter(state: ref<App>, value: u64) -> unit effects {} {
   struct.set(state, value, field=selected_filter)
   ()
 }
+// ---- dock, snapping and the clipboard --------------------------------------
+
+pub fn dock_tab(state: ref<App>) -> u32 effects {} { state.dock_tab }
+pub fn set_dock_tab(state: ref<App>, value: u32) -> unit effects {} {
+  struct.set(state, if value > 3 { 0 } else { value }, field=dock_tab)
+  struct.set(state, 0.0, field=dock_scroll)
+  ()
+}
+pub fn dock_scroll(state: ref<App>) -> f64 effects {} { state.dock_scroll }
+pub fn set_dock_scroll(state: ref<App>, value: f64) -> f64 effects {} {
+  let next: f64 = if value < 0.0 { 0.0 } else { value }
+  struct.set(state, next, field=dock_scroll)
+  next
+}
+pub fn snap(state: ref<App>) -> bool effects {} { state.snap }
+pub fn toggle_snap(state: ref<App>) -> bool effects {} {
+  let next: bool = not state.snap
+  struct.set(state, next, field=snap)
+  next
+}
+
+pub fn has_clipboard(state: ref<App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=clipboard), field=filled)
+}
+pub fn clipboard(state: ref<App>) -> Clipboard effects {} { state.clipboard }
+pub fn set_clipboard(state: ref<App>, source: u64, source_in: i64,
+                     length: i64) -> unit effects {} {
+  let board: ref<Clipboard> = struct.borrow(state, field=clipboard)
+  struct.set(board, source, field=source)
+  struct.set(board, source_in, field=source_in)
+  struct.set(board, length, field=length)
+  struct.set(board, source != 0 and length > 0, field=filled)
+  ()
+}
+
+// ---- the pointer gesture ---------------------------------------------------
+
+pub fn gesture_kind(state: ref<App>) -> u32 effects {} {
+  struct.get(struct.borrow(state, field=gesture), field=kind)
+}
+pub fn gesture_clip(state: ref<App>) -> u64 effects {} {
+  struct.get(struct.borrow(state, field=gesture), field=clip)
+}
+pub fn gesture(state: ref<App>) -> Drag effects {} { state.gesture }
+pub fn begin_gesture(state: ref<App>, kind: u32, clip: u64, grab: i64, start: i64,
+                     source_in: i64, length: i64, track: u64) -> unit effects {} {
+  let held: ref<Drag> = struct.borrow(state, field=gesture)
+  struct.set(held, kind, field=kind)
+  struct.set(held, clip, field=clip)
+  struct.set(held, grab, field=grab_frame)
+  struct.set(held, start, field=origin_start)
+  struct.set(held, source_in, field=origin_in)
+  struct.set(held, length, field=origin_length)
+  struct.set(held, track, field=origin_track)
+  struct.set(held, false, field=moved)
+  ()
+}
+pub fn gesture_moved(state: ref<App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=gesture), field=moved)
+}
+pub fn mark_gesture_moved(state: ref<App>) -> unit effects {} {
+  struct.set(struct.borrow(state, field=gesture), true, field=moved)
+  ()
+}
+pub fn end_gesture(state: ref<App>) -> unit effects {} {
+  struct.set(struct.borrow(state, field=gesture), drag_none(), field=kind)
+  struct.set(struct.borrow(state, field=gesture), 0, field=clip)
+  ()
+}
+
+// ---- the prompt ------------------------------------------------------------
+
+pub fn prompt_active(state: ref<App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=prompt), field=active)
+}
+pub fn prompt_action(state: ref<App>) -> u32 effects {} {
+  struct.get(struct.borrow(state, field=prompt), field=action)
+}
+pub fn prompt_label(state: ref<App>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(struct.borrow(state, field=prompt), field=label)))
+}
+pub fn prompt_text(state: ref<App>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(struct.borrow(state, field=prompt), field=buffer)))
+}
+pub fn begin_prompt(state: ref<App>, action: u32, label: str, seed: str) -> unit effects {alloc} {
+  let asking: ref<Prompt> = struct.borrow(state, field=prompt)
+  struct.set(asking, true, field=active)
+  struct.set(asking, action, field=action)
+  let _ = ref.swap(struct.borrow(asking, field=label), string.copy(label))
+  let _ = ref.swap(struct.borrow(asking, field=buffer), string.copy(seed))
+  ()
+}
+pub fn prompt_push(state: ref<App>, text: str) -> unit effects {alloc} {
+  if not prompt_active(state) { return () }
+  string.append(struct.borrow(struct.borrow(state, field=prompt), field=buffer), text)
+  ()
+}
+pub fn prompt_backspace(state: ref<App>) -> unit effects {alloc} {
+  if not prompt_active(state) { return () }
+  var held: string = prompt_text(state)
+  let count: u64 = str.len(str.view(held))
+  if count == 0 { return () }
+  var shorter: string = string.copy(str.slice(str.view(held), 0, count - 1))
+  let _ = ref.swap(struct.borrow(struct.borrow(state, field=prompt), field=buffer), shorter)
+  ()
+}
+pub fn end_prompt(state: ref<App>) -> unit effects {alloc} {
+  let asking: ref<Prompt> = struct.borrow(state, field=prompt)
+  struct.set(asking, false, field=active)
+  struct.set(asking, 0, field=action)
+  let _ = ref.swap(struct.borrow(asking, field=buffer), string.new())
+  ()
+}
+
 pub fn painted(state: ref<App>) -> u64 effects {} { state.frames_painted }
 pub fn count_paint(state: ref<App>) -> unit effects {} {
   struct.set(state, state.frames_painted + 1, field=frames_painted)
@@ -164,20 +324,28 @@ pub fn default_video_track(state: ref<App>) -> u64 effects {} {
   }
   0
 }
+// A1 — the audio track nearest the video, which is the highest-ordered audio lane. Taking
+// the first in document order would land new audio on the BOTTOM lane instead.
 pub fn default_audio_track(state: ref<App>) -> u64 effects {} {
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
+  var chosen: u64 = 0
+  var best: u32 = 0
   var index: u64 = 0
   loop {
     if index >= editor.track_count(document) { break }
     let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
     if struct.get(entry, field=owner) == sequence
       and struct.get(entry, field=kind) == editor.track_audio() {
-      return struct.get(entry, field=id)
+      let order: u32 = struct.get(entry, field=order)
+      if chosen == 0 or order > best {
+        chosen = struct.get(entry, field=id)
+        best = order
+      }
     }
     index = index + 1
   }
-  0
+  chosen
 }
 
 // ---- waveform cache -------------------------------------------------------
