@@ -207,10 +207,10 @@ A missing worker or fixture is reported **BLOCKED**, never passed.
 
 Gaps in AIR itself — things this application wanted and the language or toolkit could not
 express — are recorded in [`docs/AIR_GAPS.md`](docs/AIR_GAPS.md) with the smallest fix, the
-file it belongs in and a reproducer. **AIR was not modified for any of them.** In short:
-`std.editor` can read a clip's speed and reverse flag but not write them; it can add and
-remove tracks but not reorder them; and `std.vector_font` carries only letters, digits, `+`,
-`-` and `.`, so every control label here is spelled without punctuation.
+file it belongs in and a reproducer. Each was recorded and worked around visibly BEFORE it
+was fixed; all three have since been closed in AIR, on the commit `air-sdk.conf` pins:
+`std.editor` gained `set_clip_speed`, `set_clip_reverse` and `reorder_track`, and
+`std.vector_font` was redrawn — all 95 printable ASCII glyphs, at the right proportions.
 
 Gaps in this application:
 
@@ -230,8 +230,6 @@ Gaps in this application:
   monitor does not change — closing it is the compositing work above.
 - No export. `Render` writes the window's own frame (`gui.screenshot`), which is a still of
   the editor, not an encode of the timeline.
-- A new audio track added with `+A` lands above the video tracks rather than below them,
-  because the toolkit cannot reorder tracks. See gap 2 in `docs/AIR_GAPS.md`.
 - Zoom and pan live in this application (`app.Viewport`) because the AIR NLE toolkit records
   viewport policy as deliberately unported. If it proves generic it should be upstreamed.
 - The menu bar is drawn but not interactive; everything it would hold is on the toolbar, the

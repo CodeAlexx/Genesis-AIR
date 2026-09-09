@@ -1,120 +1,104 @@
 # AIR gaps found by Genesis AIR
 
-Genesis AIR uses AIR; it does not modify it. When building this application ran into
-something AIR could not express, the gap is recorded here with the smallest fix that would
-close it, the file it belongs in, and a reproducer — and the application works around it in
-a way that stays visible to the person using it, rather than pretending the feature exists.
+Genesis AIR uses AIR; it does not modify it casually. When building this application ran into
+something AIR could not express, the gap was recorded here first — with the smallest fix, the
+file it belonged in, and a reproducer — and the application worked around it in a way that
+stayed visible to the person using it, rather than pretending the feature existed.
 
-Nothing in `CodeAlexx/AIR` was changed for any entry below.
-
-SDK pinned by this project: `air-sdk.conf` → `AIR_SDK_COMMIT`.
+Everything below has since been fixed **in AIR**, on the commit this project pins
+(`air-sdk.conf` → `AIR_SDK_COMMIT`). This file is kept as the record of what was found, what
+was done about it, and what it cost — the workarounds are gone from the code.
 
 ---
 
-## 1. `std.editor` cannot write a clip's speed or reverse flag
+## 1. `std.editor` could not write a clip's speed or reverse flag — CLOSED
 
-**What is missing.** `editor.Clip` carries `speed: f64` and `reverse: bool`, `editor_io`
-round-trips both, and `editor.clip()` reads them — but there is no setter. `set_clip_gain`,
-`set_clip_enabled`, `set_fade_in` and `set_fade_out` all exist; speed and reverse have no
+**What was missing.** `editor.Clip` carried `speed: f64` and `reverse: bool`, `editor_io`
+round-tripped both, and `editor.clip()` read them — but there was no setter. `set_clip_gain`,
+`set_clip_enabled`, `set_fade_in` and `set_fade_out` all existed; speed and reverse had no
 equivalent.
 
-**Why it matters here.** The inspector's SPEED section can display a clip's speed and
-reverse flag but cannot change them. Modelling speed as a filter parameter instead was
-rejected: `Clip.speed` already exists, and a second store for the same fact is exactly the
+**Why it mattered.** The inspector's SPEED section could display a clip's rate and reverse
+flag and could not change them. Modelling speed as a filter parameter instead was rejected:
+`Clip.speed` already existed, and a second store for the same fact is exactly the
 disagreement this codebase is built to avoid.
 
-**Smallest fix.** Two functions in `stdlib/editor.ai`, beside `set_clip_gain`:
+**Fixed by** `set_clip_speed` and `set_clip_reverse` in `stdlib/editor.ai`, beside
+`set_clip_gain`. A rate of zero or less is **refused** rather than clamped: a clip with no
+rate is not a slower clip, and `reverse` is the separate flag that says which way it runs.
 
-```
-pub fn set_clip_speed(doc: ref<Document>, id: u64, value: f64) -> bool
-pub fn set_clip_reverse(doc: ref<Document>, id: u64, value: bool) -> bool
-```
+**Covered by** `stdlib_editor`, which checks the refusals as well as the writes — including
+that a refused write leaves the previous rate alone — against its independent Python oracle,
+native and reference agreeing.
 
-**Affected file.** `stdlib/editor.ai` (AIR).
-
-**Reproducer.** In a document with one clip, `editor.clip(doc, id).speed` reads `1.0` and no
-call in the module can make it read anything else.
-
-**What Genesis AIR does instead.** The SPEED rows are read-only and the panel says so, in
-`src/chrome.ai` (`properties_panel`).
+**In this application** the SPEED section is a rate slider and a reverse switch, like any
+other parameter.
 
 ---
 
-## 2. `std.editor` cannot reorder tracks
+## 2. `std.editor` could not reorder tracks — CLOSED
 
-**What is missing.** `add_track` appends with the next `order`, and `remove_track` deletes;
-nothing moves a track to a different lane. `editor_view.lanes` sorts by `Track.order`, so
-lane position is entirely determined by creation order.
+**What was missing.** `add_track` appended with the next `order` and `remove_track` deleted;
+nothing moved a track to a different lane. `editor_view.lanes` sorts by `Track.order`, so
+lane position was entirely determined by creation order.
 
-**Why it matters here.** The conventional layout is video above audio. Because the topmost
-lane is the highest `order`, Genesis AIR has to CREATE its default tracks bottom-up
-(A2, A1, V1, V2) to get V2/V1/A1/A2 top-down. That works for the default project, but a
-track added later with the `+A` button lands at the top of the stack instead of below the
-video, and nothing can move it down.
+**Why it mattered.** The conventional layout is video above audio. Because the topmost lane
+is the highest `order`, Genesis AIR had to CREATE its default tracks bottom-up to get
+V2/V1/A1/A2 top-down — and a track added later with the `+A` button landed at the top of the
+stack, above the video, with nothing able to move it down.
 
-**Smallest fix.** One function in `stdlib/editor.ai`, mirroring `reorder_filter`, which
-already does exactly this for filter stacks:
+**Fixed by** `reorder_track` in `stdlib/editor.ai`, mirroring `reorder_filter`, which already
+did exactly this for filter stacks. It renumbers the rest to keep a sequence's orders a dense
+`0..n-1` run and clamps a position past the end to the last lane.
 
-```
-pub fn reorder_track(doc: ref<Document>, id: u64, position: u32) -> bool
-```
+**Covered by** `stdlib_editor`: moving the last of four lanes to the front leaves 0..3 with
+no hole and no duplicate, a position past the end clamps, and an unknown track is refused.
 
-**Affected file.** `stdlib/editor.ai` (AIR).
-
-**Reproducer.** `add_track(doc, seq, track_audio(), "A3")` on a document whose tracks are
-A2, A1, V1, V2 puts A3 above V2 in `editor_view.lanes`, and no call can move it.
-
-**What Genesis AIR does instead.** Seeds its tracks bottom-up (`src/app.ai`,
-`src/commands.ai::new_project`) and leaves later additions where the toolkit puts them.
+**In this application** `+A` places the new track below the video, and `+V` above it.
 
 ---
 
-## 3. `std.vector_font` has almost no punctuation
+## 3. `std.vector_font` was not legible — CLOSED
 
-**What is missing.** `vector_font.glyph_points` covers `0-9`, `A-Z`, `a-z`, `+`, `-` and
-`.` — 65 codepoints. Everything else, including `:` `/` `(` `)` `%` `<` `>` `|` `^` `_` `,`
-`?` `*` `=` and every non-ASCII character, returns no outline. Unsupported characters
-advance the pen but draw nothing, so they render as gaps.
+**What was wrong.** Three things at once, and the first is the one that mattered most:
 
-**Why it matters here.** A label made only of unsupported characters draws as an empty
-button. The first build of the toolbar had transport buttons labelled `|<` `<` `>` `>|` and
-they came out blank.
+- **The glyphs were a third of their own advance.** The forms were drawn between x=1 and x=3
+  on a 5×7 grid whose pen advanced 7 units. Text set in it read as thin marks separated by
+  wide gaps, and at small sizes `a`, `e` and `o` were indistinguishable from `s`.
+- **The pen advanced by `advance() + 2`.** The side bearings are part of the outlines, so
+  those two units were counted twice, setting the text nearly half again as loose as it
+  should have been.
+- **The table covered only letters, digits, `+`, `-` and `.`.** Anything else drew as an
+  empty box: a timecode lost its colons, a percentage its sign, a path its separators. A
+  label made only of unsupported characters — the transport buttons were first labelled
+  `|<` `<` `>` `>|` — came out blank.
 
-There is a second, sharper limitation in the same module, found by measuring a ladder of
-every size and weight: the glyphs are single strokes whose counters are one or two grid
-units across, so the font is only legible in a narrow band. Below about ten pixels of cap
-height the letterforms stop separating — `Render` reads as `Rsndsr` — and above a stroke
-weight of about 1.0 the pen closes the bowls, so `a`, `e` and `o` all collapse to `s`. There
-is no size and weight at which the font is comfortable; ten to twelve pixels at weight one
-is the whole usable window.
+Dots were a two-point segment 0.2 units long: a fifth of a pixel at ten-pixel type, which the
+stroker rounds away, so `0.85` printed as `0 85`.
 
-**Smallest fix.** Two, independent. For the missing characters: additional entries in
-`glyph_points` for the printable ASCII punctuation, in the same two-value polyline format the
-existing glyphs use — no API change. For legibility: the letterforms themselves need more
-distinct bowls (a wider grid than 5x7 for the lowercase, or a second set of glyph outlines
-intended for filling rather than stroking), which is a larger piece of work and a real design
-decision rather than a patch.
+**Fixed by** redrawing the whole table in `stdlib/vector_font.ai`. All 95 printable ASCII
+glyphs are present, drawn between x=0.6 and x=4.4 — nearly the full cell — with letterforms
+chosen so the bowls stay open when the stroker fills them; the pen advances by `advance()`;
+and a dot is a small closed square that carries area at every size the font is legible at.
+`height()` and `advance()` are unchanged, so nothing that measures through
+`text_vector_width` moved except in the direction of having more room than it asked for.
 
-**Affected file.** `stdlib/vector_font.ai` (AIR).
+**Covered by** `stdlib_graphics_xml_extra`, whose pinned glyph counts and coordinates now
+read from `std.vector_font`'s own table and stated metrics rather than from a frozen donor
+table.
 
-**Reproducer.** `font.text_vector_width("<>", 7.0)` returns a non-zero advance while
-`font.glyph_points(60)` returns an empty array.
-
-**What Genesis AIR does instead.** Every control label is spelled with supported characters
-(`Start`, `Prev`, `Next`, `End`, `Up`, `Dn`, `Zoom in`, `Zoom out`), the prompt's caret is a
-drawn rectangle rather than an underscore, and the type scale is pinned inside the font's
-usable window: ten, eleven and twelve pixels at weight one, named in `genesis.view` so no
-call site can pick a size the font cannot draw. Every strip that has to hold a row of labels
-— the toolbars, the dock tabs, the media pool's actions — measures its labels first and
-steps the size down until they fit, rather than laying out at a fixed size and clipping.
+**What it still costs.** It is a 5×7 stroke font: legible from about nine pixels up, at a
+stroke weight of about one. A heavier pen still closes the bowls — heavier is worse, not
+bolder — and there is no size at which it has the texture of a real typeface. Genesis AIR
+names its type scale in `genesis.view` so no call site can pick a size outside that window,
+and every strip that holds a row of labels measures them first and steps the size down until
+they fit.
 
 ---
 
-## Closed since this project started
+## Closed earlier
 
-- **No long-lived subprocess with writable stdin.** Recorded here first, and now fixed
-  upstream: `stdlib/process.ai` gained `spawn_piped` / `write_stdin` / `read_stdout` /
-  `poll` / `wait`, backed by `runtime/air_proc_pipe.c`, on AIR `main`. Genesis AIR has not
-  adopted it yet because `air-sdk.conf` still pins the pre-merge NLE commit; adopting it
-  means repointing the pin and rebuilding the compiler for the new opcodes, which is a
-  separate change from this one.
+- **No long-lived subprocess with writable stdin.** Recorded here first, then fixed upstream:
+  `stdlib/process.ai` gained `spawn_piped` / `write_stdin` / `read_stdout` / `poll` / `wait`,
+  backed by `runtime/air_proc_pipe.c`. This project now pins a commit that carries it; the
+  media provider has not adopted it yet, which is the remaining item in the README's gaps.

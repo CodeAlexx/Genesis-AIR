@@ -843,10 +843,10 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
   match editor.clip(doc, clip) {
     none => { },
     some(value) => {
-      let shown: string = math.format_fixed(value.speed, 3)
-      cursor = text_row(out, area, cursor, "Speed", str.view(shown))
-      cursor = text_row(out, area, cursor, "Reverse", if value.reverse { "on" } else { "off" })
-      cursor = text_row(out, area, cursor, "note", "read only in std.editor")
+      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "speed", "Rate",
+        value.speed, 0.1, 4.0, 0.05, clip != 0)
+      cursor = switch_row(out, area, cursor, act_param_toggle(), domain_clip(), clip, "",
+        "reverse", "Reverse", value.reverse)
     },
   }
 

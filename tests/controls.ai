@@ -136,9 +136,18 @@ fn snapshot(state: ref<app.App>) -> unit effects {io.write, alloc} {
       cell_i("gain", cast.sat(value.gain * 100.0)) },
   }
   cell_u("keys", editor.key_count(document, chosen, "size_position.x"))
+  cell_i("speed", cast.sat(clip_speed(document, chosen) * 1000.0))
+  cell_b("reverse", clip_reverse(document, chosen))
   cell_u("monitor", document.monitor_source)
   cell_i("monitor_frame", struct.get(struct.borrow(document, field=monitor), field=frame))
   ()
+}
+
+fn clip_speed(document: ref<editor.Document>, clip: u64) -> f64 effects {} {
+  match editor.clip(document, clip) { some(value) => value.speed, none => 0.0, }
+}
+fn clip_reverse(document: ref<editor.Document>, clip: u64) -> bool effects {} {
+  match editor.clip(document, clip) { some(value) => value.reverse, none => false, }
 }
 
 fn track_gain_total(document: ref<editor.Document>) -> f64 effects {} {

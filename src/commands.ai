@@ -139,12 +139,18 @@ pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {al
 // ---------------------------------------------------------------------------
 // Tracks
 
+// A new track goes where its kind belongs: video on top, which is where `add_track` already
+// appends it, and audio at the bottom, which needs `std.editor.reorder_track`.
 pub fn add_track(state: ref<app.App>, kind: u32, name: str) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
   let id: u64 = editor.add_track(struct.borrow(state, field=document), sequence, kind, name)
+  if kind == editor.track_audio() {
+    let _ = editor.reorder_track(struct.borrow(state, field=document), id, 0)
+  }
   app.mark_dirty(state, true)
-  done("track added", id)
+  done(if kind == editor.track_audio() { "audio track added below the video" }
+       else { "video track added" }, id)
 }
 
 pub fn remove_track(state: ref<app.App>, track: u64) -> Result effects {alloc} {
@@ -611,10 +617,27 @@ pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> 
       editor.set_fade_out(struct.borrow(state, field=document), clip, frames)
     } else if str.eq(name, "gain") {
       editor.set_clip_gain(struct.borrow(state, field=document), clip, value)
+    } else if str.eq(name, "speed") {
+      editor.set_clip_speed(struct.borrow(state, field=document), clip, value)
     } else { false }
   if not ok { return refused("that clip property is not settable") }
   app.mark_dirty(state, true)
   done("clip property set", clip)
+}
+
+// Reverse is a flag, not a value, so it toggles rather than being set to a number.
+pub fn toggle_clip_reverse(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  var now: bool = false
+  match editor.clip(struct.borrow(state, field=document), clip) {
+    none => { return refused("no clip selected") },
+    some(value) => { now = value.reverse },
+  }
+  if not editor.set_clip_reverse(struct.borrow(state, field=document), clip, not now) {
+    return refused("no such clip")
+  }
+  app.mark_dirty(state, true)
+  done(if now { "playing forward" } else { "playing in reverse" }, clip)
 }
 
 pub fn set_track_field(state: ref<app.App>, track: u64, name: str, value: f64) -> Result effects {alloc} {

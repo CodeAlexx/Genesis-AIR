@@ -351,6 +351,13 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     string.append(line, str.view(math.format_fixed(next, 2)))
     return line
   }
+  if action == chrome.act_param_toggle() {
+    if domain == chrome.domain_clip() and str.eq(str.view(name), "reverse") {
+      var landed: commands.Result = commands.toggle_clip_reverse(state, target)
+      return commands.message(landed)
+    }
+    return note("that switch is not settable")
+  }
   if action == chrome.act_param_key() {
     var landed: commands.Result = commands.keyframe_parameter(state, domain, target,
       str.view(kind), str.view(name), value)

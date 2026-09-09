@@ -121,9 +121,9 @@ EXPECTED = {
     "tbar_has_snap": "true",
     "dock_tab_after_click": "1",          # chrome.tab_filters()
     "library_added_filter": "true",
-    # The inspector shows every parameter of every offered filter, present or not: 169
+    # The inspector shows every parameter of every offered filter, present or not: 172
     # controls for this project. A drop here means a section stopped being built.
-    "properties_controls": "169",
+    "properties_controls": "172",
     "slider_materialised_filter": "true",
     "slider_wrote_value": "true",
     "copied": "true",
