@@ -1,0 +1,214 @@
+// Genesis AIR application state.
+//
+// THE PROJECT IS AUTHORITATIVE. `document` is a `std.editor.Document` and it is the only
+// place project facts live. Everything else in this record is view state: which panel is
+// focused, what the timeline is scrolled to, which media pool row is highlighted. A widget
+// never holds a second copy of a clip, a track or a transport position — if it is a project
+// fact, it is read from the document at paint time.
+//
+// The flow is always:  input -> command -> document changes -> repaint.
+module genesis.app
+
+import std.editor as editor
+import std.editor_io as editor_io
+import "provider.ai" as provider
+
+pub fn panel_pool() -> u32 effects {} { 0 }
+pub fn panel_source() -> u32 effects {} { 1 }
+pub fn panel_program() -> u32 effects {} { 2 }
+pub fn panel_filters() -> u32 effects {} { 3 }
+pub fn panel_properties() -> u32 effects {} { 4 }
+pub fn panel_mixer() -> u32 effects {} { 5 }
+pub fn panel_timeline() -> u32 effects {} { 6 }
+
+// The timeline viewport. `std.editor_view` derives its geometry from these, so zoom and pan
+// are ordinary application state rather than a hidden second model. The NLE toolkit records
+// viewport policy as deliberately unported; this is where it lives until it is proved
+// generic enough to upstream.
+pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_height: f64 }
+
+// Peak data for one audio clip, keyed by the clip's STABLE id. The view reads this; only a
+// refresh step fills it, so painting never calls the media provider.
+pub type Waveform = struct { clip: u64, peaks: array<f64> }
+
+pub type App = struct {
+  document: editor.Document,
+  history: editor.History,
+  provider: provider.Provider,
+  viewport: Viewport,
+  focus: u32,
+  pool_row: u64,
+  selected_filter: u64,
+  project_path: string,
+  status: string,
+  dirty: bool,
+  running: bool,
+  frames_painted: u64,
+  waveforms: array<Waveform>
+}
+
+pub fn viewport() -> Viewport effects {} {
+  Viewport {pixels_per_frame: 2.4, scroll_frames: 0, track_height: 46.0}
+}
+
+// A new, empty project with the track set an editor actually starts from.
+pub fn app(engine: provider.Provider own) -> App effects {alloc} {
+  var document: editor.Document = editor.document(30.0, 1920, 1080)
+  let sequence: u64 = document.active
+  let _ = editor.add_track(document, sequence, editor.track_video(), "V1")
+  let _ = editor.add_track(document, sequence, editor.track_video(), "V2")
+  let _ = editor.add_track(document, sequence, editor.track_audio(), "A1")
+  let _ = editor.add_track(document, sequence, editor.track_audio(), "A2")
+  App {document: document, history: editor.history(64), provider: engine,
+    viewport: viewport(), focus: panel_timeline(), pool_row: 0, selected_filter: 0,
+    project_path: string.new(), status: string.copy("New project"), dirty: false,
+    running: true, frames_painted: 0, waveforms: array.new()}
+}
+
+pub fn status(state: ref<App>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(state, field=status)))
+}
+pub fn set_status(state: ref<App>, text: str) -> unit effects {alloc} {
+  let _ = ref.swap(struct.borrow(state, field=status), string.copy(text))
+  ()
+}
+pub fn project_path(state: ref<App>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(state, field=project_path)))
+}
+pub fn set_project_path(state: ref<App>, text: str) -> unit effects {alloc} {
+  let _ = ref.swap(struct.borrow(state, field=project_path), string.copy(text))
+  ()
+}
+pub fn dirty(state: ref<App>) -> bool effects {} { state.dirty }
+pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
+  struct.set(state, value, field=dirty)
+  ()
+}
+pub fn running(state: ref<App>) -> bool effects {} { state.running }
+pub fn stop(state: ref<App>) -> unit effects {} {
+  struct.set(state, false, field=running)
+  ()
+}
+pub fn focus(state: ref<App>) -> u32 effects {} { state.focus }
+pub fn set_focus(state: ref<App>, value: u32) -> unit effects {} {
+  struct.set(state, value, field=focus)
+  ()
+}
+pub fn pool_row(state: ref<App>) -> u64 effects {} { state.pool_row }
+pub fn set_pool_row(state: ref<App>, value: u64) -> unit effects {} {
+  struct.set(state, value, field=pool_row)
+  ()
+}
+pub fn selected_filter(state: ref<App>) -> u64 effects {} { state.selected_filter }
+pub fn set_selected_filter(state: ref<App>, value: u64) -> unit effects {} {
+  struct.set(state, value, field=selected_filter)
+  ()
+}
+pub fn painted(state: ref<App>) -> u64 effects {} { state.frames_painted }
+pub fn count_paint(state: ref<App>) -> unit effects {} {
+  struct.set(state, state.frames_painted + 1, field=frames_painted)
+  ()
+}
+
+// ---- viewport -------------------------------------------------------------
+
+pub fn zoom(state: ref<App>) -> f64 effects {} {
+  struct.get(struct.borrow(state, field=viewport), field=pixels_per_frame)
+}
+pub fn scroll(state: ref<App>) -> i64 effects {} {
+  struct.get(struct.borrow(state, field=viewport), field=scroll_frames)
+}
+pub fn track_height(state: ref<App>) -> f64 effects {} {
+  struct.get(struct.borrow(state, field=viewport), field=track_height)
+}
+pub fn set_zoom(state: ref<App>, value: f64) -> f64 effects {} {
+  var next: f64 = value
+  if next < 0.05 { next = 0.05 }
+  if next > 40.0 { next = 40.0 }
+  struct.set(struct.borrow(state, field=viewport), next, field=pixels_per_frame)
+  next
+}
+pub fn set_scroll(state: ref<App>, value: i64) -> i64 effects {} {
+  let next: i64 = if value < 0 { 0 } else { value }
+  struct.set(struct.borrow(state, field=viewport), next, field=scroll_frames)
+  next
+}
+
+// The first selected clip, which is what the properties and filter panels describe.
+pub fn current_clip(state: ref<App>) -> u64 effects {alloc} {
+  var chosen: array<u64> = editor.selection(struct.borrow(state, field=document))
+  if array.len(chosen) == 0 { return 0 }
+  array.get(chosen, 0)
+}
+
+// The media source the pool has highlighted, by STABLE ID rather than row position.
+pub fn current_source(state: ref<App>) -> u64 effects {} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  if state.pool_row >= editor.source_count(document) { return 0 }
+  struct.get(array.borrow(struct.borrow(document, field=sources), state.pool_row), field=id)
+}
+
+// The track a new clip lands on: the first video track of the active sequence.
+pub fn default_video_track(state: ref<App>) -> u64 effects {} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var index: u64 = 0
+  loop {
+    if index >= editor.track_count(document) { break }
+    let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
+    if struct.get(entry, field=owner) == sequence
+      and struct.get(entry, field=kind) == editor.track_video() {
+      return struct.get(entry, field=id)
+    }
+    index = index + 1
+  }
+  0
+}
+pub fn default_audio_track(state: ref<App>) -> u64 effects {} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var index: u64 = 0
+  loop {
+    if index >= editor.track_count(document) { break }
+    let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
+    if struct.get(entry, field=owner) == sequence
+      and struct.get(entry, field=kind) == editor.track_audio() {
+      return struct.get(entry, field=id)
+    }
+    index = index + 1
+  }
+  0
+}
+
+// ---- waveform cache -------------------------------------------------------
+
+pub fn set_waveform(state: ref<App>, clip: u64, peaks: array<f64> own) -> unit effects {alloc} {
+  var incoming: array<f64> = peaks
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(state, field=waveforms)) { break }
+    let entry: ref<Waveform> = array.borrow(struct.borrow(state, field=waveforms), index)
+    if struct.get(entry, field=clip) == clip {
+      let _ = ref.swap(struct.borrow(entry, field=peaks), incoming)
+      return ()
+    }
+    index = index + 1
+  }
+  array.push(struct.borrow(state, field=waveforms), Waveform {clip: clip, peaks: incoming})
+  ()
+}
+
+pub fn waveform_slot(state: ref<App>, clip: u64) -> option<u64> effects {} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(state, field=waveforms)) { break }
+    if struct.get(array.borrow(struct.borrow(state, field=waveforms), index), field=clip) == clip {
+      return option.some(index)
+    }
+    index = index + 1
+  }
+  option.none()
+}
+pub fn waveform_count(state: ref<App>) -> u64 effects {} {
+  array.len(struct.borrow(state, field=waveforms))
+}

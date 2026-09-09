@@ -1,0 +1,567 @@
+// The application command layer.
+//
+// Every edit in Genesis AIR goes through a function here, and every function here does two
+// things: capture the document for undo, then call the reusable operation in `std.editor`.
+// There is NO edit arithmetic in this file — no clip maths, no ripple, no source clamping.
+// If a command looks like it is computing an edit, that is a bug: the toolkit owns it.
+//
+// Each command returns a `Result` naming what happened, so the UI reports one message and
+// the tests assert one outcome.
+module genesis.commands
+
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.codec as codec
+import "app.ai" as app
+import "provider.ai" as provider
+
+pub type Result = struct { ok: bool, message: string, value: u64 }
+
+fn done(message: str, value: u64) -> Result effects {alloc} {
+  Result {ok: true, message: string.copy(message), value: value}
+}
+fn refused(message: str) -> Result effects {alloc} {
+  Result {ok: false, message: string.copy(message), value: 0}
+}
+pub fn message(value: ref<Result>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(value, field=message)))
+}
+
+// Record the document BEFORE a mutation. Every mutating command below calls
+// `editor.capture` first, which is what makes undo cover the whole application rather than
+// the handful of edits someone remembered to wire.
+
+// ---------------------------------------------------------------------------
+// Project
+
+pub fn new_project(state: ref<app.App>) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  var fresh: editor.Document = editor.document(30.0, 1920, 1080)
+  let sequence: u64 = fresh.active
+  let _ = editor.add_track(fresh, sequence, editor.track_video(), "V1")
+  let _ = editor.add_track(fresh, sequence, editor.track_video(), "V2")
+  let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A1")
+  let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A2")
+  let _ = ref.swap(struct.borrow(state, field=document), fresh)
+  app.set_project_path(state, "")
+  app.mark_dirty(state, false)
+  app.set_status(state, "New project")
+  done("new project", 0)
+}
+
+pub fn save_project(state: ref<app.App>, target: str) -> Result effects {alloc, fs.write} {
+  let text: string = match editor_io.encode(struct.borrow(state, field=document)) {
+    ok(value) => value,
+    err(problem) => { var failure: codec.Error = problem
+      return refused(str.view(codec.describe(failure))) },
+  }
+  match files.write_text(target, str.view(text)) {
+    ok(written) => { },
+    err(problem) => { return refused("the project could not be written") },
+  }
+  app.set_project_path(state, target)
+  app.mark_dirty(state, false)
+  app.set_status(state, "Saved")
+  done("saved", cast.sat(str.len(str.view(text))))
+}
+
+pub fn save(state: ref<app.App>) -> Result effects {alloc, fs.write} {
+  let where: string = app.project_path(state)
+  if str.len(str.view(where)) == 0 { return refused("this project has no path yet; use save as") }
+  save_project(state, str.view(where))
+}
+
+// Open a project. The stored schema and revision are the toolkit's; a revision this build
+// does not implement is refused by `std.editor_io` and reported here rather than guessed at.
+pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, fs.read} {
+  let text: string = match files.read_text(target) {
+    ok(value) => value,
+    err(problem) => { return refused("the project could not be read") },
+  }
+  var loaded: editor.Document = match editor_io.decode(str.view(text)) {
+    ok(value) => value,
+    err(problem) => { var failure: codec.Error = problem
+      return refused(str.view(codec.describe(failure))) },
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let _ = ref.swap(struct.borrow(state, field=document), loaded)
+  app.set_project_path(state, target)
+  app.mark_dirty(state, false)
+  app.set_status(state, "Opened")
+  done("opened", 0)
+}
+
+// ---------------------------------------------------------------------------
+// Media
+
+// Import a source. The provider is asked how long it really is, and that length becomes the
+// pool's authoritative frame count — which is what lets the toolkit refuse a clip that would
+// read past the end of the media.
+pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
+  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let id: u64 = editor.add_source(struct.borrow(state, field=document), path, name,
+    report.frames, report.fps)
+  let _ = editor.describe_source(struct.borrow(state, field=document), id, report.width,
+    report.height, report.has_video, report.has_audio, 48000, 2)
+  app.mark_dirty(state, true)
+  if not report.ok {
+    app.set_status(state, "Imported, but its length is unknown")
+    return done("imported with unknown length", id)
+  }
+  app.set_status(state, "Imported")
+  done("imported", id)
+}
+
+pub fn add_bin(state: ref<app.App>, name: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let id: u64 = editor.add_bin(struct.borrow(state, field=document), name, 1)
+  app.mark_dirty(state, true)
+  done("bin added", id)
+}
+
+pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
+  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, path,
+    report.frames)
+  app.mark_dirty(state, true)
+  if corrected != 0 {
+    app.set_status(state, "Relinked; some clips were clamped to the new media")
+    return done("relinked with clamping", corrected)
+  }
+  app.set_status(state, "Relinked")
+  done("relinked", 0)
+}
+
+// ---------------------------------------------------------------------------
+// Tracks
+
+pub fn add_track(state: ref<app.App>, kind: u32, name: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
+  let id: u64 = editor.add_track(struct.borrow(state, field=document), sequence, kind, name)
+  app.mark_dirty(state, true)
+  done("track added", id)
+}
+
+pub fn remove_track(state: ref<app.App>, track: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.remove_track(struct.borrow(state, field=document), track) {
+    return refused("that track is locked or unknown")
+  }
+  app.mark_dirty(state, true)
+  done("track removed", track)
+}
+
+pub fn rename_track(state: ref<app.App>, track: u64, name: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.rename_track(struct.borrow(state, field=document), track, name) {
+    return refused("no such track")
+  }
+  app.mark_dirty(state, true)
+  done("track renamed", track)
+}
+
+// ---------------------------------------------------------------------------
+// Timeline edits
+//
+// Each of these is a capture followed by exactly one toolkit call. That is the whole point:
+// split, ripple, slip, roll and slide semantics live in `std.editor` and are not restated
+// here, so the application cannot drift from the behavior the toolkit's gates prove.
+
+pub fn insert_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64, length: i64,
+                   at: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  match editor.insert(struct.borrow(state, field=document), track, source, source_in, length, at) {
+    some(id) => { app.mark_dirty(state, true)
+      done("inserted", id) },
+    none => refused("the clip could not be inserted there"),
+  }
+}
+
+pub fn overwrite_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
+                      length: i64, at: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  match editor.overwrite(struct.borrow(state, field=document), track, source, source_in, length, at) {
+    some(id) => { app.mark_dirty(state, true)
+      done("overwrote", id) },
+    none => refused("the clip could not be placed there"),
+  }
+}
+
+pub fn append_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
+                   length: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  match editor.append(struct.borrow(state, field=document), track, source, source_in, length) {
+    some(id) => { app.mark_dirty(state, true)
+      done("appended", id) },
+    none => refused("the clip could not be appended"),
+  }
+}
+
+pub fn move_clip(state: ref<app.App>, clip: u64, track: u64, start: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.move_clip(struct.borrow(state, field=document), clip, track, start) {
+    return refused("that clip cannot move there")
+  }
+  app.mark_dirty(state, true)
+  done("moved", clip)
+}
+
+pub fn nudge(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.nudge(struct.borrow(state, field=document), clip, delta) {
+    return refused("that clip cannot be nudged")
+  }
+  app.mark_dirty(state, true)
+  done("nudged", clip)
+}
+
+// SPLIT at the playhead, which is what the keyboard shortcut means.
+pub fn split_at_playhead(state: ref<app.App>) -> Result effects {alloc} {
+  let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+  let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
+  let chosen: u64 = app.current_clip(state)
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if chosen != 0 {
+    match editor.split(struct.borrow(state, field=document), chosen, frame) {
+      some(id) => { app.mark_dirty(state, true)
+        return done("split", id) },
+      none => { },
+    }
+  }
+  // Nothing selected, or the playhead is not inside it: split every track at the playhead,
+  // which is the ordinary "razor all" gesture.
+  let cuts: u64 = editor.split_all(struct.borrow(state, field=document), sequence, frame)
+  if cuts == 0 { return refused("nothing to split at the playhead") }
+  app.mark_dirty(state, true)
+  done("split all tracks", cuts)
+}
+
+pub fn trim_start(state: ref<app.App>, clip: u64, start: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.trim_start(struct.borrow(state, field=document), clip, start) {
+    return refused("that head trim was refused")
+  }
+  app.mark_dirty(state, true)
+  done("trimmed head", clip)
+}
+pub fn trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.trim_end(struct.borrow(state, field=document), clip, length) {
+    return refused("that tail trim was refused")
+  }
+  app.mark_dirty(state, true)
+  done("trimmed tail", clip)
+}
+pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.ripple_trim_end(struct.borrow(state, field=document), clip, length) {
+    return refused("that ripple trim was refused")
+  }
+  app.mark_dirty(state, true)
+  done("ripple trimmed", clip)
+}
+pub fn ripple_delete(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.ripple_delete(struct.borrow(state, field=document), clip) {
+    return refused("no such clip")
+  }
+  app.mark_dirty(state, true)
+  done("ripple deleted", clip)
+}
+pub fn lift(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.lift(struct.borrow(state, field=document), clip) {
+    return refused("no such clip")
+  }
+  app.mark_dirty(state, true)
+  done("lifted", clip)
+}
+pub fn slip(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.slip(struct.borrow(state, field=document), clip, delta) {
+    return refused("that slip was refused")
+  }
+  app.mark_dirty(state, true)
+  done("slipped", clip)
+}
+pub fn roll(state: ref<app.App>, left: u64, right: u64, delta: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let applied: i64 = editor.roll(struct.borrow(state, field=document), left, right, delta)
+  if applied == 0 { return refused("that cut cannot roll") }
+  app.mark_dirty(state, true)
+  done("rolled", cast.wrap(if applied < 0 { 0 - applied } else { applied }))
+}
+pub fn slide(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.slide(struct.borrow(state, field=document), clip, delta) {
+    return refused("that clip has no abutting neighbours to absorb a slide")
+  }
+  app.mark_dirty(state, true)
+  done("slid", clip)
+}
+
+// ---------------------------------------------------------------------------
+// Selection and grouping
+
+pub fn select_only(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  if not editor.select_only(struct.borrow(state, field=document), clip) {
+    return refused("no such clip")
+  }
+  done("selected", clip)
+}
+pub fn add_to_selection(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+  if not editor.select(struct.borrow(state, field=document), clip, true) {
+    return refused("no such clip")
+  }
+  done("added to selection", clip)
+}
+pub fn clear_selection(state: ref<app.App>) -> Result effects {alloc} {
+  editor.clear_selection(struct.borrow(state, field=document))
+  done("selection cleared", 0)
+}
+
+pub fn group_selection(state: ref<app.App>) -> Result effects {alloc} {
+  var members: array<u64> = editor.selection(struct.borrow(state, field=document))
+  if array.len(members) < 2 { return refused("select at least two clips to group") }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let id: u64 = editor.group(struct.borrow(state, field=document), array.view(members))
+  if id == 0 { return refused("those clips could not be grouped") }
+  app.mark_dirty(state, true)
+  done("grouped", id)
+}
+pub fn ungroup(state: ref<app.App>, group: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.ungroup(struct.borrow(state, field=document), group) {
+    return refused("no such group")
+  }
+  app.mark_dirty(state, true)
+  done("ungrouped", group)
+}
+pub fn move_group(state: ref<app.App>, group: u64, delta: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.move_group(struct.borrow(state, field=document), group, delta) {
+    return refused("that group cannot move")
+  }
+  app.mark_dirty(state, true)
+  done("group moved", group)
+}
+
+// ---------------------------------------------------------------------------
+// Transitions, fades, keyframes, markers, subtitles
+
+pub fn add_transition(state: ref<app.App>, track: u64, centre: i64, duration: i64,
+                      kind: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let id: u64 = editor.add_transition(struct.borrow(state, field=document), track, centre,
+    duration, kind)
+  app.mark_dirty(state, true)
+  done("transition added", id)
+}
+pub fn set_transition_duration(state: ref<app.App>, transition: u64, duration: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_transition_duration(struct.borrow(state, field=document), transition, duration) {
+    return refused("no such transition")
+  }
+  app.mark_dirty(state, true)
+  done("transition resized", transition)
+}
+pub fn remove_transition(state: ref<app.App>, transition: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.remove_transition(struct.borrow(state, field=document), transition) {
+    return refused("no such transition")
+  }
+  app.mark_dirty(state, true)
+  done("transition removed", transition)
+}
+
+pub fn set_fades(state: ref<app.App>, clip: u64, fade_in: i64, fade_out: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_fade_in(struct.borrow(state, field=document), clip, fade_in) {
+    return refused("no such clip")
+  }
+  let _ = editor.set_fade_out(struct.borrow(state, field=document), clip, fade_out)
+  app.mark_dirty(state, true)
+  done("fades set", clip)
+}
+
+pub fn set_key(state: ref<app.App>, clip: u64, param: str, frame: i64, value: f64,
+               interp: u32) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_key(struct.borrow(state, field=document), clip, param, frame, value, interp) {
+    return refused("that parameter could not be keyed")
+  }
+  app.mark_dirty(state, true)
+  done("keyframe set", clip)
+}
+
+pub fn add_marker(state: ref<app.App>, frame: i64, label: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
+  let id: u64 = editor.add_marker(struct.borrow(state, field=document), sequence, frame, label, 2)
+  app.mark_dirty(state, true)
+  done("marker added", id)
+}
+
+pub fn add_subtitle(state: ref<app.App>, start: i64, finish: i64, text: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
+  match editor.add_subtitle(struct.borrow(state, field=document), sequence, start, finish, text) {
+    some(id) => { app.mark_dirty(state, true)
+      done("subtitle added", id) },
+    none => refused("a subtitle needs a positive span"),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+
+pub fn add_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
+    some(id) => { app.set_selected_filter(state, id)
+      app.mark_dirty(state, true)
+      done("filter added", id) },
+    none => refused("no such clip"),
+  }
+}
+pub fn remove_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.remove_filter(struct.borrow(state, field=document), filter) {
+    return refused("no such filter")
+  }
+  if app.selected_filter(state) == filter { app.set_selected_filter(state, 0) }
+  app.mark_dirty(state, true)
+  done("filter removed", filter)
+}
+pub fn toggle_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let now: bool = editor.filter_enabled(struct.borrow(state, field=document), filter)
+  if not editor.set_filter_enabled(struct.borrow(state, field=document), filter, not now) {
+    return refused("no such filter")
+  }
+  app.mark_dirty(state, true)
+  done(if now { "filter disabled" } else { "filter enabled" }, filter)
+}
+pub fn reorder_filter(state: ref<app.App>, filter: u64, position: u32) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.reorder_filter(struct.borrow(state, field=document), filter, position) {
+    return refused("no such filter")
+  }
+  app.mark_dirty(state, true)
+  done("filter reordered", filter)
+}
+pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_filter_param(struct.borrow(state, field=document), filter, name, value) {
+    return refused("no such filter")
+  }
+  app.mark_dirty(state, true)
+  done("parameter set", filter)
+}
+
+// ---------------------------------------------------------------------------
+// Mixer. Solo-wins is the toolkit's policy and is not restated here.
+
+pub fn set_track_gain(state: ref<app.App>, track: u64, value: f64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_track_gain(struct.borrow(state, field=document), track, value) {
+    return refused("no such track")
+  }
+  app.mark_dirty(state, true)
+  done("gain set", track)
+}
+pub fn set_track_pan(state: ref<app.App>, track: u64, value: f64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_track_pan(struct.borrow(state, field=document), track, value) {
+    return refused("no such track")
+  }
+  app.mark_dirty(state, true)
+  done("pan set", track)
+}
+pub fn toggle_mute(state: ref<app.App>, track: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let now: bool = not editor.track_audible(struct.borrow(state, field=document), track)
+  if not editor.set_track_muted(struct.borrow(state, field=document), track, not now) {
+    return refused("no such track")
+  }
+  app.mark_dirty(state, true)
+  done("mute toggled", track)
+}
+pub fn toggle_solo(state: ref<app.App>, track: u64) -> Result effects {alloc} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var now: bool = false
+  match editor.track_slot(document, track) {
+    some(slot) => { now = struct.get(array.borrow(struct.borrow(document, field=tracks), slot), field=solo) },
+    none => { return refused("no such track") },
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let _ = editor.set_track_solo(struct.borrow(state, field=document), track, not now)
+  app.mark_dirty(state, true)
+  done("solo toggled", track)
+}
+pub fn toggle_track_lock(state: ref<app.App>, track: u64) -> Result effects {alloc} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var now: bool = false
+  match editor.track_slot(document, track) {
+    some(slot) => { now = struct.get(array.borrow(struct.borrow(document, field=tracks), slot), field=locked) },
+    none => { return refused("no such track") },
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let _ = editor.set_track_lock(struct.borrow(state, field=document), track, not now)
+  app.mark_dirty(state, true)
+  done("lock toggled", track)
+}
+
+// ---------------------------------------------------------------------------
+// Transport. The two transports are independent, which is the toolkit's model.
+
+pub fn program(state: ref<app.App>, action: u32) -> Result effects {alloc} {
+  let landed: editor.Transport = editor.program_action(struct.borrow(state, field=document), action)
+  done("program transport", cast.wrap(landed.frame))
+}
+pub fn seek(state: ref<app.App>, frame: i64) -> Result effects {alloc} {
+  let landed: i64 = editor.seek(struct.borrow(state, field=document), frame)
+  done("sought", cast.wrap(landed))
+}
+pub fn open_source(state: ref<app.App>, source: u64) -> Result effects {alloc} {
+  if not editor.open_source(struct.borrow(state, field=document), source) {
+    return refused("no such source")
+  }
+  done("source opened", source)
+}
+pub fn monitor(state: ref<app.App>, action: u32) -> Result effects {alloc} {
+  let landed: editor.Transport = editor.monitor_action(struct.borrow(state, field=document), action)
+  done("source transport", cast.wrap(landed.frame))
+}
+pub fn set_project_range(state: ref<app.App>, start: i64, finish: i64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_export_range(struct.borrow(state, field=document), start, finish) {
+    return refused("that range is inverted")
+  }
+  app.mark_dirty(state, true)
+  done("range set", 0)
+}
+
+// ---------------------------------------------------------------------------
+// Undo and redo
+
+pub fn undo(state: ref<app.App>) -> Result effects {alloc} {
+  if not editor.undo(struct.borrow(state, field=history), struct.borrow(state, field=document)) {
+    return refused("nothing to undo")
+  }
+  app.mark_dirty(state, true)
+  app.set_status(state, "Undone")
+  done("undone", 0)
+}
+pub fn redo(state: ref<app.App>) -> Result effects {alloc} {
+  if not editor.redo(struct.borrow(state, field=history), struct.borrow(state, field=document)) {
+    return refused("nothing to redo")
+  }
+  app.mark_dirty(state, true)
+  app.set_status(state, "Redone")
+  done("redone", 0)
+}

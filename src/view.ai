@@ -1,0 +1,552 @@
+// Painting Genesis AIR.
+//
+// Every pixel is derived from the document at paint time. This module holds no project
+// state and mutates nothing: hand it an `App` and it draws what is currently true. That is
+// what keeps the visual timeline from becoming a second, disagreeing model.
+//
+// The timeline lanes, clips, fades, markers and playhead come from `std.editor_view`, which
+// builds a `std.timeline` view of the document; this module adds the application chrome
+// (menu, pool rows, monitors, filter stack, properties, mixer, status) around it.
+module genesis.view
+
+import std.draw as draw
+import std.editor as editor
+import std.editor_view as editor_view
+import std.geometry as geometry
+import std.math as math
+import std.timeline as timeline
+import std.vector_font as font
+import "app.ai" as app
+import "layout.ai" as layout
+import "provider.ai" as provider
+
+pub type Theme = struct {
+  background: draw.Color,
+  panel: draw.Color,
+  panel_head: draw.Color,
+  edge: draw.Color,
+  text: draw.Color,
+  dim: draw.Color,
+  accent: draw.Color,
+  warn: draw.Color,
+  focus: draw.Color
+}
+
+pub fn theme() -> Theme effects {} {
+  Theme {background: draw.rgb(16, 17, 21), panel: draw.rgb(26, 28, 34),
+    panel_head: draw.rgb(36, 39, 47), edge: draw.rgb(52, 56, 66),
+    text: draw.rgb(226, 230, 238), dim: draw.rgb(132, 140, 155),
+    accent: draw.rgb(250, 206, 100), warn: draw.rgb(232, 104, 112),
+    focus: draw.rgb(96, 150, 226)}
+}
+
+fn fill(canvas: ref<draw.Canvas>, area: layout.Rect, value: draw.Color) -> unit effects {alloc} {
+  match geometry.rect(area.left, area.top, area.right, area.bottom) {
+    some(box) => draw.fill_rect(canvas, box, value),
+    none => (),
+  }
+}
+fn fill_at(canvas: ref<draw.Canvas>, left: f64, top: f64, right: f64, bottom: f64,
+           value: draw.Color) -> unit effects {alloc} {
+  match geometry.rect(left, top, right, bottom) {
+    some(box) => draw.fill_rect(canvas, box, value),
+    none => (),
+  }
+}
+fn outline(canvas: ref<draw.Canvas>, area: layout.Rect, value: draw.Color) -> unit effects {alloc} {
+  match geometry.rect(area.left, area.top, area.right, area.bottom) {
+    some(box) => draw.stroke_rect(canvas, box, value, 1.0),
+    none => (),
+  }
+}
+fn label(canvas: ref<draw.Canvas>, x: f64, y: f64, text: str, size: f64,
+         value: draw.Color) -> unit effects {alloc} {
+  font.draw_text_filled(canvas, x, y, text, value, size, 1.0)
+  ()
+}
+
+// A titled panel. `focused` draws the accent edge, so a person can see which panel a
+// keystroke will reach.
+fn panel(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect, title: str,
+         focused: bool) -> unit effects {alloc} {
+  fill(canvas, area, colors.panel)
+  fill_at(canvas, area.left, area.top, area.right, area.top + 18.0, colors.panel_head)
+  outline(canvas, area, if focused { colors.focus } else { colors.edge })
+  label(canvas, area.left + 7.0, area.top + 5.0, title, 7.0, colors.text)
+  ()
+}
+
+fn number(value: i64) -> string effects {alloc} { string.from_int(value) }
+
+// ---------------------------------------------------------------------------
+// Panels
+
+fn paint_menu(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+              area: layout.Rect) -> unit effects {alloc} {
+  fill(canvas, area, colors.panel_head)
+  var x: f64 = 10.0
+  var entries: array<string> = ["File", "Edit", "View", "Project", "Help"]
+  var index: u64 = 0
+  loop {
+    if index >= array.len(entries) { break }
+    let text: str = str.view(array.borrow(entries, index))
+    label(canvas, x, 8.0, text, 7.0, colors.text)
+    x = x + 22.0 + font.text_vector_width(text, 7.0)
+    index = index + 1
+  }
+  var title: string = string.copy("Genesis AIR  —  ")
+  let where: string = app.project_path(state)
+  if str.len(str.view(where)) == 0 { string.append(title, "untitled") }
+  else { string.append(title, str.view(where)) }
+  if app.dirty(state) { string.append(title, " *") }
+  label(canvas, area.right - 430.0, 8.0, str.view(title), 7.0, colors.dim)
+  ()
+}
+
+fn paint_pool(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+              area: layout.Rect) -> unit effects {alloc} {
+  panel(canvas, colors, area, "MEDIA POOL", app.focus(state) == app.panel_pool())
+  let highlighted: u64 = app.pool_row(state)
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var y: f64 = area.top + 24.0
+  var index: u64 = 0
+  loop {
+    if index >= editor.source_count(document) { break }
+    if y + 26.0 > area.bottom { break }
+    let entry: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), index)
+    let online: bool = struct.get(entry, field=online)
+    let frames: i64 = struct.get(entry, field=frames)
+    let chosen: bool = index == highlighted
+    fill_at(canvas, area.left + 4.0, y, area.right - 4.0, y + 23.0,
+      if chosen { draw.rgb(44, 60, 84) } else { draw.rgb(32, 35, 42) })
+    fill_at(canvas, area.left + 8.0, y + 4.0, area.left + 30.0, y + 19.0,
+      if online { draw.rgb(66, 102, 160) } else { draw.rgb(94, 58, 62) })
+    label(canvas, area.left + 34.0, y + 3.0,
+      str.view(string.copy(str.view(struct.borrow(entry, field=name)))), 7.0,
+      if online { colors.text } else { colors.dim })
+    var detail: string = string.new()
+    if frames > 0 {
+      string.append(detail, str.view(number(frames)))
+      string.append(detail, " frames")
+    } else { string.append(detail, "length unknown") }
+    if not online { string.append(detail, "  OFFLINE") }
+    label(canvas, area.left + 34.0, y + 13.0, str.view(detail), 6.0, colors.dim)
+    y = y + 26.0
+    index = index + 1
+  }
+  if editor.source_count(document) == 0 {
+    label(canvas, area.left + 10.0, area.top + 30.0, "no media imported", 7.0, colors.dim)
+  }
+  ()
+}
+
+// A monitor: the frame area, a scrub bar carrying the in/out range, and SMPTE.
+fn paint_monitor(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect, title: str,
+                 frame: i64, last: i64, mark_in: i64, mark_out: i64, fps: f64,
+                 playing: bool, image: ref<draw.Surface>, focused: bool) -> unit effects {alloc} {
+  panel(canvas, colors, area, title, focused)
+  let view_top: f64 = area.top + 22.0
+  let view_bottom: f64 = area.bottom - 30.0
+  fill_at(canvas, area.left + 6.0, view_top, area.right - 6.0, view_bottom, draw.rgb(8, 9, 11))
+  // The provider's frame, letterboxed into the monitor.
+  let source_w: u32 = draw.surface_width(image)
+  let source_h: u32 = draw.surface_height(image)
+  if source_w != 0 and source_h != 0 {
+    let box_w: f64 = area.right - area.left - 12.0
+    let box_h: f64 = view_bottom - view_top
+    let wide: u64 = cast.wrap(source_w)
+    let tall: u64 = cast.wrap(source_h)
+    let scale: f64 = math.min(box_w / cast.float(wide), box_h / cast.float(tall))
+    let draw_w: f64 = cast.float(wide) * scale
+    let draw_h: f64 = cast.float(tall) * scale
+    let left: f64 = area.left + 6.0 + (box_w - draw_w) * 0.5
+    let top: f64 = view_top + (box_h - draw_h) * 0.5
+    var y: f64 = 0.0
+    loop {
+      if y >= draw_h { break }
+      var x: f64 = 0.0
+      loop {
+        if x >= draw_w { break }
+        let sx: u32 = cast.sat(x / scale)
+        let sy: u32 = cast.sat(y / scale)
+        match draw.surface_pixel(image, sx, sy) {
+          some(colour) => { let px: i64 = cast.sat(left + x)
+            let py: i64 = cast.sat(top + y)
+            draw.device_pixel(canvas, px, py, colour) },
+          none => { },
+        }
+        x = x + 1.0
+      }
+      y = y + 1.0
+    }
+  }
+  let bar_top: f64 = view_bottom + 6.0
+  fill_at(canvas, area.left + 6.0, bar_top, area.right - 6.0, bar_top + 7.0, draw.rgb(22, 24, 29))
+  let span: f64 = if last > 0 { cast.float(last) } else { 1.0 }
+  if mark_in >= 0 and mark_out > mark_in {
+    let a: f64 = area.left + 6.0 + (area.right - area.left - 12.0) * cast.float(mark_in) / span
+    let b: f64 = area.left + 6.0 + (area.right - area.left - 12.0) * cast.float(mark_out) / span
+    fill_at(canvas, a, bar_top, b, bar_top + 7.0, draw.rgb(56, 90, 138))
+  }
+  let head: f64 = area.left + 6.0 + (area.right - area.left - 12.0) * cast.float(frame) / span
+  fill_at(canvas, head - 1.0, bar_top - 3.0, head + 2.0, bar_top + 10.0, draw.rgb(244, 78, 78))
+  var line: string = string.copy(str.view(timeline.timecode(frame, fps)))
+  string.append(line, if playing { "   PLAY" } else { "   PAUSE" })
+  label(canvas, area.left + 8.0, bar_top + 11.0, str.view(line), 7.0, colors.text)
+  ()
+}
+
+fn paint_filters(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                 area: layout.Rect, clip: u64) -> unit effects {alloc} {
+  panel(canvas, colors, area, "FILTERS", app.focus(state) == app.panel_filters())
+  let picked: u64 = app.selected_filter(state)
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  if clip == 0 {
+    label(canvas, area.left + 8.0, area.top + 26.0, "no clip selected", 6.0, colors.dim)
+    return ()
+  }
+  let count: u64 = editor.filter_count(document, clip)
+  if count == 0 {
+    label(canvas, area.left + 8.0, area.top + 26.0, "no filters applied", 6.0, colors.dim)
+    return ()
+  }
+  var y: f64 = area.top + 24.0
+  var position: u32 = 0
+  loop {
+    let seen: u64 = cast.wrap(position)
+    if seen >= count { break }
+    if y + 16.0 > area.bottom { break }
+    match editor.filter_at(document, clip, position) {
+      none => { },
+      some(id) => {
+        let on: bool = editor.filter_enabled(document, id)
+        let chosen: bool = id == picked
+        fill_at(canvas, area.left + 4.0, y, area.right - 4.0, y + 14.0,
+          if chosen { draw.rgb(44, 60, 84) } else { draw.rgb(32, 35, 42) })
+        fill_at(canvas, area.left + 8.0, y + 4.0, area.left + 15.0, y + 11.0,
+          if on { draw.rgb(120, 200, 150) } else { draw.rgb(70, 74, 84) })
+        label(canvas, area.left + 20.0, y + 3.0, str.view(editor.filter_kind(document, id)),
+          6.0, if on { colors.text } else { colors.dim })
+      },
+    }
+    y = y + 16.0
+    position = position + 1
+  }
+  ()
+}
+
+fn paint_properties(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                    area: layout.Rect, clip: u64) -> unit effects {alloc} {
+  panel(canvas, colors, area, "PROPERTIES", app.focus(state) == app.panel_properties())
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  match editor.clip(document, clip) {
+    none => { label(canvas, area.left + 8.0, area.top + 26.0, "no clip selected", 6.0, colors.dim) },
+    some(value) => {
+      var y: f64 = area.top + 24.0
+      label(canvas, area.left + 8.0, y, str.view(editor.source_name(document, value.source)),
+        7.0, colors.text)
+      y = y + 13.0
+      var range: string = string.copy("source ")
+      string.append(range, str.view(number(value.source_in)))
+      string.append(range, " + ")
+      string.append(range, str.view(number(value.length)))
+      match editor.source_limit(document, value) {
+        some(limit) => { string.append(range, " of ")
+          string.append(range, str.view(number(limit))) },
+        none => { string.append(range, " of unknown") },
+      }
+      label(canvas, area.left + 8.0, y, str.view(range), 6.0, colors.dim)
+      y = y + 11.0
+      var span: string = string.copy("timeline ")
+      string.append(span, str.view(number(value.start)))
+      string.append(span, " .. ")
+      string.append(span, str.view(number(editor.clip_end(value))))
+      label(canvas, area.left + 8.0, y, str.view(span), 6.0, colors.dim)
+      y = y + 11.0
+      var mix: string = string.copy("gain ")
+      string.append(mix, str.view(math.format_fixed(editor.effective_gain(document, clip), 2)))
+      string.append(mix, "   fades ")
+      string.append(mix, str.view(number(value.fade_in)))
+      string.append(mix, "/")
+      string.append(mix, str.view(number(value.fade_out)))
+      label(canvas, area.left + 8.0, y, str.view(mix), 6.0, colors.dim)
+      y = y + 11.0
+      if value.group != 0 {
+        var grouped: string = string.copy("group ")
+        string.append(grouped, str.view(number(cast.sat(value.group))))
+        label(canvas, area.left + 8.0, y, str.view(grouped), 6.0, colors.accent)
+      }
+    },
+  }
+  ()
+}
+
+fn paint_mixer(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+               area: layout.Rect) -> unit effects {alloc} {
+  panel(canvas, colors, area, "MIXER", app.focus(state) == app.panel_mixer())
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var lanes: array<u64> = editor_view.lanes(document, sequence)
+  var x: f64 = area.left + 8.0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(lanes) { break }
+    let id: u64 = array.get(lanes, index)
+    if editor.track_kind(document, id) == editor.track_audio() {
+      if x + 46.0 > area.right { break }
+      let top: f64 = area.top + 24.0
+      let bottom: f64 = area.bottom - 18.0
+      fill_at(canvas, x, top, x + 40.0, bottom, draw.rgb(32, 35, 42))
+      let audible: bool = editor.track_audible(document, id)
+      let gain: f64 = math.min(1.0, editor.track_gain(document, id))
+      let level: f64 = bottom - (bottom - top - 8.0) * gain
+      fill_at(canvas, x + 14.0, level - 3.0, x + 26.0, level + 3.0,
+        if audible { draw.rgb(120, 200, 150) } else { colors.dim })
+      draw.line(canvas, geometry.vec2(x + 20.0, top + 4.0), geometry.vec2(x + 20.0, bottom - 4.0),
+        colors.edge, 1.0)
+      let pan: f64 = editor.track_pan(document, id)
+      let pan_x: f64 = x + 20.0 + pan * 16.0
+      fill_at(canvas, pan_x - 2.0, bottom - 16.0, pan_x + 2.0, bottom - 12.0, colors.accent)
+      var flags: string = string.copy(str.view(editor.track_name(document, id)))
+      match editor.track_slot(document, id) {
+        none => { },
+        some(slot) => {
+          let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), slot)
+          if struct.get(entry, field=muted) { string.append(flags, " M") }
+          if struct.get(entry, field=solo) { string.append(flags, " S") }
+        },
+      }
+      label(canvas, x + 2.0, area.bottom - 14.0, str.view(flags), 6.0, colors.dim)
+      x = x + 46.0
+    }
+    index = index + 1
+  }
+  ()
+}
+
+// ---------------------------------------------------------------------------
+// The timeline
+//
+// Built by `std.editor_view.view`, which turns the document into a `std.timeline` model.
+// The application supplies only the viewport — zoom, scroll and lane height — so the clip
+// geometry a click resolves against is the geometry that was drawn.
+
+pub fn timeline_model(state: ref<app.App>, area: layout.Rect) -> timeline.Timeline effects {alloc} {
+  let zoom: f64 = app.zoom(state)
+  let scroll: i64 = app.scroll(state)
+  let height: f64 = app.track_height(state)
+  let colours: editor_view.Palette = editor_view.dark()
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  // Scrolling is expressed as a shifted origin, so frame `scroll` sits at the panel's left.
+  let origin: f64 = area.left - cast.float(scroll) * zoom
+  var model: timeline.Timeline = editor_view.view(document, sequence, colours, zoom, origin,
+    area.top + 4.0)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(model, field=tracks)) { break }
+    struct.set(array.borrow(struct.borrow(model, field=tracks), index), height, field=height)
+    index = index + 1
+  }
+  model
+}
+
+fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+               area: layout.Rect, model: ref<timeline.Timeline>, fps: f64) -> unit effects {alloc} {
+  fill(canvas, area, draw.rgb(22, 24, 29))
+  outline(canvas, area, colors.edge)
+  let step: i64 = if fps >= 1.0 { cast.sat(math.round(fps)) } else { 1 }
+  var frame: i64 = app.scroll(state)
+  var guard: u64 = 0
+  loop {
+    if guard > 4096 { break }
+    let x: f64 = timeline.frame_to_x(model, frame)
+    if x > area.right { break }
+    if x >= area.left {
+      draw.line(canvas, geometry.vec2(x, area.bottom - 7.0), geometry.vec2(x, area.bottom),
+        colors.edge, 1.0)
+      label(canvas, x + 3.0, area.top + 3.0, str.view(timeline.timecode(frame, fps)), 6.0,
+        colors.dim)
+    }
+    frame = frame + step
+    guard = guard + 1
+  }
+  // Markers ride the ruler, where an editor expects them.
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var index: u64 = 0
+  loop {
+    if index >= editor.marker_count(document) { break }
+    let entry: ref<editor.Marker> = array.borrow(struct.borrow(document, field=markers), index)
+    if struct.get(entry, field=owner) == sequence {
+      let x: f64 = timeline.frame_to_x(model, struct.get(entry, field=frame))
+      if x >= area.left and x <= area.right {
+        fill_at(canvas, x - 3.0, area.top + 2.0, x + 4.0, area.top + 9.0, draw.rgb(236, 96, 116))
+      }
+    }
+    index = index + 1
+  }
+  ()
+}
+
+fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                 area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
+  fill(canvas, area, draw.rgb(22, 24, 29))
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var lanes: array<u64> = editor_view.lanes(document, sequence)
+  let total: u64 = array.len(lanes)
+  var lane: u64 = 0
+  loop {
+    if lane >= total { break }
+    if lane >= array.len(struct.borrow(model, field=tracks)) { break }
+    let pick: u64 = total - 1 - lane
+    let id: u64 = array.get(lanes, pick)
+    let top: f64 = timeline.track_top(model, lane)
+    let height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=height)
+    if top > area.bottom { break }
+    fill_at(canvas, area.left, top, area.right, top + height, draw.rgb(30, 32, 39))
+    match geometry.rect(area.left, top, area.right, top + height) {
+      some(box) => { draw.stroke_rect(canvas, box, colors.edge, 1.0) },
+      none => { },
+    }
+    label(canvas, area.left + 8.0, top + 5.0, str.view(editor.track_name(document, id)), 7.0,
+      colors.text)
+    var flags: string = string.new()
+    match editor.track_slot(document, id) {
+      none => { },
+      some(slot) => {
+        let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), slot)
+        if struct.get(entry, field=locked) { string.append(flags, "LOCK ") }
+        if struct.get(entry, field=hidden) { string.append(flags, "HIDE ") }
+        if struct.get(entry, field=muted) { string.append(flags, "MUTE ") }
+        if struct.get(entry, field=solo) { string.append(flags, "SOLO") }
+      },
+    }
+    label(canvas, area.left + 8.0, top + 17.0, str.view(flags), 6.0, colors.accent)
+    lane = lane + 1
+  }
+  ()
+}
+
+// Waveforms for the audio clips, from the cache the application refreshed. The lane index
+// matches the one `editor_view.view` assigned, so the bars land on their own clip.
+fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state: ref<app.App>,
+                   model: ref<timeline.Timeline>) -> unit effects {alloc} {
+  let count: u64 = app.waveform_count(state)
+  if count == 0 { return () }
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var lanes: array<u64> = editor_view.lanes(document, sequence)
+  let total: u64 = array.len(lanes)
+  var index: u64 = 0
+  loop {
+    if index >= count { break }
+    let entry: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), index)
+    let clip: u64 = struct.get(entry, field=clip)
+    match editor.clip(document, clip) {
+      none => { },
+      some(value) => {
+        var position: u64 = total
+        var scan: u64 = 0
+        loop {
+          if scan >= total { break }
+          if array.get(lanes, scan) == value.track { position = scan
+            break }
+          scan = scan + 1
+        }
+        if position < total {
+          let lane: u64 = total - 1 - position
+          editor_view.paint_waveform(canvas, colours, model, lane, value.start, value.length,
+            array.view(struct.borrow(entry, field=peaks)))
+        }
+      },
+    }
+    index = index + 1
+  }
+  ()
+}
+
+fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                  area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
+  fill(canvas, area, draw.rgb(20, 22, 27))
+  let saved: draw.State = draw.state(canvas)
+  match geometry.rect(area.left, area.top, area.right, area.bottom) {
+    some(box) => { let _ = draw.clip_rect(canvas, box) },
+    none => { },
+  }
+  timeline.paint(model, canvas, area.right)
+  let colours: editor_view.Palette = editor_view.dark()
+  paint_waveforms(canvas, colours, state, model)
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  editor_view.paint_transitions(document, canvas, colours, model, sequence)
+  draw.restore(canvas, saved)
+  outline(canvas, area, colors.edge)
+  ()
+}
+
+fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                area: layout.Rect) -> unit effects {alloc} {
+  fill(canvas, area, colors.panel_head)
+  var line: string = app.status(state)
+  string.append(line, "   |   ")
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  string.append(line, "clips ")
+  let clips: i64 = cast.sat(editor.clip_count(document))
+  string.append(line, str.view(number(clips)))
+  string.append(line, "   duration ")
+  string.append(line, str.view(number(editor.duration(document))))
+  string.append(line, "   playhead ")
+  string.append(line, str.view(timeline.timecode(editor.playhead(document),
+    editor.sequence_fps(document, document.active))))
+  var unbounded: array<u64> = editor.unbounded_clips(document)
+  if array.len(unbounded) != 0 {
+    string.append(line, "   ")
+    let count: i64 = cast.sat(array.len(unbounded))
+    string.append(line, str.view(number(count)))
+    string.append(line, " clip(s) with an unverifiable source length")
+  }
+  label(canvas, 8.0, area.top + 6.0, str.view(line), 7.0, colors.text)
+  ()
+}
+
+// Paint the whole application. `source_image` and `program_image` are the frames the
+// provider returned for this repaint; the view never calls the provider itself, so painting
+// stays free of media work.
+pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
+             source_image: ref<draw.Surface>, program_image: ref<draw.Surface>) -> unit effects {alloc} {
+  let colors: Theme = theme()
+  let frame: layout.Frame = layout.frame(width, height)
+  draw.clear(canvas, colors.background)
+  paint_menu(canvas, colors, state, frame.menu)
+  paint_pool(canvas, colors, state, frame.pool)
+
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  let fps: f64 = editor.sequence_fps(document, sequence)
+  let monitor: editor.Transport = document.monitor
+  let program: editor.Transport = document.program
+  let source_last: i64 = editor.source_frames(document, document.monitor_source)
+  let total: i64 = editor.sequence_duration(document, sequence)
+  let focus: u32 = app.focus(state)
+  paint_monitor(canvas, colors, frame.source, "SOURCE", monitor.frame,
+    if source_last > 0 { source_last - 1 } else { 0 }, monitor.mark_in, monitor.mark_out,
+    fps, monitor.playing, source_image, focus == app.panel_source())
+  paint_monitor(canvas, colors, frame.program, "PROGRAM", program.frame,
+    if total > 0 { total - 1 } else { 0 }, program.mark_in, program.mark_out, fps,
+    program.playing, program_image, focus == app.panel_program())
+
+  let chosen: u64 = app.current_clip(state)
+  paint_filters(canvas, colors, state, frame.filters, chosen)
+  paint_properties(canvas, colors, state, frame.properties, chosen)
+  paint_mixer(canvas, colors, state, frame.mixer)
+
+  var model: timeline.Timeline = timeline_model(state, frame.timeline)
+  paint_ruler(canvas, colors, state, frame.ruler, model, fps)
+  paint_timeline(canvas, colors, state, frame.timeline, model)
+  paint_headers(canvas, colors, state, frame.headers, model)
+  paint_status(canvas, colors, state, frame.status)
+  app.count_paint(state)
+  ()
+}

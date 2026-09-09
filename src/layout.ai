@@ -1,0 +1,62 @@
+// Panel geometry.
+//
+// One place computes where every panel sits, so painting and hit testing cannot disagree
+// about which pixels belong to which panel — the usual source of "the click did something
+// else than the drawing suggested".
+module genesis.layout
+
+pub type Rect = struct { left: f64, top: f64, right: f64, bottom: f64 }
+
+pub type Frame = struct {
+  menu: Rect,
+  pool: Rect,
+  source: Rect,
+  program: Rect,
+  filters: Rect,
+  properties: Rect,
+  mixer: Rect,
+  ruler: Rect,
+  headers: Rect,
+  timeline: Rect,
+  status: Rect,
+  width: f64,
+  height: f64
+}
+
+fn rect(left: f64, top: f64, right: f64, bottom: f64) -> Rect effects {} {
+  Rect {left: left, top: top, right: right, bottom: bottom}
+}
+
+pub fn contains(area: Rect, x: f64, y: f64) -> bool effects {} {
+  x >= area.left and x < area.right and y >= area.top and y < area.bottom
+}
+pub fn width_of(area: Rect) -> f64 effects {} { area.right - area.left }
+pub fn height_of(area: Rect) -> f64 effects {} { area.bottom - area.top }
+
+// The header column width is also the timeline's left origin, so a clip at frame 0 starts
+// exactly where the track name ends.
+pub fn header_width() -> f64 effects {} { 132.0 }
+
+pub fn frame(width: f64, height: f64) -> Frame effects {} {
+  let menu_bottom: f64 = 26.0
+  let monitor_bottom: f64 = menu_bottom + (height - menu_bottom) * 0.40
+  let strip_bottom: f64 = monitor_bottom + (height - menu_bottom) * 0.17
+  let status_top: f64 = height - 22.0
+  let ruler_top: f64 = strip_bottom + 4.0
+  let ruler_bottom: f64 = ruler_top + 22.0
+  let pool_right: f64 = width * 0.22
+  let monitor_width: f64 = (width - pool_right - 12.0) * 0.5
+  Frame {
+    menu: rect(0.0, 0.0, width, menu_bottom),
+    pool: rect(4.0, menu_bottom + 4.0, pool_right, monitor_bottom),
+    source: rect(pool_right + 4.0, menu_bottom + 4.0, pool_right + 4.0 + monitor_width, monitor_bottom),
+    program: rect(pool_right + monitor_width + 8.0, menu_bottom + 4.0, width - 4.0, monitor_bottom),
+    filters: rect(4.0, monitor_bottom + 4.0, pool_right, strip_bottom),
+    properties: rect(pool_right + 4.0, monitor_bottom + 4.0, width * 0.62, strip_bottom),
+    mixer: rect(width * 0.62 + 4.0, monitor_bottom + 4.0, width - 4.0, strip_bottom),
+    ruler: rect(4.0 + header_width(), ruler_top, width - 4.0, ruler_bottom),
+    headers: rect(4.0, ruler_bottom, 4.0 + header_width(), status_top - 4.0),
+    timeline: rect(4.0 + header_width(), ruler_bottom, width - 4.0, status_top - 4.0),
+    status: rect(0.0, status_top, width, height),
+    width: width, height: height}
+}

@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Genesis AIR test runner.
+
+Stage 1 is headless and uses the FakeMediaProvider, so it needs no FFmpeg, OpenCL or GPU.
+Stage 2 is a bounded real-media smoke test against the existing gcompose worker; it is
+BLOCKED, not passed, when the worker or a fixture is missing.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+HERE = Path(__file__).resolve().parent
+PROJECT = HERE.parent
+
+
+def sdk_config():
+    values = {}
+    for line in (PROJECT / "air-sdk.conf").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, raw = line.split("=", 1)
+        if raw.startswith("${") and ":-" in raw:
+            raw = raw.split(":-", 1)[1].rstrip("}")
+        values[name.strip()] = raw.strip()
+    return values
+
+
+# Expected values, stated here from the application's documented behavior rather than read
+# back from it. The provider is deterministic, so every one of these is reproducible.
+EXPECTED = {
+    "provider": "fake",
+    "tracks_at_start": "4",
+    "clips_at_start": "0",
+    "status_at_start": "New project",
+    "clean_at_start": "true",
+    "sources": "3",
+    "import_marks_dirty": "true",
+    "length_known": "true",
+    "bin_added": "true",
+    "clips_after_append": "3",
+    "duration": "280",
+    # The toolkit's source-bounds contract still applies when the app asks for too much.
+    "oversize_admitted": "true",
+    "oversize_clamped": "true",
+    "selection_size": "1",
+    "selected_is_first": "true",
+    "selection_after_add": "2",
+    "selection_after_only": "1",
+    "split": "split",
+    "clips_after_split": "4",
+    "trim": "trimmed tail",
+    "ripple_trim": "ripple trimmed",
+    "slip": "slipped",
+    "nudge": "nudged",
+    "group": "grouped",
+    "group_members": "2",
+    "move_group": "group moved",
+    "ungroup": "ungrouped",
+    "transition": "transition added",
+    "transition_resize": "transition resized",
+    "fades": "fades set",
+    "keys": "2",
+    "marker": "marker added",
+    "subtitle": "subtitle added",
+    "zero_span_subtitle": "false",
+    "filters": "3",
+    "filter_toggle": "filter disabled",
+    "grain_disabled": "true",
+    "grain_order": "0",
+    "filters_after_remove": "2",
+    "pan": "-0.5",
+    # Solo is a mixer-wide policy: once A2 is soloed, A1 is not audible.
+    "a1_audible_when_a2_solo": "false",
+    "a2_audible_when_a2_solo": "true",
+    "a1_muted": "true",
+    "program_frame": "40",
+    "source_frame": "2",
+    "transports_independent": "true",
+    "project_range": "range set",
+    "pool_click": "Opened wide.mov",
+    "focus_is_pool": "true",
+    "pool_row": "0",
+    "focus_is_mixer": "true",
+    "ruler_scrubbed": "true",
+    "space_plays": "true",
+    "space_pauses": "true",
+    "home_rewinds": "0",
+    "edits_changed_state": "true",
+    "undo_1": "true",
+    "undo_1_exact": "true",
+    "undo_2_exact": "true",
+    "redo_1_exact": "true",
+    "redo_2_exact": "true",
+    "saved": "true",
+    "clean_after_save": "true",
+    "opened": "true",
+    "reload_exact": "true",
+    "reload_sources": "3",
+    "reload_tracks": "4",
+    "reload_transitions": "1",
+    "reload_markers": "1",
+    "reload_subtitles": "1",
+    "missing_project_refused": "true",
+    "provider_used": "true",
+    "provider_failures": "0",
+    "render_width": "1600",
+    "render_height": "980",
+    "paints": "1",
+}
+
+APPROX = {"filter_param": 0.4, "gain": 0.6}
+
+
+def run(argv, env, timeout=900):
+    done = subprocess.run([str(v) for v in argv], env=env, text=True,
+                          capture_output=True, timeout=timeout)
+    return done
+
+
+def headless(airc, stdlib):
+    env = dict(os.environ, AIR_STDLIB=str(stdlib))
+    with TemporaryDirectory(prefix="genesis-air-") as temporary:
+        root = Path(temporary)
+        env["XDG_CACHE_HOME"] = str(root / "cache")
+        done = run([airc, "run", HERE / "headless.ai", "--mode", "release", "--",
+                    str(root), str(root / "project.air"), str(root / "frame.png")], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        rows = dict(line.split("\t", 1) for line in done.stdout.splitlines())
+
+        missing = sorted(set(EXPECTED) - set(rows))
+        assert not missing, f"the fixture did not report: {missing}"
+        wrong = {k: {"expected": v, "actual": rows[k]} for k, v in EXPECTED.items()
+                 if rows[k] != v}
+        assert not wrong, "headless expectations disagree: " + json.dumps(wrong, indent=2)
+        for name, want in APPROX.items():
+            assert abs(float(rows[name]) - want) < 1e-9, (name, rows[name], want)
+
+        # The saved project is the AIR editor schema, not a Genesis-only invention.
+        stored = json.loads((root / "project.air").read_text())
+        assert stored["schema"] == "air.editor.project", stored["schema"]
+        assert stored["revision"] == 1, stored["revision"]
+        assert len(stored["tracks"]) == 4 and len(stored["sources"]) == 3, stored
+        # Every stored clip stays inside the media it names.
+        lengths = {s["id"]: s["frames"] for s in stored["sources"]}
+        for clip in stored["clips"]:
+            limit = lengths.get(clip["source"], 0)
+            if limit:
+                assert clip["source_in"] >= 0 and clip["source_in"] + clip["length"] <= limit, clip
+        print(f"  headless: {len(rows)} application facts passed (fake provider)")
+        return len(rows)
+
+
+def render_smoke(binary, stdlib):
+    env = dict(os.environ, AIR_STDLIB=str(stdlib), GENESIS_FAKE_PROVIDER="1")
+    with TemporaryDirectory(prefix="genesis-air-render-") as temporary:
+        root = Path(temporary)
+        env["GENESIS_SCRATCH"] = str(root / "scratch")
+        png = root / "frame.png"
+        project = root / "demo.air"
+        done = run([binary, "demo", str(png), str(project)], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert png.exists() and png.stat().st_size > 1000, "no frame was written"
+        assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        stored = json.loads(project.read_text())
+        assert stored["schema"] == "air.editor.project"
+        assert len(stored["clips"]) == 3, stored["clips"]
+        assert len(stored["transitions"]) == 1
+        assert len(stored["filters"]) == 2
+        print("  render: the demo project painted a 1600x980 frame and saved its project")
+
+
+def live_workers(worker):
+    """PIDs actually executing `worker`.
+
+    `pgrep -x` cannot match a name longer than 15 characters and `pgrep -f` matches any
+    command line that merely mentions the path — including this checker's own. Resolving
+    /proc/<pid>/exe is the only form that answers the real question.
+    """
+    target = os.path.realpath(worker)
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or entry == str(os.getpid()):
+            continue
+        try:
+            if os.path.realpath(os.path.join("/proc", entry, "exe")) == target:
+                found.append(entry)
+        except OSError:
+            continue
+    return found
+
+
+def gcompose_smoke(binary, stdlib, worker, fixture):
+    """Bounded real-media smoke.
+
+    One file: open the source, read its real length, place a short clip, pull one source
+    frame and one program frame through the provider, paint the editor, exit cleanly. No
+    render and no long decode.
+    """
+    env = dict(os.environ, AIR_STDLIB=str(stdlib), GENESIS_GCOMPOSE=str(worker))
+    env.pop("GENESIS_FAKE_PROVIDER", None)
+    with TemporaryDirectory(prefix="genesis-air-gcompose-") as temporary:
+        root = Path(temporary)
+        env["GENESIS_SCRATCH"] = str(root / "scratch")
+        png = root / "frame.png"
+        done = run([binary, "probe", str(fixture), str(png)], env, timeout=300)
+        assert done.returncode == 0, done.stdout + done.stderr
+        rows = {}
+        for line in done.stdout.splitlines():
+            parts = line.split(" ", 1)
+            if len(parts) == 2:
+                rows[parts[0]] = parts[1]
+        assert rows.get("frames") and int(rows["frames"]) > 0, done.stdout
+        assert rows.get("source_frame") == "ok", done.stdout
+        assert rows.get("provider_failures") == "0", done.stdout
+        assert done.stdout.splitlines()[0] == "gcompose", "the real provider was not selected"
+        assert png.exists() and png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        leftover = live_workers(worker)
+        assert not leftover, f"a worker outlived the run: {leftover}"
+        print(f"  gcompose: {rows['frames']} real frames probed, one source frame decoded, "
+              f"no worker left behind")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--airc")
+    parser.add_argument("--stdlib")
+    parser.add_argument("--binary")
+    parser.add_argument("--media", help="a small media fixture for the gcompose smoke test")
+    args = parser.parse_args()
+
+    config = sdk_config()
+    stdlib = Path(args.stdlib or (config["AIR_SDK"] + "/stdlib"))
+    airc = Path(args.airc or (config["AIR_TOOLCHAIN"] + "/build-dev/bin/airc"))
+    binary = Path(args.binary or (PROJECT / "build/genesis-air"))
+
+    print(f"genesis-air tests   AIR {config['AIR_SDK_COMMIT'][:12]}   stdlib {stdlib}")
+    if not airc.exists():
+        print(f"BLOCKED: no AIR compiler at {airc}", file=sys.stderr)
+        return 1
+    if not (stdlib / "editor.ai").exists():
+        print(f"BLOCKED: {stdlib} has no std.editor", file=sys.stderr)
+        return 1
+
+    headless(airc, stdlib)
+
+    if binary.exists():
+        render_smoke(binary, stdlib)
+    else:
+        print(f"  BLOCKED render smoke: build it first ({binary})")
+
+    worker = Path(os.environ.get("GENESIS_GCOMPOSE",
+                                 "/home/alex/mojodiffusion/output/bin/genesis-gcompose"))
+    if not binary.exists():
+        print("  BLOCKED gcompose smoke: no application binary")
+    elif not worker.exists():
+        print(f"  BLOCKED gcompose smoke: no worker at {worker}")
+    elif not args.media:
+        print("  BLOCKED gcompose smoke: pass --media with a small fixture")
+    elif not Path(args.media).exists():
+        print(f"  BLOCKED gcompose smoke: no media fixture at {args.media}")
+    else:
+        gcompose_smoke(binary, stdlib, worker, Path(args.media))
+
+    print("genesis-air: tests complete")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

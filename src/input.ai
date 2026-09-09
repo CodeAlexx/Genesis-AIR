@@ -1,0 +1,187 @@
+// Input to command.
+//
+// This module decides WHICH command a keystroke or click means. It never edits the
+// document itself — it calls `genesis.commands`, which is the only path to a mutation.
+// Hit testing resolves against the same `std.timeline` model the view drew, so a click
+// always lands on the clip that was visible under the pointer.
+module genesis.input
+
+import std.editor as editor
+import std.editor_view as editor_view
+import std.timeline as timeline
+import std.widgets as widgets
+import "app.ai" as app
+import "commands.ai" as commands
+import "layout.ai" as layout
+import "view.ai" as painter
+
+// Which panel a point belongs to, so a keystroke reaches the panel a person is pointing at.
+pub fn panel_at(width: f64, height: f64, x: f64, y: f64) -> u32 effects {} {
+  let frame: layout.Frame = layout.frame(width, height)
+  if layout.contains(frame.pool, x, y) { return app.panel_pool() }
+  if layout.contains(frame.source, x, y) { return app.panel_source() }
+  if layout.contains(frame.program, x, y) { return app.panel_program() }
+  if layout.contains(frame.filters, x, y) { return app.panel_filters() }
+  if layout.contains(frame.properties, x, y) { return app.panel_properties() }
+  if layout.contains(frame.mixer, x, y) { return app.panel_mixer() }
+  app.panel_timeline()
+}
+
+// A pointer press. Returns a short description of what it did, for the status line.
+pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
+                    y: f64) -> string effects {alloc} {
+  let frame: layout.Frame = layout.frame(width, height)
+  let where: u32 = panel_at(width, height, x, y)
+  app.set_focus(state, where)
+
+  if where == app.panel_pool() {
+    let row: u64 = cast.sat((y - frame.pool.top - 24.0) / 26.0)
+    let count: u64 = editor.source_count(struct.borrow(state, field=document))
+    if row < count {
+      app.set_pool_row(state, row)
+      let source: u64 = app.current_source(state)
+      let _ = commands.open_source(state, source)
+      var line: string = string.copy("Opened ")
+      string.append(line, str.view(editor.source_name(struct.borrow(state, field=document), source)))
+      return line
+    }
+    return string.copy("Media pool")
+  }
+
+  if where == app.panel_filters() {
+    let clip: u64 = app.current_clip(state)
+    let position: u32 = cast.sat((y - frame.filters.top - 24.0) / 16.0)
+    match editor.filter_at(struct.borrow(state, field=document), clip, position) {
+      some(id) => { app.set_selected_filter(state, id)
+        return string.copy("Filter selected") },
+      none => { return string.copy("Filters") },
+    }
+  }
+
+  // The ruler scrubs the program transport.
+  if layout.contains(frame.ruler, x, y) {
+    var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+    let frame_at: i64 = timeline.x_to_frame(model, x)
+    var landed: commands.Result = commands.seek(state, frame_at)
+    return commands.message(landed)
+  }
+
+  if where == app.panel_timeline() {
+    var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+    match timeline.clip_at(model, x, y) {
+      some(index) => {
+        let id: u64 = struct.get(array.borrow(struct.borrow(model, field=clips), index), field=id)
+        let _ = commands.select_only(state, id)
+        var line: string = string.copy("Selected clip ")
+        let shown: i64 = cast.sat(id)
+        string.append(line, str.view(string.from_int(shown)))
+        return line
+      },
+      none => {
+        let _ = commands.clear_selection(state)
+        let frame_at: i64 = timeline.x_to_frame(model, x)
+        var landed: commands.Result = commands.seek(state, frame_at)
+        return commands.message(landed)
+      },
+    }
+  }
+  string.copy("")
+}
+
+// A wheel: zoom with control held is the usual editor gesture; otherwise scroll.
+pub fn wheel(state: ref<app.App>, down: bool, lines: u32, zooming: bool) -> string effects {alloc} {
+  if zooming {
+    let now: f64 = app.zoom(state)
+    let level: f64 = app.set_zoom(state, if down { now / 1.25 } else { now * 1.25 })
+    var line: string = string.copy("Zoom ")
+    let shown: i64 = cast.sat(level * 100.0)
+    string.append(line, str.view(string.from_int(shown)))
+    string.append(line, "%")
+    return line
+  }
+  let rows: u32 = if lines == 0 { 1 } else { lines }
+  let widened: i64 = cast.wrap(rows)
+  let step: i64 = widened * 12
+  let now: i64 = app.scroll(state)
+  let target: i64 = if down { now + step } else { now - step }
+  let _ = app.set_scroll(state, target)
+  string.copy("Scrolled")
+}
+
+// A key press. The set is deliberately small and conventional.
+pub fn key(state: ref<app.App>, code: u32, control: bool, shift: bool) -> string effects {alloc} {
+  if code == widgets.key_space() {
+    let playing: bool = editor.playing(struct.borrow(state, field=document))
+    var landed: commands.Result = commands.program(state,
+      if playing { editor.pause() } else { editor.play() })
+    return string.copy(if playing { "Paused" } else { "Playing" })
+  }
+  if control and code == widgets.key_z() {
+    if shift {
+      var landed: commands.Result = commands.redo(state)
+      return commands.message(landed)
+    }
+    var landed: commands.Result = commands.undo(state)
+    return commands.message(landed)
+  }
+  if control and code == widgets.key_y() {
+    var landed: commands.Result = commands.redo(state)
+    return commands.message(landed)
+  }
+  if code == 115 {
+    // `s` splits at the playhead.
+    var landed: commands.Result = commands.split_at_playhead(state)
+    return commands.message(landed)
+  }
+  if code == widgets.key_delete() {
+    let clip: u64 = app.current_clip(state)
+    if clip == 0 { return string.copy("Nothing selected") }
+    var landed: commands.Result = if shift { commands.ripple_delete(state, clip) }
+      else { commands.lift(state, clip) }
+    return commands.message(landed)
+  }
+  if code == widgets.key_left() {
+    var landed: commands.Result = commands.program(state, editor.step_back())
+    return commands.message(landed)
+  }
+  if code == widgets.key_right() {
+    var landed: commands.Result = commands.program(state, editor.step_forward())
+    return commands.message(landed)
+  }
+  if code == widgets.key_home() {
+    var landed: commands.Result = commands.program(state, editor.go_start())
+    return commands.message(landed)
+  }
+  if code == widgets.key_end() {
+    var landed: commands.Result = commands.program(state, editor.go_end())
+    return commands.message(landed)
+  }
+  if code == 105 {
+    var landed: commands.Result = commands.program(state, editor.mark_in())
+    return string.copy("Marked in")
+  }
+  if code == 111 {
+    var landed: commands.Result = commands.program(state, editor.mark_out())
+    return string.copy("Marked out")
+  }
+  if code == 109 {
+    let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+    var landed: commands.Result = commands.add_marker(state, frame, "marker")
+    return commands.message(landed)
+  }
+  if code == 103 {
+    var landed: commands.Result = commands.group_selection(state)
+    return commands.message(landed)
+  }
+  if code == 61 {
+    let now: f64 = app.zoom(state)
+    let _ = app.set_zoom(state, now * 1.25)
+    return string.copy("Zoomed in")
+  }
+  if code == 45 {
+    let now: f64 = app.zoom(state)
+    let _ = app.set_zoom(state, now / 1.25)
+    return string.copy("Zoomed out")
+  }
+  string.copy("")
+}

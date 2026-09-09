@@ -1,0 +1,394 @@
+// The media-provider seam.
+//
+// Genesis AIR never learns where a frame came from. Everything the application asks of a
+// media engine goes through this one module: probe a source, make a thumbnail, fetch a
+// source frame, fetch a composited program frame, read an audio envelope.
+//
+// Two providers are implemented. `fake` is deterministic and needs no external program, so
+// the whole application is testable without FFmpeg, OpenCL or a GPU. `gcompose` drives the
+// existing Genesis worker (CodeAlexx/Genesis-, `gcompose/`) as a SEPARATE PROCESS, which is
+// the isolation the original measured it needs: NVIDIA OpenCL initialization and a UI GL/GLX
+// stack crashed intermittently when combined, so the compositor stays out of this process.
+//
+// The donor's wire is 103 positional fields on one ENC line. That shape stops here: the rest
+// of the application sees `probe`, `thumbnail`, `source_frame`, `program_frame`, `envelope`.
+module genesis.provider
+
+import std.draw as draw
+import std.files as files
+import std.image as image
+import std.path as path
+import std.process as proc
+import std.text as text
+
+pub fn kind_fake() -> u32 effects {} { 0 }
+pub fn kind_gcompose() -> u32 effects {} { 1 }
+
+pub type Provider = struct {
+  kind: u32,
+  worker: string,
+  scratch: string,
+  calls: u64,
+  failures: u64,
+  last_error: string,
+  available: bool
+}
+
+// What a probe learned about one source. `frames` 0 means the length is genuinely unknown,
+// which is the state `std.editor`'s source-bounds contract keys on.
+pub type Probe = struct {
+  ok: bool,
+  frames: i64,
+  width: u32,
+  height: u32,
+  fps: f64,
+  has_video: bool,
+  has_audio: bool,
+  detail: string
+}
+
+pub type Frame = struct { ok: bool, width: u32, height: u32, pixels: draw.Surface, detail: string }
+
+pub fn fake(scratch: str) -> Provider effects {alloc} {
+  Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
+    calls: 0, failures: 0, last_error: string.new(), available: true}
+}
+
+// A gcompose provider. `worker` is the binary; the provider is `available` only when it is
+// actually there, so an application can fall back rather than fail at the first request.
+pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} {
+  let there: bool = match files.exists(worker) { ok(found) => found, err(problem) => false, }
+  Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
+    calls: 0, failures: 0, last_error: string.new(), available: there}
+}
+
+pub fn available(state: ref<Provider>) -> bool effects {} { state.available }
+pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
+pub fn failures(state: ref<Provider>) -> u64 effects {} { state.failures }
+pub fn last_error(state: ref<Provider>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(state, field=last_error)))
+}
+pub fn describe(state: ref<Provider>) -> string effects {alloc} {
+  if state.kind == kind_fake() { return string.copy("fake") }
+  var out: string = string.copy("gcompose")
+  if not state.available { string.append(out, " (worker missing)") }
+  out
+}
+
+fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc} {
+  struct.set(state, state.failures + 1, field=failures)
+  let _ = ref.swap(struct.borrow(state, field=last_error), string.copy(detail))
+  ()
+}
+
+// ---------------------------------------------------------------------------
+// The gcompose transport
+//
+// One bounded worker invocation per request: the command line is piped in, the reply line is
+// captured, and the worker exits. That keeps the compositor in its own process and needs no
+// long-lived pipe.
+//
+// A PERSISTENT worker would be better for a busy editor, and the donor runs one. AIR cannot
+// express it today: `process.exec` inherits stdio and waits, `process.run` redirects to a
+// file, and there is no primitive that hands back a writable stdin. That gap is recorded in
+// this project's README rather than worked around with a shell that pretends to be a pipe.
+
+fn scratch_file(state: ref<Provider>, name: str) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(state, field=scratch)), name)
+}
+
+// Run one command line through the worker and return its reply line, or none.
+fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {alloc, fs.meta, fs.read, fs.write, process} {
+  struct.set(state, state.calls + 1, field=calls)
+  if not state.available {
+    note_failure(state, "the gcompose worker is not present")
+    return option.none()
+  }
+  match files.mkdirs(str.view(struct.borrow(state, field=scratch))) {
+    ok(made) => { }, err(problem) => { },
+  }
+  var log: string = scratch_file(state, tag)
+  var argv: array<string> = array.new()
+  array.push(argv, string.copy("/bin/sh"))
+  array.push(argv, string.copy("-c"))
+  // The command text and the worker path are passed as ARGUMENTS, never spliced into the
+  // script, so nothing a caller supplies is ever interpreted as shell.
+  array.push(argv, string.copy("printf '%s\\n' \"$1\" | \"$2\" --serve"))
+  array.push(argv, string.copy("genesis-provider"))
+  array.push(argv, string.copy(command))
+  array.push(argv, string.copy(str.view(struct.borrow(state, field=worker))))
+  match proc.run(argv, ".", str.view(log), false) {
+    err(problem) => { note_failure(state, "the worker could not be started")
+      return option.none() },
+    ok(status) => {
+      if not proc.success(status) {
+        note_failure(state, "the worker exited with a failure")
+        return option.none()
+      }
+    },
+  }
+  let reply: string = match files.read_text(str.view(log)) {
+    ok(text_value) => text_value,
+    err(problem) => { note_failure(state, "the worker produced no reply")
+      return option.none() },
+  }
+  var lines: array<string> = text.split(str.view(reply), "\n")
+  var index: u64 = array.len(lines)
+  loop {
+    if index == 0 { break }
+    index = index - 1
+    let line: str = str.view(array.borrow(lines, index))
+    if str.starts_with(line, "DONE") {
+      if str.len(line) <= 5 { return option.some(string.new()) }
+      return option.some(string.copy(str.slice(line, 5, str.len(line))))
+    }
+    if str.starts_with(line, "ERR") {
+      note_failure(state, "the worker refused the request")
+      return option.none()
+    }
+  }
+  note_failure(state, "the worker gave no DONE or ERR reply")
+  option.none()
+}
+
+fn parse_int(text_value: str) -> option<i64> effects {} {
+  if str.len(text_value) == 0 { return option.none() }
+  var value: i64 = 0
+  let raw: view<byte> = str.bytes(text_value)
+  var index: u64 = 0
+  loop {
+    if index >= view.len(raw) { break }
+    let octet: u8 = cast.bits(view.get(raw, index))
+    let code: u64 = cast.wrap(octet)
+    if code < 48 or code > 57 { return option.none() }
+    value = value * 10 + cast.sat(code - 48)
+    index = index + 1
+  }
+  option.some(value)
+}
+
+// ---------------------------------------------------------------------------
+// The provider surface
+//
+// Five operations. Everything above the seam uses only these.
+
+// Deterministic fake dimensions and length, derived from the path so a fixture is stable.
+fn fake_seed(source: str) -> u64 effects {} {
+  var seed: u64 = 2166136261
+  let raw: view<byte> = str.bytes(source)
+  var index: u64 = 0
+  loop {
+    if index >= view.len(raw) { break }
+    let octet: u8 = cast.bits(view.get(raw, index))
+    seed = mul.wrap(xor(seed, cast.wrap(octet)), 16777619)
+    index = index + 1
+  }
+  seed
+}
+
+// PROBE: what the source is. The frame count is what `std.editor` treats as authoritative,
+// so a provider that does not know must say 0 rather than guess.
+pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta, fs.read, fs.write, process} {
+  if state.kind == kind_fake() {
+    struct.set(state, state.calls + 1, field=calls)
+    let seed: u64 = fake_seed(source)
+    let frames: i64 = cast.sat(120 + seed % 480)
+    let audio_only: bool = str.starts_with(source, "audio:")
+    return Probe {ok: true, frames: frames, width: if audio_only { 0 } else { 1920 },
+      height: if audio_only { 0 } else { 1080 }, fps: 30.0, has_video: not audio_only,
+      has_audio: true, detail: string.copy("fake source")}
+  }
+  var command: string = string.copy("NFRAMES ")
+  string.append(command, source)
+  match ask(state, str.view(command), "probe.txt") {
+    none => Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0, has_video: false,
+      has_audio: false, detail: last_error(state)},
+    some(reply) => {
+      match parse_int(str.view(text.trim(str.view(reply)))) {
+        none => Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0,
+          has_video: false, has_audio: false, detail: string.copy("unreadable frame count")},
+        some(frames) => Probe {ok: true, frames: frames, width: 0, height: 0, fps: 30.0,
+          has_video: true, has_audio: true, detail: string.copy("gcompose NFRAMES")},
+      }
+    },
+  }
+}
+
+// A deterministic image the fake provider returns, so a test can assert real pixels.
+fn fake_image(source: str, frame: i64, width: u32, height: u32) -> draw.Surface effects {alloc} {
+  match draw.surface(width, height) {
+    none => draw.empty_surface(),
+    some(target) => {
+      var canvas: draw.Canvas = draw.canvas(target)
+      let seed: u64 = fake_seed(source)
+      let base: u64 = seed % 128
+      let positive: i64 = if frame < 0 { 0 } else { frame }
+      let shift: u64 = cast.wrap(positive) % 128
+      let red: u8 = cast.sat((base + shift) % 256)
+      let green: u8 = cast.sat((base * 3 + shift) % 200)
+      let blue: u8 = cast.sat((base * 7 + shift * 2) % 200)
+      draw.clear(canvas, draw.rgb(red, green, blue))
+      // A corner marker, so a test can tell one frame from another by pixel.
+      var y: u32 = 0
+      loop {
+        if y >= 8 or y >= height { break }
+        var x: u32 = 0
+        loop {
+          if x >= 8 or x >= width { break }
+          let mark_r: u8 = cast.sat(shift * 2 % 256)
+          let mark_b: u8 = cast.sat(base * 2 % 256)
+          let px: i64 = cast.wrap(x)
+          let py: i64 = cast.wrap(y)
+          draw.device_pixel(canvas, px, py, draw.rgb(mark_r, 255, mark_b))
+          x = x + 1
+        }
+        y = y + 1
+      }
+      draw.finish(canvas)
+    },
+  }
+}
+
+// Read a raw RGBA file the worker wrote and turn it into a surface.
+fn read_rgba(file: str, width: u32, height: u32) -> option<draw.Surface> effects {alloc, fs.read} {
+  let raw: bytes = match files.read_bytes(file) { ok(value) => value, err(problem) => { return option.none() }, }
+  let data: view<byte> = bytes.view(raw)
+  let wanted: u64 = cast.wrap(width) * cast.wrap(height) * 4
+  if view.len(data) < wanted { return option.none() }
+  match draw.surface(width, height) {
+    none => option.none(),
+    some(target) => {
+      var canvas: draw.Canvas = draw.canvas(target)
+      var y: u32 = 0
+      loop {
+        if y >= height { break }
+        var x: u32 = 0
+        loop {
+          if x >= width { break }
+          let at: u64 = (cast.wrap(y) * cast.wrap(width) + cast.wrap(x)) * 4
+          let r: u8 = cast.bits(view.get(data, at))
+          let g: u8 = cast.bits(view.get(data, at + 1))
+          let b: u8 = cast.bits(view.get(data, at + 2))
+          let px: i64 = cast.wrap(x)
+          let py: i64 = cast.wrap(y)
+          draw.device_pixel(canvas, px, py, draw.rgb(r, g, b))
+          x = x + 1
+        }
+        y = y + 1
+      }
+      option.some(draw.finish(canvas))
+    },
+  }
+}
+
+fn thumb_command(source: str, frame: i64, width: u32, height: u32, out: str) -> string effects {alloc} {
+  var command: string = string.copy("THUMB ")
+  string.append(command, source)
+  string.append(command, " ")
+  string.append(command, str.view(string.from_int(frame)))
+  string.append(command, " ")
+  let w: i64 = cast.wrap(width)
+  let h: i64 = cast.wrap(height)
+  string.append(command, str.view(string.from_int(w)))
+  string.append(command, " ")
+  string.append(command, str.view(string.from_int(h)))
+  string.append(command, " ")
+  string.append(command, out)
+  command
+}
+
+// THUMBNAIL / SOURCE FRAME. One decode of one source at one frame; the media pool and the
+// source monitor both use it, which is why there is one operation rather than two.
+pub fn source_frame(state: ref<Provider>, source: str, frame: i64, width: u32,
+                    height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+  if state.kind == kind_fake() {
+    struct.set(state, state.calls + 1, field=calls)
+    return Frame {ok: true, width: width, height: height,
+      pixels: fake_image(source, frame, width, height), detail: string.copy("fake frame")}
+  }
+  var out: string = scratch_file(state, "frame.rgba")
+  let command: string = thumb_command(source, frame, width, height, str.view(out))
+  match ask(state, str.view(command), "frame.txt") {
+    none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
+      detail: last_error(state)},
+    some(reply) => {
+      match read_rgba(str.view(out), width, height) {
+        none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
+          detail: string.copy("the worker's frame could not be read")},
+        some(surface) => Frame {ok: true, width: width, height: height, pixels: surface,
+          detail: string.copy("gcompose THUMB")},
+      }
+    },
+  }
+}
+
+pub fn thumbnail(state: ref<Provider>, source: str, width: u32, height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+  source_frame(state, source, 0, width, height)
+}
+
+// PROGRAM FRAME: the composited timeline at one frame. The application passes the sources
+// visible at that frame; a provider that cannot composite returns the topmost one, which is
+// honest and keeps the monitor useful rather than blank.
+pub fn program_frame(state: ref<Provider>, sources: ref<array<string>>, frame: i64, width: u32,
+                     height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+  if array.len(sources) == 0 {
+    return Frame {ok: true, width: width, height: height,
+      pixels: match draw.surface(width, height) {
+        none => draw.empty_surface(),
+        some(target) => { var canvas: draw.Canvas = draw.canvas(target)
+          draw.clear(canvas, draw.rgb(10, 11, 14))
+          draw.finish(canvas) },
+      }, detail: string.copy("no clip under the playhead")}
+  }
+  let top: u64 = array.len(sources) - 1
+  source_frame(state, str.view(array.borrow(sources, top)), frame, width, height)
+}
+
+// ENVELOPE: peak magnitudes for a waveform lane. The fake provider synthesises a stable
+// shape; gcompose exposes `ENV`, which this asks for and reads back as text.
+pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var out: array<f64> = array.new()
+  if buckets == 0 { return out }
+  if state.kind == kind_fake() {
+    struct.set(state, state.calls + 1, field=calls)
+    let seed: u64 = fake_seed(source)
+    var index: u64 = 0
+    loop {
+      if index >= buckets { break }
+      let mixed: u64 = (seed + index * 2654435761) % 1000
+      array.push(out, 0.15 + 0.8 * cast.float(mixed) / 1000.0)
+      index = index + 1
+    }
+    return out
+  }
+  var command: string = string.copy("ENV ")
+  string.append(command, source)
+  match ask(state, str.view(command), "env.txt") {
+    none => out,
+    some(reply) => {
+      var parts: array<string> = text.split(str.view(reply), ",")
+      var index: u64 = 0
+      loop {
+        if index >= array.len(parts) { break }
+        if array.len(out) >= buckets { break }
+        match parse_int(str.view(text.trim(str.view(array.borrow(parts, index))))) {
+          some(value) => { array.push(out, cast.float(value) / 1000.0) },
+          none => { },
+        }
+        index = index + 1
+      }
+      out
+    },
+  }
+}
+
+// Move the image out of a Frame. A surface is owned, so a caller that wants the pixels takes
+// the whole reply rather than borrowing a field out of it.
+pub fn take_pixels(value: Frame own) -> draw.Surface effects {alloc} {
+  var held: Frame = value
+  ref.swap(struct.borrow(held, field=pixels), draw.empty_surface())
+}
+pub fn frame_ok(value: ref<Frame>) -> bool effects {} { value.ok }
+pub fn frame_detail(value: ref<Frame>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(value, field=detail)))
+}

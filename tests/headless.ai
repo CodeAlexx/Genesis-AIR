@@ -1,0 +1,311 @@
+// Headless acceptance for Genesis AIR.
+//
+// Everything here drives the APPLICATION COMMAND LAYER, not `std.editor` directly, so what
+// is proved is that the application is wired to the toolkit — which is the whole claim of
+// this project. The FakeMediaProvider means none of it needs FFmpeg, OpenCL or a GPU.
+module genesis.tests
+
+import std.draw as draw
+import std.editor as editor
+import std.files as files
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/view.ai" as painter
+
+fn emit(name: str, value: str) -> unit effects {io.write} {
+  io.write(name)
+  io.write("\t")
+  io.write(value)
+  io.write("\n")
+  ()
+}
+fn emit_u(name: str, value: u64) -> unit effects {io.write, alloc} {
+  let shown: i64 = cast.sat(value)
+  emit(name, str.view(string.from_int(shown)))
+}
+fn emit_i(name: str, value: i64) -> unit effects {io.write, alloc} {
+  emit(name, str.view(string.from_int(value)))
+}
+fn emit_b(name: str, value: bool) -> unit effects {io.write, alloc} {
+  emit(name, if value { "true" } else { "false" })
+}
+fn emit_result(name: str, value: ref<commands.Result>) -> unit effects {io.write, alloc} {
+  emit(name, str.view(commands.message(value)))
+}
+
+// A compact digest of the document, so undo and redo can be compared exactly.
+fn digest(state: ref<app.App>) -> string effects {alloc} {
+  var out: string = string.new()
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      none => { },
+      some(value) => {
+        let id: i64 = cast.sat(value.id)
+        let track: i64 = cast.sat(value.track)
+        string.append(out, "[")
+        string.append(out, str.view(string.from_int(id)))
+        string.append(out, ":")
+        string.append(out, str.view(string.from_int(value.source_in)))
+        string.append(out, ",")
+        string.append(out, str.view(string.from_int(value.length)))
+        string.append(out, ",")
+        string.append(out, str.view(string.from_int(value.start)))
+        string.append(out, ",")
+        string.append(out, str.view(string.from_int(track)))
+        string.append(out, "]")
+      },
+    }
+    index = index + 1
+  }
+  out
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process} {
+  let scratch: str = view.get(args, 1)
+  let project: str = view.get(args, 2)
+  let png: str = view.get(args, 3)
+
+  // A. startup
+  var engine: provider.Provider = provider.fake(scratch)
+  emit("provider", str.view(provider.describe(engine)))
+  var state: app.App = app.app(engine)
+  emit_u("tracks_at_start", editor.track_count(struct.borrow(state, field=document)))
+  emit_u("clips_at_start", editor.clip_count(struct.borrow(state, field=document)))
+  emit("status_at_start", str.view(app.status(state)))
+  emit_b("clean_at_start", not app.dirty(state))
+
+  // C. media import; the provider supplies the authoritative length
+  var wide: commands.Result = commands.import_media(state, "media/wide.mov", "wide.mov")
+  var close: commands.Result = commands.import_media(state, "media/close.mov", "close.mov")
+  var voice: commands.Result = commands.import_media(state, "audio:media/vo.wav", "vo.wav")
+  emit_u("sources", editor.source_count(struct.borrow(state, field=document)))
+  emit_b("import_marks_dirty", app.dirty(state))
+  let wide_frames: i64 = editor.source_frames(struct.borrow(state, field=document), wide.value)
+  emit_b("length_known", wide_frames > 0)
+  var bin: commands.Result = commands.add_bin(state, "B-roll")
+  emit_b("bin_added", bin.ok)
+
+  // D. timeline edits through the command layer
+  let v1: u64 = app.default_video_track(state)
+  let a1: u64 = app.default_audio_track(state)
+  var first: commands.Result = commands.append_clip(state, v1, wide.value, 0, 150)
+  var second: commands.Result = commands.append_clip(state, v1, close.value, 20, 130)
+  var bed: commands.Result = commands.append_clip(state, a1, voice.value, 0, 260)
+  emit_u("clips_after_append", editor.clip_count(struct.borrow(state, field=document)))
+  emit_i("duration", editor.duration(struct.borrow(state, field=document)))
+
+  // The source-bounds contract belongs to the toolkit; the application must not defeat it.
+  var over: commands.Result = commands.append_clip(state, v1, wide.value, wide_frames - 10, 400)
+  emit_b("oversize_admitted", over.ok)
+  match editor.clip(struct.borrow(state, field=document), over.value) {
+    some(value) => { emit_b("oversize_clamped", value.source_in + value.length <= wide_frames) },
+    none => { emit("oversize_clamped", "absent") },
+  }
+  let _ = commands.ripple_delete(state, over.value)
+
+  // selection is a single clip unless a second is added
+  var picked: commands.Result = commands.select_only(state, first.value)
+  emit_u("selection_size", editor.selection_count(struct.borrow(state, field=document)))
+  emit_b("selected_is_first", app.current_clip(state) == first.value)
+  let _ = commands.add_to_selection(state, second.value)
+  emit_u("selection_after_add", editor.selection_count(struct.borrow(state, field=document)))
+  let _ = commands.select_only(state, first.value)
+  emit_u("selection_after_only", editor.selection_count(struct.borrow(state, field=document)))
+
+  // split at the playhead
+  let _ = commands.seek(state, 60)
+  var cut: commands.Result = commands.split_at_playhead(state)
+  emit_result("split", cut)
+  emit_u("clips_after_split", editor.clip_count(struct.borrow(state, field=document)))
+
+  // trim, ripple trim, slip, roll, slide, nudge — each one toolkit call
+  var trimmed: commands.Result = commands.trim_end(state, first.value, 40)
+  emit_result("trim", trimmed)
+  var rippled: commands.Result = commands.ripple_trim_end(state, first.value, 30)
+  emit_result("ripple_trim", rippled)
+  var slipped: commands.Result = commands.slip(state, second.value, 5)
+  emit_result("slip", slipped)
+  var nudged: commands.Result = commands.nudge(state, bed.value, 4)
+  emit_result("nudge", nudged)
+
+  // grouping
+  let _ = commands.select_only(state, first.value)
+  let _ = commands.add_to_selection(state, bed.value)
+  var grouped: commands.Result = commands.group_selection(state)
+  emit_result("group", grouped)
+  var members: array<u64> = editor.group_members(struct.borrow(state, field=document), grouped.value)
+  emit_u("group_members", array.len(members))
+  var moved: commands.Result = commands.move_group(state, grouped.value, 6)
+  emit_result("move_group", moved)
+  var ungrouped: commands.Result = commands.ungroup(state, grouped.value)
+  emit_result("ungroup", ungrouped)
+
+  // transitions, fades, keyframes, markers, subtitles
+  var seam: commands.Result = commands.add_transition(state, v1, 150, 24, "crossfade")
+  emit_result("transition", seam)
+  var wider: commands.Result = commands.set_transition_duration(state, seam.value, 40)
+  emit_result("transition_resize", wider)
+  var fades: commands.Result = commands.set_fades(state, second.value, 10, 12)
+  emit_result("fades", fades)
+  let _ = commands.set_key(state, second.value, "opacity", 0, 0.0, 2)
+  let _ = commands.set_key(state, second.value, "opacity", 20, 1.0, 2)
+  emit_u("keys", editor.key_count(struct.borrow(state, field=document), second.value, "opacity"))
+  var marker: commands.Result = commands.add_marker(state, 90, "cut")
+  emit_result("marker", marker)
+  var caption: commands.Result = commands.add_subtitle(state, 10, 80, "a line")
+  emit_result("subtitle", caption)
+  var bad_caption: commands.Result = commands.add_subtitle(state, 50, 50, "empty")
+  emit_b("zero_span_subtitle", bad_caption.ok)
+
+  // H. filter stack
+  var grade: commands.Result = commands.add_filter(state, second.value, "colour_balance")
+  var sharpen: commands.Result = commands.add_filter(state, second.value, "sharpen")
+  var grain: commands.Result = commands.add_filter(state, second.value, "grain")
+  emit_u("filters", editor.filter_count(struct.borrow(state, field=document), second.value))
+  let _ = commands.set_filter_param(state, grade.value, "temperature", 0.4)
+  emit("filter_param", str.view(math_text(editor.filter_param(
+    struct.borrow(state, field=document), grade.value, "temperature", -1.0))))
+  var toggled: commands.Result = commands.toggle_filter(state, grain.value)
+  emit_result("filter_toggle", toggled)
+  emit_b("grain_disabled", not editor.filter_enabled(struct.borrow(state, field=document), grain.value))
+  let _ = commands.reorder_filter(state, grain.value, 0)
+  emit_u("grain_order", cast.wrap(editor.filter_order(struct.borrow(state, field=document), grain.value)))
+  var dropped: commands.Result = commands.remove_filter(state, sharpen.value)
+  emit_u("filters_after_remove", editor.filter_count(struct.borrow(state, field=document), second.value))
+
+  // I. mixer, including the toolkit's solo-wins policy
+  let a2: u64 = second_audio_track(state)
+  let _ = commands.set_track_gain(state, a1, 0.6)
+  let _ = commands.set_track_pan(state, a1, -0.5)
+  emit("gain", str.view(math_text(editor.track_gain(struct.borrow(state, field=document), a1))))
+  emit("pan", str.view(math_text(editor.track_pan(struct.borrow(state, field=document), a1))))
+  let _ = commands.toggle_solo(state, a2)
+  emit_b("a1_audible_when_a2_solo", editor.track_audible(struct.borrow(state, field=document), a1))
+  emit_b("a2_audible_when_a2_solo", editor.track_audible(struct.borrow(state, field=document), a2))
+  let _ = commands.toggle_solo(state, a2)
+  let _ = commands.toggle_mute(state, a1)
+  emit_b("a1_muted", not editor.track_audible(struct.borrow(state, field=document), a1))
+  let _ = commands.toggle_mute(state, a1)
+
+  // G. transport, independent for the two monitors
+  let _ = commands.open_source(state, close.value)
+  let _ = commands.monitor(state, editor.go_start())
+  let _ = commands.monitor(state, editor.step_forward())
+  let _ = commands.monitor(state, editor.step_forward())
+  let _ = commands.seek(state, 40)
+  emit_i("program_frame", editor.playhead(struct.borrow(state, field=document)))
+  emit_i("source_frame", struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=frame))
+  emit_b("transports_independent",
+    editor.playhead(struct.borrow(state, field=document)) != 2)
+  var ranged: commands.Result = commands.set_project_range(state, 12, 200)
+  emit_result("project_range", ranged)
+
+  // F. panel focus and pool selection through the input layer
+  let frame: layout.Frame = layout.frame(1600.0, 980.0)
+  var note: string = input.pointer_down(state, 1600.0, 980.0,
+    frame.pool.left + 20.0, frame.pool.top + 30.0)
+  emit("pool_click", str.view(note))
+  emit_b("focus_is_pool", app.focus(state) == app.panel_pool())
+  emit_u("pool_row", app.pool_row(state))
+  var note2: string = input.pointer_down(state, 1600.0, 980.0,
+    frame.mixer.left + 20.0, frame.mixer.top + 30.0)
+  emit_b("focus_is_mixer", app.focus(state) == app.panel_mixer())
+  // the ruler scrubs
+  var note3: string = input.pointer_down(state, 1600.0, 980.0,
+    frame.ruler.left + 100.0, frame.ruler.top + 6.0)
+  emit_b("ruler_scrubbed", editor.playhead(struct.borrow(state, field=document)) != 40)
+
+  // keyboard: space toggles play, arrows step, home rewinds
+  let _ = input.key(state, 32, false, false)
+  emit_b("space_plays", editor.playing(struct.borrow(state, field=document)))
+  let _ = input.key(state, 32, false, false)
+  emit_b("space_pauses", not editor.playing(struct.borrow(state, field=document)))
+  let _ = input.key(state, 65360, false, false)
+  emit_i("home_rewinds", editor.playhead(struct.borrow(state, field=document)))
+
+  // E. undo and redo through the application, across several edits
+  var before: string = digest(state)
+  var extra: commands.Result = commands.append_clip(state, v1, wide.value, 0, 45)
+  var after_add: string = digest(state)
+  var deleted: commands.Result = commands.ripple_delete(state, extra.value)
+  var after_delete: string = digest(state)
+  emit_b("edits_changed_state", not str.eq(str.view(before), str.view(after_add)))
+  var undo1: commands.Result = commands.undo(state)
+  emit_b("undo_1", undo1.ok)
+  emit_b("undo_1_exact", str.eq(str.view(digest(state)), str.view(after_add)))
+  var undo2: commands.Result = commands.undo(state)
+  emit_b("undo_2_exact", str.eq(str.view(digest(state)), str.view(before)))
+  var redo1: commands.Result = commands.redo(state)
+  emit_b("redo_1_exact", str.eq(str.view(digest(state)), str.view(after_add)))
+  var redo2: commands.Result = commands.redo(state)
+  emit_b("redo_2_exact", str.eq(str.view(digest(state)), str.view(after_delete)))
+
+  // B. save and load round trip
+  var saved: commands.Result = commands.save_project(state, project)
+  emit_b("saved", saved.ok)
+  emit_b("clean_after_save", not app.dirty(state))
+  var reference: string = digest(state)
+  var reopened: provider.Provider = provider.fake(scratch)
+  var restored: app.App = app.app(reopened)
+  var opened: commands.Result = commands.open_project(restored, project)
+  emit_b("opened", opened.ok)
+  emit_b("reload_exact", str.eq(str.view(digest(restored)), str.view(reference)))
+  emit_u("reload_sources", editor.source_count(struct.borrow(restored, field=document)))
+  emit_u("reload_tracks", editor.track_count(struct.borrow(restored, field=document)))
+  emit_u("reload_transitions", editor.transition_count(struct.borrow(restored, field=document)))
+  emit_u("reload_markers", editor.marker_count(struct.borrow(restored, field=document)))
+  emit_u("reload_subtitles", editor.subtitle_count(struct.borrow(restored, field=document)))
+  var missing: commands.Result = commands.open_project(restored, "/nonexistent/none.air")
+  emit_b("missing_project_refused", not missing.ok)
+
+  // J. the provider was exercised, and only through the seam
+  emit_b("provider_used", provider.calls(struct.borrow(state, field=provider)) > 0)
+  emit_u("provider_failures", provider.failures(struct.borrow(state, field=provider)))
+
+  // A render proves the view can express this document.
+  var image: array<draw.Surface> = array.new()
+  array.push(image, draw.empty_surface())
+  array.push(image, draw.empty_surface())
+  var target: draw.Surface = match draw.surface(1600, 980) {
+    some(value) => value, none => { return 1 },
+  }
+  var canvas: draw.Canvas = draw.canvas(target)
+  var blank_a: draw.Surface = match array.pop(image) { some(v) => v, none => draw.empty_surface(), }
+  var blank_b: draw.Surface = match array.pop(image) { some(v) => v, none => draw.empty_surface(), }
+  painter.paint(state, canvas, 1600.0, 980.0, blank_a, blank_b)
+  var finished: draw.Surface = draw.finish(canvas)
+  emit_u("render_width", cast.wrap(draw.surface_width(finished)))
+  emit_u("render_height", cast.wrap(draw.surface_height(finished)))
+  emit_u("paints", app.painted(state))
+  match draw.surface_pixel(finished, 4, 976) {
+    some(colour) => { emit_u("status_pixel_r", cast.wrap(colour.r)) },
+    none => { emit("status_pixel_r", "-") },
+  }
+  0
+}
+
+fn math_text(value: f64) -> string effects {alloc} { string.from_float(value) }
+
+fn second_audio_track(state: ref<app.App>) -> u64 effects {} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  var seen: u64 = 0
+  var index: u64 = 0
+  loop {
+    if index >= editor.track_count(document) { break }
+    let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
+    if struct.get(entry, field=owner) == sequence
+      and struct.get(entry, field=kind) == editor.track_audio() {
+      if seen == 1 { return struct.get(entry, field=id) }
+      seen = seen + 1
+    }
+    index = index + 1
+  }
+  0
+}
