@@ -1,0 +1,352 @@
+// Does every control do what it says?
+//
+// This walks EVERY control the chrome builds — toolbar, timeline toolbar, dock tabs, each
+// dock tab's body, the track headers and the media pool — and for each one: builds a fresh
+// fixture, clicks the centre of the rectangle that control was BUILT with, and prints what
+// changed in the document and the application. A control that changes nothing, or changes
+// the wrong thing, shows up as a line that does not match its own name.
+//
+// Each control gets its own fixture so effects cannot compound and hide each other.
+module genesis.controls
+
+import std.editor as editor
+import std.timeline as timeline
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/view.ai" as painter
+
+fn width() -> f64 effects {} { 1600.0 }
+fn height() -> f64 effects {} { 980.0 }
+
+// A project with enough in it that every control has something to act on.
+fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var engine: provider.Provider = provider.fake(scratch)
+  var state: app.App = app.app(engine)
+  var wide: commands.Result = commands.import_media(state, "media/wide.mov", "wide.mov")
+  var close: commands.Result = commands.import_media(state, "media/close.mov", "close.mov")
+  var voice: commands.Result = commands.import_media(state, "audio:media/vo.wav", "vo.wav")
+  let v1: u64 = app.default_video_track(state)
+  let a1: u64 = app.default_audio_track(state)
+  var first: commands.Result = commands.append_clip(state, v1, wide.value, 0, 150)
+  var second: commands.Result = commands.append_clip(state, v1, close.value, 20, 130)
+  var bed: commands.Result = commands.append_clip(state, a1, voice.value, 0, 260)
+  let _ = commands.select_only(state, first.value)
+  var grade: commands.Result = commands.add_filter(state, first.value, "brightness")
+  let _ = commands.set_filter_param(state, grade.value, "level", 1.2)
+  let _ = commands.add_marker(state, 150, "cut")
+  let _ = commands.seek(state, 60)
+  app.set_status(state, "")
+  state
+}
+
+fn say(text: str) -> unit effects {io.write} { io.write(text)
+  () }
+fn cell(name: str, value: str) -> unit effects {io.write} {
+  io.write(name)
+  io.write("=")
+  io.write(value)
+  io.write(" ")
+  ()
+}
+fn cell_i(name: str, value: i64) -> unit effects {io.write, alloc} {
+  cell(name, str.view(string.from_int(value)))
+}
+fn cell_u(name: str, value: u64) -> unit effects {io.write, alloc} {
+  let shown: i64 = cast.sat(value)
+  cell_i(name, shown)
+}
+fn cell_b(name: str, value: bool) -> unit effects {io.write, alloc} {
+  cell(name, if value { "1" } else { "0" })
+}
+
+// Everything a control could plausibly change, in one line.
+// Everything a control could plausibly change, in one line. The application-side reads all
+// happen BEFORE the document borrow, because a borrow of the state cannot be live while
+// another is taken through it.
+fn snapshot(state: ref<app.App>) -> unit effects {io.write, alloc} {
+  let chosen: u64 = app.current_clip(state)
+  let tab: u64 = cast.wrap(app.dock_tab(state))
+  let snapping: bool = app.snap(state)
+  let zoom: i64 = cast.sat(app.zoom(state) * 100.0)
+  let scroll: i64 = app.scroll(state)
+  let dock_scroll: i64 = cast.sat(app.dock_scroll(state))
+  let dirty: bool = app.dirty(state)
+  let clipboard: bool = app.has_clipboard(state)
+  let prompt: bool = app.prompt_active(state)
+  let pool_row: u64 = app.pool_row(state)
+  let filter_sel: u64 = app.selected_filter(state)
+  let focus: u64 = cast.wrap(app.focus(state))
+
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let sequence: u64 = document.active
+  cell_u("clips", editor.clip_count(document))
+  cell_u("tracks", editor.track_count(document))
+  cell_u("sources", editor.source_count(document))
+  cell_i("duration", editor.sequence_duration(document, sequence))
+  cell_i("playhead", editor.playhead(document))
+  cell_b("playing", editor.playing(document))
+  cell_u("selected", editor.selection_count(document))
+  cell_u("markers", editor.marker_count(document))
+  cell_u("transitions", editor.transition_count(document))
+  cell_u("clip", chosen)
+  cell_u("filters", editor.filter_count(document, chosen))
+  cell_u("tab", tab)
+  cell_b("snap", snapping)
+  cell_i("zoom", zoom)
+  cell_i("scroll", scroll)
+  cell_i("dock_scroll", dock_scroll)
+  cell_b("dirty", dirty)
+  cell_b("clipboard", clipboard)
+  cell_b("prompt", prompt)
+  cell_u("pool_row", pool_row)
+  cell_u("filter_sel", filter_sel)
+  cell_u("focus", focus)
+  // Track switches, clip fields and the source monitor: without these a control that only
+  // flips a flag looks like a control that does nothing.
+  var hidden: u64 = 0
+  var locked: u64 = 0
+  var muted: u64 = 0
+  var soloed: u64 = 0
+  var index: u64 = 0
+  loop {
+    if index >= editor.track_count(document) { break }
+    let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
+    if struct.get(entry, field=hidden) { hidden = hidden + 1 }
+    if struct.get(entry, field=locked) { locked = locked + 1 }
+    if struct.get(entry, field=muted) { muted = muted + 1 }
+    if struct.get(entry, field=solo) { soloed = soloed + 1 }
+    index = index + 1
+  }
+  cell_u("hidden", hidden)
+  cell_u("locked", locked)
+  cell_u("muted", muted)
+  cell_u("solo", soloed)
+  cell_i("gains", cast.sat(track_gain_total(document) * 100.0))
+  cell_i("pans", cast.sat(track_pan_total(document) * 100.0))
+  match editor.clip(document, chosen) {
+    none => { cell_i("fade_in", -1)
+      cell_i("fade_out", -1)
+      cell_i("gain", -1) },
+    some(value) => { cell_i("fade_in", value.fade_in)
+      cell_i("fade_out", value.fade_out)
+      cell_i("gain", cast.sat(value.gain * 100.0)) },
+  }
+  cell_u("keys", editor.key_count(document, chosen, "size_position.x"))
+  cell_i("speed", cast.sat(clip_speed(document, chosen) * 1000.0))
+  cell_b("reverse", clip_reverse(document, chosen))
+  cell_u("monitor", document.monitor_source)
+  cell_i("monitor_frame", struct.get(struct.borrow(document, field=monitor), field=frame))
+  ()
+}
+
+fn clip_speed(document: ref<editor.Document>, clip: u64) -> f64 effects {} {
+  match editor.clip(document, clip) { some(value) => value.speed, none => 0.0, }
+}
+fn clip_reverse(document: ref<editor.Document>, clip: u64) -> bool effects {} {
+  match editor.clip(document, clip) { some(value) => value.reverse, none => false, }
+}
+
+fn track_gain_total(document: ref<editor.Document>) -> f64 effects {} {
+  var total: f64 = 0.0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(document, field=tracks)) { break }
+    total = total + struct.get(array.borrow(struct.borrow(document, field=tracks), index),
+      field=gain)
+    index = index + 1
+  }
+  total
+}
+fn track_pan_total(document: ref<editor.Document>) -> f64 effects {} {
+  var total: f64 = 0.0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(document, field=tracks)) { break }
+    total = total + struct.get(array.borrow(struct.borrow(document, field=tracks), index),
+      field=pan)
+    index = index + 1
+  }
+  total
+}
+
+fn panel_controls(state: ref<app.App>, which: u64) -> array<chrome.Control> effects {alloc} {
+  let frame: layout.Frame = layout.frame(width(), height())
+  if which == 0 { return chrome.toolbar(frame, state) }
+  if which == 1 { return chrome.timeline_bar(frame, state) }
+  if which == 2 { return chrome.dock_tabs(frame, state) }
+  if which == 3 { return chrome.pool_controls(frame, state) }
+  if which == 4 {
+    var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+    return chrome.track_controls(frame, state, model)
+  }
+  if which == 5 { return chrome.dock_panel(frame, state) }
+  if which == 6 { return chrome.menu_bar(frame, state) }
+  app.set_open_menu(state, cast.sat(which - 6))
+  chrome.menu_popup(frame, state)
+}
+
+fn panel_name(which: u64) -> string effects {alloc} {
+  if which == 0 { return string.copy("toolbar") }
+  if which == 1 { return string.copy("timeline-bar") }
+  if which == 2 { return string.copy("dock-tabs") }
+  if which == 3 { return string.copy("pool") }
+  if which == 4 { return string.copy("track-headers") }
+  if which == 5 { return string.copy("dock-body") }
+  if which == 6 { return string.copy("menu-bar") }
+  if which == 7 { return string.copy("menu-file") }
+  if which == 8 { return string.copy("menu-edit") }
+  if which == 9 { return string.copy("menu-view") }
+  if which == 10 { return string.copy("menu-project") }
+  string.copy("menu-help")
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process} {
+  if view.len(args) < 2 {
+    say("controls SCRATCH [DOCK_TAB]\n")
+    return 2
+  }
+  let scratch: str = view.get(args, 1)
+  var tab: u32 = 0
+  if view.len(args) >= 3 {
+    let named: string = string.copy(view.get(args, 2))
+    if str.eq(str.view(named), "filters") { tab = chrome.tab_filters() }
+    else if str.eq(str.view(named), "scopes") { tab = chrome.tab_scopes() }
+    else if str.eq(str.view(named), "audio") { tab = chrome.tab_audio() }
+  }
+
+  var baseline: app.App = fixture(scratch)
+  app.set_dock_tab(baseline, tab)
+  say("BASE\t")
+  snapshot(baseline)
+  say("\n")
+
+  // The LAYOUT pass: every panel's rectangles at scroll zero. Overlap is a property of the
+  // layout, and scrolling only translates a column, so it is checked here rather than on the
+  // click rows — which are each captured at whatever scroll brought that row into view.
+  var layout_panel: u64 = 0
+  loop {
+    if layout_panel > 11 { break }
+    var geometry_state: app.App = fixture(scratch)
+    app.set_dock_tab(geometry_state, tab)
+    var rects: array<chrome.Control> = panel_controls(geometry_state, layout_panel)
+    var seat: u64 = 0
+    loop {
+      if seat >= array.len(rects) { break }
+      let entry: ref<chrome.Control> = array.borrow(rects, seat)
+      if struct.get(entry, field=action) != chrome.act_none()
+        and struct.get(entry, field=enabled) {
+        let box: layout.Rect = struct.get(entry, field=area)
+        let named: string = chrome.label_of(entry)
+        let panel_named: string = panel_name(layout_panel)
+        io.write("RECT\t")
+        io.write(str.view(panel_named))
+        io.write("\t")
+        io.write(str.view(named))
+        io.write("\t")
+        let l: i64 = cast.sat(box.left)
+        let t: i64 = cast.sat(box.top)
+        let r: i64 = cast.sat(box.right)
+        let b: i64 = cast.sat(box.bottom)
+        io.write(str.view(string.from_int(l)))
+        io.write(",")
+        io.write(str.view(string.from_int(t)))
+        io.write(",")
+        io.write(str.view(string.from_int(r)))
+        io.write(",")
+        io.write(str.view(string.from_int(b)))
+        io.write("\n")
+      }
+      seat = seat + 1
+    }
+    layout_panel = layout_panel + 1
+  }
+
+  var panel: u64 = 0
+  loop {
+    if panel > 11 { break }
+    // How many controls this panel has, counted on a throwaway fixture.
+    var counter: app.App = fixture(scratch)
+    app.set_dock_tab(counter, tab)
+    var listing: array<chrome.Control> = panel_controls(counter, panel)
+    let total: u64 = array.len(listing)
+    var index: u64 = 0
+    loop {
+      if index >= total { break }
+      var state: app.App = fixture(scratch)
+      app.set_dock_tab(state, tab)
+      // The inspector is taller than its panel. A person scrolls a row into view before
+      // clicking it, so the harness does the same: find where the control sits, scroll it
+      // to the middle of the panel, then rebuild — the list order is stable, only the y
+      // offset moves, so the control is still at this index.
+      if panel == 5 {
+        var probe: array<chrome.Control> = panel_controls(state, panel)
+        if index < array.len(probe) {
+          let frame: layout.Frame = layout.frame(width(), height())
+          let where: f64 = struct.get(struct.get(array.borrow(probe, index), field=area),
+            field=top)
+          let wanted: f64 = where - frame.dock_body.top - layout.height_of(frame.dock_body) * 0.4
+          let _ = app.set_dock_scroll(state, app.dock_scroll(state) + wanted)
+        }
+      }
+      var controls: array<chrome.Control> = panel_controls(state, panel)
+      if index >= array.len(controls) { break }
+      let entry: ref<chrome.Control> = array.borrow(controls, index)
+      let action: u32 = struct.get(entry, field=action)
+      let style: u32 = struct.get(entry, field=style)
+      let area: layout.Rect = struct.get(entry, field=area)
+      let named: string = chrome.label_of(entry)
+      let param: string = chrome.name_of(entry)
+      let kind: string = chrome.kind_of(entry)
+      if action == chrome.act_none() {
+        index = index + 1
+        continue
+      }
+      // A slider is clicked a quarter of the way along, where a person would drag it.
+      let at_x: f64 = if style == chrome.style_slider() {
+          area.left + layout.width_of(area) * 0.25
+        } else { (area.left + area.right) * 0.5 }
+      let at_y: f64 = (area.top + area.bottom) * 0.5
+      var note: string = input.pointer_down(state, width(), height(), at_x, at_y)
+
+      let panel_named: string = panel_name(panel)
+      io.write(str.view(panel_named))
+      io.write("\t")
+      let shown_index: i64 = cast.sat(index)
+      io.write(str.view(string.from_int(shown_index)))
+      io.write("\t")
+      let widened_action: u64 = cast.wrap(action)
+      let shown_action: i64 = cast.sat(widened_action)
+      io.write(str.view(string.from_int(shown_action)))
+      io.write("\t")
+      io.write(str.view(named))
+      io.write("\t")
+      io.write(str.view(kind))
+      io.write("\t")
+      io.write(str.view(param))
+      io.write("\t")
+      let l: i64 = cast.sat(area.left)
+      let t: i64 = cast.sat(area.top)
+      let r: i64 = cast.sat(area.right)
+      let b: i64 = cast.sat(area.bottom)
+      io.write(str.view(string.from_int(l)))
+      io.write(",")
+      io.write(str.view(string.from_int(t)))
+      io.write(",")
+      io.write(str.view(string.from_int(r)))
+      io.write(",")
+      io.write(str.view(string.from_int(b)))
+      io.write("\t")
+      snapshot(state)
+      io.write("\t")
+      io.write(str.view(note))
+      io.write("\n")
+      index = index + 1
+    }
+    panel = panel + 1
+  }
+  0
+}

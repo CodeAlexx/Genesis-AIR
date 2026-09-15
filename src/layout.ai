@@ -1,0 +1,100 @@
+// Panel geometry.
+//
+// One place computes where every panel sits, so painting and hit testing cannot disagree
+// about which pixels belong to which panel — the usual source of "the click did something
+// else than the drawing suggested".
+//
+// The shape is the conventional editor one: a menu and a toolbar across the top, a right
+// dock that carries the inspector tabs, media and the two monitors filling the upper left,
+// and the timeline — its own toolbar, ruler, track headers and lanes — filling the lower
+// left above the status line.
+module genesis.layout
+
+pub type Rect = struct { left: f64, top: f64, right: f64, bottom: f64 }
+
+pub type Frame = struct {
+  menu: Rect,
+  toolbar: Rect,
+  pool: Rect,
+  source: Rect,
+  program: Rect,
+  dock: Rect,
+  dock_tabs: Rect,
+  dock_body: Rect,
+  tbar: Rect,
+  ruler: Rect,
+  headers: Rect,
+  timeline: Rect,
+  status: Rect,
+  width: f64,
+  height: f64
+}
+
+pub fn rect(left: f64, top: f64, right: f64, bottom: f64) -> Rect effects {} {
+  Rect {left: left, top: top, right: right, bottom: bottom}
+}
+
+pub fn contains(area: Rect, x: f64, y: f64) -> bool effects {} {
+  x >= area.left and x < area.right and y >= area.top and y < area.bottom
+}
+pub fn width_of(area: Rect) -> f64 effects {} { area.right - area.left }
+pub fn height_of(area: Rect) -> f64 effects {} { area.bottom - area.top }
+
+// The header column width is also the timeline's left origin, so a clip at frame 0 starts
+// exactly where the track name ends.
+pub fn header_width() -> f64 effects {} { 196.0 }
+
+// The inspector dock is a fixed column: its controls are laid out in rows of a known width,
+// so they must not reflow as the window is resized.
+pub fn dock_width() -> f64 effects {} { 364.0 }
+
+// Every one of these is sized around the type scale in `genesis.view` — a 5x7 stroke font
+// needs about nine pixels of cap height to stay readable, and a row has to be tall enough
+// to hold that plus its padding. Shrinking one without the other is what made the first
+// build unreadable.
+pub fn menu_height() -> f64 effects {} { 26.0 }
+pub fn toolbar_height() -> f64 effects {} { 34.0 }
+pub fn tbar_height() -> f64 effects {} { 30.0 }
+pub fn ruler_height() -> f64 effects {} { 24.0 }
+pub fn status_height() -> f64 effects {} { 26.0 }
+pub fn tab_height() -> f64 effects {} { 26.0 }
+
+pub fn frame(width: f64, height: f64) -> Frame effects {} {
+  let menu_bottom: f64 = menu_height()
+  let toolbar_bottom: f64 = menu_bottom + toolbar_height()
+  let status_top: f64 = height - status_height()
+
+  // The dock keeps its width until the window is too narrow to hold a timeline beside it.
+  var dock_left: f64 = width - dock_width()
+  if dock_left < width * 0.45 { dock_left = width * 0.45 }
+  let work_right: f64 = dock_left - 4.0
+
+  let pool_right: f64 = if work_right * 0.26 < 260.0 { work_right * 0.26 } else { 260.0 }
+  // The monitors take the upper part of the working area; the timeline takes the rest.
+  let monitor_bottom: f64 = toolbar_bottom + (status_top - toolbar_bottom) * 0.46
+  let tbar_top: f64 = monitor_bottom + 4.0
+  let tbar_bottom: f64 = tbar_top + tbar_height()
+  let ruler_top: f64 = tbar_bottom + 2.0
+  let ruler_bottom: f64 = ruler_top + ruler_height()
+  let monitor_width: f64 = (work_right - pool_right - 12.0) * 0.5
+
+  Frame {
+    menu: rect(0.0, 0.0, width, menu_bottom),
+    toolbar: rect(0.0, menu_bottom, width, toolbar_bottom),
+    pool: rect(4.0, toolbar_bottom + 4.0, pool_right, monitor_bottom),
+    source: rect(pool_right + 4.0, toolbar_bottom + 4.0,
+                 pool_right + 4.0 + monitor_width, monitor_bottom),
+    program: rect(pool_right + monitor_width + 8.0, toolbar_bottom + 4.0,
+                  work_right, monitor_bottom),
+    dock: rect(dock_left, toolbar_bottom + 4.0, width - 4.0, status_top - 4.0),
+    dock_tabs: rect(dock_left, toolbar_bottom + 4.0, width - 4.0,
+                    toolbar_bottom + 4.0 + tab_height()),
+    dock_body: rect(dock_left, toolbar_bottom + 4.0 + tab_height(), width - 4.0,
+                    status_top - 4.0),
+    tbar: rect(4.0, tbar_top, work_right, tbar_bottom),
+    ruler: rect(4.0 + header_width(), ruler_top, work_right, ruler_bottom),
+    headers: rect(4.0, ruler_bottom, 4.0 + header_width(), status_top - 4.0),
+    timeline: rect(4.0 + header_width(), ruler_bottom, work_right, status_top - 4.0),
+    status: rect(0.0, status_top, width, height),
+    width: width, height: height}
+}

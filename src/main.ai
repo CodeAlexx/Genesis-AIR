@@ -1,0 +1,472 @@
+// Genesis AIR — a native AIR non-linear editor.
+//
+//   genesis-air render OUT.png [PROJECT]      paint one frame headlessly
+//   genesis-air demo   OUT.png [PROJECT.air]  build a small project, edit it, save, paint
+//   genesis-air open   PROJECT.air            open a window on an existing project
+//   genesis-air new                           open a window on a new project
+//
+// The window path needs a display; every other path is headless, which is what the tests
+// use and what makes this application checkable without a screen.
+module genesis.main
+
+import std.draw as draw
+import std.editor as editor
+import std.files as files
+import std.gui as gui
+import std.image as image
+import std.png_tools as png_tools
+import std.widgets as widgets
+import "app.ai" as app
+import "commands.ai" as commands
+import "chrome.ai" as chrome
+import "input.ai" as input
+import "provider.ai" as provider
+import "view.ai" as painter
+
+fn say(text: str) -> unit effects {io.write} {
+  io.write(text)
+  io.write("\n")
+  ()
+}
+
+fn worker_path() -> string effects {alloc, env} {
+  match env.get("GENESIS_GCOMPOSE") {
+    some(value) => value,
+    none => string.copy("genesis-gcompose"),
+  }
+}
+
+// Choose a provider: gcompose when its worker is present, otherwise the deterministic fake.
+// The application above this line cannot tell which it got.
+fn choose_provider(scratch: str, force_fake: bool) -> provider.Provider effects {alloc, env, fs.meta} {
+  if force_fake { return provider.fake(scratch) }
+  var real: provider.Provider = provider.gcompose(str.view(worker_path()), scratch)
+  if provider.available(real) { return real }
+  provider.fake(scratch)
+}
+
+// Ask the provider for the two monitor images the next repaint needs. The view never does
+// this itself, so painting stays free of media work.
+fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface> effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var out: array<draw.Surface> = array.new()
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let monitor_source: u64 = document.monitor_source
+  let monitor_frame: i64 = struct.get(struct.borrow(document, field=monitor), field=frame)
+  let program_frame: i64 = editor.playhead(document)
+  var source_path: string = string.new()
+  if monitor_source != 0 {
+    match editor.source_slot(document, monitor_source) {
+      some(slot) => { source_path = string.copy(str.view(struct.borrow(
+        array.borrow(struct.borrow(document, field=sources), slot), field=path))) },
+      none => { },
+    }
+  }
+  // Which sources are under the playhead, bottom lane first.
+  var visible: array<string> = array.new()
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      none => { },
+      some(value) => {
+        if value.enabled and value.start <= program_frame and editor.clip_end(value) > program_frame {
+          match editor.source_slot(document, value.source) {
+            some(slot) => { array.push(visible, string.copy(str.view(struct.borrow(
+              array.borrow(struct.borrow(document, field=sources), slot), field=path)))) },
+            none => { },
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  if str.len(str.view(source_path)) != 0 {
+    var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
+      str.view(source_path), monitor_frame, width, height)
+    array.push(out, provider.take_pixels(shot))
+  } else {
+    array.push(out, draw.empty_surface())
+  }
+  var program: provider.Frame = provider.program_frame(struct.borrow(state, field=provider),
+    visible, program_frame, width, height)
+  array.push(out, provider.take_pixels(program))
+  out
+}
+
+// Fill the waveform cache for every audio clip. This is the only place the application asks
+// the provider for envelopes, so painting never does media work.
+fn refresh_waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var wanted: array<u64> = array.new()
+  var paths: array<string> = array.new()
+  var widths: array<u64> = array.new()
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      none => { },
+      some(value) => {
+        if editor.track_kind(document, value.track) == editor.track_audio() {
+          match editor.source_slot(document, value.source) {
+            some(slot) => {
+              array.push(wanted, value.id)
+              array.push(paths, string.copy(str.view(struct.borrow(
+                array.borrow(struct.borrow(document, field=sources), slot), field=path))))
+              let span: i64 = if value.length < 8 { 8 } else { value.length }
+              let widened: u64 = cast.wrap(span)
+              let buckets: u64 = widened / 3
+              array.push(widths, if buckets < 8 { 8 } else { buckets })
+            },
+            none => { },
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  var filled: u64 = 0
+  var at: u64 = 0
+  loop {
+    if at >= array.len(wanted) { break }
+    var peaks: array<f64> = provider.envelope(struct.borrow(state, field=provider),
+      str.view(array.borrow(paths, at)), array.get(widths, at))
+    if array.len(peaks) != 0 {
+      app.set_waveform(state, array.get(wanted, at), peaks)
+      filled = filled + 1
+    }
+    at = at + 1
+  }
+  filled
+}
+
+fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process} {
+  let _ = refresh_waveforms(state)
+  var images: array<draw.Surface> = monitor_images(state, 320, 180)
+  var program_image: draw.Surface = match array.pop(images) {
+    some(value) => value, none => draw.empty_surface(),
+  }
+  var source_image: draw.Surface = match array.pop(images) {
+    some(value) => value, none => draw.empty_surface(),
+  }
+  var surface: draw.Surface = match draw.surface(width, height) {
+    some(value) => value,
+    none => { return false },
+  }
+  var canvas: draw.Canvas = draw.canvas(surface)
+  let wide: u64 = cast.wrap(width)
+  let tall: u64 = cast.wrap(height)
+  painter.paint(state, canvas, cast.float(wide), cast.float(tall), source_image, program_image)
+  var finished: draw.Surface = draw.finish(canvas)
+  var metadata: array<png_tools.TextEntry> = [
+    png_tools.text("Title", "Genesis AIR"),
+    png_tools.text("Renderer", "AIR portable toolkit + std.editor")
+  ]
+  var encoded: bytes = match png_tools.encode_rgba_with_text(finished, metadata) {
+    ok(value) => value,
+    err(problem) => { return false },
+  }
+  match image.write_file(target, bytes.view(encoded)) {
+    ok(written) => true,
+    err(problem) => false,
+  }
+}
+
+// A small but genuine project: media, four tracks, real edits, a transition, keyframes,
+// markers, a subtitle, a filter stack and a mixer change. Every step goes through the
+// command layer, so this is the same path the UI takes.
+fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var wide: commands.Result = commands.import_media(state, "media/wide.mov", "wide_shot.mov")
+  var close: commands.Result = commands.import_media(state, "media/close.mov", "close_up.mov")
+  var voice: commands.Result = commands.import_media(state, "audio:media/vo.wav", "narration.wav")
+  let v1: u64 = app.default_video_track(state)
+  let a1: u64 = app.default_audio_track(state)
+  var first: commands.Result = commands.append_clip(state, v1, wide.value, 0, 150)
+  var second: commands.Result = commands.append_clip(state, v1, close.value, 20, 130)
+  var bed: commands.Result = commands.append_clip(state, a1, voice.value, 0, 260)
+  let _ = commands.select_only(state, first.value)
+  var seam: commands.Result = commands.add_transition(state, v1, 150, 24, "crossfade")
+  var fades: commands.Result = commands.set_fades(state, second.value, 12, 18)
+  var grade: commands.Result = commands.add_filter(state, first.value, "colour_balance")
+  let _ = commands.set_filter_param(state, grade.value, "temperature", 0.2)
+  var sharp: commands.Result = commands.add_filter(state, first.value, "sharpen")
+  let _ = commands.set_key(state, first.value, "opacity", 0, 0.0, 2)
+  let _ = commands.set_key(state, first.value, "opacity", 30, 1.0, 2)
+  let _ = commands.add_marker(state, 150, "cut")
+  let _ = commands.add_subtitle(state, 20, 140, "The river remembers every stone.")
+  let _ = commands.set_track_gain(state, a1, 0.8)
+  let _ = commands.seek(state, 96)
+  let _ = commands.open_source(state, close.value)
+  app.set_status(state, "Demo project")
+  ()
+}
+
+// The windowed application. One repaint per input burst; the document is the only state,
+// so a repaint always shows exactly what the last command did.
+fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, ui} {
+  var window: Window = match gui.open_canvas(title, 1600, 980) {
+    ok(value) => value,
+    err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
+      return 1 },
+  }
+  var dirty: bool = true
+  var pointer_x: f64 = 0.0
+  var pointer_y: f64 = 0.0
+  var control: bool = false
+  var shift: bool = false
+  loop {
+    if not app.running(state) { break }
+    let box: gui.Rect = gui.window_size(window)
+    let width: u32 = if box.width < 640 { 640 } else { box.width }
+    let height: u32 = if box.height < 480 { 480 } else { box.height }
+    if dirty {
+      let _ = refresh_waveforms(state)
+      var images: array<draw.Surface> = monitor_images(state, 320, 180)
+      var program_image: draw.Surface = match array.pop(images) { some(v) => v, none => draw.empty_surface(), }
+      var source_image: draw.Surface = match array.pop(images) { some(v) => v, none => draw.empty_surface(), }
+      match draw.surface(width, height) {
+        none => { },
+        some(target) => {
+          var canvas: draw.Canvas = draw.canvas(target)
+          let w: u64 = cast.wrap(width)
+          let h: u64 = cast.wrap(height)
+          painter.paint(state, canvas, cast.float(w), cast.float(h), source_image, program_image)
+          var finished: draw.Surface = draw.finish(canvas)
+          var pixels: bytes = draw.surface_rgb24(finished, draw.rgb(0, 0, 0))
+          match gui.present(window, bytes.view(pixels), width, height) {
+            ok(shown) => { }, err(problem) => { },
+          }
+        },
+      }
+      dirty = false
+    }
+    var drained: u64 = 0
+    loop {
+      let event: ui.event = gui.wait(window, if drained == 0 { 40 } else { 0 })
+      if event.kind == 0 { break }
+      if event.kind == 1 {
+        app.stop(state)
+        break
+      }
+      match widgets.translate(event) {
+        none => { },
+        some(signal) => {
+          match signal {
+            PointerDown(point) => {
+              let at_x: u64 = cast.wrap(point.x)
+              let at_y: u64 = cast.wrap(point.y)
+              pointer_x = cast.float(at_x)
+              pointer_y = cast.float(at_y)
+              let w: u64 = cast.wrap(width)
+              let h: u64 = cast.wrap(height)
+              var note: string = input.pointer_down(state, cast.float(w), cast.float(h),
+                pointer_x, pointer_y)
+              if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              dirty = true
+            },
+            PointerMove(point) => {
+              let mx: u64 = cast.wrap(point.x)
+              let my: u64 = cast.wrap(point.y)
+              pointer_x = cast.float(mx)
+              pointer_y = cast.float(my)
+              let w: u64 = cast.wrap(width)
+              let h: u64 = cast.wrap(height)
+              if input.pointer_hover(state, cast.float(w), cast.float(h), pointer_x, pointer_y) {
+                dirty = true
+              }
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
+                var moving: string = input.pointer_move(state, cast.float(w), cast.float(h),
+                  pointer_x, pointer_y)
+                if str.len(str.view(moving)) != 0 {
+                  app.set_status(state, str.view(moving))
+                  dirty = true
+                }
+              }
+            },
+            Scroll(wheel) => {
+              let w: u64 = cast.wrap(width)
+              let h: u64 = cast.wrap(height)
+              let wheel_x: u64 = cast.wrap(wheel.x)
+              let wheel_y: u64 = cast.wrap(wheel.y)
+              var note: string = input.wheel(state, cast.float(w), cast.float(h),
+                cast.float(wheel_x), cast.float(wheel_y),
+                wheel.down, wheel.lines, control)
+              if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              dirty = true
+            },
+            Key(press) => {
+              control = press.control
+              shift = press.shift
+              // The window owns the canvas, so a committed "render" prompt is performed
+              // here rather than in the input layer.
+              if input.prompt_is_render(state) and press.code == widgets.key_return() {
+                var where: string = app.prompt_text(state)
+                app.end_prompt(state)
+                if str.len(str.view(where)) == 0 {
+                  app.set_status(state, "cancelled")
+                } else {
+                  match gui.screenshot(window, str.view(where)) {
+                    ok(written) => { var said: string = string.copy("wrote ")
+                      string.append(said, str.view(where))
+                      app.set_status(state, str.view(said)) },
+                    err(problem) => { app.set_status(state, "the still could not be written") },
+                  }
+                }
+              } else {
+                var note: string = input.key(state, press.code, press.control, press.shift)
+                if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              }
+              dirty = true
+            },
+            Resize(extent) => { dirty = true },
+            Tick => { },
+            PointerUp(point) => {
+              let ux: u64 = cast.wrap(point.x)
+              let uy: u64 = cast.wrap(point.y)
+              pointer_x = cast.float(ux)
+              pointer_y = cast.float(uy)
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
+                let w: u64 = cast.wrap(width)
+                let h: u64 = cast.wrap(height)
+                var released: string = input.pointer_up(state, cast.float(w), cast.float(h),
+                  pointer_x, pointer_y)
+                if str.len(str.view(released)) != 0 {
+                  app.set_status(state, str.view(released))
+                }
+                dirty = true
+              }
+            },
+            Text(entry) => { },
+            Progress(step) => { },
+          }
+        },
+      }
+      drained = drained + 1
+      if drained > 64 { break }
+    }
+  }
+  gui.close(window)
+  0
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, ui} {
+  if view.len(args) < 2 {
+    say("genesis-air render OUT.png [PROJECT]")
+    say("genesis-air demo   OUT.png [PROJECT.air]")
+    say("genesis-air open   PROJECT.air")
+    say("genesis-air new")
+    return 2
+  }
+  let verb: str = view.get(args, 1)
+  let force_fake: bool = match env.get("GENESIS_FAKE_PROVIDER") { some(value) => true, none => false, }
+  var scratch: string = string.copy("/tmp/genesis-air")
+  match env.get("GENESIS_SCRATCH") { some(value) => { scratch = value }, none => { }, }
+  var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
+  var state: app.App = app.app(engine)
+  // Which inspector tab a headless render shows, so every panel is checkable without a
+  // screen. The window path starts on Properties like any other launch.
+  match env.get("GENESIS_TAB") {
+    some(value) => {
+      let named: string = value
+      if str.eq(str.view(named), "filters") { app.set_dock_tab(state, chrome.tab_filters()) }
+      else if str.eq(str.view(named), "scopes") { app.set_dock_tab(state, chrome.tab_scopes()) }
+      else if str.eq(str.view(named), "audio") { app.set_dock_tab(state, chrome.tab_audio()) }
+    },
+    none => { },
+  }
+
+  if str.eq(verb, "render") {
+    if view.len(args) < 3 { say("render needs an output path")
+      return 2 }
+    if view.len(args) >= 4 {
+      var opened: commands.Result = commands.open_project(state, view.get(args, 3))
+      if not opened.ok { say(str.view(commands.message(opened)))
+        return 1 }
+    }
+    if not render_to(state, view.get(args, 2), 1600, 980) {
+      say("the frame could not be written")
+      return 1
+    }
+    say("Genesis AIR frame written")
+    return 0
+  }
+
+  if str.eq(verb, "demo") {
+    if view.len(args) < 3 { say("demo needs an output path")
+      return 2 }
+    build_demo(state)
+    if view.len(args) >= 4 {
+      var saved: commands.Result = commands.save_project(state, view.get(args, 3))
+      if not saved.ok { say(str.view(commands.message(saved)))
+        return 1 }
+      say("project saved")
+    }
+    if not render_to(state, view.get(args, 2), 1600, 980) {
+      say("the frame could not be written")
+      return 1
+    }
+    say("Genesis AIR demo frame written")
+    return 0
+  }
+
+  // A bounded real-media check: open a source, read its length, pull one source frame and
+  // one program frame through the provider, and write the composed editor frame. This is
+  // the whole media path, on one file, with no render.
+  if str.eq(verb, "probe") {
+    if view.len(args) < 4 { say("probe needs a media path and an output path")
+      return 2 }
+    let media: str = view.get(args, 2)
+    say(str.view(provider.describe(struct.borrow(state, field=provider))))
+    var imported: commands.Result = commands.import_media(state, media, "fixture")
+    if not imported.ok { say(str.view(commands.message(imported)))
+      return 1 }
+    let frames: i64 = editor.source_frames(struct.borrow(state, field=document), imported.value)
+    io.write("frames ")
+    io.write(str.view(string.from_int(frames)))
+    io.write("\n")
+    if frames <= 0 { say("the provider could not determine the source length")
+      return 1 }
+    let track: u64 = app.default_video_track(state)
+    let length: i64 = if frames < 24 { frames } else { 24 }
+    var placed: commands.Result = commands.append_clip(state, track, imported.value, 0, length)
+    if not placed.ok { say(str.view(commands.message(placed)))
+      return 1 }
+    let _ = commands.open_source(state, imported.value)
+    let _ = commands.seek(state, 0)
+    // One source frame and one program frame, through the seam.
+    var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
+      media, 0, 320, 180)
+    io.write("source_frame ")
+    io.write(if provider.frame_ok(shot) { "ok" } else { "failed" })
+    io.write("\n")
+    if not render_to(state, view.get(args, 3), 1600, 980) {
+      say("the frame could not be written")
+      return 1
+    }
+    let calls: i64 = cast.sat(provider.calls(struct.borrow(state, field=provider)))
+    let failed: i64 = cast.sat(provider.failures(struct.borrow(state, field=provider)))
+    io.write("provider_calls ")
+    io.write(str.view(string.from_int(calls)))
+    io.write("\nprovider_failures ")
+    io.write(str.view(string.from_int(failed)))
+    io.write("\n")
+    say("Genesis AIR probe complete")
+    return 0
+  }
+
+  if str.eq(verb, "open") {
+    if view.len(args) < 3 { say("open needs a project path")
+      return 2 }
+    var opened: commands.Result = commands.open_project(state, view.get(args, 2))
+    if not opened.ok { say(str.view(commands.message(opened)))
+      return 1 }
+    return run_window(state, "Genesis AIR")
+  }
+
+  if str.eq(verb, "new") {
+    build_demo(state)
+    return run_window(state, "Genesis AIR")
+  }
+
+  say("unknown command")
+  2
+}
