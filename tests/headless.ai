@@ -362,6 +362,65 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_b("toolbar_built", array.len(toolbar) > 10)
   emit_b("toolbar_has_undo", found_action(toolbar, chrome.act_undo()))
 
+  // Menus open and switch on hover, items highlight on hover, and the first heading press
+  // opens rather than toggling the menu away. A popup item dispatches then closes it.
+  var menus: array<chrome.Control> = chrome.menu_bar(chrome_frame, state)
+  emit_b("menu_headings_built", array.len(menus) == 5)
+  let file_area: layout.Rect = struct.get(array.borrow(menus, 0), field=area)
+  let _ = input.pointer_hover(state, 1600.0, 980.0,
+    (file_area.left + file_area.right) * 0.5, (file_area.top + file_area.bottom) * 0.5)
+  emit_b("menu_opens_on_hover", app.open_menu(state) == chrome.menu_file())
+  let help_slot: u64 = cast.wrap(chrome.menu_help() - 1)
+  let help_area: layout.Rect = struct.get(array.borrow(menus, help_slot), field=area)
+  let _ = input.pointer_hover(state, 1600.0, 980.0,
+    (help_area.left + help_area.right) * 0.5, (help_area.top + help_area.bottom) * 0.5)
+  emit_b("menu_switches_on_hover", app.open_menu(state) == chrome.menu_help())
+  var hovered_help: array<chrome.Control> = chrome.menu_popup(chrome_frame, state)
+  let about_area: layout.Rect = struct.get(array.borrow(hovered_help, 0), field=area)
+  let _ = input.pointer_hover(state, 1600.0, 980.0,
+    (about_area.left + about_area.right) * 0.5, (about_area.top + about_area.bottom) * 0.5)
+  emit_b("menu_item_hovers", app.hovered(state, chrome.act_about(), 0))
+  app.close_menu(state)
+  var help_opened: string = click_action(state, menus, help_slot)
+  emit_b("menu_first_click_opens", app.open_menu(state) == chrome.menu_help())
+  var help: array<chrome.Control> = chrome.menu_popup(chrome_frame, state)
+  emit_b("menu_popup_has_about", found_action(help, chrome.act_about()))
+  var about: string = click_action(state, help, 0)
+  emit_b("menu_item_reports", str.len(str.view(about)) != 0)
+  emit_b("menu_closes_after_item", app.open_menu(state) == chrome.menu_none())
+
+  // Wheel routing uses the wheel event's own point, not whichever panel was clicked last.
+  // The same scrollbar geometry used for painting drives track paging and thumb dragging.
+  app.set_dock_tab(state, chrome.tab_properties())
+  app.set_focus(state, app.panel_timeline())
+  let dock_x: f64 = chrome_frame.dock_body.right - 30.0
+  let dock_y: f64 = chrome_frame.dock_body.top + 80.0
+  let scroll_max: f64 = chrome.dock_scroll_max(chrome_frame, state)
+  emit_b("dock_scrollbar_present", scroll_max > 0.0)
+  var wheel_note: string = input.wheel(state, 1600.0, 980.0, dock_x, dock_y,
+    true, 3, false)
+  let after_wheel: f64 = app.dock_scroll(state)
+  emit_b("dock_wheel_uses_pointer", after_wheel > 0.0 and app.focus(state) == app.panel_dock())
+  let _ = input.wheel(state, 1600.0, 980.0, dock_x, dock_y, false, 1, false)
+  emit_b("dock_wheel_scrolls_up", app.dock_scroll(state) < after_wheel)
+
+  let _ = app.set_dock_scroll(state, 0.0)
+  let thumb: layout.Rect = chrome.dock_scroll_thumb(chrome_frame, state)
+  let thumb_x: f64 = (thumb.left + thumb.right) * 0.5
+  let thumb_y: f64 = (thumb.top + thumb.bottom) * 0.5
+  let _ = input.pointer_down(state, 1600.0, 980.0, thumb_x, thumb_y)
+  emit_b("dock_thumb_press_starts_drag", app.dock_scroll_dragging(state))
+  let _ = input.pointer_move(state, 1600.0, 980.0, thumb_x, thumb_y + 100.0)
+  emit_b("dock_thumb_drag_scrolls", app.dock_scroll(state) > 0.0)
+  let _ = input.pointer_up(state, 1600.0, 980.0, thumb_x, thumb_y + 100.0)
+  emit_b("dock_thumb_release_stops_drag", not app.dock_scroll_dragging(state))
+
+  let _ = app.set_dock_scroll(state, 0.0)
+  let track: layout.Rect = chrome.dock_scroll_track(chrome_frame)
+  let _ = input.pointer_down(state, 1600.0, 980.0,
+    (track.left + track.right) * 0.5, track.bottom - 4.0)
+  emit_b("dock_track_click_pages", app.dock_scroll(state) > 0.0)
+
   var tbar: array<chrome.Control> = chrome.timeline_bar(chrome_frame, state)
   emit_b("tbar_has_split", found_action(tbar, chrome.act_split()))
   emit_b("tbar_has_snap", found_action(tbar, chrome.act_snap()))

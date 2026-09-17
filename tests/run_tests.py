@@ -117,6 +117,21 @@ EXPECTED = {
     # prove that painting and dispatch share one geometry rather than two that agree today.
     "toolbar_built": "true",
     "toolbar_has_undo": "true",
+    "menu_headings_built": "true",
+    "menu_opens_on_hover": "true",
+    "menu_switches_on_hover": "true",
+    "menu_item_hovers": "true",
+    "menu_first_click_opens": "true",
+    "menu_popup_has_about": "true",
+    "menu_item_reports": "true",
+    "menu_closes_after_item": "true",
+    "dock_scrollbar_present": "true",
+    "dock_wheel_uses_pointer": "true",
+    "dock_wheel_scrolls_up": "true",
+    "dock_thumb_press_starts_drag": "true",
+    "dock_thumb_drag_scrolls": "true",
+    "dock_thumb_release_stops_drag": "true",
+    "dock_track_click_pages": "true",
     "tbar_has_split": "true",
     "tbar_has_snap": "true",
     "dock_tab_after_click": "1",          # chrome.tab_filters()
@@ -312,8 +327,9 @@ def main():
     args = parser.parse_args()
 
     config = sdk_config()
-    stdlib = Path(args.stdlib or (config["AIR_SDK"] + "/stdlib"))
-    airc = Path(args.airc or (config["AIR_TOOLCHAIN"] + "/build-dev/bin/airc"))
+    stdlib = Path(args.stdlib) if args.stdlib else (PROJECT / config["AIR_SDK"] / "stdlib").resolve()
+    airc = Path(args.airc) if args.airc else (
+        PROJECT / config["AIR_TOOLCHAIN"] / "build-dev/bin/airc").resolve()
     binary = Path(args.binary or (PROJECT / "build/genesis-air"))
 
     print(f"genesis-air tests   AIR {config['AIR_SDK_COMMIT'][:12]}   stdlib {stdlib}")
@@ -332,8 +348,7 @@ def main():
     else:
         print(f"  BLOCKED render smoke: build it first ({binary})")
 
-    worker = Path(os.environ.get("GENESIS_GCOMPOSE",
-                                 "/home/alex/mojodiffusion/output/bin/genesis-gcompose"))
+    worker = Path(os.environ.get("GENESIS_GCOMPOSE", "genesis-gcompose"))
     if not binary.exists():
         print("  BLOCKED gcompose smoke: no application binary")
     elif not worker.exists():

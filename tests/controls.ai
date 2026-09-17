@@ -183,7 +183,10 @@ fn panel_controls(state: ref<app.App>, which: u64) -> array<chrome.Control> effe
     var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
     return chrome.track_controls(frame, state, model)
   }
-  chrome.dock_panel(frame, state)
+  if which == 5 { return chrome.dock_panel(frame, state) }
+  if which == 6 { return chrome.menu_bar(frame, state) }
+  app.set_open_menu(state, cast.sat(which - 6))
+  chrome.menu_popup(frame, state)
 }
 
 fn panel_name(which: u64) -> string effects {alloc} {
@@ -192,7 +195,13 @@ fn panel_name(which: u64) -> string effects {alloc} {
   if which == 2 { return string.copy("dock-tabs") }
   if which == 3 { return string.copy("pool") }
   if which == 4 { return string.copy("track-headers") }
-  string.copy("dock-body")
+  if which == 5 { return string.copy("dock-body") }
+  if which == 6 { return string.copy("menu-bar") }
+  if which == 7 { return string.copy("menu-file") }
+  if which == 8 { return string.copy("menu-edit") }
+  if which == 9 { return string.copy("menu-view") }
+  if which == 10 { return string.copy("menu-project") }
+  string.copy("menu-help")
 }
 
 pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process} {
@@ -220,7 +229,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   // click rows — which are each captured at whatever scroll brought that row into view.
   var layout_panel: u64 = 0
   loop {
-    if layout_panel > 5 { break }
+    if layout_panel > 11 { break }
     var geometry_state: app.App = fixture(scratch)
     app.set_dock_tab(geometry_state, tab)
     var rects: array<chrome.Control> = panel_controls(geometry_state, layout_panel)
@@ -258,7 +267,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
 
   var panel: u64 = 0
   loop {
-    if panel > 5 { break }
+    if panel > 11 { break }
     // How many controls this panel has, counted on a throwaway fixture.
     var counter: app.App = fixture(scratch)
     app.set_dock_tab(counter, tab)

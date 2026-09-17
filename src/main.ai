@@ -32,7 +32,7 @@ fn say(text: str) -> unit effects {io.write} {
 fn worker_path() -> string effects {alloc, env} {
   match env.get("GENESIS_GCOMPOSE") {
     some(value) => value,
-    none => string.copy("/home/alex/mojodiffusion/output/bin/genesis-gcompose"),
+    none => string.copy("genesis-gcompose"),
   }
 }
 
@@ -268,9 +268,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               let my: u64 = cast.wrap(point.y)
               pointer_x = cast.float(mx)
               pointer_y = cast.float(my)
-              if app.gesture_kind(state) != app.drag_none() {
-                let w: u64 = cast.wrap(width)
-                let h: u64 = cast.wrap(height)
+              let w: u64 = cast.wrap(width)
+              let h: u64 = cast.wrap(height)
+              if input.pointer_hover(state, cast.float(w), cast.float(h), pointer_x, pointer_y) {
+                dirty = true
+              }
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
                 var moving: string = input.pointer_move(state, cast.float(w), cast.float(h),
                   pointer_x, pointer_y)
                 if str.len(str.view(moving)) != 0 {
@@ -280,7 +283,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               }
             },
             Scroll(wheel) => {
-              var note: string = input.wheel(state, wheel.down, wheel.lines, control)
+              let w: u64 = cast.wrap(width)
+              let h: u64 = cast.wrap(height)
+              let wheel_x: u64 = cast.wrap(wheel.x)
+              let wheel_y: u64 = cast.wrap(wheel.y)
+              var note: string = input.wheel(state, cast.float(w), cast.float(h),
+                cast.float(wheel_x), cast.float(wheel_y),
+                wheel.down, wheel.lines, control)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               dirty = true
             },
@@ -315,7 +324,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               let uy: u64 = cast.wrap(point.y)
               pointer_x = cast.float(ux)
               pointer_y = cast.float(uy)
-              if app.gesture_kind(state) != app.drag_none() {
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
                 let w: u64 = cast.wrap(width)
                 let h: u64 = cast.wrap(height)
                 var released: string = input.pointer_up(state, cast.float(w), cast.float(h),

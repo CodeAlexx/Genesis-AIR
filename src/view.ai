@@ -105,18 +105,11 @@ fn number(value: i64) -> string effects {alloc} { string.from_int(value) }
 // Panels
 
 fn paint_menu(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
-              area: layout.Rect) -> unit effects {alloc} {
+              frame: layout.Frame) -> unit effects {alloc} {
+  let area: layout.Rect = frame.menu
   fill(canvas, area, colors.panel_head)
-  var x: f64 = 10.0
-  var entries: array<string> = ["File", "Edit", "View", "Project", "Help"]
-  var index: u64 = 0
-  loop {
-    if index >= array.len(entries) { break }
-    let text: str = str.view(array.borrow(entries, index))
-    label(canvas, x, 8.0, text, type_title(), colors.text)
-    x = x + 22.0 + font.text_vector_width(text, type_title())
-    index = index + 1
-  }
+  var controls: array<chrome.Control> = chrome.menu_bar(frame, state)
+  paint_controls(canvas, colors, controls)
   var title: string = string.copy("Genesis AIR    ")
   let where: string = app.project_path(state)
   if str.len(str.view(where)) == 0 { string.append(title, "untitled") }
@@ -848,17 +841,14 @@ fn paint_dock(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   }
   draw.restore(canvas, saved)
 
-  // A scroll indicator, so a long inspector does not look like a short one.
-  if which != chrome.tab_scopes() {
-    var controls: array<chrome.Control> = chrome.dock_panel(frame, state)
-    let extent: f64 = chrome.panel_extent(controls, body) + app.dock_scroll(state)
-    let visible: f64 = layout.height_of(body)
-    if extent > visible {
-      let portion: f64 = visible / extent
-      let offset: f64 = app.dock_scroll(state) / extent
-      fill_at(canvas, body.right - 4.0, body.top + visible * offset, body.right - 1.0,
-        body.top + visible * offset + visible * portion, colors.edge)
-    }
+  // A full mouse scrollbar: the geometry comes from `chrome`, where input gets it too.
+  if which != chrome.tab_scopes() and chrome.dock_scroll_max(frame, state) > 0.0 {
+    let track: layout.Rect = chrome.dock_scroll_track(frame)
+    let thumb: layout.Rect = chrome.dock_scroll_thumb(frame, state)
+    fill(canvas, track, draw.rgb(19, 21, 26))
+    outline(canvas, track, colors.edge)
+    fill(canvas, thumb, if app.dock_scroll_dragging(state) { colors.focus } else { colors.dim })
+    outline(canvas, thumb, colors.edge)
   }
   ()
 }
@@ -871,7 +861,7 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   let colors: Theme = theme()
   let frame: layout.Frame = layout.frame(width, height)
   draw.clear(canvas, colors.background)
-  paint_menu(canvas, colors, state, frame.menu)
+  paint_menu(canvas, colors, state, frame)
   paint_toolbar(canvas, colors, state, frame)
   paint_pool(canvas, colors, state, frame)
 
@@ -907,6 +897,9 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   paint_controls(canvas, colors, track_buttons)
   draw.restore(canvas, saved)
   paint_status(canvas, colors, state, frame.status)
+  // Menus are painted last because their popup deliberately overlays the toolbar and panels.
+  var menu: array<chrome.Control> = chrome.menu_popup(frame, state)
+  paint_controls(canvas, colors, menu)
   app.count_paint(state)
   ()
 }

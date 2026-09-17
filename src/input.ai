@@ -37,6 +37,7 @@ fn character(code: u32) -> string effects {alloc} {
 // Which panel a point belongs to, so a keystroke reaches the panel a person is pointing at.
 pub fn panel_at(width: f64, height: f64, x: f64, y: f64) -> u32 effects {} {
   let frame: layout.Frame = layout.frame(width, height)
+  if layout.contains(frame.menu, x, y) { return app.panel_menu() }
   if layout.contains(frame.toolbar, x, y) { return app.panel_toolbar() }
   if layout.contains(frame.dock, x, y) { return app.panel_dock() }
   if layout.contains(frame.pool, x, y) { return app.panel_pool() }
@@ -79,6 +80,23 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   let step: f64 = struct.get(control, field=step)
   let name: string = chrome.name_of(control)
   let kind: string = chrome.kind_of(control)
+
+  if action == chrome.act_menu() {
+    let which: u32 = cast.sat(target)
+    app.set_open_menu(state, which)
+    let _ = app.set_hover(state, action, target)
+    var named: string = chrome.menu_name(which)
+    string.append(named, " menu")
+    return named
+  }
+  app.close_menu(state)
+  if action == chrome.act_quit() {
+    app.stop(state)
+    return note("Closing Genesis AIR")
+  }
+  if action == chrome.act_about() {
+    return note("Genesis AIR — native nonlinear editor written in AIR")
+  }
 
   // ---- project ----
   if action == chrome.act_new() {
@@ -404,10 +422,84 @@ fn perform_slider(state: ref<app.App>, control: ref<chrome.Control>,
 
 fn edge_zone() -> f64 effects {} { 7.0 }
 
+// Menu hover is separate from timeline dragging. It opens the heading under the pointer,
+// switches between headings without another click, and highlights the item under the pointer.
+// The bool lets the window repaint only when visible hover state actually changed.
+pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
+                     y: f64) -> bool effects {alloc} {
+  let frame: layout.Frame = layout.frame(width, height)
+  var menus: array<chrome.Control> = chrome.menu_bar(frame, state)
+  match chrome.hit(menus, x, y) {
+    some(index) => {
+      let entry: ref<chrome.Control> = array.borrow(menus, index)
+      let target: u64 = struct.get(entry, field=target)
+      let which: u32 = cast.sat(target)
+      let menu_changed: bool = app.open_menu(state) != which
+      app.set_open_menu(state, which)
+      let hover_changed: bool = app.set_hover(state, chrome.act_menu(), target)
+      return menu_changed or hover_changed
+    },
+    none => { },
+  }
+  var popup: array<chrome.Control> = chrome.menu_popup(frame, state)
+  match chrome.hit(popup, x, y) {
+    some(index) => {
+      let entry: ref<chrome.Control> = array.borrow(popup, index)
+      return app.set_hover(state, struct.get(entry, field=action),
+        struct.get(entry, field=target))
+    },
+    none => { },
+  }
+  app.clear_hover(state)
+}
+
 pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
   let frame: layout.Frame = layout.frame(width, height)
   app.set_focus(state, panel_at(width, height, x, y))
+
+  // The open popup is topmost, followed by the menu headings themselves. A click elsewhere
+  // closes the menu without falling through to a covered toolbar or timeline control.
+  var popup: array<chrome.Control> = chrome.menu_popup(frame, state)
+  match chrome.hit(popup, x, y) {
+    some(index) => {
+      app.set_focus(state, app.panel_menu())
+      return perform(state, array.borrow(popup, index), width, height)
+    },
+    none => { },
+  }
+  var menus: array<chrome.Control> = chrome.menu_bar(frame, state)
+  match chrome.hit(menus, x, y) {
+    some(index) => {
+      app.set_focus(state, app.panel_menu())
+      return perform(state, array.borrow(menus, index), width, height)
+    },
+    none => { },
+  }
+  if app.open_menu(state) != chrome.menu_none() {
+    app.close_menu(state)
+    return note("menu closed")
+  }
+
+  // The inspector scrollbar is above the scrolling controls. Pressing its track pages;
+  // pressing its thumb starts a drag handled by pointer_move/pointer_up.
+  let scroll_max: f64 = chrome.dock_scroll_max(frame, state)
+  let scroll_track: layout.Rect = chrome.dock_scroll_track(frame)
+  if scroll_max > 0.0 and layout.contains(scroll_track, x, y) {
+    app.set_focus(state, app.panel_dock())
+    let thumb: layout.Rect = chrome.dock_scroll_thumb(frame, state)
+    if layout.contains(thumb, x, y) {
+      app.begin_dock_scroll_drag(state, y - thumb.top)
+      return note("Drag to scroll inspector")
+    }
+    let page: f64 = layout.height_of(frame.dock_body) * 0.8
+    let now: f64 = app.dock_scroll(state)
+    var next: f64 = if y < thumb.top { now - page } else { now + page }
+    if next < 0.0 { next = 0.0 }
+    if next > scroll_max { next = scroll_max }
+    let _ = app.set_dock_scroll(state, next)
+    return note("Inspector scrolled")
+  }
 
   var bar: array<chrome.Control> = chrome.toolbar(frame, state)
   match chrome.hit(bar, x, y) {
@@ -501,6 +593,19 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
 // so the whole gesture becomes ONE undo step.
 pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc} {
+  if app.dock_scroll_dragging(state) {
+    let frame: layout.Frame = layout.frame(width, height)
+    let track: layout.Rect = chrome.dock_scroll_track(frame)
+    let thumb: layout.Rect = chrome.dock_scroll_thumb(frame, state)
+    let maximum: f64 = chrome.dock_scroll_max(frame, state)
+    let travel: f64 = layout.height_of(track) - layout.height_of(thumb)
+    if maximum <= 0.0 or travel <= 0.0 { return note("") }
+    var position: f64 = y - track.top - app.dock_scroll_drag_offset(state)
+    if position < 0.0 { position = 0.0 }
+    if position > travel { position = travel }
+    let _ = app.set_dock_scroll(state, maximum * position / travel)
+    return note("Inspector scrolled")
+  }
   if app.gesture_kind(state) == app.drag_none() { return note("") }
   let frame: layout.Frame = layout.frame(width, height)
   var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
@@ -520,6 +625,10 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
                   y: f64) -> string effects {alloc} {
+  if app.dock_scroll_dragging(state) {
+    app.end_dock_scroll_drag(state)
+    return note("Inspector scrolled")
+  }
   let kind: u32 = app.gesture_kind(state)
   if kind == app.drag_none() { return note("") }
   if not app.gesture_moved(state) {
@@ -559,14 +668,21 @@ pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 // A wheel: over the dock it scrolls the inspector; over the timeline it zooms with control
 // held and scrolls otherwise.
-pub fn wheel(state: ref<app.App>, down: bool, lines: u32, zooming: bool) -> string effects {alloc} {
-  if app.focus(state) == app.panel_dock() {
+pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
+             down: bool, lines: u32, zooming: bool) -> string effects {alloc} {
+  let frame: layout.Frame = layout.frame(width, height)
+  if layout.contains(frame.dock, x, y) {
+    app.set_focus(state, app.panel_dock())
     let rows: u32 = if lines == 0 { 1 } else { lines }
     let widened: u64 = cast.wrap(rows)
     let step: f64 = 24.0 * cast.float(widened)
     let now: f64 = app.dock_scroll(state)
-    let _ = app.set_dock_scroll(state, if down { now + step } else { now - step })
-    return note("")
+    let maximum: f64 = chrome.dock_scroll_max(frame, state)
+    var next: f64 = if down { now + step } else { now - step }
+    if next < 0.0 { next = 0.0 }
+    if next > maximum { next = maximum }
+    let _ = app.set_dock_scroll(state, next)
+    return note("Inspector scrolled")
   }
   if zooming {
     let now: f64 = app.zoom(state)
