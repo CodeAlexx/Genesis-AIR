@@ -240,7 +240,8 @@ python3 tests/real_media.py --binary build/genesis-air \
   and saves its project.
 - **Real media**: the worker probe reads frame count, size, frame rate and audio presence;
   the preview and MP4 paths compose three colored clips in track order, add a timed caption,
-  apply a touching-cut crossfade, and check gamma, sepia, and vignette pixels,
+  apply a touching-cut crossfade, and check gamma, sepia, vignette, levels, crop,
+  and keyed overlay pixels,
   export an audio-only timeline, retime and reverse a rising tone, keep freeze-frame
   audio silent, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
@@ -255,6 +256,8 @@ python3 tests/real_media.py --binary build/genesis-air \
   unsupported video filters, and keyframed effects other than opacity are refused by
   preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
   parameter is shown as release time because that is the behavior `agate` implements.
+  Cropping currently supports equal margins, and the worker supports eight of the
+  twelve blend modes shown in the inspector; unsupported values fail explicitly.
   The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.

@@ -180,7 +180,16 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
   } else if str.eq(str.view(kind), "hue") and not overlay {
     put_f(values, 51, editor.filter_param(doc, filter, "shift", 0.0))
   } else if str.eq(str.view(kind), "gamma") and not overlay {
+    if not str.eq(str.view(array.borrow(values, 56)), "1") { return false }
     put_f(values, 56, editor.filter_param(doc, filter, "level", 1.0))
+  } else if str.eq(str.view(kind), "levels") and not overlay {
+    if not str.eq(str.view(array.borrow(values, 56)), "1") { return false }
+    let black: f64 = editor.filter_param(doc, filter, "black", 0.0)
+    let white: f64 = editor.filter_param(doc, filter, "white", 1.0)
+    if black >= white { return false }
+    put_f(values, 54, black)
+    put_f(values, 55, white)
+    put_f(values, 56, editor.filter_param(doc, filter, "gamma", 1.0))
   } else if str.eq(str.view(kind), "vignette") and not overlay {
     if editor.filter_param(doc, filter, "softness", 0.5) != 0.5 { return false }
     put_f(values, 47, editor.filter_param(doc, filter, "amount", 0.4))
@@ -213,6 +222,32 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     }
   } else if str.eq(str.view(kind), "denoise") and not overlay {
     put_f(values, 65, editor.filter_param(doc, filter, "amount", 0.3))
+  } else if str.eq(str.view(kind), "crop") and not overlay {
+    let left: f64 = editor.filter_param(doc, filter, "left", 0.0)
+    let top: f64 = editor.filter_param(doc, filter, "top", 0.0)
+    let right: f64 = editor.filter_param(doc, filter, "right", 0.0)
+    let bottom: f64 = editor.filter_param(doc, filter, "bottom", 0.0)
+    if left != top or left != right or left != bottom { return false }
+    put_f(values, 79, left)
+  } else if str.eq(str.view(kind), "chroma_key") and overlay {
+    let degrees: f64 = editor.filter_param(doc, filter, "hue", 120.0)
+    if degrees < 0.0 or degrees > 360.0 { return false }
+    let hue: f64 = if degrees == 360.0 { 0.0 } else { degrees }
+    let sector: i64 = cast.sat(math.floor(hue / 60.0))
+    let part: f64 = hue / 60.0 - cast.float(sector)
+    let middle: f64 = 1.0 - part
+    let red: f64 = if sector == 0 or sector == 5 { 1.0 }
+      else if sector == 1 { middle } else if sector == 4 { part } else { 0.0 }
+    let green: f64 = if sector == 1 or sector == 2 { 1.0 }
+      else if sector == 0 { part } else if sector == 3 { middle } else { 0.0 }
+    let blue: f64 = if sector == 3 or sector == 4 { 1.0 }
+      else if sector == 2 { part } else if sector == 5 { middle } else { 0.0 }
+    put(values, 36, "1")
+    put_f(values, 37, red)
+    put_f(values, 38, green)
+    put_f(values, 39, blue)
+    put_f(values, 40, editor.filter_param(doc, filter, "tolerance", 0.25))
+    put_f(values, 41, editor.filter_param(doc, filter, "softness", 0.10))
   } else if str.eq(str.view(kind), "white_balance") and not overlay {
     if editor.filter_param(doc, filter, "tint", 0.0) != 0.0 { return false }
     put_f(values, 100, editor.filter_param(doc, filter, "temperature", 0.0))

@@ -86,8 +86,9 @@ def main():
     args.stdlib = args.stdlib.resolve()
     with TemporaryDirectory(prefix="genesis-air-real-") as temporary:
         root = Path(temporary)
-        red, blue, green, gray = (root / name for name in (
-            "red clip.mp4", "blue clip.mp4", "green clip.mp4", "gray clip.mp4"))
+        red, blue, green, gray, key_green = (root / name for name in (
+            "red clip.mp4", "blue clip.mp4", "green clip.mp4", "gray clip.mp4",
+            "key-green.mp4"))
         run(["ffmpeg", "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30",
              "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
@@ -105,6 +106,10 @@ def main():
              "-f", "lavfi", "-i", "color=c=gray:s=320x180:r=30",
              "-t", "0.4", "-c:v", "libx264", "-preset", "ultrafast",
              "-pix_fmt", "yuv420p", gray])
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=0x00ff00:s=320x180:r=30",
+             "-t", "0.4", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", key_green])
         env = dict(os.environ, AIR_STDLIB=str(args.stdlib),
                    GENESIS_GCOMPOSE=str(args.worker),
                    GENESIS_SCRATCH=str(root / "scratch"),
@@ -256,6 +261,35 @@ def main():
         vignette_preview = root / "vignette.png"
         run([args.binary, "preview", vignette_preview, grade_project], env)
         assert pixel(vignette_preview, 30, 30)[0] < pixel(plain_grade, 30, 30)[0] - 20
+        graded["filters"][0]["kind"] = "levels"
+        graded["filter_params"] = [dict(filter=11, name="white", value=0.7)]
+        grade_project.write_text(json.dumps(graded))
+        levels_preview = root / "levels.png"
+        run([args.binary, "preview", levels_preview, grade_project], env)
+        assert pixel(levels_preview, 320, 180)[0] > original_gray + 20
+        graded["filters"][0]["kind"] = "crop"
+        graded["filter_params"] = [dict(filter=11, name=edge, value=0.2)
+                                   for edge in ("left", "top", "right", "bottom")]
+        grade_project.write_text(json.dumps(graded))
+        crop_preview = root / "crop.png"
+        run([args.binary, "preview", crop_preview, grade_project], env)
+        assert pixel(crop_preview, 30, 30)[0] < 20
+        keyed = json.loads(json.dumps(document))
+        keyed["sources"][1]["path"] = str(key_green)
+        keyed["filters"][0]["kind"] = "chroma_key"
+        keyed["filter_params"] = [dict(filter=11, name="hue", value=120.0),
+                                  dict(filter=11, name="tolerance", value=0.25),
+                                  dict(filter=11, name="softness", value=0.1)]
+        keyed_project = root / "chroma.air"
+        keyed_project.write_text(json.dumps(keyed))
+        chroma_preview = root / "chroma.png"
+        chroma_movie = root / "chroma.mp4"
+        run([args.binary, "preview", chroma_preview, keyed_project], env)
+        run([args.binary, "export", chroma_movie, keyed_project], env)
+        chroma_pixel = pixel(chroma_preview, 320, 180)
+        assert chroma_pixel[0] > 180 and chroma_pixel[1] < 80, chroma_pixel
+        encoded_chroma = pixel(chroma_movie, 960, 540, True)
+        assert max(abs(a - b) for a, b in zip(chroma_pixel, encoded_chroma)) <= 18
 
         layered = json.loads(json.dumps(document))
         layered["sources"].append(dict(source, id=20, path=str(green), name="green",
