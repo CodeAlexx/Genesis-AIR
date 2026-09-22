@@ -216,6 +216,10 @@ GENESIS_GCOMPOSE=/path/to/gcompose python3 tests/run_tests.py \
 # Generated red/blue video plus tone: compares preview/export pixels and audible AAC.
 python3 tests/real_media.py --binary build/genesis-air \
   --worker /path/to/gcompose --stdlib /path/to/AIR/stdlib
+
+# Optional X11 Play/Pause canvas check (requires python-xlib and an X display).
+python3 tests/window_playback.py --binary build/genesis-air \
+  --stdlib /path/to/AIR/stdlib
 ```
 
 - **122 application facts** through the command layer with the fake provider: startup,
