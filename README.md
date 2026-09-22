@@ -239,7 +239,8 @@ python3 tests/real_media.py --binary build/genesis-air \
 - **Canvas smoke**: `build/genesis-air demo OUT.png PROJECT.air` paints a 1600×980 frame
   and saves its project.
 - **Real media**: the worker probe reads frame count, size, frame rate and audio presence;
-  the preview and MP4 paths compose three colored clips in track order, apply a touching-cut crossfade,
+  the preview and MP4 paths compose three colored clips in track order, add a timed caption,
+  apply a touching-cut crossfade,
   export an audio-only timeline, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
   effect instead of silently dropping it.
@@ -248,13 +249,15 @@ python3 tests/real_media.py --binary build/genesis-air \
 
 - Source probe, thumbnail, waveform and interactive preview still start one worker per
   request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
-- The media adapter composites visible video lanes in track order and touching-cut crossfades.
-  Nested sequences, other transition kinds and overlap seams,
-  subtitles, unsupported video filters, keyframed effects
+- The media adapter composites visible video lanes in track order, timed captions,
+  and touching-cut crossfades. Nested sequences, other transition kinds and overlap seams,
+  unsupported video filters, keyframed effects
   other than opacity, and the audio filters beyond gain, pan, low pass, high pass,
   tremolo, bass, treble, and limiter are refused by preview/export. The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.
+- Captions use AIR's portable vector font in a fixed lower-third position; it currently
+  covers printable ASCII. More typography and placement controls remain open.
 - The worker stamps frames on a fixed 30 fps timeline. Export rejects sequences with another
   frame rate. `std.editor` currently bounds clip length in source-frame units, so a clip whose
   source rate differs from the sequence rate cannot use its entire source duration without

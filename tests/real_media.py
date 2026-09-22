@@ -27,6 +27,17 @@ def pixel(path, x, y, movie=False, time_s=0.1):
     return tuple(done.stdout)
 
 
+def rgb_frame(path, movie=False, time_s=0.1):
+    argv = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if movie:
+        argv += ["-ss", str(time_s)]
+    argv += ["-i", str(path), "-vf", "scale=640:360", "-frames:v", "1",
+             "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+    done = subprocess.run(argv, capture_output=True, timeout=30)
+    assert done.returncode == 0 and len(done.stdout) == 640 * 360 * 3, done.stderr
+    return done.stdout
+
+
 def audio_peak(movie, channel=None):
     argv = ["ffmpeg", "-v", "error", "-i", str(movie), "-vn"]
     if channel:
@@ -180,6 +191,32 @@ def main():
             third_preview, third_encoded)
         assert not list(root.rglob("*.layer*.rgba")), "layer fold left raw frames behind"
 
+        captioned = json.loads(json.dumps(layered))
+        captioned["subtitles"] = [
+            dict(id=24, owner=captioned["active"], start=0, finish=6,
+                 text="AIR caption"),
+            dict(id=25, owner=captioned["active"], start=6, finish=12,
+                 text="NEXT caption"),
+        ]
+        captioned["next_id"] = 26
+        caption_project = root / "caption.air"
+        caption_project.write_text(json.dumps(captioned))
+        caption_preview = root / "caption.png"
+        caption_movie = root / "caption.mp4"
+        caption_env = dict(env, GENESIS_SCRATCH=str(root / "fresh-caption-scratch"))
+        run([args.binary, "preview", caption_preview, caption_project], caption_env)
+        run([args.binary, "export", caption_movie, caption_project], caption_env)
+        plain_view, with_caption = rgb_frame(layer_preview), rgb_frame(caption_preview)
+        changed = sum(abs(a - b) > 30 for a, b in zip(plain_view, with_caption))
+        assert changed > 300, changed
+        plain_movie, captioned_movie = rgb_frame(layer_movie, True), rgb_frame(caption_movie, True)
+        changed_movie = sum(abs(a - b) > 30 for a, b in zip(plain_movie, captioned_movie))
+        assert changed_movie > 300, changed_movie
+        second_cue = rgb_frame(caption_movie, True, 0.3)
+        changed_cue = sum(abs(a - b) > 30 for a, b in zip(captioned_movie, second_cue))
+        assert changed_cue > 100, changed_cue
+        assert not list(root.rglob("*.subtitle.rgba")), "caption raster left behind"
+
         tone = root / "audio only.wav"
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
              "-i", "sine=frequency=660:sample_rate=48000", "-t", "0.4", tone])
@@ -243,7 +280,7 @@ def main():
         assert bad_audio.returncode != 0 and "unsupported audio filter" in bad_audio.stdout
         assert not (root / "bad-audio.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
-              f"12 frames, three layers, crossfade, mixed picture/audio filters, audible AAC and "
+              f"12 frames, three layers, timed captions, crossfade, mixed picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
 

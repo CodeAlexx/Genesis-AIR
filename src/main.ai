@@ -130,8 +130,9 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
   var program: provider.Frame = if struct.get(struct.borrow(state, field=provider), field=kind) ==
       provider.kind_gcompose() {
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
+    var frame_cache: timeline_media.RenderCache = timeline_media.RenderCache {subtitle: 0}
     match timeline_media.frame_plan(document, program_frame, "PREVIEW", str.view(output),
-      str.view(output)) {
+      str.view(output), frame_cache) {
       ok(plan_lines) => {
         var lines: array<string> = plan_lines
         var picture: provider.Frame = provider.program_plan(struct.borrow(state, field=provider),
@@ -497,8 +498,9 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     }
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
     let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+    var frame_cache: timeline_media.RenderCache = timeline_media.RenderCache {subtitle: 0}
     var plan: array<string> = match timeline_media.frame_plan(struct.borrow(state, field=document),
-      frame, "PREVIEW", str.view(output), str.view(output)) {
+      frame, "PREVIEW", str.view(output), str.view(output), frame_cache) {
       ok(value) => value,
       err(problem) => { say(str.view(problem))
         return 1 },

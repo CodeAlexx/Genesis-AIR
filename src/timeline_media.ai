@@ -4,10 +4,13 @@ module genesis.timeline_media
 
 import std.editor as editor
 import std.editor_view as editor_view
+import std.draw as draw
 import std.files as files
 import std.math as math
+import std.path as path
 import std.process as proc
 import std.text as text
+import std.vector_font as font
 import "chrome.ai" as chrome
 import "provider.ai" as provider
 
@@ -288,10 +291,6 @@ fn wire_line(values: ref<array<string>>, kind: str, out: str) -> string effects 
 
 fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                    strict: bool) -> result<string, string> effects {alloc} {
-  match editor.subtitle_at(doc, doc.active, frame) {
-    some(id) => { return result.err("subtitles are not composited yet") },
-    none => { },
-  }
   var values: array<string> = neutral()
   var visible: u64 = 0
   var lanes: array<u64> = editor_view.lanes(doc, doc.active)
@@ -381,6 +380,10 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
 
 pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
                   -> result<string, string> effects {alloc} {
+  match editor.subtitle_at(doc, doc.active, frame) {
+    some(id) => { return result.err("subtitles need a frame plan") },
+    none => { },
+  }
   frame_line_core(doc, frame, kind, out, true)
 }
 
@@ -390,8 +393,8 @@ fn layer_path(prefix: str, number: u64) -> string effects {alloc} {
 
 // Fold visible lanes bottom to top. The worker accepts RAW: RGBA as a base, so each
 // PREVIEW output becomes the next input. ENC then consumes the completed raw frame.
-pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
-                  scratch_prefix: str) -> result<array<string>, string> effects {alloc} {
+fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
+              scratch_prefix: str) -> result<array<string>, string> effects {alloc} {
   var visible: array<editor.Clip> = array.new()
   var lanes: array<u64> = editor_view.lanes(doc, doc.active)
   var at: u64 = 0
@@ -408,7 +411,7 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   }
   var lines: array<string> = array.new()
   if array.len(visible) <= 2 {
-    array.push(lines, try frame_line(doc, frame, kind, out))
+    array.push(lines, try frame_line_core(doc, frame, kind, out, true))
     return result.ok(lines)
   }
   let first_out: string = layer_path(scratch_prefix, 0)
@@ -462,9 +465,82 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   result.ok(lines)
 }
 
+pub type RenderCache = struct {subtitle: u64}
+
+fn subtitle_path(prefix: str) -> string effects {alloc} {
+  text.concat(prefix, ".subtitle.rgba")
+}
+
+fn raster_subtitle(doc: ref<editor.Document>, id: u64, prefix: str,
+                   cache: ref<RenderCache>) -> result<string, string> effects {alloc, fs.write} {
+  let raster_file: string = subtitle_path(prefix)
+  if cache.subtitle == id { return result.ok(raster_file) }
+  match files.mkdirs(str.view(path.dirname(prefix))) {
+    err(problem) => { return result.err("subtitle scratch directory could not be created") },
+    ok(_) => { },
+  }
+  var surface: draw.Surface = match draw.surface(1280, 856) {
+    none => { return result.err("subtitle surface could not be allocated") },
+    some(value) => value,
+  }
+  var canvas: draw.Canvas = draw.canvas(surface)
+  draw.clear(canvas, draw.transparent())
+  let caption: string = editor.subtitle_text(doc, id)
+  var rows: array<string> = text.split(str.view(caption), "\n")
+  var at: u64 = 0
+  loop {
+    if at >= array.len(rows) { break }
+    let line: str = str.view(array.borrow(rows, at))
+    let y: f64 = 720.0 + cast.float(at) * 48.0
+    font.draw_text_filled(canvas, 154.0 + 2.0, y + 2.0, line,
+      draw.rgb(0, 0, 0), 44.0, 3.0)
+    font.draw_text_filled(canvas, 154.0, y, line,
+      draw.rgb(255, 255, 255), 44.0, 3.0)
+    at = at + 1
+  }
+  var finished: draw.Surface = draw.finish(canvas)
+  var rgba: bytes = draw.surface_rgba(finished)
+  match files.write_bytes(str.view(raster_file), bytes.view(rgba)) {
+    err(problem) => { return result.err("subtitle raster could not be written") },
+    ok(_) => { },
+  }
+  struct.set(cache, id, field=subtitle)
+  result.ok(raster_file)
+}
+
+pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
+                  scratch_prefix: str, cache: ref<RenderCache>)
+                  -> result<array<string>, string> effects {alloc, fs.write} {
+  let subtitle: u64 = match editor.subtitle_at(doc, doc.active, frame) {
+    none => 0, some(id) => id,
+  }
+  if subtitle == 0 { return media_plan(doc, frame, kind, out, scratch_prefix) }
+  let base: string = text.concat(scratch_prefix, ".base.rgba")
+  var lines: array<string> = try media_plan(doc, frame, "PREVIEW", str.view(base), scratch_prefix)
+  let caption: string = try raster_subtitle(doc, subtitle, scratch_prefix, cache)
+  var values: array<string> = neutral()
+  let raw_base: string = text.concat("RAW:", str.view(base))
+  let raw_caption: string = text.concat("RAW:", str.view(caption))
+  put(values, 0, str.view(provider.wire_path(str.view(raw_base))))
+  put(values, 1, str.view(provider.wire_path(str.view(raw_caption))))
+  let folded: string = if str.eq(kind, "PREVIEW") { string.copy(out) }
+    else { text.concat(scratch_prefix, ".caption.rgba") }
+  array.push(lines, wire_line(values, "PREVIEW", str.view(folded)))
+  if str.eq(kind, "ENC") {
+    var final_values: array<string> = neutral()
+    let raw_folded: string = text.concat("RAW:", str.view(folded))
+    put(final_values, 0, str.view(provider.wire_path(str.view(raw_folded))))
+    array.push(lines, wire_line(final_values, "ENC", ""))
+  }
+  result.ok(lines)
+}
+
 pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
   let _ = files.remove(str.view(layer_path(prefix, 0)))
   let _ = files.remove(str.view(layer_path(prefix, 1)))
+  let _ = files.remove(str.view(subtitle_path(prefix)))
+  let _ = files.remove(str.view(text.concat(prefix, ".base.rgba")))
+  let _ = files.remove(str.view(text.concat(prefix, ".caption.rgba")))
   ()
 }
 
@@ -634,7 +710,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
 }
 
 fn render_into(doc: ref<editor.Document>, worker: str, output: str)
-               -> result<unit, string> effects {alloc, fs.meta, process, time} {
+               -> result<unit, string> effects {alloc, fs.meta, fs.write, process, time} {
   let range: editor.Transport = editor.export_range(doc)
   if range.mark_out <= range.mark_in { return result.err("the export range is empty") }
   let sequence_slot: u64 = match editor.sequence_slot(doc, doc.active) {
@@ -668,10 +744,11 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
     string.copy("0"), string.copy("-"), string.copy("128000"), string.copy("aac")
   ]
   let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
+  var cache: RenderCache = RenderCache {subtitle: 0}
   var frame: i64 = range.mark_in
   loop {
     if frame >= range.mark_out { break }
-    var lines: array<string> = try frame_plan(doc, frame, "ENC", "", output)
+    var lines: array<string> = try frame_plan(doc, frame, "ENC", "", output, cache)
     var step: u64 = 0
     loop {
       if step >= array.len(lines) { break }
