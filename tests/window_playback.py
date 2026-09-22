@@ -2,6 +2,7 @@
 """Exercise Play/Pause in the actual X11 canvas with the fake media provider."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -39,11 +40,25 @@ def press_space(connection, window):
     connection.sync()
 
 
+def player_children(parent_pid):
+    children = Path(f"/proc/{parent_pid}/task/{parent_pid}/children")
+    if not children.exists():
+        return []
+    found = []
+    for item in children.read_text().split():
+        name = Path(f"/proc/{item}/comm")
+        if name.exists() and name.read_text().strip() in ("paplay", "aplay"):
+            found.append(int(item))
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--stdlib", type=Path, required=True)
     parser.add_argument("--display", default=os.environ.get("DISPLAY"))
+    parser.add_argument("--worker", type=Path,
+                        help="exercise real timeline audio through gcompose")
     args = parser.parse_args()
     assert args.display, "an X11 display is required"
     binary = args.binary.resolve()
@@ -55,12 +70,32 @@ def main():
         with TemporaryDirectory(prefix="genesis-air-window-") as temporary:
             work = Path(temporary)
             env = dict(os.environ, DISPLAY=args.display, AIR_STDLIB=str(stdlib),
-                       GENESIS_FAKE_PROVIDER="1", GENESIS_SCRATCH=str(work / "scratch"),
+                       GENESIS_SCRATCH=str(work / "scratch"),
                        XDG_CACHE_HOME=str(work / "cache"))
             project = work / "demo.air"
-            made = subprocess.run([binary, "demo", work / "demo.png", project],
+            if args.worker:
+                env.pop("GENESIS_FAKE_PROVIDER", None)
+                env["GENESIS_GCOMPOSE"] = str(args.worker.resolve())
+                source = work / "source.mp4"
+                source_build = subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "color=c=red:s=320x180:r=30", "-f", "lavfi", "-i",
+                    "sine=frequency=440:sample_rate=48000", "-t", "4", "-c:v",
+                    "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(source)], capture_output=True, text=True,
+                    timeout=30)
+                assert source_build.returncode == 0, source_build.stderr
+                command = [binary, "probe", source, work / "probe.png", project]
+            else:
+                env["GENESIS_FAKE_PROVIDER"] = "1"
+                command = [binary, "demo", work / "demo.png", project]
+            made = subprocess.run(command,
                                   env=env, capture_output=True, text=True, timeout=30)
             assert made.returncode == 0, made.stdout + made.stderr
+            if args.worker:
+                document = json.loads(project.read_text())
+                document["clips"][0]["length"] = 120
+                project.write_text(json.dumps(document))
             child = subprocess.Popen([binary, "open", project], env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
@@ -77,6 +112,22 @@ def main():
                 assert canvas is not None, "Genesis AIR window did not open"
                 time.sleep(0.4)
                 press_space(connection, canvas)
+                if args.worker:
+                    audio_children = []
+                    for _ in range(30):
+                        audio_children = player_children(child.pid)
+                        if audio_children:
+                            break
+                        time.sleep(0.1)
+                    assert audio_children, "Play did not start a timeline audio player"
+                    press_space(connection, canvas)
+                    for _ in range(30):
+                        if not player_children(child.pid):
+                            break
+                        time.sleep(0.1)
+                    assert not player_children(child.pid), "Pause left the audio player running"
+                    print("X11 audio: Play started an audio player; Pause stopped it")
+                    return
                 time.sleep(0.6)
                 moving_a = capture(connection, canvas)
                 time.sleep(0.6)

@@ -151,6 +151,20 @@ def main():
         assert any(s["codec_type"] == "audio" for s in streams), streams
         assert audio_peak(movie) > 0.01, "exported audio is silent"
 
+        # Window audition uses the same AIR timeline resolver. Inspect the actual
+        # WAV that its preparation step hands to the system audio player.
+        audition = root / "audition result.wav"
+        run([args.binary, "audio", audition, project], env)
+        assert audio_peak(audition) > 0.01, "playback WAV is silent"
+        wave_meta = run(["ffprobe", "-v", "error", "-show_entries",
+                         "stream=codec_name,sample_rate,channels:format=duration",
+                         "-of", "json", audition])
+        wave_info = json.loads(wave_meta.stdout)
+        assert wave_info["streams"][0] == {
+            "codec_name": "pcm_s16le", "sample_rate": "48000", "channels": 2
+        }, wave_info
+        assert 0.39 <= float(wave_info["format"]["duration"]) <= 0.41, wave_info
+
         # A video clip can carry picture and sound filters at once. The picture path
         # must ignore audio filters and the audio path must ignore picture filters.
         filtered = json.loads(json.dumps(document))

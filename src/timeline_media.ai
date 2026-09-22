@@ -673,6 +673,20 @@ fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
   result.err("worker gave no reply")
 }
 
+fn audio_session(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
+                 sounds: ref<array<string>>, closer: str)
+                 -> result<unit, string> effects {alloc, process, time} {
+  try command(child, reader, opener)
+  var at: u64 = 0
+  loop {
+    if at >= array.len(sounds) { break }
+    try command(child, reader, str.view(array.borrow(sounds, at)))
+    at = at + 1
+  }
+  try command(child, reader, closer)
+  result.ok(())
+}
+
 // A clip may carry both picture and sound. Video filters belong to frame_line; these
 // stages affect only its audio stream and keep the inspector's parameter values.
 fn audio_filter_stage(doc: ref<editor.Document>, filter: u64)
@@ -974,6 +988,78 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     array.push(lines, text.join(fields, " "))
   }
   result.ok(lines)
+}
+
+// Assemble the audible timeline tail as a WAV for native window playback. The visual
+// clock starts only after this returns, so sound and picture share a start point.
+pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output: str)
+                     -> result<bool, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let finish: i64 = editor.duration(doc)
+  if start >= finish { return result.ok(false) }
+  let fps: f64 = editor.sequence_fps(doc, doc.active)
+  if fps <= 0.0 { return result.err("sequence frame rate is invalid") }
+  var sounds: array<string> = try audio_lines(doc, start, finish, fps)
+  if array.len(sounds) == 0 { return result.ok(false) }
+  match files.mkdirs(str.view(path.dirname(output))) {
+    err(problem) => { return result.err("audio scratch directory could not be created") },
+    ok(_) => { },
+  }
+  var argv: array<string> = [string.copy(worker), string.copy("--serve")]
+  var child: Child = match proc.spawn_piped_merged(argv) {
+    err(problem) => { return result.err(text.concat("start audio worker: ", fs.error.message(problem))) },
+    ok(value) => value,
+  }
+  // WAVECLOSE in the current worker treats its output token literally. Give it a
+  // space-free path, then publish to the caller's requested name after completion.
+  let encoded: string = provider.wire_path(output)
+  let staged: bool = not str.eq(str.view(encoded), output)
+  let child_number: i64 = cast.sat(proc.child_pid(child))
+  let suffix: string = string.from_int(child_number)
+  let target: string = if staged {
+    text.concat("/tmp/genesis-air-audio-", text.concat(str.view(suffix), ".wav"))
+  } else { string.copy(output) }
+  var reader: proc.LineReader = proc.line_reader(65536)
+  var opener: string = text.concat("WAVE ", str.view(target))
+  string.append(opener, " ")
+  string.append(opener, str.view(string.from_float(cast.float(finish - start) / fps)))
+  var closer: string = text.concat("WAVECLOSE ", str.view(target))
+  match audio_session(child, reader, str.view(opener), sounds, str.view(closer)) {
+    err(problem) => {
+      let _ = proc.terminate(child, 100)
+      let _ = proc.close(child)
+      if staged { let _ = files.remove(str.view(target)) }
+      return result.err(problem)
+    },
+    ok(_) => { },
+  }
+  let _ = proc.close_stdin(child)
+  let finished: process.status = match proc.wait(child, proc.deadline_in(30000)) {
+    err(problem) => { return result.err("audio worker did not finish") },
+    ok(value) => value,
+  }
+  let _ = proc.close(child)
+  if not proc.success(finished) { return result.err("audio worker exited unsuccessfully") }
+  if staged {
+    let temporary: string = text.concat(output,
+      text.concat(".genesis-air-", str.view(suffix)))
+    match files.copy_new(str.view(target), str.view(temporary)) {
+      err(problem) => {
+        let _ = files.remove(str.view(target))
+        return result.err(text.concat("publish audio: ", fs.error.message(problem)))
+      },
+      ok(_) => { },
+    }
+    match files.rename(str.view(temporary), output) {
+      err(problem) => {
+        let _ = files.remove(str.view(temporary))
+        let _ = files.remove(str.view(target))
+        return result.err(text.concat("publish audio: ", fs.error.message(problem)))
+      },
+      ok(_) => { },
+    }
+    let _ = files.remove(str.view(target))
+  }
+  result.ok(true)
 }
 
 fn render_into(doc: ref<editor.Document>, worker: str, output: str)

@@ -3,6 +3,7 @@
 //   genesis-air render OUT.png [PROJECT]      paint one frame headlessly
 //   genesis-air demo   OUT.png [PROJECT.air]  build a small project, edit it, save, paint
 //   genesis-air open   PROJECT.air            open a window on an existing project
+//   genesis-air audio  OUT.wav PROJECT.air    mix audible timeline for inspection
 //   genesis-air new                           open a window on a new project
 //
 // The window path needs a display; every other path is headless, which is what the tests
@@ -15,6 +16,7 @@ import std.files as files
 import std.gui as gui
 import std.image as image
 import std.path as path
+import std.process as proc
 import std.png_tools as png_tools
 import std.system as system
 import std.text as text
@@ -262,6 +264,40 @@ fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.
 
 // The windowed application. One repaint per input burst; the document is the only state,
 // so a repaint always shows exactly what the last command did.
+fn stop_audio(player: ref<option<Child>>, wav: str) -> unit effects {fs.write, process} {
+  let previous: option<Child> = ref.swap(player, option.none())
+  match previous {
+    none => { },
+    some(value) => {
+      var child: Child = value
+      let _ = proc.terminate(child, 100)
+      let _ = proc.close(child)
+    },
+  }
+  let _ = files.remove(wav)
+  ()
+}
+
+fn audio_player_result(player: ref<option<Child>>) -> option<bool> effects {process} {
+  let previous: option<Child> = ref.swap(player, option.none())
+  match previous {
+    none => option.none(),
+    some(value) => {
+      var child: Child = value
+      match proc.poll(child) {
+        none => {
+          let _ = ref.swap(player, option.some(child))
+          option.none()
+        },
+        some(status) => {
+          let _ = proc.close(child)
+          option.some(proc.success(status))
+        },
+      }
+    },
+  }
+}
+
 fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
@@ -275,13 +311,90 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   var shift: bool = false
   var clock_ns: u64 = clock.start()
   var frame_clock: transport_clock.Clock = transport_clock.Clock {remainder: 0.0}
+  var audio_player: option<Child> = option.none()
+  var audio_from_paplay: bool = false
+  let audition_file: string = provider.audition_path(struct.borrow(state, field=provider))
+  var previous_playing: bool = false
+  var previous_frame: i64 = editor.playhead(struct.borrow(state, field=document))
   loop {
     if not app.running(state) { break }
     let now_ns: u64 = clock.start()
-    let elapsed_ns: u64 = clock.between_ns(clock_ns, now_ns)
+    var elapsed_ns: u64 = clock.between_ns(clock_ns, now_ns)
     clock_ns = now_ns
+    let playing_now: bool = editor.playing(struct.borrow(state, field=document))
+    let frame_now: i64 = editor.playhead(struct.borrow(state, field=document))
+    if playing_now and (not previous_playing or frame_now != previous_frame) {
+      stop_audio(audio_player, str.view(audition_file))
+      let engine: ref<provider.Provider> = struct.borrow(state, field=provider)
+      if struct.get(engine, field=kind) == provider.kind_gcompose() {
+        let worker: string = provider.worker_path(engine)
+        match timeline_media.prepare_audio(struct.borrow(state, field=document),
+            str.view(worker), frame_now, str.view(audition_file)) {
+          err(problem) => {
+            app.set_status(state, str.view(problem))
+            let _ = commands.program(state, editor.pause())
+          },
+          ok(has_audio) => {
+            if has_audio {
+              var argv: array<string> = [string.copy("paplay"), string.copy(str.view(audition_file))]
+              match proc.spawn_piped(argv) {
+                ok(child) => {
+                  audio_player = option.some(child)
+                  audio_from_paplay = true
+                },
+                err(problem) => {
+                  var fallback: array<string> = [string.copy("aplay"), string.copy(str.view(audition_file))]
+                  match proc.spawn_piped(fallback) {
+                    ok(child) => {
+                      audio_player = option.some(child)
+                      audio_from_paplay = false
+                    },
+                    err(other) => {
+                      app.set_status(state, "no audio player is installed")
+                      let _ = commands.program(state, editor.pause())
+                    },
+                  }
+                },
+              }
+            }
+          },
+        }
+      }
+      elapsed_ns = 0
+      clock_ns = clock.start()
+    }
     if transport_clock.advance(struct.borrow(state, field=document), elapsed_ns,
         frame_clock) { dirty = true }
+    if not editor.playing(struct.borrow(state, field=document)) and previous_playing {
+      stop_audio(audio_player, str.view(audition_file))
+    }
+    if editor.playing(struct.borrow(state, field=document)) {
+      match audio_player_result(audio_player) {
+        none => { },
+        some(succeeded) => {
+          if not succeeded {
+            if audio_from_paplay {
+              audio_from_paplay = false
+              var fallback: array<string> = [string.copy("aplay"), string.copy(str.view(audition_file))]
+              match proc.spawn_piped(fallback) {
+                ok(child) => { audio_player = option.some(child) },
+                err(problem) => {
+                  app.set_status(state, "audio player failed; check the audio device")
+                  let _ = commands.program(state, editor.pause())
+                  stop_audio(audio_player, str.view(audition_file))
+                },
+              }
+            } else {
+              app.set_status(state, "audio player failed; check the audio device")
+              let _ = commands.program(state, editor.pause())
+              stop_audio(audio_player, str.view(audition_file))
+            }
+          }
+        },
+      }
+    }
+    previous_playing = editor.playing(struct.borrow(state, field=document))
+    previous_frame = editor.playhead(struct.borrow(state, field=document))
     let box: gui.Rect = gui.window_size(window)
     let width: u32 = if box.width < 640 { 640 } else { box.width }
     let height: u32 = if box.height < 480 { 480 } else { box.height }
@@ -416,6 +529,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
       if drained > 64 { break }
     }
   }
+  stop_audio(audio_player, str.view(audition_file))
   gui.close(window)
   0
 }
@@ -424,6 +538,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   if view.len(args) < 2 {
     say("genesis-air render OUT.png [PROJECT]")
     say("genesis-air export OUT.mp4 PROJECT.air")
+    say("genesis-air audio  OUT.wav PROJECT.air")
     say("genesis-air preview OUT.png PROJECT.air")
     say("genesis-air demo   OUT.png [PROJECT.air]")
     say("genesis-air probe  MEDIA.mp4 OUT.png [PROJECT.air]")
@@ -480,6 +595,32 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     match timeline_media.render(struct.borrow(state, field=document), str.view(worker), view.get(args, 2)) {
       ok(_) => { say("Genesis AIR video written")
         return 0 },
+      err(problem) => { say(str.view(problem))
+        return 1 },
+    }
+  }
+
+  if str.eq(verb, "audio") {
+    if view.len(args) < 4 { say("audio needs an output path and a project")
+      return 2 }
+    var opened: commands.Result = commands.open_project(state, view.get(args, 3))
+    if not opened.ok { say(str.view(commands.message(opened)))
+      return 1 }
+    if not provider.available(struct.borrow(state, field=provider)) or
+       provider.kind_fake() == struct.get(struct.borrow(state, field=provider), field=kind) {
+      say("audio mix requires a gcompose worker")
+      return 1
+    }
+    let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+    let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
+    match timeline_media.prepare_audio(struct.borrow(state, field=document), str.view(worker),
+        playhead, view.get(args, 2)) {
+      ok(has_audio) => {
+        if has_audio { say("Genesis AIR audio written")
+          return 0 }
+        say("project has no audible audio after the playhead")
+        return 1
+      },
       err(problem) => { say(str.view(problem))
         return 1 },
     }

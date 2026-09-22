@@ -70,6 +70,9 @@ pub fn worker_path(state: ref<Provider>) -> string effects {alloc} {
 pub fn preview_path(state: ref<Provider>) -> string effects {alloc} {
   path.join(str.view(struct.borrow(state, field=scratch)), "program.rgba")
 }
+pub fn audition_path(state: ref<Provider>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(state, field=scratch)), "audition.wav")
+}
 pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
 pub fn failures(state: ref<Provider>) -> u64 effects {} { state.failures }
 pub fn last_error(state: ref<Provider>) -> string effects {alloc} {

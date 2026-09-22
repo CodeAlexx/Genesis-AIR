@@ -133,6 +133,7 @@ build/genesis-air probe MEDIA.mp4 OUT.png [PROJECT.air]
 # compose the saved project's playhead frame, or encode its export range
 build/genesis-air preview OUT.png PROJECT.air
 build/genesis-air export OUT.mp4 PROJECT.air
+build/genesis-air audio OUT.wav PROJECT.air   # mix audio from the playhead
 
 # windowed (needs a display)
 build/genesis-air open PROJECT.air
@@ -149,6 +150,10 @@ The window's **Export video** action now encodes an MP4. The headless `render` c
 PNG of the editor canvas for layout checks. Video export requires the worker and currently
 requires a 30 fps sequence and a `.mp4` output path. Existing output files are refused, and an incomplete encode is
 removed on failure.
+Window Play mixes the audible timeline into a WAV through the same AIR resolver as export,
+then plays it through `paplay` or `aplay`; Pause, seek, and end stop the player. Audio
+preparation currently runs on the window thread, so long timelines can pause the UI before
+playback starts. The `audio` command writes that exact mix for inspection.
 
 ## Keys
 
@@ -220,6 +225,10 @@ python3 tests/real_media.py --binary build/genesis-air \
 # Optional X11 Play/Pause canvas check (requires python-xlib and an X display).
 python3 tests/window_playback.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib
+
+# Optional X11 real-audio check (also requires paplay/aplay and a working audio server).
+python3 tests/window_playback.py --binary build/genesis-air \
+  --stdlib /path/to/AIR/stdlib --worker /path/to/gcompose
 ```
 
 - **122 application facts** through the command layer with the fake provider: startup,
@@ -246,7 +255,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   the preview and MP4 paths compose three colored clips in track order, add a timed caption,
   apply a touching-cut crossfade, and check gamma, sepia, vignette, levels, crop,
   and keyed overlay pixels,
-  export an audio-only timeline, retime and reverse a rising tone, keep freeze-frame
+  export an audio-only timeline, write an audible playback WAV (including a spaced output
+  path), retime and reverse a rising tone, keep freeze-frame
   audio silent, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
   effect instead of silently dropping it.
@@ -275,8 +285,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   of silently repeating its last picture frame.
 - The window runs export synchronously, so it does not repaint or accept cancellation during
   a long encode. The standalone `preview` and `export` commands support headless workflows.
-- The program Play control now advances on a monotonic clock and skips frames after a slow
-  paint; live audio playback is still missing. Encoded audio is present in exported MP4s.
+- The program Play control advances on a monotonic clock, skips frames after a slow paint,
+  and plays the mixed timeline audio. WAV preparation is synchronous, and this best-effort
+  system-player path has no sample-accurate audio/video clock or live scrub audio.
 - Zoom and pan live in this application (`app.Viewport`) because the AIR NLE toolkit records
   viewport policy as deliberately unported. If it proves generic it should be upstreamed.
 ## Provenance
