@@ -164,6 +164,40 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     put_f(values, 72, editor.filter_param(doc, filter, "amount", 0.0))
   } else if str.eq(str.view(kind), "hue") and not overlay {
     put_f(values, 51, editor.filter_param(doc, filter, "shift", 0.0))
+  } else if str.eq(str.view(kind), "gamma") and not overlay {
+    put_f(values, 56, editor.filter_param(doc, filter, "level", 1.0))
+  } else if str.eq(str.view(kind), "vignette") and not overlay {
+    if editor.filter_param(doc, filter, "softness", 0.5) != 0.5 { return false }
+    put_f(values, 47, editor.filter_param(doc, filter, "amount", 0.4))
+  } else if str.eq(str.view(kind), "lift_gamma_gain") and not overlay {
+    let lift: f64 = editor.filter_param(doc, filter, "lift", 0.0)
+    let gamma: f64 = editor.filter_param(doc, filter, "gamma", 1.0)
+    let gain: f64 = editor.filter_param(doc, filter, "gain", 1.0)
+    var channel: u64 = 0
+    loop {
+      if channel >= 3 { break }
+      put_f(values, 24 + channel, lift)
+      put_f(values, 27 + channel, gamma)
+      put_f(values, 30 + channel, gain)
+      channel = channel + 1
+    }
+  } else if str.eq(str.view(kind), "rotate") and not overlay {
+    put_f(values, 33, editor.filter_param(doc, filter, "angle", 0.0))
+  } else if str.eq(str.view(kind), "flip") and not overlay {
+    put(values, 49, if editor.filter_param(doc, filter, "vertical", 0.0) >= 0.5 { "2" } else { "0" })
+  } else if str.eq(str.view(kind), "mirror") and not overlay {
+    put(values, 93, if editor.filter_param(doc, filter, "horizontal", 1.0) >= 0.5 { "1" } else { "0" })
+  } else if (str.eq(str.view(kind), "invert") or str.eq(str.view(kind), "sepia") or
+             str.eq(str.view(kind), "mono")) and not overlay {
+    let amount: f64 = editor.filter_param(doc, filter, "amount", 1.0)
+    if amount != 0.0 and amount != 1.0 { return false }
+    if not str.eq(str.view(array.borrow(values, 50)), "0") { return false }
+    if amount == 1.0 {
+      put(values, 50, if str.eq(str.view(kind), "invert") { "1" }
+        else if str.eq(str.view(kind), "sepia") { "2" } else { "3" })
+    }
+  } else if str.eq(str.view(kind), "denoise") and not overlay {
+    put_f(values, 65, editor.filter_param(doc, filter, "amount", 0.3))
   } else if str.eq(str.view(kind), "white_balance") and not overlay {
     if editor.filter_param(doc, filter, "tint", 0.0) != 0.0 { return false }
     put_f(values, 100, editor.filter_param(doc, filter, "temperature", 0.0))

@@ -75,7 +75,8 @@ def main():
     args.stdlib = args.stdlib.resolve()
     with TemporaryDirectory(prefix="genesis-air-real-") as temporary:
         root = Path(temporary)
-        red, blue, green = root / "red clip.mp4", root / "blue clip.mp4", root / "green clip.mp4"
+        red, blue, green, gray = (root / name for name in (
+            "red clip.mp4", "blue clip.mp4", "green clip.mp4", "gray clip.mp4"))
         run(["ffmpeg", "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30",
              "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
@@ -89,6 +90,10 @@ def main():
              "-f", "lavfi", "-i", "color=c=green:s=320x180:r=30",
              "-t", "0.4", "-c:v", "libx264", "-preset", "ultrafast",
              "-pix_fmt", "yuv420p", green])
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=gray:s=320x180:r=30",
+             "-t", "0.4", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", gray])
         env = dict(os.environ, AIR_STDLIB=str(args.stdlib),
                    GENESIS_GCOMPOSE=str(args.worker),
                    GENESIS_SCRATCH=str(root / "scratch"),
@@ -179,6 +184,39 @@ def main():
         top_after = root / "top-after.png"
         run([args.binary, "preview", top_after, ordered_project], env)
         assert pixel(top_after, 320, 180)[0] > 180
+
+        graded = json.loads(json.dumps(document))
+        graded["sources"][0]["path"] = str(gray)
+        graded["sources"][0]["has_audio"] = False
+        graded["clips"] = [graded["clips"][0]]
+        graded["filters"] = []
+        graded["filter_params"] = []
+        grade_project = root / "grade.air"
+        grade_project.write_text(json.dumps(graded))
+        plain_grade = root / "plain-grade.png"
+        run([args.binary, "preview", plain_grade, grade_project], env)
+        original_gray = pixel(plain_grade, 320, 180)[0]
+        graded["filters"] = [dict(id=11, clip=base_id, kind="gamma", order=0,
+                                   enabled=True)]
+        graded["filter_params"] = [dict(filter=11, name="level", value=1.8)]
+        graded["next_id"] = 12
+        grade_project.write_text(json.dumps(graded))
+        gamma_preview = root / "gamma.png"
+        run([args.binary, "preview", gamma_preview, grade_project], env)
+        assert pixel(gamma_preview, 320, 180)[0] > original_gray + 25
+        graded["filters"][0]["kind"] = "sepia"
+        graded["filter_params"][0] = dict(filter=11, name="amount", value=1.0)
+        grade_project.write_text(json.dumps(graded))
+        sepia_preview = root / "sepia.png"
+        run([args.binary, "preview", sepia_preview, grade_project], env)
+        sepia_pixel = pixel(sepia_preview, 320, 180)
+        assert sepia_pixel[0] > sepia_pixel[1] > sepia_pixel[2], sepia_pixel
+        graded["filters"][0]["kind"] = "vignette"
+        graded["filter_params"][0] = dict(filter=11, name="amount", value=1.0)
+        grade_project.write_text(json.dumps(graded))
+        vignette_preview = root / "vignette.png"
+        run([args.binary, "preview", vignette_preview, grade_project], env)
+        assert pixel(vignette_preview, 30, 30)[0] < pixel(plain_grade, 30, 30)[0] - 20
 
         layered = json.loads(json.dumps(document))
         layered["sources"].append(dict(source, id=20, path=str(green), name="green",
@@ -322,7 +360,7 @@ def main():
         assert not (root / "bad-audio.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
               f"12 frames, three layers, timed captions, crossfade, reverse-speed audio, "
-              f"mixed picture/audio filters, audible AAC and "
+              f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
 
