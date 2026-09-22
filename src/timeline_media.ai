@@ -14,12 +14,12 @@ import std.vector_font as font
 import "chrome.ai" as chrome
 import "provider.ai" as provider
 
-type SourceInfo = struct {path: string, fps: f64, audio: bool, online: bool}
+type SourceInfo = struct {path: string, frames: i64, fps: f64, audio: bool, online: bool}
 
 fn source_info(doc: ref<editor.Document>, slot: u64) -> SourceInfo effects {alloc} {
   let value: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), slot)
   SourceInfo {path: string.copy(str.view(struct.borrow(value, field=path))),
-    fps: value.fps, audio: value.has_audio, online: value.online}
+    frames: value.frames, fps: value.fps, audio: value.has_audio, online: value.online}
 }
 
 fn put(values: ref<array<string>>, at: u64, value: str) -> unit effects {alloc} {
@@ -111,8 +111,8 @@ fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64
     source_fps / timeline_fps
   } else { 1.0 }
   let position: i64 = if clip.reverse { clip.length - 1 - local } else { local }
-  let offset: i64 = cast.sat(math.floor(cast.float(position) * clip.speed * ratio))
-  let result_frame: i64 = clip.source_in + offset
+  let result_frame: i64 = cast.sat(math.floor(
+    (cast.float(clip.source_in) + cast.float(position) * clip.speed) * ratio))
   let bound: i64 = editor.source_frames(doc, clip.source)
   if bound > 0 and result_frame >= bound { bound - 1 }
   else if result_frame < 0 { 0 }
@@ -129,9 +129,9 @@ fn source_range_ok(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects
   let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), slot)
   if source.frames <= 0 { return true }
   if sequence_fps <= 0.0 or source.fps <= 0.0 { return false }
-  let required: f64 = cast.float(clip.source_in) +
-    math.ceil(cast.float(clip.length) * clip.speed * source.fps / sequence_fps)
-  required <= cast.float(source.frames)
+  let last_native: f64 = math.floor((cast.float(clip.source_in) +
+    cast.float(clip.length - 1) * clip.speed) * source.fps / sequence_fps)
+  last_native < cast.float(source.frames)
 }
 
 fn fade(clip: editor.Clip, frame: i64) -> f64 effects {} {
@@ -930,12 +930,16 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     if not math.is_finite(clip.speed) or clip.speed < 0.05 or clip.speed > 16.0 {
       return result.err("audible clip speed must be between 0.05 and 16")
     }
-    let source_fps: f64 = if source.fps > 0.0 { source.fps } else { fps }
     let local_start: i64 = if clip.reverse { clip.length - (end - clip.start) }
       else { begin - clip.start }
-    let source_s: f64 = cast.float(clip.source_in) / source_fps +
+    let source_s: f64 = cast.float(clip.source_in) / fps +
       cast.float(local_start) * clip.speed / fps
-    let duration_s: f64 = cast.float(end - begin) * clip.speed / fps
+    var duration_s: f64 = cast.float(end - begin) * clip.speed / fps
+    if source.frames > 0 and source.fps > 0.0 {
+      let remaining_s: f64 = cast.float(source.frames) / source.fps - source_s
+      if duration_s > remaining_s { duration_s = remaining_s }
+    }
+    if duration_s <= 0.0 { continue }
     let destination_s: f64 = cast.float(begin - start) / fps
     var stages: array<string> = array.new()
     if clip.reverse { array.push(stages, string.copy("areverse")) }

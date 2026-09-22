@@ -219,7 +219,7 @@ GENESIS_GCOMPOSE=/path/to/gcompose python3 tests/run_tests.py \
   --airc /path/to/AIR/build-gcc15/bin/airc --stdlib /path/to/AIR/stdlib \
   --binary build/genesis-air --media /path/to/fixture.mp4
 
-# Generated red/blue video plus tone: compares preview/export pixels and audible AAC.
+# Generated red/blue and mixed-rate video plus tone: compares pixels and audible AAC.
 python3 tests/real_media.py --binary build/genesis-air \
   --worker /path/to/gcompose --stdlib /path/to/AIR/stdlib
 
@@ -232,7 +232,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib --worker /path/to/gcompose
 ```
 
-- **122 application facts** through the command layer with the fake provider: startup,
+- **125 application facts** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
   solo-wins, both transports, elapsed-time playback, reverse sampling at mixed frame
@@ -256,7 +256,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   the preview and MP4 paths compose three colored clips in track order, add a timed caption,
   apply a touching-cut crossfade, and check gamma, sepia, vignette, levels, crop,
   and keyed overlay pixels,
-  export an audio-only timeline, write an audible playback WAV (including a spaced output
+  export an audio-only timeline, verify a 24 fps source across a full 30 fps sequence
+  second, write an audible playback WAV (including a spaced output
   path), retime and reverse a rising tone, keep freeze-frame
   audio silent, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
@@ -279,11 +280,11 @@ python3 tests/window_playback.py --binary build/genesis-air \
 - Captions use AIR's portable vector font in a fixed lower-third position; it currently
   covers printable ASCII. More typography and placement controls remain open.
 - The worker stamps frames on a fixed 30 fps timeline. Export rejects sequences with another
-  frame rate. `std.editor` currently bounds clip length in source-frame units, so a clip whose
-  source rate differs from the sequence rate cannot use its entire source duration without
-  further editor-model work. Preview samples source frames by the measured rate. Preview and
+  frame rate. AIR's editor now converts source duration into the owning sequence's frame
+  units, and the renderer samples native frames by the measured source rate. Preview and
   export refuse a clip whose speed and length would read beyond its measured source, instead
-  of silently repeating its last picture frame.
+  of silently repeating its last picture frame. The mixed-rate real-media gate needs a rerun
+  when the shared GPU is available.
 - The window runs export synchronously, so it does not repaint or accept cancellation during
   a long encode. The standalone `preview` and `export` commands support headless workflows.
 - The program Play control advances on a monotonic clock, skips frames after a slow paint,

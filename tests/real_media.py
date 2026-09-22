@@ -165,6 +165,37 @@ def main():
         }, wave_info
         assert 0.39 <= float(wave_info["format"]["duration"]) <= 0.41, wave_info
 
+        # One second of 24 fps media occupies 30 frames in this 30 fps sequence.
+        # The editor must retain the native 24-frame probe while allowing the full
+        # timeline duration and sampling its last blue native frames.
+        mixed_source = root / "mixed-rate.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=red:s=320x180:r=24:d=0.5",
+             "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=24:d=0.5",
+             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+             "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+             "-map", "[v]", "-map", "2:a", "-t", "1", "-c:v", "libx264",
+             "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+             mixed_source])
+        mixed_project = root / "mixed-rate.air"
+        run([args.binary, "probe", mixed_source, root / "mixed-panel.png",
+             mixed_project], env)
+        mixed_doc = json.loads(mixed_project.read_text())
+        assert mixed_doc["sources"][0]["frames"] == 24
+        mixed_doc["clips"][0]["length"] = 30
+        mixed_doc["program"]["frame"] = 29
+        mixed_project.write_text(json.dumps(mixed_doc))
+        mixed_preview = root / "mixed-preview.png"
+        mixed_movie = root / "mixed-export.mp4"
+        run([args.binary, "preview", mixed_preview, mixed_project], env)
+        run([args.binary, "export", mixed_movie, mixed_project], env)
+        mixed_color = pixel(mixed_preview, 320, 180)
+        assert mixed_color[2] > 200 and mixed_color[0] < 30, mixed_color
+        mixed_meta = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                          "-show_entries", "stream=nb_frames", "-of", "json", mixed_movie])
+        assert int(json.loads(mixed_meta.stdout)["streams"][0]["nb_frames"]) == 30
+        assert audio_peak(mixed_movie) > 0.01
+
         # A video clip can carry picture and sound filters at once. The picture path
         # must ignore audio filters and the audio path must ignore picture filters.
         filtered = json.loads(json.dumps(document))

@@ -763,7 +763,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     }
     let track: u64 = if has_video { app.default_video_track(state) }
       else { app.default_audio_track(state) }
-    let length: i64 = if frames < 24 { frames } else { 24 }
+    let owner: u64 = struct.get(struct.borrow(state, field=document), field=active)
+    let available: i64 = editor.source_timeline_frames(
+      struct.borrow(state, field=document), imported.value, owner)
+    let length: i64 = if available < 24 { available } else { 24 }
     var placed: commands.Result = commands.append_clip(state, track, imported.value, 0, length)
     if not placed.ok { say(str.view(commands.message(placed)))
       return 1 }
