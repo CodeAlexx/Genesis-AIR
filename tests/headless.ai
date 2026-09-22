@@ -623,6 +623,56 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
         str.eq(str.view(array.borrow(fields, 3)), "12"))
     },
   }
+  var anim_doc: editor.Document = editor.document(30.0, 640, 360)
+  let anim_owner: u64 = anim_doc.active
+  let anim_source: u64 = editor.add_source(anim_doc, "/media/anim.mp4", "anim", 60, 30.0)
+  let base_track: u64 = editor.add_track(anim_doc, anim_owner, editor.track_video(), "V1")
+  let over_track: u64 = editor.add_track(anim_doc, anim_owner, editor.track_video(), "V2")
+  let base_clip: u64 = match editor.place(anim_doc, base_track, anim_source, 0, 60, 0) {
+    none => 0, some(value) => value,
+  }
+  let anim_clip: u64 = match editor.place(anim_doc, over_track, anim_source, 0, 30, 10) {
+    none => 0, some(value) => value,
+  }
+  let opacity_filter: u64 = match editor.add_filter(anim_doc, anim_clip, "opacity") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_param(anim_doc, opacity_filter, "level", 1.0)
+  let _ = editor.set_key(anim_doc, anim_clip, "opacity.level", 0, 0.0, 0)
+  let _ = editor.set_key(anim_doc, anim_clip, "opacity.level", 20, 1.0, 0)
+  let bright_filter: u64 = match editor.add_filter(anim_doc, base_clip, "brightness") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_key(anim_doc, base_clip, "brightness.level", 10, 1.0, 0)
+  let _ = editor.set_key(anim_doc, base_clip, "brightness.level", 30, 2.0, 0)
+  match timeline_media.frame_line(anim_doc, 10, "ENC", "") {
+    err(problem) => { emit_b("keyframed_opacity_start", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("keyframed_opacity_start", str.eq(str.view(array.borrow(fields, 5)), "0"))
+      emit_b("keyframed_brightness_start", str.eq(str.view(array.borrow(fields, 22)), "0"))
+    },
+  }
+  match timeline_media.frame_line(anim_doc, 30, "ENC", "") {
+    err(problem) => { emit_b("keyframed_opacity_end", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("keyframed_opacity_end", str.eq(str.view(array.borrow(fields, 5)), "1"))
+      emit_b("keyframed_brightness_end", str.eq(str.view(array.borrow(fields, 22)), "1"))
+    },
+  }
+  var key_state: app.App = app.app(provider.fake(scratch))
+  var key_source: commands.Result = commands.import_media(key_state, "media/key.mov", "key")
+  let key_track: u64 = app.default_video_track(key_state)
+  var key_clip: commands.Result = commands.insert_clip(key_state, key_track,
+    key_source.value, 0, 30, 10)
+  let _ = commands.select_only(key_state, key_clip.value)
+  let _ = commands.seek(key_state, 15)
+  var key_added: commands.Result = commands.keyframe_parameter(key_state,
+    chrome.domain_filter(), 0, "opacity", "level", 0.5)
+  let key_entry: editor.Key = array.get(struct.borrow(
+    struct.borrow(key_state, field=document), field=keys), 0)
+  emit_b("keyframe_uses_local_frame", key_added.ok and key_entry.frame == 5)
   0
 }
 

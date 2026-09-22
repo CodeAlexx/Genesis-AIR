@@ -232,7 +232,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib --worker /path/to/gcompose
 ```
 
-- **125 application facts** through the command layer with the fake provider: startup,
+- **130 application facts** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
   solo-wins, both transports, elapsed-time playback, reverse sampling at mixed frame
@@ -269,11 +269,13 @@ python3 tests/window_playback.py --binary build/genesis-air \
   request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
 - The media adapter composites visible video lanes in track order, timed captions,
   and touching-cut crossfades. Nested sequences, other transition kinds and overlap seams,
-  unsupported video filters, and keyframed effects other than opacity are refused by
+  unsupported video filters, and keyframes for unsupported effects or clip properties are refused by
   preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
   parameter is shown as release time because that is the behavior `agate` implements.
   Cropping currently supports equal margins, and the worker supports eight of the
   twelve blend modes shown in the inspector; unsupported values fail explicitly.
+  Mapped video filter parameters and overlay opacity use AIR's clip-local keyframes at the
+  requested timeline frame; audio filter automation remains open.
   The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.

@@ -690,7 +690,12 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
                           name: str, value: f64) -> Result effects {alloc} {
   let clip: u64 = app.current_clip(state)
   if clip == 0 { return refused("no clip selected") }
-  let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+  let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
+  let selected: editor.Clip = match editor.clip(struct.borrow(state, field=document), clip) {
+    none => { return refused("selected clip is missing") }, some(found) => found,
+  }
+  let frame: i64 = playhead - selected.start
+  if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
   var qualified: string = string.copy(kind)
   if str.len(kind) != 0 { string.append(qualified, ".") }
   string.append(qualified, name)
