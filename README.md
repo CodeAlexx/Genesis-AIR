@@ -252,9 +252,10 @@ python3 tests/real_media.py --binary build/genesis-air \
   request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
 - The media adapter composites visible video lanes in track order, timed captions,
   and touching-cut crossfades. Nested sequences, other transition kinds and overlap seams,
-  unsupported video filters, keyframed effects
-  other than opacity, and the audio filters beyond gain, pan, low pass, high pass,
-  tremolo, bass, treble, and limiter are refused by preview/export. The inspector
+  unsupported video filters, and keyframed effects other than opacity are refused by
+  preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
+  parameter is shown as release time because that is the behavior `agate` implements.
+  The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.
 - Captions use AIR's portable vector font in a fixed lower-third position; it currently

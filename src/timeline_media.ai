@@ -618,6 +618,9 @@ fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
         match value {
           none => { return result.err("worker closed its reply pipe") },
           some(reply) => {
+            if text.contains(str.view(reply), "AUDIO fx chain failed") {
+              return result.err("worker could not apply an audio filter chain")
+            }
             if str.starts_with(str.view(reply), "DONE") { return result.ok(()) }
             if str.starts_with(str.view(reply), "ERR") {
               if str.len(str.view(detail)) > 0 {
@@ -650,6 +653,119 @@ fn audio_filter_stage(doc: ref<editor.Document>, filter: u64)
     return option.some(text.concat("stereotools=balance_out=", str.view(string.from_float(
       editor.filter_param(doc, filter, "position", 0.0)))))
   }
+  if str.eq(str.view(kind), "eq_3band") {
+    var stages: array<string> = array.new()
+    var names: array<string> = ["low", "mid", "high"]
+    var freqs: array<string> = ["100", "1000", "8000"]
+    var band: u64 = 0
+    loop {
+      if band >= 3 { break }
+      let gain: f64 = editor.filter_param(doc, filter, str.view(array.borrow(names, band)), 0.0)
+      if gain != 0.0 {
+        var stage: string = text.concat("equalizer=f=", str.view(array.borrow(freqs, band)))
+        string.append(stage, ":t=q:w=1:g=")
+        string.append(stage, str.view(string.from_float(gain)))
+        array.push(stages, stage)
+      }
+      band = band + 1
+    }
+    let pan: f64 = editor.filter_param(doc, filter, "pan", 0.0)
+    if pan != 0.0 {
+      array.push(stages, text.concat("stereotools=balance_out=", str.view(string.from_float(pan))))
+    }
+    return option.some(if array.len(stages) == 0 { string.copy("anull") }
+      else { text.join(stages, ",") })
+  }
+  if str.eq(str.view(kind), "eq_10band") {
+    var stages: array<string> = array.new()
+    var freqs: array<string> = ["31", "62", "125", "250", "500", "1000", "2000",
+      "4000", "8000", "16000"]
+    var band: u64 = 0
+    loop {
+      if band >= 10 { break }
+      let name: string = text.concat("band", str.view(string.from_int(band)))
+      let gain: f64 = editor.filter_param(doc, filter, str.view(name), 0.0)
+      if gain != 0.0 {
+        var stage: string = text.concat("equalizer=f=", str.view(array.borrow(freqs, band)))
+        string.append(stage, ":width_type=o:width=1:g=")
+        string.append(stage, str.view(string.from_float(gain)))
+        array.push(stages, stage)
+      }
+      band = band + 1
+    }
+    return option.some(if array.len(stages) == 0 { string.copy("anull") }
+      else { text.join(stages, ",") })
+  }
+  if str.eq(str.view(kind), "compressor") {
+    let threshold: f64 = math.pow(10.0,
+      editor.filter_param(doc, filter, "threshold", -18.0) / 20.0)
+    let ratio: f64 = editor.filter_param(doc, filter, "ratio", 4.0)
+    let attack: f64 = math.max(0.01, editor.filter_param(doc, filter, "attack", 10.0))
+    let release: f64 = math.max(0.01, editor.filter_param(doc, filter, "release", 120.0))
+    var stage: string = text.concat("acompressor=threshold=", str.view(string.from_float(threshold)))
+    string.append(stage, ":ratio=")
+    string.append(stage, str.view(string.from_float(ratio)))
+    string.append(stage, ":attack=")
+    string.append(stage, str.view(string.from_float(attack)))
+    string.append(stage, ":release=")
+    string.append(stage, str.view(string.from_float(release)))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "gate") {
+    let threshold: f64 = math.pow(10.0,
+      editor.filter_param(doc, filter, "threshold", -45.0) / 20.0)
+    // The saved `hold` parameter predates audio export. The inspector labels it as
+    // release time, which is the response the worker's agate filter can implement.
+    let release: f64 = math.max(0.01, editor.filter_param(doc, filter, "hold", 50.0))
+    var stage: string = text.concat("agate=threshold=", str.view(string.from_float(threshold)))
+    string.append(stage, ":release=")
+    string.append(stage, str.view(string.from_float(release)))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "normalize") {
+    let target: f64 = editor.filter_param(doc, filter, "target", -14.0)
+    if target > -5.0 or target < -70.0 { return option.none() }
+    return option.some(text.concat("loudnorm=I=", str.view(string.from_float(target))))
+  }
+  if str.eq(str.view(kind), "delay") {
+    let delay_ms: f64 = editor.filter_param(doc, filter, "time", 250.0)
+    let decay: f64 = editor.filter_param(doc, filter, "decay", 0.4)
+    if delay_ms <= 0.0 { return option.some(string.copy("anull")) }
+    if decay > 0.95 { return option.none() }
+    let millis: i64 = cast.sat(delay_ms)
+    let bounded_ms: i64 = if millis < 1 { 1 } else { millis }
+    var stage: string = text.concat("aecho=0.8:0.9:", str.view(string.from_int(bounded_ms)))
+    string.append(stage, ":")
+    string.append(stage, str.view(string.from_float(decay)))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "reverb") {
+    let amount: f64 = editor.filter_param(doc, filter, "amount", 0.3)
+    let room: f64 = editor.filter_param(doc, filter, "room", 0.5)
+    if amount <= 0.0 { return option.some(string.copy("anull")) }
+    var delays: array<string> = array.new()
+    var decays: array<string> = array.new()
+    var taps: array<i64> = [47, 97, 151, 211]
+    var at: u64 = 0
+    loop {
+      if at >= array.len(taps) { break }
+      let tap: f64 = cast.float(array.get(taps, at))
+      let delay_ms: i64 = cast.sat(tap * (0.5 + room))
+      let bounded_ms: i64 = if delay_ms < 1 { 1 } else { delay_ms }
+      array.push(delays, string.from_int(bounded_ms))
+      array.push(decays, string.from_float(amount * (0.5 - cast.float(at) * 0.1)))
+      at = at + 1
+    }
+    var stage: string = text.concat("aecho=0.8:0.9:", str.view(text.join(delays, "|")))
+    string.append(stage, ":")
+    string.append(stage, str.view(text.join(decays, "|")))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "pitch") {
+    let semitones: f64 = editor.filter_param(doc, filter, "semitones", 0.0)
+    let ratio: f64 = math.pow(2.0, semitones / 12.0)
+    return option.some(text.concat("rubberband=pitch=", str.view(string.from_float(ratio))))
+  }
   if str.eq(str.view(kind), "low_pass") {
     return option.some(text.concat("lowpass=f=", str.view(string.from_float(
       editor.filter_param(doc, filter, "cutoff", 8000.0)))))
@@ -670,6 +786,40 @@ fn audio_filter_stage(doc: ref<editor.Document>, filter: u64)
     return option.some(text.concat(if str.eq(str.view(kind), "bass") { "bass=g=" }
       else { "treble=g=" }, str.view(string.from_float(
       editor.filter_param(doc, filter, "level", 0.0)))))
+  }
+  if str.eq(str.view(kind), "notch") {
+    var stage: string = text.concat("bandreject=f=", str.view(string.from_float(
+      editor.filter_param(doc, filter, "frequency", 1000.0))))
+    string.append(stage, ":t=q:w=")
+    string.append(stage, str.view(string.from_float(
+      editor.filter_param(doc, filter, "width", 1.0))))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "chorus") {
+    let depth: f64 = editor.filter_param(doc, filter, "depth", 0.4)
+    let rate: f64 = editor.filter_param(doc, filter, "rate", 1.5)
+    var stage: string = text.concat("chorus=0.5:0.9:50:0.4:", str.view(string.from_float(rate)))
+    string.append(stage, ":")
+    string.append(stage, str.view(string.from_float(depth * 2.0)))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "flanger") {
+    let depth: f64 = editor.filter_param(doc, filter, "depth", 0.4)
+    let rate: f64 = editor.filter_param(doc, filter, "rate", 0.5)
+    var stage: string = text.concat("flanger=depth=", str.view(string.from_float(depth * 8.0)))
+    string.append(stage, ":speed=")
+    string.append(stage, str.view(string.from_float(rate)))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "phaser") {
+    let depth: f64 = editor.filter_param(doc, filter, "depth", 0.5)
+    let rate: f64 = editor.filter_param(doc, filter, "rate", 0.8)
+    if rate > 2.0 { return option.none() }
+    var stage: string = text.concat("aphaser=decay=", str.view(string.from_float(
+      0.1 + depth * 0.8)))
+    string.append(stage, ":speed=")
+    string.append(stage, str.view(string.from_float(rate)))
+    return option.some(stage)
   }
   if str.eq(str.view(kind), "limiter") {
     let ceiling: f64 = editor.filter_param(doc, filter, "ceiling", -1.0)

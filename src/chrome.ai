@@ -673,16 +673,16 @@ pub fn params_for(kind: str) -> array<Spec> effects {alloc} {
   }
   else if str.eq(kind, "gate") {
     sp(out, "threshold", "Threshold", -80.0, 0.0, 1.0, -45.0)
-    sp(out, "hold", "Hold ms", 0.0, 500.0, 5.0, 50.0)
+    sp(out, "hold", "Release ms", 0.0, 500.0, 5.0, 50.0)
   }
-  else if str.eq(kind, "normalize") { sp(out, "target", "Target LUFS", -30.0, 0.0, 0.5, -14.0) }
+  else if str.eq(kind, "normalize") { sp(out, "target", "Target LUFS", -30.0, -5.0, 0.5, -14.0) }
   else if str.eq(kind, "reverb") {
     sp(out, "amount", "Amount", 0.0, 1.0, 0.02, 0.3)
     sp(out, "room", "Room", 0.0, 1.0, 0.02, 0.5)
   }
   else if str.eq(kind, "delay") {
     sp(out, "time", "Delay ms", 0.0, 2000.0, 10.0, 250.0)
-    sp(out, "decay", "Delay decay", 0.0, 1.0, 0.02, 0.4)
+    sp(out, "decay", "Delay decay", 0.0, 0.95, 0.02, 0.4)
   }
   else if str.eq(kind, "pitch") { sp(out, "semitones", "Pitch", -12.0, 12.0, 0.5, 0.0) }
   else if str.eq(kind, "low_pass") { sp(out, "cutoff", "Low pass Hz", 20.0, 20000.0, 100.0, 8000.0) }
@@ -707,7 +707,7 @@ pub fn params_for(kind: str) -> array<Spec> effects {alloc} {
   }
   else if str.eq(kind, "phaser") {
     sp(out, "depth", "Depth", 0.0, 1.0, 0.02, 0.5)
-    sp(out, "rate", "Rate Hz", 0.1, 10.0, 0.1, 0.8)
+    sp(out, "rate", "Rate Hz", 0.1, 2.0, 0.1, 0.8)
   }
   else if str.eq(kind, "limiter") { sp(out, "ceiling", "Ceiling dB", -12.0, 0.0, 0.1, -1.0) }
   else { sp(out, "amount", "Amount", 0.0, 1.0, 0.02, 1.0) }

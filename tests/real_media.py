@@ -63,6 +63,17 @@ def audio_rms_window(movie, start, duration):
     return (sum(sample * sample for sample in samples) / len(samples)) ** 0.5
 
 
+def zero_crossings(movie):
+    done = subprocess.run(["ffmpeg", "-v", "error", "-i", str(movie), "-vn",
+                           "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"],
+                          capture_output=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    samples = array("f")
+    samples.frombytes(done.stdout)
+    return sum((a < 0 <= b or b < 0 <= a) and abs(a - b) > 0.002
+               for a, b in zip(samples, samples[1:]))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -162,6 +173,34 @@ def main():
         low_movie = root / "low-pass.mp4"
         run([args.binary, "export", low_movie, filtered_project], env)
         assert 0.0 < audio_peak(low_movie) < audio_peak(movie) * 0.55
+        filtered["filters"][2]["kind"] = "compressor"
+        filtered["filter_params"] = [dict(filter=12, name="level", value=0.8),
+                                     dict(filter=13, name="threshold", value=-30.0),
+                                     dict(filter=13, name="ratio", value=10.0),
+                                     dict(filter=13, name="attack", value=1.0),
+                                     dict(filter=13, name="release", value=20.0)]
+        filtered_project.write_text(json.dumps(filtered))
+        compressed_movie = root / "compressed.mp4"
+        run([args.binary, "export", compressed_movie, filtered_project], env)
+        assert 0.0 < audio_peak(compressed_movie) < audio_peak(movie) * 0.8
+        filtered["filters"][2]["kind"] = "pitch"
+        filtered["filter_params"] = [dict(filter=12, name="level", value=0.8),
+                                     dict(filter=13, name="semitones", value=12.0)]
+        filtered_project.write_text(json.dumps(filtered))
+        pitched_movie = root / "pitched.mp4"
+        run([args.binary, "export", pitched_movie, filtered_project], env)
+        assert zero_crossings(pitched_movie) > zero_crossings(movie) * 1.5
+        for kind in ("eq_3band", "eq_10band", "gate", "normalize", "delay", "reverb", "notch",
+                     "chorus", "flanger", "phaser", "limiter"):
+            effect_project = json.loads(json.dumps(document))
+            effect_project["filters"].append(dict(id=12, clip=base_id, kind=kind,
+                                                   order=0, enabled=True))
+            effect_project["next_id"] = 13
+            effect_file = root / f"audio-{kind}.air"
+            effect_file.write_text(json.dumps(effect_project))
+            effect_movie = root / f"audio-{kind}.mp4"
+            run([args.binary, "export", effect_movie, effect_file], env)
+            assert audio_peak(effect_movie) > 0.0, kind
 
         # Track.order is the toolkit's display order. Reordering the lanes must
         # change which opaque clip is on top in the program monitor as well.
@@ -355,9 +394,9 @@ def main():
         assert bad.returncode != 0 and "unsupported video filter" in bad.stdout
         assert not (root / "bad.mp4").exists()
         audio_bad = json.loads(json.dumps(document))
-        audio_bad["filters"] = [dict(id=12, clip=base_id, kind="phaser",
+        audio_bad["filters"] = [dict(id=12, clip=base_id, kind="normalize",
                                      order=0, enabled=True)]
-        audio_bad["filter_params"] = []
+        audio_bad["filter_params"] = [dict(filter=12, name="target", value=0.0)]
         audio_bad["next_id"] = 13
         bad_audio_project = root / "bad-audio.air"
         bad_audio_project.write_text(json.dumps(audio_bad))
@@ -366,6 +405,17 @@ def main():
                                    text=True, timeout=30)
         assert bad_audio.returncode != 0 and "unsupported audio filter" in bad_audio.stdout
         assert not (root / "bad-audio.mp4").exists()
+        broken_fx = json.loads(json.dumps(audio_bad))
+        broken_fx["filters"][0]["kind"] = "notch"
+        broken_fx["filter_params"] = [dict(filter=12, name="frequency", value=1000.0),
+                                       dict(filter=12, name="width", value=-1.0)]
+        broken_project = root / "broken-filter.air"
+        broken_project.write_text(json.dumps(broken_fx))
+        broken = subprocess.run([str(args.binary), "export", str(root / "broken-filter.mp4"),
+                                 str(broken_project)], env=env, capture_output=True,
+                                text=True, timeout=30)
+        assert broken.returncode != 0 and "audio filter chain" in broken.stdout, broken.stdout
+        assert not (root / "broken-filter.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
               f"12 frames, three layers, timed captions, crossfade, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
