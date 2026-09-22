@@ -3,6 +3,7 @@
 module genesis.timeline_media
 
 import std.editor as editor
+import std.editor_view as editor_view
 import std.files as files
 import std.math as math
 import std.process as proc
@@ -10,13 +11,7 @@ import std.text as text
 import "chrome.ai" as chrome
 import "provider.ai" as provider
 
-type TrackInfo = struct {id: u64, owner: u64, kind: u32}
 type SourceInfo = struct {path: string, fps: f64, audio: bool, online: bool}
-
-fn track_info(doc: ref<editor.Document>, slot: u64) -> TrackInfo effects {} {
-  let value: ref<editor.Track> = array.borrow(struct.borrow(doc, field=tracks), slot)
-  TrackInfo {id: value.id, owner: value.owner, kind: value.kind}
-}
 
 fn source_info(doc: ref<editor.Document>, slot: u64) -> SourceInfo effects {alloc} {
   let value: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), slot)
@@ -280,22 +275,34 @@ fn transition_pair(doc: ref<editor.Document>, track: u64, center: i64)
 
 // Refuse an edit that this adapter cannot yet render. Silent substitution would make the
 // monitor and exported file disagree with the edit shown in the inspector.
-pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
-                  -> result<string, string> effects {alloc} {
+fn wire_line(values: ref<array<string>>, kind: str, out: str) -> string effects {alloc} {
+  var line: string = string.copy(kind)
+  string.append(line, " ")
+  string.append(line, str.view(text.join(values, " ")))
+  if str.eq(kind, "PREVIEW") {
+    string.append(line, " ")
+    string.append(line, str.view(provider.wire_path(out)))
+  }
+  line
+}
+
+fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
+                   strict: bool) -> result<string, string> effects {alloc} {
   match editor.subtitle_at(doc, doc.active, frame) {
     some(id) => { return result.err("subtitles are not composited yet") },
     none => { },
   }
   var values: array<string> = neutral()
   var visible: u64 = 0
+  var lanes: array<u64> = editor_view.lanes(doc, doc.active)
   var lane: u64 = 0
   loop {
-    if lane >= editor.track_count(doc) { break }
-    let track: TrackInfo = track_info(doc, lane)
-    if track.owner == doc.active and track.kind == editor.track_video() and
-       editor.track_visible(doc, track.id) {
-      var chosen: option<editor.Clip> = visible_clip(doc, track.id, frame)
-      match editor.transition_at(doc, track.id, frame) {
+    if lane >= array.len(lanes) { break }
+    let track: u64 = array.get(lanes, lane)
+    if editor.track_kind(doc, track) == editor.track_video() and
+       editor.track_visible(doc, track) {
+      var chosen: option<editor.Clip> = visible_clip(doc, track, frame)
+      match editor.transition_at(doc, track, frame) {
         none => { },
         some(id) => {
           if visible != 0 { return result.err("a transition above the base lane is not rendered yet") }
@@ -307,7 +314,7 @@ pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
           if not str.eq(str.view(name), "crossfade") {
             return result.err("this transition kind is not rendered yet")
           }
-          let pair: TransitionPair = match transition_pair(doc, track.id, transition.center) {
+          let pair: TransitionPair = match transition_pair(doc, track, transition.center) {
             none => { return result.err("crossfade needs two clips touching at its center") },
             some(value) => value,
           }
@@ -326,6 +333,11 @@ pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
         none => { },
         some(clip) => {
               if clip.enabled {
+                if visible >= 2 {
+                  if strict { return result.err("more than two visible video layers") }
+                  lane = lane + 1
+                  continue
+                }
                 var key_index: u64 = 0
                 loop {
                   if key_index >= array.len(struct.borrow(doc, field=keys)) { break }
@@ -343,7 +355,6 @@ pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
                   some(value) => value,
                   none => { return result.err("a visible clip has no online video source") },
                 }
-                if visible >= 2 { return result.err("more than two visible video layers") }
                 let source_at: i64 = source_frame(doc, clip, frame)
                 let slot: u64 = if visible == 0 { 0 } else { 1 }
                 put(values, slot, str.view(provider.wire_path(str.view(path))))
@@ -365,15 +376,96 @@ pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
     }
     lane = lane + 1
   }
-  // gcompose consumes 102 payload fields for ENC, and one extra output path for PREVIEW.
-  var line: string = string.copy(kind)
-  string.append(line, " ")
-  string.append(line, str.view(text.join(values, " ")))
-  if str.eq(kind, "PREVIEW") {
-    string.append(line, " ")
-    string.append(line, str.view(provider.wire_path(out)))
+  result.ok(wire_line(values, kind, out))
+}
+
+pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
+                  -> result<string, string> effects {alloc} {
+  frame_line_core(doc, frame, kind, out, true)
+}
+
+fn layer_path(prefix: str, number: u64) -> string effects {alloc} {
+  text.concat(prefix, if number == 0 { ".layer0.rgba" } else { ".layer1.rgba" })
+}
+
+// Fold visible lanes bottom to top. The worker accepts RAW: RGBA as a base, so each
+// PREVIEW output becomes the next input. ENC then consumes the completed raw frame.
+pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
+                  scratch_prefix: str) -> result<array<string>, string> effects {alloc} {
+  var visible: array<editor.Clip> = array.new()
+  var lanes: array<u64> = editor_view.lanes(doc, doc.active)
+  var at: u64 = 0
+  loop {
+    if at >= array.len(lanes) { break }
+    let track: u64 = array.get(lanes, at)
+    if editor.track_kind(doc, track) == editor.track_video() and editor.track_visible(doc, track) {
+      match visible_clip(doc, track, frame) {
+        none => { },
+        some(clip) => { array.push(visible, clip) },
+      }
+    }
+    at = at + 1
   }
-  result.ok(line)
+  var lines: array<string> = array.new()
+  if array.len(visible) <= 2 {
+    array.push(lines, try frame_line(doc, frame, kind, out))
+    return result.ok(lines)
+  }
+  let first_out: string = layer_path(scratch_prefix, 0)
+  array.push(lines, try frame_line_core(doc, frame, "PREVIEW", str.view(first_out), false))
+  var layer: u64 = 2
+  var previous: string = first_out
+  loop {
+    if layer >= array.len(visible) { break }
+    let clip: editor.Clip = array.get(visible, layer)
+    match editor.transition_at(doc, clip.track, frame) {
+      some(id) => { return result.err("a transition above the base lane is not rendered yet") },
+      none => { },
+    }
+    if clip.nested != 0 { return result.err("nested sequences are not rendered yet") }
+    var key_index: u64 = 0
+    loop {
+      if key_index >= array.len(struct.borrow(doc, field=keys)) { break }
+      let key: editor.Key = array.get(struct.borrow(doc, field=keys), key_index)
+      if key.clip == clip.id and not str.eq(str.view(editor.name_text(doc, key.param)), "opacity") {
+        return result.err("a visible clip has unsupported keyframed video effects")
+      }
+      key_index = key_index + 1
+    }
+    let path: string = match source_path(doc, clip) {
+      some(value) => value,
+      none => { return result.err("a visible clip has no online video source") },
+    }
+    var values: array<string> = neutral()
+    var raw_base: string = text.concat("RAW:", str.view(previous))
+    put(values, 0, str.view(provider.wire_path(str.view(raw_base))))
+    put(values, 1, str.view(provider.wire_path(str.view(path))))
+    put_i(values, 3, source_frame(doc, clip, frame))
+    put_f(values, 4, fade(clip, frame) *
+      editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) * overlay_opacity(doc, clip))
+    if not filters(doc, clip, values, true) {
+      return result.err("a visible clip uses an unsupported video filter")
+    }
+    let last: bool = layer + 1 == array.len(visible)
+    let stage_out: string = if last and str.eq(kind, "PREVIEW") { string.copy(out) }
+      else { layer_path(scratch_prefix, (layer - 1) % 2) }
+    array.push(lines, wire_line(values, "PREVIEW", str.view(stage_out)))
+    previous = stage_out
+    layer = layer + 1
+  }
+  if str.eq(kind, "ENC") {
+    var values: array<string> = neutral()
+    var raw_base: string = text.concat("RAW:", str.view(previous))
+    put(values, 0, str.view(provider.wire_path(str.view(raw_base))))
+    array.push(lines, wire_line(values, "ENC", ""))
+  }
+  result.ok(lines)
+}
+
+pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
+  let _ = files.remove(str.view(layer_path(prefix, 0)))
+  let _ = files.remove(str.view(layer_path(prefix, 1)))
+  ()
 }
 
 fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
@@ -579,8 +671,13 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
   var frame: i64 = range.mark_in
   loop {
     if frame >= range.mark_out { break }
-    let line: string = try frame_line(doc, frame, "ENC", "")
-    let _ = try command(child, reader, str.view(line))
+    var lines: array<string> = try frame_plan(doc, frame, "ENC", "", output)
+    var step: u64 = 0
+    loop {
+      if step >= array.len(lines) { break }
+      let _ = try command(child, reader, str.view(array.borrow(lines, step)))
+      step = step + 1
+    }
     frame = frame + 1
   }
   var sounds: array<string> = try audio_lines(doc, range.mark_in, range.mark_out, fps)
@@ -625,10 +722,12 @@ pub fn render(doc: ref<editor.Document>, worker: str, output: str)
   }
   match render_into(doc, worker, str.view(partial)) {
     err(problem) => {
+      cleanup_plan(str.view(partial))
       let _ = files.remove(str.view(partial))
       result.err(problem)
     },
     ok(_) => {
+      cleanup_plan(str.view(partial))
       match files.rename(str.view(partial), output) {
         ok(_) => result.ok(()),
         err(problem) => {

@@ -130,9 +130,15 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
   var program: provider.Frame = if struct.get(struct.borrow(state, field=provider), field=kind) ==
       provider.kind_gcompose() {
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
-    match timeline_media.frame_line(document, program_frame, "PREVIEW", str.view(output)) {
-      ok(line) => provider.program_command(struct.borrow(state, field=provider),
-        str.view(line), width, height),
+    match timeline_media.frame_plan(document, program_frame, "PREVIEW", str.view(output),
+      str.view(output)) {
+      ok(plan_lines) => {
+        var lines: array<string> = plan_lines
+        var picture: provider.Frame = provider.program_plan(struct.borrow(state, field=provider),
+          lines, width, height)
+        timeline_media.cleanup_plan(str.view(output))
+        picture
+      },
       err(problem) => {
         app.set_status(state, str.view(problem))
         var empty: array<string> = array.new()
@@ -491,14 +497,15 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     }
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
     let frame: i64 = editor.playhead(struct.borrow(state, field=document))
-    let command: string = match timeline_media.frame_line(struct.borrow(state, field=document),
-      frame, "PREVIEW", str.view(output)) {
+    var plan: array<string> = match timeline_media.frame_plan(struct.borrow(state, field=document),
+      frame, "PREVIEW", str.view(output), str.view(output)) {
       ok(value) => value,
       err(problem) => { say(str.view(problem))
         return 1 },
     }
-    var picture: provider.Frame = provider.program_command(struct.borrow(state, field=provider),
-      str.view(command), 640, 360)
+    var picture: provider.Frame = provider.program_plan(struct.borrow(state, field=provider),
+      plan, 640, 360)
+    timeline_media.cleanup_plan(str.view(output))
     if not provider.frame_ok(picture) { say(str.view(provider.frame_detail(picture)))
       return 1 }
     var pixels: draw.Surface = provider.take_pixels(picture)

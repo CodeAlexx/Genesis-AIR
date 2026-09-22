@@ -459,6 +459,27 @@ pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32)
   }
 }
 
+pub fn program_plan(state: ref<Provider>, lines: ref<array<string>>, width: u32,
+                    height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+  if array.len(lines) == 0 {
+    return Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
+      detail: string.copy("empty preview plan")}
+  }
+  var at: u64 = 0
+  loop {
+    if at + 1 >= array.len(lines) { break }
+    match ask(state, str.view(array.borrow(lines, at)), "program-step.txt") {
+      none => {
+        return Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
+          detail: last_error(state)}
+      },
+      some(reply) => { },
+    }
+    at = at + 1
+  }
+  program_command(state, str.view(array.borrow(lines, at)), width, height)
+}
+
 fn thumb_command(source: str, frame: i64, width: u32, height: u32, out: str) -> string effects {alloc} {
   var command: string = string.copy("THUMB ")
   string.append(command, str.view(wire_path(source)))

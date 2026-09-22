@@ -52,7 +52,7 @@ def main():
     args.stdlib = args.stdlib.resolve()
     with TemporaryDirectory(prefix="genesis-air-real-") as temporary:
         root = Path(temporary)
-        red, blue = root / "red clip.mp4", root / "blue clip.mp4"
+        red, blue, green = root / "red clip.mp4", root / "blue clip.mp4", root / "green clip.mp4"
         run(["ffmpeg", "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30",
              "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
@@ -62,6 +62,10 @@ def main():
              "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=30",
              "-t", "0.4", "-c:v", "libx264", "-preset", "ultrafast",
              "-pix_fmt", "yuv420p", blue])
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=green:s=320x180:r=30",
+             "-t", "0.4", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", green])
         env = dict(os.environ, AIR_STDLIB=str(args.stdlib),
                    GENESIS_GCOMPOSE=str(args.worker),
                    GENESIS_SCRATCH=str(root / "scratch"),
@@ -131,6 +135,51 @@ def main():
         run([args.binary, "export", low_movie, filtered_project], env)
         assert 0.0 < audio_peak(low_movie) < audio_peak(movie) * 0.55
 
+        # Track.order is the toolkit's display order. Reordering the lanes must
+        # change which opaque clip is on top in the program monitor as well.
+        ordered = json.loads(json.dumps(document))
+        ordered["filters"] = []
+        ordered["filter_params"] = []
+        ordered_project = root / "ordered.air"
+        ordered_project.write_text(json.dumps(ordered))
+        top_before = root / "top-before.png"
+        run([args.binary, "preview", top_before, ordered_project], env)
+        assert pixel(top_before, 320, 180)[2] > 180
+        base_track = ordered["clips"][0]["track"]
+        over_track = ordered["clips"][1]["track"]
+        for track in ordered["tracks"]:
+            if track["id"] == base_track:
+                track["order"] = 3
+            if track["id"] == over_track:
+                track["order"] = 2
+        ordered_project.write_text(json.dumps(ordered))
+        top_after = root / "top-after.png"
+        run([args.binary, "preview", top_after, ordered_project], env)
+        assert pixel(top_after, 320, 180)[0] > 180
+
+        layered = json.loads(json.dumps(document))
+        layered["sources"].append(dict(source, id=20, path=str(green), name="green",
+                                       has_audio=False))
+        top_track = next(track for track in layered["tracks"] if track["id"] == over_track)
+        layered["tracks"].append(dict(top_track, id=21, name="V3", order=4))
+        layered["clips"].append(dict(layered["clips"][0], id=22, source=20, track=21))
+        layered["filters"].append(dict(id=23, clip=22, kind="opacity", order=0,
+                                        enabled=True))
+        layered["filter_params"].append(dict(filter=23, name="level", value=0.5))
+        layered["next_id"] = 24
+        layer_project = root / "three-layers.air"
+        layer_project.write_text(json.dumps(layered))
+        layer_preview = root / "three-layers.png"
+        layer_movie = root / "three-layers.mp4"
+        run([args.binary, "preview", layer_preview, layer_project], env)
+        run([args.binary, "export", layer_movie, layer_project], env)
+        third_preview = pixel(layer_preview, 320, 180)
+        third_encoded = pixel(layer_movie, 960, 540, True)
+        assert all(45 <= value <= 85 for value in third_preview), third_preview
+        assert max(abs(a - b) for a, b in zip(third_preview, third_encoded)) <= 18, (
+            third_preview, third_encoded)
+        assert not list(root.rglob("*.layer*.rgba")), "layer fold left raw frames behind"
+
         tone = root / "audio only.wav"
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
              "-i", "sine=frequency=660:sample_rate=48000", "-t", "0.4", tone])
@@ -194,7 +243,7 @@ def main():
         assert bad_audio.returncode != 0 and "unsupported audio filter" in bad_audio.stdout
         assert not (root / "bad-audio.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
-              f"12 frames, crossfade, mixed picture/audio filters, audible AAC and "
+              f"12 frames, three layers, crossfade, mixed picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
 

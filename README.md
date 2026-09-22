@@ -239,7 +239,7 @@ python3 tests/real_media.py --binary build/genesis-air \
 - **Canvas smoke**: `build/genesis-air demo OUT.png PROJECT.air` paints a 1600×980 frame
   and saves its project.
 - **Real media**: the worker probe reads frame count, size, frame rate and audio presence;
-  the preview and MP4 paths compose two colored clips, apply a touching-cut crossfade,
+  the preview and MP4 paths compose three colored clips in track order, apply a touching-cut crossfade,
   export an audio-only timeline, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
   effect instead of silently dropping it.
@@ -248,8 +248,8 @@ python3 tests/real_media.py --binary build/genesis-air \
 
 - Source probe, thumbnail, waveform and interactive preview still start one worker per
   request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
-- The media adapter currently composites two video lanes and touching-cut crossfades.
-  Extra visible lanes, nested sequences, other transition kinds and overlap seams,
+- The media adapter composites visible video lanes in track order and touching-cut crossfades.
+  Nested sequences, other transition kinds and overlap seams,
   subtitles, unsupported video filters, keyframed effects
   other than opacity, and the audio filters beyond gain, pan, low pass, high pass,
   tremolo, bass, treble, and limiter are refused by preview/export. The inspector
