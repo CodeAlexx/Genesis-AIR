@@ -289,6 +289,14 @@ def main():
         first_loudness = audio_rms_window(speed_movie, 0.0, 0.04)
         last_loudness = audio_rms_window(speed_movie, 0.15, 0.04)
         assert first_loudness > last_loudness * 1.7, (first_loudness, last_loudness)
+        sped["clips"][0]["length"] = 12
+        speed_project.write_text(json.dumps(sped))
+        overrun = subprocess.run([str(args.binary), "export", str(root / "overrun.mp4"),
+                                  str(speed_project)], env=env, capture_output=True,
+                                 text=True, timeout=30)
+        assert overrun.returncode != 0 and "exceed its source frames" in overrun.stdout
+        assert not (root / "overrun.mp4").exists()
+        sped["clips"][0]["length"] = 6
         sped["clips"][0]["speed"] = 0.0
         sped["clips"][0]["reverse"] = False
         speed_project.write_text(json.dumps(sped))

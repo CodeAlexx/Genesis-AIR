@@ -119,6 +119,21 @@ fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64
   else { result_frame }
 }
 
+fn source_range_ok(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {} {
+  if clip.speed == 0.0 { return true }
+  if not math.is_finite(clip.speed) or clip.speed < 0.0 { return false }
+  let slot: u64 = match editor.source_slot(doc, clip.source) {
+    none => { return false }, some(value) => value,
+  }
+  let sequence_fps: f64 = editor.sequence_fps(doc, clip.owner)
+  let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), slot)
+  if source.frames <= 0 { return true }
+  if sequence_fps <= 0.0 or source.fps <= 0.0 { return false }
+  let required: f64 = cast.float(clip.source_in) +
+    math.ceil(cast.float(clip.length) * clip.speed * source.fps / sequence_fps)
+  required <= cast.float(source.frames)
+}
+
 fn fade(clip: editor.Clip, frame: i64) -> f64 effects {} {
   let local: i64 = frame - clip.start
   var value: f64 = 1.0
@@ -384,6 +399,9 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                   key_index = key_index + 1
                 }
                 if clip.nested != 0 { return result.err("nested sequences are not rendered yet") }
+                if not source_range_ok(doc, clip) {
+                  return result.err("clip speed and length exceed its source frames")
+                }
                 let path: string = match source_path(doc, clip) {
                   some(value) => value,
                   none => { return result.err("a visible clip has no online video source") },
@@ -460,6 +478,9 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
       none => { },
     }
     if clip.nested != 0 { return result.err("nested sequences are not rendered yet") }
+    if not source_range_ok(doc, clip) {
+      return result.err("clip speed and length exceed its source frames")
+    }
     var key_index: u64 = 0
     loop {
       if key_index >= array.len(struct.borrow(doc, field=keys)) { break }
@@ -702,6 +723,9 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     let begin: i64 = if clip.start > start { clip.start } else { start }
     let end: i64 = if editor.clip_end(clip) < finish { editor.clip_end(clip) } else { finish }
     if end <= begin { continue }
+    if not source_range_ok(doc, clip) {
+      return result.err("audio clip speed and length exceed its source frames")
+    }
     // A held picture has no progressing audio samples. Other audible clips can still mix.
     if clip.speed == 0.0 { continue }
     if not math.is_finite(clip.speed) or clip.speed < 0.05 or clip.speed > 16.0 {

@@ -262,7 +262,9 @@ python3 tests/real_media.py --binary build/genesis-air \
 - The worker stamps frames on a fixed 30 fps timeline. Export rejects sequences with another
   frame rate. `std.editor` currently bounds clip length in source-frame units, so a clip whose
   source rate differs from the sequence rate cannot use its entire source duration without
-  further editor-model work. Preview samples source frames by the measured rate.
+  further editor-model work. Preview samples source frames by the measured rate. Preview and
+  export refuse a clip whose speed and length would read beyond its measured source, instead
+  of silently repeating its last picture frame.
 - The window runs export synchronously, so it does not repaint or accept cancellation during
   a long encode. The standalone `preview` and `export` commands support headless workflows.
 - The program Play control now advances on a monotonic clock and skips frames after a slow
