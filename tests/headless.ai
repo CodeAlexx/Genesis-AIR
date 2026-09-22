@@ -9,12 +9,15 @@ import std.draw as draw
 import std.editor as editor
 import std.files as files
 import std.timeline as timeline
+import std.text as text
 import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
 import "../src/input.ai" as input
 import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
+import "../src/transport_clock.ai" as transport_clock
+import "../src/timeline_media.ai" as timeline_media
 import "../src/view.ai" as painter
 
 fn emit(name: str, value: str) -> unit effects {io.write} {
@@ -540,6 +543,55 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   match draw.surface_pixel(finished, 4, 976) {
     some(colour) => { emit_u("status_pixel_r", cast.wrap(colour.r)) },
     none => { emit("status_pixel_r", "-") },
+  }
+  // A real window advances the document from elapsed monotonic time. Fractional frames
+  // accumulate; pausing clears that remainder and the last frame stops playback.
+  let _ = commands.seek(state, 0)
+  let _ = commands.program(state, editor.play())
+  var frame_clock: transport_clock.Clock = transport_clock.Clock {remainder: 0.0}
+  let first_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    50000000, frame_clock)
+  emit_b("clock_first_frame", first_tick and
+    editor.playhead(struct.borrow(state, field=document)) == 1)
+  let second_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    50000000, frame_clock)
+  emit_b("clock_fractional_frame", second_tick and
+    editor.playhead(struct.borrow(state, field=document)) == 3)
+  let _ = commands.program(state, editor.pause())
+  let paused_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    100000000, frame_clock)
+  emit_b("clock_paused", not paused_tick and
+    editor.playhead(struct.borrow(state, field=document)) == 3)
+  let last: i64 = editor.duration(struct.borrow(state, field=document)) - 1
+  let _ = commands.seek(state, last - 1)
+  let _ = commands.program(state, editor.play())
+  let final_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    100000000, frame_clock)
+  emit_b("clock_stops_at_end", final_tick and
+    editor.playhead(struct.borrow(state, field=document)) == last and
+    not editor.playing(struct.borrow(state, field=document)))
+  // Reverse sampling must apply both clip speed and the source/sequence FPS ratio.
+  var rate_doc: editor.Document = editor.document(30.0, 320, 180)
+  let rate_source: u64 = editor.add_source(rate_doc, "rate.mp4", "rate", 60, 60.0)
+  let rate_track: u64 = editor.add_track(rate_doc, rate_doc.active, editor.track_video(), "V1")
+  let rate_clip: u64 = match editor.place(rate_doc, rate_track, rate_source, 0, 10, 0) {
+    some(id) => id, none => 0,
+  }
+  let _ = editor.set_clip_speed(rate_doc, rate_clip, 2.0)
+  let _ = editor.set_clip_reverse(rate_doc, rate_clip, true)
+  match timeline_media.frame_line(rate_doc, 0, "ENC", "") {
+    err(problem) => { emit_b("reverse_rate_start", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("reverse_rate_start", str.eq(str.view(array.borrow(fields, 3)), "36"))
+    },
+  }
+  match timeline_media.frame_line(rate_doc, 9, "ENC", "") {
+    err(problem) => { emit_b("reverse_rate_end", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("reverse_rate_end", str.eq(str.view(array.borrow(fields, 3)), "0"))
+    },
   }
   0
 }

@@ -14,7 +14,7 @@ case "$AIR_SDK" in /*) ;; *) AIR_SDK="$here/$AIR_SDK" ;; esac
 case "$AIR_TOOLCHAIN" in /*) ;; *) AIR_TOOLCHAIN="$here/$AIR_TOOLCHAIN" ;; esac
 AIR_HOME=${AIR_HOME:-$AIR_SDK}
 case "$AIR_HOME" in /*) ;; *) AIR_HOME="$here/$AIR_HOME" ;; esac
-AIRC=${AIRC:-$AIR_TOOLCHAIN/build-dev/bin/airc}
+AIRC=${AIRC:-$AIR_TOOLCHAIN/build-gcc15/bin/airc}
 case "$AIRC" in /*) ;; *) AIRC="$here/$AIRC" ;; esac
 export AIR_STDLIB="$AIR_HOME/stdlib"
 
@@ -30,7 +30,8 @@ if [ ! -f "$AIR_STDLIB/editor.ai" ]; then
 fi
 
 have=$(cd "$AIR_HOME" && git rev-parse HEAD 2>/dev/null || echo unknown)
-if [ "$have" != "$AIR_SDK_COMMIT" ]; then
+if [ "$have" != "$AIR_SDK_COMMIT" ] &&
+   ! (cd "$AIR_HOME" && git merge-base --is-ancestor "$AIR_SDK_COMMIT" "$have" 2>/dev/null); then
   echo "genesis-air: warning — AIR SDK is at $have, this project pins $AIR_SDK_COMMIT" >&2
 fi
 
@@ -46,7 +47,11 @@ set -e
 if [ "$status" -ne 0 ]; then
   # Keep the compiler's structured report available and surface it without requiring
   # a second language runtime.
-  sed 's/^/  /' "$here/build/build.json" >&2
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$here/report_build.py" "$here/build/build.json" || true
+  else
+    sed 's/^/  /' "$here/build/build.json" >&2
+  fi
   echo "genesis-air: build failed ($status)" >&2
   exit "$status"
 fi

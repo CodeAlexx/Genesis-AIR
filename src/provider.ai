@@ -10,13 +10,14 @@
 // the isolation the original measured it needs: NVIDIA OpenCL initialization and a UI GL/GLX
 // stack crashed intermittently when combined, so the compositor stays out of this process.
 //
-// The donor's wire is 103 positional fields on one ENC line. That shape stops here: the rest
-// of the application sees `probe`, `thumbnail`, `source_frame`, `program_frame`, `envelope`.
+// The donor's 103-field frame wire is assembled in timeline_media.ai; this module owns
+// transport, source probes, frame reads and waveform reads.
 module genesis.provider
 
 import std.draw as draw
 import std.files as files
 import std.image as image
+import std.math as math
 import std.path as path
 import std.process as proc
 import std.text as text
@@ -63,6 +64,12 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} 
 }
 
 pub fn available(state: ref<Provider>) -> bool effects {} { state.available }
+pub fn worker_path(state: ref<Provider>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(state, field=worker)))
+}
+pub fn preview_path(state: ref<Provider>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(state, field=scratch)), "program.rgba")
+}
 pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
 pub fn failures(state: ref<Provider>) -> u64 effects {} { state.failures }
 pub fn last_error(state: ref<Provider>) -> string effects {alloc} {
@@ -84,17 +91,22 @@ fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc} {
 // ---------------------------------------------------------------------------
 // The gcompose transport
 //
-// One bounded worker invocation per request: the command line is piped in, the reply line is
-// captured, and the worker exits. That keeps the compositor in its own process and needs no
-// long-lived pipe.
-//
-// A PERSISTENT worker would be better for a busy editor, and the donor runs one. AIR cannot
-// express it today: `process.exec` inherits stdio and waits, `process.run` redirects to a
-// file, and there is no primitive that hands back a writable stdin. That gap is recorded in
-// this project's README rather than worked around with a shell that pretends to be a pipe.
+// Probe, thumbnail, waveform and interactive program requests use one bounded worker
+// invocation apiece. Export uses AIR's persistent process pipes in timeline_media.ai.
+// Reusing a worker here remains a performance improvement for interactive editing.
 
 fn scratch_file(state: ref<Provider>, name: str) -> string effects {alloc} {
   path.join(str.view(struct.borrow(state, field=scratch)), name)
+}
+
+// gcompose's positional wire decodes these escapes in the reverse order. Encode '%' first
+// so a literal sequence such as "%20" still names the same file after the round trip.
+pub fn wire_path(value: str) -> string effects {alloc} {
+  var encoded: string = text.replace(value, "%", "%25")
+  encoded = text.replace(str.view(encoded), " ", "%20")
+  encoded = text.replace(str.view(encoded), "\t", "%09")
+  encoded = text.replace(str.view(encoded), "\n", "%0A")
+  text.replace(str.view(encoded), "\r", "%0D")
 }
 
 // Run one command line through the worker and return its reply line, or none.
@@ -167,10 +179,114 @@ fn parse_int(text_value: str) -> option<i64> effects {} {
   option.some(value)
 }
 
+type VideoInfo = struct {width: u32, height: u32, fps: f64, known: bool}
+
+fn ffprobe_text(state: ref<Provider>, source: str, stream: str, fields: str,
+                tag: str) -> option<string> effects {alloc, fs.meta, fs.read, fs.write, process} {
+  match files.mkdirs(str.view(struct.borrow(state, field=scratch))) {
+    ok(_) => { },
+    err(problem) => { return option.none() },
+  }
+  let log: string = scratch_file(state, tag)
+  var argv: array<string> = ["ffprobe", "-v", "error", "-select_streams",
+    string.copy(stream), "-show_entries", string.copy(fields),
+    "-of", "default=noprint_wrappers=1", string.copy(source)]
+  match proc.run(argv, ".", str.view(log), false) {
+    err(problem) => option.none(),
+    ok(status) => {
+      if not proc.success(status) { return option.none() }
+      match files.read_text(str.view(log)) {
+        err(problem) => option.none(),
+        ok(value) => option.some(value),
+      }
+    },
+  }
+}
+
+fn video_info(state: ref<Provider>, source: str) -> VideoInfo
+              effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var info: VideoInfo = VideoInfo {width: 0, height: 0, fps: 30.0, known: false}
+  let answer: string = match ffprobe_text(state, source, "v:0",
+      "stream=width,height,avg_frame_rate", "video-info.txt") {
+    none => { return info },
+    some(value) => value,
+  }
+  var lines: array<string> = text.split(str.view(answer), "\n")
+  var at: u64 = 0
+  loop {
+    if at >= array.len(lines) { break }
+    let line: str = str.view(array.borrow(lines, at))
+    if str.starts_with(line, "width=") {
+      match parse_int(str.slice(line, 6, str.len(line))) {
+        some(value) => { let width: u32 = cast.sat(value)
+          struct.set(info, width, field=width) }, none => { },
+      }
+    }
+    if str.starts_with(line, "height=") {
+      match parse_int(str.slice(line, 7, str.len(line))) {
+        some(value) => { let height: u32 = cast.sat(value)
+          struct.set(info, height, field=height) }, none => { },
+      }
+    }
+    if str.starts_with(line, "avg_frame_rate=") {
+      var ratio: array<string> = text.split(str.slice(line, 15, str.len(line)), "/")
+      if array.len(ratio) == 2 {
+        let top: f64 = match text.parse_f64(str.view(array.borrow(ratio, 0))) {
+          some(value) => value, none => 0.0,
+        }
+        let bottom: f64 = match text.parse_f64(str.view(array.borrow(ratio, 1))) {
+          some(value) => value, none => 0.0,
+        }
+        if top > 0.0 and bottom > 0.0 { struct.set(info, top / bottom, field=fps) }
+      }
+    }
+    at = at + 1
+  }
+  let measured: bool = info.width > 0 and info.height > 0
+  struct.set(info, measured, field=known)
+  info
+}
+
+fn has_audio(state: ref<Provider>, source: str) -> bool
+             effects {alloc, fs.meta, fs.read, fs.write, process} {
+  match ffprobe_text(state, source, "a:0", "stream=codec_type", "audio-info.txt") {
+    none => true,
+    some(value) => text.contains(str.view(value), "codec_type=audio"),
+  }
+}
+
+fn audio_frames(state: ref<Provider>, source: str) -> i64
+                effects {alloc, fs.meta, fs.read, fs.write, process} {
+  let answer: string = match ffprobe_text(state, source, "a:0",
+      "format=duration", "duration-info.txt") {
+    none => { return 0 },
+    some(value) => value,
+  }
+  var lines: array<string> = text.split(str.view(answer), "\n")
+  var at: u64 = 0
+  loop {
+    if at >= array.len(lines) { break }
+    let line: str = str.view(array.borrow(lines, at))
+    if str.starts_with(line, "duration=") {
+      match text.parse_f64(str.slice(line, 9, str.len(line))) {
+        some(seconds) => {
+          if seconds > 0.0 and seconds < 86400.0 {
+            let frames: i64 = cast.sat(math.ceil(seconds * 30.0))
+            return frames
+          }
+        },
+        none => { },
+      }
+    }
+    at = at + 1
+  }
+  0
+}
+
 // ---------------------------------------------------------------------------
 // The provider surface
 //
-// Five operations. Everything above the seam uses only these.
+// Source and program media operations. Everything above the seam uses these.
 
 // Deterministic fake dimensions and length, derived from the path so a fixture is stable.
 fn fake_seed(source: str) -> u64 effects {} {
@@ -186,8 +302,8 @@ fn fake_seed(source: str) -> u64 effects {} {
   seed
 }
 
-// PROBE: what the source is. The frame count is what `std.editor` treats as authoritative,
-// so a provider that does not know must say 0 rather than guess.
+// PROBE: gcompose supplies the frame count; ffprobe supplies dimensions, native frame rate
+// and audio presence. A provider that does not know the frame count says 0.
 pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta, fs.read, fs.write, process} {
   if state.kind == kind_fake() {
     struct.set(state, state.calls + 1, field=calls)
@@ -198,8 +314,17 @@ pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta
       height: if audio_only { 0 } else { 1080 }, fps: 30.0, has_video: not audio_only,
       has_audio: true, detail: string.copy("fake source")}
   }
+  let info: VideoInfo = video_info(state, source)
+  let audio: bool = has_audio(state, source)
+  if not info.known and audio {
+    let frames: i64 = audio_frames(state, source)
+    if frames > 0 {
+      return Probe {ok: true, frames: frames, width: 0, height: 0, fps: 30.0,
+        has_video: false, has_audio: true, detail: string.copy("audio-only ffprobe metadata")}
+    }
+  }
   var command: string = string.copy("NFRAMES ")
-  string.append(command, source)
+  string.append(command, str.view(wire_path(source)))
   match ask(state, str.view(command), "probe.txt") {
     none => Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0, has_video: false,
       has_audio: false, detail: last_error(state)},
@@ -207,8 +332,11 @@ pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta
       match parse_int(str.view(text.trim(str.view(reply)))) {
         none => Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0,
           has_video: false, has_audio: false, detail: string.copy("unreadable frame count")},
-        some(frames) => Probe {ok: true, frames: frames, width: 0, height: 0, fps: 30.0,
-          has_video: true, has_audio: true, detail: string.copy("gcompose NFRAMES")},
+        some(frames) => {
+          Probe {ok: true, frames: frames, width: info.width, height: info.height,
+            fps: info.fps, has_video: true, has_audio: audio,
+            detail: string.copy("gcompose NFRAMES + ffprobe metadata")}
+        },
       }
     },
   }
@@ -281,9 +409,59 @@ fn read_rgba(file: str, width: u32, height: u32) -> option<draw.Surface> effects
   }
 }
 
+// PREVIEW always writes the worker's fixed 1280x856 canvas. Sample that canvas into the
+// monitor's requested size; interpreting the first width*height bytes as a small image
+// would instead show only a cropped corner of the composition.
+fn read_program(file: str, width: u32, height: u32) -> option<draw.Surface> effects {alloc, fs.read} {
+  let raw: bytes = match files.read_bytes(file) { ok(value) => value, err(problem) => { return option.none() }, }
+  let data: view<byte> = bytes.view(raw)
+  if view.len(data) != 1280 * 856 * 4 or width == 0 or height == 0 { return option.none() }
+  match draw.surface(width, height) {
+    none => option.none(),
+    some(target) => {
+      var canvas: draw.Canvas = draw.canvas(target)
+      var y: u32 = 0
+      loop {
+        if y >= height { break }
+        let sy: u64 = cast.wrap(y) * 856 / cast.wrap(height)
+        var x: u32 = 0
+        loop {
+          if x >= width { break }
+          let sx: u64 = cast.wrap(x) * 1280 / cast.wrap(width)
+          let at: u64 = (sy * 1280 + sx) * 4
+          let red: u8 = cast.bits(view.get(data, at))
+          let green: u8 = cast.bits(view.get(data, at + 1))
+          let blue: u8 = cast.bits(view.get(data, at + 2))
+          draw.device_pixel(canvas, cast.wrap(x), cast.wrap(y), draw.rgb(red, green, blue))
+          x = x + 1
+        }
+        y = y + 1
+      }
+      option.some(draw.finish(canvas))
+    },
+  }
+}
+
+pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32) -> Frame
+                       effects {alloc, fs.meta, fs.read, fs.write, process} {
+  let output: string = preview_path(state)
+  match ask(state, line, "program.txt") {
+    none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
+      detail: last_error(state)},
+    some(reply) => {
+      match read_program(str.view(output), width, height) {
+        none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
+          detail: string.copy("the worker's program frame could not be read")},
+        some(pixels) => Frame {ok: true, width: width, height: height, pixels: pixels,
+          detail: string.copy("gcompose PREVIEW")},
+      }
+    },
+  }
+}
+
 fn thumb_command(source: str, frame: i64, width: u32, height: u32, out: str) -> string effects {alloc} {
   var command: string = string.copy("THUMB ")
-  string.append(command, source)
+  string.append(command, str.view(wire_path(source)))
   string.append(command, " ")
   string.append(command, str.view(string.from_int(frame)))
   string.append(command, " ")
@@ -293,7 +471,7 @@ fn thumb_command(source: str, frame: i64, width: u32, height: u32, out: str) -> 
   string.append(command, " ")
   string.append(command, str.view(string.from_int(h)))
   string.append(command, " ")
-  string.append(command, out)
+  string.append(command, str.view(wire_path(out)))
   command
 }
 
@@ -362,19 +540,38 @@ pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> e
     return out
   }
   var command: string = string.copy("ENV ")
-  string.append(command, source)
+  string.append(command, str.view(wire_path(source)))
+  string.append(command, " ")
+  let count: i64 = cast.sat(buckets)
+  string.append(command, str.view(string.from_int(count)))
+  var envelope_file: string = scratch_file(state, "envelope.f32")
+  string.append(command, " ")
+  string.append(command, str.view(wire_path(str.view(envelope_file))))
   match ask(state, str.view(command), "env.txt") {
     none => out,
     some(reply) => {
-      var parts: array<string> = text.split(str.view(reply), ",")
+      let raw: bytes = match files.read_bytes(str.view(envelope_file)) {
+        ok(value) => value,
+        err(problem) => { note_failure(state, "the worker's envelope could not be read")
+          return out },
+      }
+      let data: view<byte> = bytes.view(raw)
+      if view.len(data) != buckets * 4 {
+        note_failure(state, "the worker's envelope has the wrong length")
+        return out
+      }
       var index: u64 = 0
       loop {
-        if index >= array.len(parts) { break }
-        if array.len(out) >= buckets { break }
-        match parse_int(str.view(text.trim(str.view(array.borrow(parts, index))))) {
-          some(value) => { array.push(out, cast.float(value) / 1000.0) },
-          none => { },
-        }
+        if index >= buckets { break }
+        let at: u64 = index * 4
+        let b0: u8 = cast.bits(view.get(data, at))
+        let b1: u8 = cast.bits(view.get(data, at + 1))
+        let b2: u8 = cast.bits(view.get(data, at + 2))
+        let b3: u8 = cast.bits(view.get(data, at + 3))
+        let bits: u32 = cast.wrap(b0) + cast.wrap(b1) * 256 +
+          cast.wrap(b2) * 65536 + cast.wrap(b3) * 16777216
+        let peak: f32 = cast.bits(bits)
+        array.push(out, cast.float(peak))
         index = index + 1
       }
       out

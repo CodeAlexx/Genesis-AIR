@@ -112,8 +112,8 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     return note("path to import?")
   }
   if action == chrome.act_render() {
-    app.begin_prompt(state, action, "Render still to", "genesis-air.png")
-    return note("write the frame where?")
+    app.begin_prompt(state, action, "Export video to", "genesis-air.mp4")
+    return note("write the video where?")
   }
   if action == chrome.act_save() {
     var where: string = app.project_path(state)

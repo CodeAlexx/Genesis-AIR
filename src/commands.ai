@@ -13,6 +13,7 @@ import std.editor as editor
 import std.editor_io as editor_io
 import std.curve as curve
 import std.files as files
+import std.path as path
 import std.codec as codec
 import "app.ai" as app
 import "provider.ai" as provider
@@ -96,13 +97,30 @@ pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
 // ---------------------------------------------------------------------------
 // Media
 
+fn media_path(state: ref<app.App>, chosen: str) -> option<string> effects {alloc, fs.read} {
+  // Fake-provider fixtures deliberately use synthetic names such as "audio:media/vo.wav".
+  if struct.get(struct.borrow(state, field=provider), field=kind) == provider.kind_fake() {
+    return option.some(string.copy(chosen))
+  }
+  if path.is_absolute(chosen) { return option.some(path.normalize(chosen)) }
+  let cwd: string = match files.cwd() {
+    ok(value) => value,
+    err(problem) => { return option.none() },
+  }
+  option.some(path.join(str.view(cwd), chosen))
+}
+
 // Import a source. The provider is asked how long it really is, and that length becomes the
 // pool's authoritative frame count — which is what lets the toolkit refuse a clip that would
 // read past the end of the media.
 pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
-  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  let absolute: string = match media_path(state, path) {
+    some(value) => value,
+    none => { return refused("the media path could not be resolved") },
+  }
+  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let id: u64 = editor.add_source(struct.borrow(state, field=document), path, name,
+  let id: u64 = editor.add_source(struct.borrow(state, field=document), str.view(absolute), name,
     report.frames, report.fps)
   let _ = editor.describe_source(struct.borrow(state, field=document), id, report.width,
     report.height, report.has_video, report.has_audio, 48000, 2)
@@ -123,9 +141,13 @@ pub fn add_bin(state: ref<app.App>, name: str) -> Result effects {alloc} {
 }
 
 pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
-  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  let absolute: string = match media_path(state, path) {
+    some(value) => value,
+    none => { return refused("the media path could not be resolved") },
+  }
+  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, path,
+  let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, str.view(absolute),
     report.frames)
   app.mark_dirty(state, true)
   if corrected != 0 {

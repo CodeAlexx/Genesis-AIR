@@ -24,7 +24,8 @@ AIR stdlib
 
 ## What it is
 
-A real editor, not a showcase.
+An AIR-native editing application with a tested project and control layer. Its media
+renderer covers the paths listed below; the remaining mappings are tracked under Known gaps.
 
 ```
 menu
@@ -100,7 +101,9 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/view.ai` | painting. Holds no project state and mutates nothing. |
 | `src/input.ai` | which command a click, drag or key means. Never edits the document. |
 | `src/commands.ai` | the only path to a mutation: capture for undo, then one toolkit call. No edit arithmetic. |
-| `src/provider.ai` | the media seam. Genesis AIR never learns where a frame came from. |
+| `src/provider.ai` | the media seam: source probe, frame and waveform retrieval, and the worker transport. |
+| `src/timeline_media.ai` | resolves AIR editor clips into the worker's preview, encode, and audio commands. |
+| `src/transport_clock.ai` | advances the program playhead from monotonic elapsed time, retaining fractional frames and stopping at the end. |
 | `src/main.ai` | the verbs and the window loop. |
 
 ## Build and run
@@ -108,6 +111,13 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 ```sh
 cd Genesis-AIR
 ./build.sh                       # -> build/genesis-air
+
+# Build the separate media worker from CodeAlexx/Genesis- (FFmpeg/OpenCL prerequisites
+# are described in that repository), then point Genesis AIR at it:
+cd ../Genesis
+cargo build --release -p gcompose
+export GENESIS_GCOMPOSE="$PWD/target/release/gcompose"
+cd ../Genesis-AIR
 ```
 
 ```sh
@@ -117,17 +127,28 @@ build/genesis-air render OUT.png [PROJECT.air]
 # headless: build a small project, edit it, save it, paint it
 build/genesis-air demo OUT.png [PROJECT.air]
 
-# bounded real-media check through the provider
-build/genesis-air probe MEDIA.mp4 OUT.png
+# inspect source media, optionally saving a short test project
+build/genesis-air probe MEDIA.mp4 OUT.png [PROJECT.air]
+
+# compose the saved project's playhead frame, or encode its export range
+build/genesis-air preview OUT.png PROJECT.air
+build/genesis-air export OUT.mp4 PROJECT.air
 
 # windowed (needs a display)
 build/genesis-air open PROJECT.air
 build/genesis-air new
 ```
 
-Environment: `AIRC` / `AIR_HOME` override the toolchain, `GENESIS_GCOMPOSE` points at the
-media worker, `GENESIS_FAKE_PROVIDER=1` forces the deterministic provider, `GENESIS_SCRATCH`
-sets the provider's scratch directory.
+The app looks for a source-built worker in the sibling `Genesis/target/release/gcompose`
+relative to its own executable, then searches `PATH` for `genesis-gcompose`.
+`GENESIS_GCOMPOSE` overrides discovery. `AIRC` / `AIR_HOME` override the AIR toolchain,
+`GENESIS_FAKE_PROVIDER=1` forces the deterministic provider, and `GENESIS_SCRATCH` sets
+the provider's scratch directory.
+
+The window's **Export video** action now encodes an MP4. The headless `render` command still writes a
+PNG of the editor canvas for layout checks. Video export requires the worker and currently
+requires a 30 fps sequence and a `.mp4` output path. Existing output files are refused, and an incomplete encode is
+removed on failure.
 
 ## Keys
 
@@ -168,31 +189,40 @@ Genesis AIR
             +-- fake             deterministic, no FFmpeg/OpenCL/GPU
 ```
 
-Five operations: `probe`, `thumbnail`, `source_frame`, `program_frame`, `envelope`. The
-donor's wire — one `ENC` line of 103 positional fields — stops inside `provider.ai`.
+The provider handles probe, thumbnail, source frame, waveform and program frame requests.
+`timeline_media.ai` resolves visible clips from `std.editor.Document` and builds the donor's
+103-field `PREVIEW`/`ENC` wire. Preview and export use the same resolver. Export holds one
+piped worker through `OPEN`, the frame and audio commands, and `CLOSE`.
 
 **Process isolation is preserved.** Genesis measured NVIDIA OpenCL initialization crashing
 intermittently against a UI GL/GLX stack, so the compositor stays out of this process. The
 provider drives `gcompose --serve` as a separate process and reads its `DONE`/`ERR` reply.
 
 `gcompose` is selected automatically when its worker is present; otherwise the fake provider
-is used, so the application always runs.
+is used for editing and headless checks. Preview and export explicitly require the real worker.
 
 ## Tests
 
 ```sh
-# Headless application and interaction fixtures; no GPU needed.
-AIRC=/path/to/airc
-AIR_STDLIB=/path/to/AIR/stdlib "$AIRC" run tests/headless.ai --mode release -- \
-  /tmp/genesis-air-test /tmp/genesis-air-test/project.air /tmp/genesis-air-test/frame.png
-AIR_STDLIB=/path/to/AIR/stdlib "$AIRC" run tests/controls.ai --mode release -- \
-  /tmp/genesis-air-controls
+# Deterministic command, UI-control, and canvas checks.
+python3 tests/run_tests.py --airc /path/to/AIR/build-gcc15/bin/airc \
+  --stdlib /path/to/AIR/stdlib --binary build/genesis-air
+
+# Bounded worker probe, preview, and MP4 check, with a small existing media fixture.
+GENESIS_GCOMPOSE=/path/to/gcompose python3 tests/run_tests.py \
+  --airc /path/to/AIR/build-gcc15/bin/airc --stdlib /path/to/AIR/stdlib \
+  --binary build/genesis-air --media /path/to/fixture.mp4
+
+# Generated red/blue video plus tone: compares preview/export pixels and audible AAC.
+python3 tests/real_media.py --binary build/genesis-air \
+  --worker /path/to/gcompose --stdlib /path/to/AIR/stdlib
 ```
 
-- **116 application facts** through the command layer with the fake provider: startup,
+- **122 application facts** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
-  solo-wins, both transports, panel focus and pool/ruler clicks, keyboard commands, and
+  solo-wins, both transports, elapsed-time playback, reverse sampling at mixed frame
+  rates, panel focus and pool/ruler clicks, keyboard commands, and
   undo/redo compared exactly in both directions — plus the chrome: every toolbar, timeline
   toolbar, dock tab, track header and inspector control is clicked at the centre of the
   rectangle it was BUILT with, which is what proves painting and dispatch share one geometry
@@ -206,29 +236,33 @@ AIR_STDLIB=/path/to/AIR/stdlib "$AIRC" run tests/controls.ai --mode release -- \
   overlapped control is unreachable and the click silently runs the one on top of it — and
   **every control must report an outcome**, so a button drawn but wired to nothing shows up.
   Rows below the fold are scrolled into view first, the way a person would.
-- **Render smoke**: `build/genesis-air demo OUT.png PROJECT.air` paints a 1600×980 frame
+- **Canvas smoke**: `build/genesis-air demo OUT.png PROJECT.air` paints a 1600×980 frame
   and saves its project.
-- **gcompose smoke** (bounded): `build/genesis-air probe MEDIA.mp4 OUT.png` opens one real
-  file, reads its frame count, places a short clip, decodes one source frame and paints.
+- **Real media**: the worker probe reads frame count, size, frame rate and audio presence;
+  the preview and MP4 paths compose two colored clips, apply a touching-cut crossfade,
+  export an audio-only timeline, mix and pan a tone, apply picture and audio filters
+  to the same clip, and reject an unsupported
+  effect instead of silently dropping it.
 
 ## Known gaps
 
-- **The media worker is still invoked once per request.** `gcompose --serve` is designed to
-  be driven over a long-lived pipe. When this project started AIR had no primitive for that;
-  it now does (`std.process.spawn_piped` and friends, on AIR `main`), but `air-sdk.conf`
-  still pins the pre-merge NLE commit, so the provider has not adopted it yet. Doing so
-  means repointing the pin and rebuilding the compiler for the new opcodes — a separate
-  change from the UI. Until then each request re-initialises the decoder, which is correct
-  and safe but slower than it needs to be.
-- Program preview is the topmost clip under the playhead, not a composite. Compositing needs
-  the donor's `ENC` path; the seam is ready for it (`program_frame` already receives every
-  visible source).
-- Filter parameters are stored and keyframed, but nothing renders them yet: the provider
-  returns source frames, so a brightness value is recorded on the clip and not yet applied
-  to the picture. The inspector is honest about this only in the sense that the program
-  monitor does not change — closing it is the compositing work above.
-- No export. `Render` writes the window's own frame (`gui.screenshot`), which is a still of
-  the editor, not an encode of the timeline.
+- Source probe, thumbnail, waveform and interactive preview still start one worker per
+  request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
+- The media adapter currently composites two video lanes and touching-cut crossfades.
+  Extra visible lanes, nested sequences, other transition kinds and overlap seams,
+  subtitles, unsupported video filters, keyframed effects
+  other than opacity, and the audio filters beyond gain, pan, low pass, high pass,
+  tremolo, bass, treble, and limiter are refused by preview/export. The inspector
+  still exposes more controls than the renderer can apply; completing their mappings and
+  tests remains necessary before calling the editor fully functional.
+- The worker stamps frames on a fixed 30 fps timeline. Export rejects sequences with another
+  frame rate. `std.editor` currently bounds clip length in source-frame units, so a clip whose
+  source rate differs from the sequence rate cannot use its entire source duration without
+  further editor-model work. Preview samples source frames by the measured rate.
+- The window runs export synchronously, so it does not repaint or accept cancellation during
+  a long encode. The standalone `preview` and `export` commands support headless workflows.
+- The program Play control now advances on a monotonic clock and skips frames after a slow
+  paint; live audio playback is still missing. Encoded audio is present in exported MP4s.
 - Zoom and pan live in this application (`app.Viewport`) because the AIR NLE toolkit records
   viewport policy as deliberately unported. If it proves generic it should be upstreamed.
 ## Provenance

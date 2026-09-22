@@ -1,0 +1,22 @@
+// Exercise the real ENV command and its little-endian f32 reply.
+module genesis.tests.provider_real
+import "../src/provider.ai" as provider
+
+pub fn main(args: view<str>) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process} {
+  if view.len(args) < 4 { return 2 }
+  var engine: provider.Provider = provider.gcompose(view.get(args, 1), view.get(args, 3))
+  if not provider.available(engine) { return 3 }
+  var peaks: array<f64> = provider.envelope(engine, view.get(args, 2), 8)
+  if array.len(peaks) != 8 or provider.failures(engine) != 0 { return 4 }
+  var highest: f64 = 0.0
+  var at: u64 = 0
+  loop {
+    if at >= array.len(peaks) { break }
+    let value: f64 = array.get(peaks, at)
+    if value > highest { highest = value }
+    at = at + 1
+  }
+  if highest < 0.01 or highest > 1.01 { return 5 }
+  io.write("envelope ok\n")
+  0
+}

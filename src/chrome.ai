@@ -264,7 +264,7 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     top = menu_item(out, state, left, top, act_open(), 0, "Open project...", false)
     top = menu_item(out, state, left, top, act_save(), 0, "Save project", app.dirty(state))
     top = menu_item(out, state, left, top, act_import(), 0, "Import media...", false)
-    top = menu_item(out, state, left, top, act_render(), 0, "Render still...", false)
+    top = menu_item(out, state, left, top, act_render(), 0, "Export video...", false)
     top = menu_item(out, state, left, top, act_quit(), 0, "Quit Genesis AIR", false)
     return out
   }
@@ -1200,7 +1200,7 @@ pub fn scopes_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   // The scopes are read from the program frame the monitor already fetched on this repaint,
   // so there is nothing to refresh; the only action here is exporting what is on screen.
   let top: f64 = area.bottom - row_height() - 6.0
-  var render: Control = button(act_render(), "Render still",
+  var render: Control = button(act_render(), "Export video",
     layout.rect(area.left + 6.0, top, area.right - 6.0, top + row_height()), false)
   struct.set(render, top_bar_type(), field=size)
   array.push(out, render)

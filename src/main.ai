@@ -14,13 +14,19 @@ import std.editor as editor
 import std.files as files
 import std.gui as gui
 import std.image as image
+import std.path as path
 import std.png_tools as png_tools
+import std.system as system
+import std.text as text
+import std.time as clock
 import std.widgets as widgets
 import "app.ai" as app
 import "commands.ai" as commands
 import "chrome.ai" as chrome
 import "input.ai" as input
 import "provider.ai" as provider
+import "timeline_media.ai" as timeline_media
+import "transport_clock.ai" as transport_clock
 import "view.ai" as painter
 
 fn say(text: str) -> unit effects {io.write} {
@@ -29,16 +35,46 @@ fn say(text: str) -> unit effects {io.write} {
   ()
 }
 
-fn worker_path() -> string effects {alloc, env} {
+fn worker_path() -> string effects {alloc, env, fs.meta, fs.read} {
   match env.get("GENESIS_GCOMPOSE") {
-    some(value) => value,
-    none => string.copy("genesis-gcompose"),
+    some(value) => { return value },
+    none => { },
   }
+  match system.executable_path() {
+    ok(executable) => {
+      let build_dir: string = path.dirname(str.view(executable))
+      let project_dir: string = path.dirname(str.view(build_dir))
+      let sibling: string = path.join(str.view(path.dirname(str.view(project_dir))),
+        "Genesis/target/release/gcompose")
+      match files.exists(str.view(sibling)) {
+        ok(found) => { if found { return sibling } },
+        err(problem) => { },
+      }
+    },
+    err(problem) => { },
+  }
+  match env.get("PATH") {
+    none => { },
+    some(search) => {
+      var folders: array<string> = text.split(str.view(search), ":")
+      var at: u64 = 0
+      loop {
+        if at >= array.len(folders) { break }
+        let candidate: string = path.join(str.view(array.borrow(folders, at)), "genesis-gcompose")
+        match files.exists(str.view(candidate)) {
+          ok(found) => { if found { return candidate } },
+          err(problem) => { },
+        }
+        at = at + 1
+      }
+    },
+  }
+  string.copy("genesis-gcompose")
 }
 
 // Choose a provider: gcompose when its worker is present, otherwise the deterministic fake.
 // The application above this line cannot tell which it got.
-fn choose_provider(scratch: str, force_fake: bool) -> provider.Provider effects {alloc, env, fs.meta} {
+fn choose_provider(scratch: str, force_fake: bool) -> provider.Provider effects {alloc, env, fs.meta, fs.read} {
   if force_fake { return provider.fake(scratch) }
   var real: provider.Provider = provider.gcompose(str.view(worker_path()), scratch)
   if provider.available(real) { return real }
@@ -56,8 +92,12 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
   var source_path: string = string.new()
   if monitor_source != 0 {
     match editor.source_slot(document, monitor_source) {
-      some(slot) => { source_path = string.copy(str.view(struct.borrow(
-        array.borrow(struct.borrow(document, field=sources), slot), field=path))) },
+      some(slot) => {
+        let source: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), slot)
+        if source.has_video {
+          source_path = string.copy(str.view(struct.borrow(source, field=path)))
+        }
+      },
       none => { },
     }
   }
@@ -87,8 +127,21 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
   } else {
     array.push(out, draw.empty_surface())
   }
-  var program: provider.Frame = provider.program_frame(struct.borrow(state, field=provider),
-    visible, program_frame, width, height)
+  var program: provider.Frame = if struct.get(struct.borrow(state, field=provider), field=kind) ==
+      provider.kind_gcompose() {
+    let output: string = provider.preview_path(struct.borrow(state, field=provider))
+    match timeline_media.frame_line(document, program_frame, "PREVIEW", str.view(output)) {
+      ok(line) => provider.program_command(struct.borrow(state, field=provider),
+        str.view(line), width, height),
+      err(problem) => {
+        app.set_status(state, str.view(problem))
+        var empty: array<string> = array.new()
+        provider.program_frame(struct.borrow(state, field=provider), empty,
+          program_frame, width, height)
+      },
+    }
+  } else { provider.program_frame(struct.borrow(state, field=provider), visible,
+    program_frame, width, height) }
   array.push(out, provider.take_pixels(program))
   out
 }
@@ -186,7 +239,7 @@ fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.
   let _ = commands.select_only(state, first.value)
   var seam: commands.Result = commands.add_transition(state, v1, 150, 24, "crossfade")
   var fades: commands.Result = commands.set_fades(state, second.value, 12, 18)
-  var grade: commands.Result = commands.add_filter(state, first.value, "colour_balance")
+  var grade: commands.Result = commands.add_filter(state, first.value, "white_balance")
   let _ = commands.set_filter_param(state, grade.value, "temperature", 0.2)
   var sharp: commands.Result = commands.add_filter(state, first.value, "sharpen")
   let _ = commands.set_key(state, first.value, "opacity", 0, 0.0, 2)
@@ -202,7 +255,7 @@ fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.
 
 // The windowed application. One repaint per input burst; the document is the only state,
 // so a repaint always shows exactly what the last command did.
-fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, ui} {
+fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
     err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
@@ -213,8 +266,15 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   var pointer_y: f64 = 0.0
   var control: bool = false
   var shift: bool = false
+  var clock_ns: u64 = clock.start()
+  var frame_clock: transport_clock.Clock = transport_clock.Clock {remainder: 0.0}
   loop {
     if not app.running(state) { break }
+    let now_ns: u64 = clock.start()
+    let elapsed_ns: u64 = clock.between_ns(clock_ns, now_ns)
+    clock_ns = now_ns
+    if transport_clock.advance(struct.borrow(state, field=document), elapsed_ns,
+        frame_clock) { dirty = true }
     let box: gui.Rect = gui.window_size(window)
     let width: u32 = if box.width < 640 { 640 } else { box.width }
     let height: u32 = if box.height < 480 { 480 } else { box.height }
@@ -304,11 +364,16 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
                 if str.len(str.view(where)) == 0 {
                   app.set_status(state, "cancelled")
                 } else {
-                  match gui.screenshot(window, str.view(where)) {
-                    ok(written) => { var said: string = string.copy("wrote ")
+                  let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+                  let rendered: result<unit, string> = if provider.available(struct.borrow(state, field=provider)) and
+                      str.len(str.view(worker)) != 0 {
+                    timeline_media.render(struct.borrow(state, field=document), str.view(worker), str.view(where))
+                  } else { result.err("the gcompose worker is required for video export") }
+                  match rendered {
+                    ok(written) => { var said: string = string.copy("wrote video ")
                       string.append(said, str.view(where))
                       app.set_status(state, str.view(said)) },
-                    err(problem) => { app.set_status(state, "the still could not be written") },
+                    err(problem) => { app.set_status(state, str.view(problem)) },
                   }
                 }
               } else {
@@ -348,10 +413,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   0
 }
 
-pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, ui} {
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
   if view.len(args) < 2 {
     say("genesis-air render OUT.png [PROJECT]")
+    say("genesis-air export OUT.mp4 PROJECT.air")
+    say("genesis-air preview OUT.png PROJECT.air")
     say("genesis-air demo   OUT.png [PROJECT.air]")
+    say("genesis-air probe  MEDIA.mp4 OUT.png [PROJECT.air]")
     say("genesis-air open   PROJECT.air")
     say("genesis-air new")
     return 2
@@ -390,6 +458,64 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     return 0
   }
 
+  if str.eq(verb, "export") {
+    if view.len(args) < 4 { say("export needs an output path and a project")
+      return 2 }
+    var opened: commands.Result = commands.open_project(state, view.get(args, 3))
+    if not opened.ok { say(str.view(commands.message(opened)))
+      return 1 }
+    if not provider.available(struct.borrow(state, field=provider)) or
+       provider.kind_fake() == struct.get(struct.borrow(state, field=provider), field=kind) {
+      say("video export requires a gcompose worker")
+      return 1
+    }
+    let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+    match timeline_media.render(struct.borrow(state, field=document), str.view(worker), view.get(args, 2)) {
+      ok(_) => { say("Genesis AIR video written")
+        return 0 },
+      err(problem) => { say(str.view(problem))
+        return 1 },
+    }
+  }
+
+  if str.eq(verb, "preview") {
+    if view.len(args) < 4 { say("preview needs an output path and a project")
+      return 2 }
+    var opened: commands.Result = commands.open_project(state, view.get(args, 3))
+    if not opened.ok { say(str.view(commands.message(opened)))
+      return 1 }
+    if not provider.available(struct.borrow(state, field=provider)) or
+       provider.kind_fake() == struct.get(struct.borrow(state, field=provider), field=kind) {
+      say("program preview requires a gcompose worker")
+      return 1
+    }
+    let output: string = provider.preview_path(struct.borrow(state, field=provider))
+    let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+    let command: string = match timeline_media.frame_line(struct.borrow(state, field=document),
+      frame, "PREVIEW", str.view(output)) {
+      ok(value) => value,
+      err(problem) => { say(str.view(problem))
+        return 1 },
+    }
+    var picture: provider.Frame = provider.program_command(struct.borrow(state, field=provider),
+      str.view(command), 640, 360)
+    if not provider.frame_ok(picture) { say(str.view(provider.frame_detail(picture)))
+      return 1 }
+    var pixels: draw.Surface = provider.take_pixels(picture)
+    var metadata: array<png_tools.TextEntry> = array.new()
+    var encoded: bytes = match png_tools.encode_rgba_with_text(pixels, metadata) {
+      ok(value) => value,
+      err(problem) => { say("preview encoding failed")
+        return 1 },
+    }
+    match image.write_file(view.get(args, 2), bytes.view(encoded)) {
+      ok(_) => { say("Genesis AIR program frame written")
+        return 0 },
+      err(problem) => { say("preview writing failed")
+        return 1 },
+    }
+  }
+
   if str.eq(verb, "demo") {
     if view.len(args) < 3 { say("demo needs an output path")
       return 2 }
@@ -425,18 +551,31 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     io.write("\n")
     if frames <= 0 { say("the provider could not determine the source length")
       return 1 }
-    let track: u64 = app.default_video_track(state)
+    let has_video: bool = match editor.source_slot(struct.borrow(state, field=document), imported.value) {
+      none => false,
+      some(slot) => struct.get(array.borrow(struct.borrow(
+        struct.borrow(state, field=document), field=sources), slot), field=has_video),
+    }
+    let track: u64 = if has_video { app.default_video_track(state) }
+      else { app.default_audio_track(state) }
     let length: i64 = if frames < 24 { frames } else { 24 }
     var placed: commands.Result = commands.append_clip(state, track, imported.value, 0, length)
     if not placed.ok { say(str.view(commands.message(placed)))
       return 1 }
+    if view.len(args) >= 5 {
+      var saved: commands.Result = commands.save_project(state, view.get(args, 4))
+      if not saved.ok { say(str.view(commands.message(saved)))
+        return 1 }
+    }
     let _ = commands.open_source(state, imported.value)
     let _ = commands.seek(state, 0)
     // One source frame and one program frame, through the seam.
-    var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
-      media, 0, 320, 180)
     io.write("source_frame ")
-    io.write(if provider.frame_ok(shot) { "ok" } else { "failed" })
+    if has_video {
+      var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
+        media, 0, 320, 180)
+      io.write(if provider.frame_ok(shot) { "ok" } else { "failed" })
+    } else { io.write("audio-only") }
     io.write("\n")
     if not render_to(state, view.get(args, 3), 1600, 980) {
       say("the frame could not be written")
@@ -463,7 +602,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   }
 
   if str.eq(verb, "new") {
-    build_demo(state)
     return run_window(state, "Genesis AIR")
   }
 

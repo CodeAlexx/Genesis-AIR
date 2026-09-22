@@ -1,0 +1,642 @@
+// Resolve an AIR editor document into gcompose's fixed frame and export protocol.
+// The document owns project facts; this module owns only their media interpretation.
+module genesis.timeline_media
+
+import std.editor as editor
+import std.files as files
+import std.math as math
+import std.process as proc
+import std.text as text
+import "chrome.ai" as chrome
+import "provider.ai" as provider
+
+type TrackInfo = struct {id: u64, owner: u64, kind: u32}
+type SourceInfo = struct {path: string, fps: f64, audio: bool, online: bool}
+
+fn track_info(doc: ref<editor.Document>, slot: u64) -> TrackInfo effects {} {
+  let value: ref<editor.Track> = array.borrow(struct.borrow(doc, field=tracks), slot)
+  TrackInfo {id: value.id, owner: value.owner, kind: value.kind}
+}
+
+fn source_info(doc: ref<editor.Document>, slot: u64) -> SourceInfo effects {alloc} {
+  let value: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), slot)
+  SourceInfo {path: string.copy(str.view(struct.borrow(value, field=path))),
+    fps: value.fps, audio: value.has_audio, online: value.online}
+}
+
+fn put(values: ref<array<string>>, at: u64, value: str) -> unit effects {alloc} {
+  let _ = ref.swap(array.borrow(values, at), string.copy(value))
+  ()
+}
+fn put_i(values: ref<array<string>>, at: u64, value: i64) -> unit effects {alloc} {
+  put(values, at, str.view(string.from_int(value)))
+}
+fn put_f(values: ref<array<string>>, at: u64, value: f64) -> unit effects {alloc} {
+  put(values, at, str.view(string.from_float(value)))
+}
+
+// One authoritative set of neutral fields, shared by PREVIEW and ENC. The worker's
+// indexed grammar is intentionally contained here; index 101 is the clip fade.
+fn neutral() -> array<string> effects {alloc} {
+  var values: array<string> = array.new()
+  var at: u64 = 0
+  loop {
+    if at == 102 { break }
+    array.push(values, string.copy("0"))
+    at = at + 1
+  }
+  put(values, 0, "-")
+  put(values, 1, "-")
+  put(values, 4, "1")
+  put(values, 8, "1")
+  put(values, 9, "1")
+  put(values, 11, "1")
+  put(values, 12, "1")
+  put(values, 15, "-")
+  put(values, 16, "-1")
+  put(values, 18, "4")
+  put(values, 19, "-")
+  put(values, 22, "1")
+  put(values, 23, "1")
+  at = 27
+  loop {
+    if at == 33 { break }
+    put(values, at, "1")
+    at = at + 1
+  }
+  put(values, 34, "1")
+  put(values, 38, "1")
+  put(values, 40, "0.4")
+  put(values, 41, "0.1")
+  put(values, 43, "0.25")
+  put(values, 44, "0.5")
+  put(values, 45, "0.75")
+  put(values, 46, "1")
+  put(values, 52, "1")
+  put(values, 55, "1")
+  put(values, 56, "1")
+  put(values, 62, "1")
+  put(values, 63, "1")
+  put(values, 64, "1")
+  put(values, 84, "90")
+  put(values, 86, "0.5")
+  put(values, 87, "0.5")
+  put(values, 88, "1")
+  put(values, 89, "1")
+  put(values, 98, "1")
+  put(values, 101, "1")
+  values
+}
+
+fn source_path(doc: ref<editor.Document>, clip: editor.Clip) -> option<string> effects {alloc} {
+  match editor.source_slot(doc, clip.source) {
+    none => option.none(),
+    some(slot) => {
+      let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), slot)
+      if not source.online or not source.has_video { return option.none() }
+      option.some(string.copy(str.view(struct.borrow(source, field=path))))
+    },
+  }
+}
+
+fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64 effects {} {
+  let unclamped: i64 = frame - clip.start
+  let local: i64 = if unclamped < 0 { 0 }
+    else if unclamped >= clip.length { clip.length - 1 }
+    else { unclamped }
+  let source_fps: f64 = match editor.source_slot(doc, clip.source) {
+    none => 30.0,
+    some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=fps),
+  }
+  let timeline_fps: f64 = editor.sequence_fps(doc, doc.active)
+  let ratio: f64 = if timeline_fps > 0.0 and source_fps > 0.0 {
+    source_fps / timeline_fps
+  } else { 1.0 }
+  let position: i64 = if clip.reverse { clip.length - 1 - local } else { local }
+  let offset: i64 = cast.sat(math.floor(cast.float(position) * clip.speed * ratio))
+  let result_frame: i64 = clip.source_in + offset
+  let bound: i64 = editor.source_frames(doc, clip.source)
+  if bound > 0 and result_frame >= bound { bound - 1 }
+  else if result_frame < 0 { 0 }
+  else { result_frame }
+}
+
+fn fade(clip: editor.Clip, frame: i64) -> f64 effects {} {
+  let local: i64 = frame - clip.start
+  var value: f64 = 1.0
+  if clip.fade_in > 0 and local < clip.fade_in {
+    value = cast.float(local) / cast.float(clip.fade_in)
+  }
+  let remaining: i64 = clip.length - local
+  if clip.fade_out > 0 and remaining <= clip.fade_out {
+    let tail: f64 = cast.float(remaining) / cast.float(clip.fade_out)
+    if tail < value { value = tail }
+  }
+  value
+}
+
+fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<string>>,
+                filter: u64, overlay: bool) -> bool effects {alloc} {
+  if not editor.filter_enabled(doc, filter) { return true }
+  let kind: string = editor.filter_kind(doc, filter)
+  if chrome.is_audio_kind(str.view(kind)) { return true }
+  if str.eq(str.view(kind), "opacity") and overlay {
+    return true
+  } else if str.eq(str.view(kind), "blend") and overlay {
+    let mode: i64 = cast.sat(editor.filter_param(doc, filter, "mode", 0.0))
+    if mode > 7 { return false }
+    put_i(values, 5, mode)
+  } else if str.eq(str.view(kind), "size_position") and overlay {
+    if editor.filter_param(doc, filter, "rotation", 0.0) != 0.0 { return false }
+    put_f(values, 6, editor.filter_param(doc, filter, "x", 0.0))
+    put_f(values, 7, editor.filter_param(doc, filter, "y", 0.0))
+    put_f(values, 8, editor.filter_param(doc, filter, "w", 1.0))
+    put_f(values, 9, editor.filter_param(doc, filter, "h", 1.0))
+  } else if str.eq(str.view(kind), "brightness") and not overlay {
+    put_f(values, 21, editor.filter_param(doc, filter, "level", 1.0) - 1.0)
+  } else if str.eq(str.view(kind), "contrast") and not overlay {
+    put_f(values, 22, editor.filter_param(doc, filter, "level", 1.0))
+  } else if str.eq(str.view(kind), "saturation") and not overlay {
+    put_f(values, 23, editor.filter_param(doc, filter, "level", 1.0))
+  } else if str.eq(str.view(kind), "sharpen") and not overlay {
+    put_f(values, 48, editor.filter_param(doc, filter, "amount", 0.0))
+  } else if str.eq(str.view(kind), "blur") and not overlay {
+    put_f(values, 35, editor.filter_param(doc, filter, "radius", 0.0))
+  } else if str.eq(str.view(kind), "grain") and not overlay {
+    put_f(values, 72, editor.filter_param(doc, filter, "amount", 0.0))
+  } else if str.eq(str.view(kind), "hue") and not overlay {
+    put_f(values, 51, editor.filter_param(doc, filter, "shift", 0.0))
+  } else if str.eq(str.view(kind), "white_balance") and not overlay {
+    if editor.filter_param(doc, filter, "tint", 0.0) != 0.0 { return false }
+    put_f(values, 100, editor.filter_param(doc, filter, "temperature", 0.0))
+  } else if str.eq(str.view(kind), "glow") and not overlay {
+    put_f(values, 66, editor.filter_param(doc, filter, "amount", 0.0))
+    put_f(values, 67, editor.filter_param(doc, filter, "threshold", 0.7))
+  } else { return false }
+  true
+}
+
+fn filters(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<string>>,
+           overlay: bool) -> bool effects {alloc} {
+  var index: u32 = 0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => { break },
+      some(filter) => {
+        if not apply_filter(doc, clip, values, filter, overlay) { return false }
+      },
+    }
+    index = index + 1
+  }
+  true
+}
+
+fn overlay_opacity(doc: ref<editor.Document>, clip: editor.Clip) -> f64 effects {alloc} {
+  var value: f64 = 1.0
+  var index: u32 = 0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => { break },
+      some(filter) => {
+        if editor.filter_enabled(doc, filter) {
+          let kind: string = editor.filter_kind(doc, filter)
+          if str.eq(str.view(kind), "opacity") {
+            value = value * editor.filter_param(doc, filter, "level", 1.0)
+          }
+          if str.eq(str.view(kind), "size_position") {
+            value = value * editor.filter_param(doc, filter, "opacity", 1.0)
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  value
+}
+
+fn visible_clip(doc: ref<editor.Document>, track: u64, frame: i64)
+                -> option<editor.Clip> effects {} {
+  var at: u64 = 0
+  loop {
+    if at >= editor.clip_count(doc) { break }
+    match editor.clip_at(doc, at) {
+      none => { },
+      some(value) => {
+        if value.track == track and value.owner == doc.active and value.enabled and
+           value.start <= frame and editor.clip_end(value) > frame {
+          return option.some(value)
+        }
+      },
+    }
+    at = at + 1
+  }
+  option.none()
+}
+
+type TransitionPair = struct {outgoing: editor.Clip, incoming: editor.Clip}
+
+// The worker's transition slot is supported for an ordinary touching cut. Overlap seams
+// need a different pair resolution, so they are refused until that case is implemented.
+fn transition_pair(doc: ref<editor.Document>, track: u64, center: i64)
+                   -> option<TransitionPair> effects {} {
+  var outgoing_id: u64 = 0
+  var incoming_id: u64 = 0
+  var last_end: i64 = -1
+  var first_start: i64 = 9223372036854775807
+  var at: u64 = 0
+  loop {
+    if at >= editor.clip_count(doc) { break }
+    match editor.clip_at(doc, at) {
+      none => { },
+      some(clip) => {
+        if clip.track == track and clip.owner == doc.active and clip.enabled {
+          let end: i64 = editor.clip_end(clip)
+          if end <= center and end > last_end {
+            outgoing_id = clip.id
+            last_end = end
+          }
+          if clip.start >= center and clip.start < first_start {
+            incoming_id = clip.id
+            first_start = clip.start
+          }
+        }
+      },
+    }
+    at = at + 1
+  }
+  if outgoing_id == 0 or incoming_id == 0 or last_end != center or first_start != center {
+    return option.none()
+  }
+  let outgoing: editor.Clip = match editor.clip(doc, outgoing_id) {
+    none => { return option.none() },
+    some(value) => value,
+  }
+  let incoming: editor.Clip = match editor.clip(doc, incoming_id) {
+    none => { return option.none() },
+    some(value) => value,
+  }
+  option.some(TransitionPair {outgoing: outgoing, incoming: incoming})
+}
+
+// Refuse an edit that this adapter cannot yet render. Silent substitution would make the
+// monitor and exported file disagree with the edit shown in the inspector.
+pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
+                  -> result<string, string> effects {alloc} {
+  match editor.subtitle_at(doc, doc.active, frame) {
+    some(id) => { return result.err("subtitles are not composited yet") },
+    none => { },
+  }
+  var values: array<string> = neutral()
+  var visible: u64 = 0
+  var lane: u64 = 0
+  loop {
+    if lane >= editor.track_count(doc) { break }
+    let track: TrackInfo = track_info(doc, lane)
+    if track.owner == doc.active and track.kind == editor.track_video() and
+       editor.track_visible(doc, track.id) {
+      var chosen: option<editor.Clip> = visible_clip(doc, track.id, frame)
+      match editor.transition_at(doc, track.id, frame) {
+        none => { },
+        some(id) => {
+          if visible != 0 { return result.err("a transition above the base lane is not rendered yet") }
+          let transition: editor.Transition = match editor.transition(doc, id) {
+            none => { return result.err("the transition could not be resolved") },
+            some(value) => value,
+          }
+          let name: string = editor.name_text(doc, transition.kind)
+          if not str.eq(str.view(name), "crossfade") {
+            return result.err("this transition kind is not rendered yet")
+          }
+          let pair: TransitionPair = match transition_pair(doc, track.id, transition.center) {
+            none => { return result.err("crossfade needs two clips touching at its center") },
+            some(value) => value,
+          }
+          let incoming_path: string = match source_path(doc, pair.incoming) {
+            none => { return result.err("the transition's incoming source is unavailable") },
+            some(value) => value,
+          }
+          chosen = option.some(pair.outgoing)
+          put(values, 16, "0")
+          put_f(values, 17, editor.transition_progress(transition, frame))
+          put(values, 19, str.view(provider.wire_path(str.view(incoming_path))))
+          put_i(values, 20, source_frame(doc, pair.incoming, frame))
+        },
+      }
+      match chosen {
+        none => { },
+        some(clip) => {
+              if clip.enabled {
+                var key_index: u64 = 0
+                loop {
+                  if key_index >= array.len(struct.borrow(doc, field=keys)) { break }
+                  let key: editor.Key = array.get(struct.borrow(doc, field=keys), key_index)
+                  if key.clip == clip.id {
+                    let param: string = editor.name_text(doc, key.param)
+                    if not str.eq(str.view(param), "opacity") {
+                      return result.err("a visible clip has unsupported keyframed video effects")
+                    }
+                  }
+                  key_index = key_index + 1
+                }
+                if clip.nested != 0 { return result.err("nested sequences are not rendered yet") }
+                let path: string = match source_path(doc, clip) {
+                  some(value) => value,
+                  none => { return result.err("a visible clip has no online video source") },
+                }
+                if visible >= 2 { return result.err("more than two visible video layers") }
+                let source_at: i64 = source_frame(doc, clip, frame)
+                let slot: u64 = if visible == 0 { 0 } else { 1 }
+                put(values, slot, str.view(provider.wire_path(str.view(path))))
+                put_i(values, if visible == 0 { 2 } else { 3 }, source_at)
+                if visible == 1 {
+                  put_f(values, 4, fade(clip, frame) *
+                    editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) *
+                    overlay_opacity(doc, clip))
+                } else {
+                  put_f(values, 101, fade(clip, frame))
+                }
+                if not filters(doc, clip, values, visible == 1) {
+                  return result.err("a visible clip uses an unsupported video filter")
+                }
+                visible = visible + 1
+              }
+        },
+      }
+    }
+    lane = lane + 1
+  }
+  // gcompose consumes 102 payload fields for ENC, and one extra output path for PREVIEW.
+  var line: string = string.copy(kind)
+  string.append(line, " ")
+  string.append(line, str.view(text.join(values, " ")))
+  if str.eq(kind, "PREVIEW") {
+    string.append(line, " ")
+    string.append(line, str.view(provider.wire_path(out)))
+  }
+  result.ok(line)
+}
+
+fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
+           -> result<unit, string> effects {alloc, process, time} {
+  var request: string = string.copy(line)
+  string.append(request, "\n")
+  match proc.write_all_stdin(child, str.bytes(str.view(request)), proc.deadline_in(30000)) {
+    err(problem) => { return result.err(text.concat("worker write: ", fs.error.message(problem))) },
+    ok(_) => { },
+  }
+  let deadline: u64 = proc.deadline_in(120000)
+  var detail: string = string.new()
+  var count: u64 = 0
+  loop {
+    if count >= 256 { return result.err("worker emitted too many diagnostic lines") }
+    match proc.read_line(child, reader, deadline) {
+      err(problem) => { return result.err(text.concat("worker reply: ", fs.error.message(problem))) },
+      ok(value) => {
+        match value {
+          none => { return result.err("worker closed its reply pipe") },
+          some(reply) => {
+            if str.starts_with(str.view(reply), "DONE") { return result.ok(()) }
+            if str.starts_with(str.view(reply), "ERR") {
+              if str.len(str.view(detail)) > 0 {
+                return result.err(text.concat("worker rejected request: ", str.view(detail)))
+              }
+              return result.err(text.concat("worker rejected: ", line))
+            }
+            detail = reply
+          },
+        }
+      },
+    }
+    count = count + 1
+  }
+  result.err("worker gave no reply")
+}
+
+// A clip may carry both picture and sound. Video filters belong to frame_line; these
+// stages affect only its audio stream and keep the inspector's parameter values.
+fn audio_filter_stage(doc: ref<editor.Document>, filter: u64)
+                      -> option<string> effects {alloc} {
+  let kind: string = editor.filter_kind(doc, filter)
+  if str.eq(str.view(kind), "gain") {
+    var stage: string = text.concat("volume=", str.view(string.from_float(
+      editor.filter_param(doc, filter, "level", 0.0))))
+    string.append(stage, "dB")
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "pan") {
+    return option.some(text.concat("stereotools=balance_out=", str.view(string.from_float(
+      editor.filter_param(doc, filter, "position", 0.0)))))
+  }
+  if str.eq(str.view(kind), "low_pass") {
+    return option.some(text.concat("lowpass=f=", str.view(string.from_float(
+      editor.filter_param(doc, filter, "cutoff", 8000.0)))))
+  }
+  if str.eq(str.view(kind), "high_pass") {
+    return option.some(text.concat("highpass=f=", str.view(string.from_float(
+      editor.filter_param(doc, filter, "cutoff", 80.0)))))
+  }
+  if str.eq(str.view(kind), "tremolo") {
+    var stage: string = text.concat("tremolo=f=", str.view(string.from_float(
+      editor.filter_param(doc, filter, "rate", 5.0))))
+    string.append(stage, ":d=")
+    let depth: f64 = editor.filter_param(doc, filter, "depth", 0.5)
+    string.append(stage, str.view(string.from_float(if depth > 0.95 { 0.95 } else { depth })))
+    return option.some(stage)
+  }
+  if str.eq(str.view(kind), "bass") or str.eq(str.view(kind), "treble") {
+    return option.some(text.concat(if str.eq(str.view(kind), "bass") { "bass=g=" }
+      else { "treble=g=" }, str.view(string.from_float(
+      editor.filter_param(doc, filter, "level", 0.0)))))
+  }
+  if str.eq(str.view(kind), "limiter") {
+    let ceiling: f64 = editor.filter_param(doc, filter, "ceiling", -1.0)
+    let linear: f64 = math.pow(10.0, ceiling / 20.0)
+    let limited: f64 = if linear < 0.0625 { 0.0625 }
+      else if linear > 1.0 { 1.0 } else { linear }
+    var stage: string = text.concat("alimiter=limit=", str.view(string.from_float(limited)))
+    string.append(stage, ":level=disabled")
+    return option.some(stage)
+  }
+  option.none()
+}
+
+fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
+               -> result<array<string>, string> effects {alloc} {
+  var lines: array<string> = array.new()
+  var at: u64 = 0
+  loop {
+    if at >= editor.clip_count(doc) { break }
+    let clip: editor.Clip = match editor.clip_at(doc, at) {
+      none => { break },
+      some(value) => value,
+    }
+    at = at + 1
+    if clip.owner != doc.active or not clip.enabled or
+       not editor.track_audible(doc, clip.track) { continue }
+    let source_slot: u64 = match editor.source_slot(doc, clip.source) {
+      none => { continue },
+      some(slot) => slot,
+    }
+    var source: SourceInfo = source_info(doc, source_slot)
+    if not source.audio or not source.online { continue }
+    let begin: i64 = if clip.start > start { clip.start } else { start }
+    let end: i64 = if editor.clip_end(clip) < finish { editor.clip_end(clip) } else { finish }
+    if end <= begin { continue }
+    if clip.speed != 1.0 or clip.reverse {
+      return result.err("audio speed or reverse is not rendered yet")
+    }
+    let source_fps: f64 = if source.fps > 0.0 { source.fps } else { fps }
+    let source_s: f64 = cast.float(clip.source_in) / source_fps +
+      cast.float(begin - clip.start) / fps
+    let duration_s: f64 = cast.float(end - begin) / fps
+    let destination_s: f64 = cast.float(begin - start) / fps
+    var stages: array<string> = array.new()
+    if clip.pan != 0.0 {
+      var stage: string = string.copy("stereotools=balance_out=")
+      string.append(stage, str.view(string.from_float(clip.pan)))
+      array.push(stages, stage)
+    }
+    let track_pan: f64 = editor.track_pan(doc, clip.track)
+    if track_pan != 0.0 {
+      var stage: string = string.copy("stereotools=balance_out=")
+      string.append(stage, str.view(string.from_float(track_pan)))
+      array.push(stages, stage)
+    }
+    var filter_index: u32 = 0
+    loop {
+      match editor.filter_at(doc, clip.id, filter_index) {
+        none => { break },
+        some(filter) => {
+          if editor.filter_enabled(doc, filter) {
+            let kind: string = editor.filter_kind(doc, filter)
+            if chrome.is_audio_kind(str.view(kind)) {
+              match audio_filter_stage(doc, filter) {
+                none => { return result.err("an audio clip uses an unsupported audio filter") },
+                some(stage) => { array.push(stages, stage) },
+              }
+            } else if editor.track_kind(doc, clip.track) != editor.track_video() {
+              return result.err("a picture filter cannot render on an audio lane")
+            }
+          }
+        },
+      }
+      filter_index = filter_index + 1
+    }
+    let chain: string = if array.len(stages) == 0 { string.copy("-") }
+      else { text.join(stages, ",") }
+    var fields: array<string> = [
+      string.copy("AUDIO"),
+      provider.wire_path(str.view(struct.borrow(source, field=path))),
+      string.from_float(source_s), string.from_float(duration_s),
+      string.from_float(destination_s),
+      string.from_float(editor.effective_gain(doc, clip.id)),
+      string.from_float(cast.float(clip.fade_in) / fps),
+      string.from_float(cast.float(clip.fade_out) / fps),
+      string.from_float(cast.float(clip.length) / fps),
+      string.from_float(cast.float(begin - clip.start) / fps),
+      chain
+    ]
+    array.push(lines, text.join(fields, " "))
+  }
+  result.ok(lines)
+}
+
+fn render_into(doc: ref<editor.Document>, worker: str, output: str)
+               -> result<unit, string> effects {alloc, fs.meta, process, time} {
+  let range: editor.Transport = editor.export_range(doc)
+  if range.mark_out <= range.mark_in { return result.err("the export range is empty") }
+  let sequence_slot: u64 = match editor.sequence_slot(doc, doc.active) {
+    none => { return result.err("the project has no active sequence") },
+    some(slot) => slot,
+  }
+  let sequence: ref<editor.Sequence> = array.borrow(struct.borrow(doc, field=sequences), sequence_slot)
+  let fps: f64 = sequence.fps
+  // The current gcompose worker stamps ENC frames at its fixed 30 fps timeline rate.
+  if fps < 29.999 or fps > 30.001 {
+    return result.err("the gcompose worker requires a 30 fps sequence")
+  }
+  let width: u32 = sequence.width
+  let height: u32 = sequence.height
+  if not (fps > 0.0) { return result.err("the sequence frame rate is invalid") }
+  var argv: array<string> = [string.copy(worker), string.copy("--serve")]
+  // Merge diagnostics into the bounded line reader so a chatty encoder cannot fill an
+  // unread stderr pipe and stall a long export.
+  var child: Child = match proc.spawn_piped_merged(argv) {
+    err(problem) => { return result.err(text.concat("start worker: ", fs.error.message(problem))) },
+    ok(value) => value,
+  }
+  var reader: proc.LineReader = proc.line_reader(65536)
+  let fps_number: i64 = cast.sat(math.round(fps * 1000.0))
+  var open_fields: array<string> = [
+    string.copy("OPEN"), provider.wire_path(output),
+    string.from_int(width), string.from_int(height),
+    string.from_int(fps_number), string.copy("1000"),
+    string.copy("0"), string.copy("4000000"), string.copy("mpeg4"),
+    string.from_float(cast.float(range.mark_out - range.mark_in) / fps),
+    string.copy("0"), string.copy("-"), string.copy("128000"), string.copy("aac")
+  ]
+  let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
+  var frame: i64 = range.mark_in
+  loop {
+    if frame >= range.mark_out { break }
+    let line: string = try frame_line(doc, frame, "ENC", "")
+    let _ = try command(child, reader, str.view(line))
+    frame = frame + 1
+  }
+  var sounds: array<string> = try audio_lines(doc, range.mark_in, range.mark_out, fps)
+  var at: u64 = 0
+  loop {
+    if at >= array.len(sounds) { break }
+    let _ = try command(child, reader, str.view(array.borrow(sounds, at)))
+    at = at + 1
+  }
+  let _ = try command(child, reader, "CLOSE")
+  match proc.close_stdin(child) {
+    ok(_) => { },
+    err(problem) => { return result.err(text.concat("close worker input: ", fs.error.message(problem))) },
+  }
+  let finished: process.status = match proc.wait(child, proc.deadline_in(30000)) {
+    ok(value) => value,
+    err(problem) => { return result.err(text.concat("wait for worker: ", fs.error.message(problem))) },
+  }
+  let status: process.status = match proc.close(child) {
+    ok(value) => value,
+    err(problem) => { return result.err(text.concat("close worker: ", fs.error.message(problem))) },
+  }
+  if not proc.success(finished) or not proc.success(status) {
+    return result.err("worker exited unsuccessfully")
+  }
+  result.ok(())
+}
+
+pub fn render(doc: ref<editor.Document>, worker: str, output: str)
+              -> result<unit, string> effects {alloc, fs.meta, fs.write, process, time} {
+  if not text.ends_with(output, ".mp4") {
+    return result.err("video export needs a .mp4 output path")
+  }
+  match files.exists(output) {
+    ok(found) => { if found { return result.err(string.copy("the output file already exists")) } },
+    err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
+  }
+  var partial: string = text.concat(output, ".genesis-air-part.mp4")
+  match files.exists(str.view(partial)) {
+    ok(found) => { if found { return result.err(string.copy("an unfinished output already exists")) } },
+    err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
+  }
+  match render_into(doc, worker, str.view(partial)) {
+    err(problem) => {
+      let _ = files.remove(str.view(partial))
+      result.err(problem)
+    },
+    ok(_) => {
+      match files.rename(str.view(partial), output) {
+        ok(_) => result.ok(()),
+        err(problem) => {
+          let detail: string = string.copy(fs.error.message(problem))
+          let _ = files.remove(str.view(partial))
+          result.err(detail)
+        },
+      }
+    },
+  }
+}
