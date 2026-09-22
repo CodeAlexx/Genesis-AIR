@@ -990,40 +990,51 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
   result.ok(lines)
 }
 
-// Assemble the audible timeline tail as a WAV for native window playback. The visual
-// clock starts only after this returns, so sound and picture share a start point.
-pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output: str)
-                     -> result<bool, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+pub type AudioPlan = struct {
+  worker: string, output: string, duration: f64, sounds: array<string>
+}
+
+// Resolve all document facts on the window thread. The returned plan owns its worker
+// commands and can be handed to a background task without borrowing the document.
+pub fn audio_plan(doc: ref<editor.Document>, worker: str, start: i64, output: str)
+                  -> result<option<AudioPlan>, string> effects {alloc} {
   let finish: i64 = editor.duration(doc)
-  if start >= finish { return result.ok(false) }
+  if start >= finish { return result.ok(option.none()) }
   let fps: f64 = editor.sequence_fps(doc, doc.active)
   if fps <= 0.0 { return result.err("sequence frame rate is invalid") }
   var sounds: array<string> = try audio_lines(doc, start, finish, fps)
-  if array.len(sounds) == 0 { return result.ok(false) }
-  match files.mkdirs(str.view(path.dirname(output))) {
+  if array.len(sounds) == 0 { return result.ok(option.none()) }
+  result.ok(option.some(AudioPlan {worker: string.copy(worker), output: string.copy(output),
+    duration: cast.float(finish - start) / fps, sounds: sounds}))
+}
+
+// Assemble the plan as a WAV through the worker. The document is no longer involved.
+pub fn execute_audio_plan(plan: ref<AudioPlan>) -> result<bool, string>
+                          effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  match files.mkdirs(str.view(path.dirname(str.view(plan.output)))) {
     err(problem) => { return result.err("audio scratch directory could not be created") },
     ok(_) => { },
   }
-  var argv: array<string> = [string.copy(worker), string.copy("--serve")]
+  var argv: array<string> = [string.copy(str.view(plan.worker)), string.copy("--serve")]
   var child: Child = match proc.spawn_piped_merged(argv) {
     err(problem) => { return result.err(text.concat("start audio worker: ", fs.error.message(problem))) },
     ok(value) => value,
   }
   // WAVECLOSE in the current worker treats its output token literally. Give it a
   // space-free path, then publish to the caller's requested name after completion.
-  let encoded: string = provider.wire_path(output)
-  let staged: bool = not str.eq(str.view(encoded), output)
+  let encoded: string = provider.wire_path(str.view(plan.output))
+  let staged: bool = not str.eq(str.view(encoded), str.view(plan.output))
   let child_number: i64 = cast.sat(proc.child_pid(child))
   let suffix: string = string.from_int(child_number)
   let target: string = if staged {
     text.concat("/tmp/genesis-air-audio-", text.concat(str.view(suffix), ".wav"))
-  } else { string.copy(output) }
+  } else { string.copy(str.view(plan.output)) }
   var reader: proc.LineReader = proc.line_reader(65536)
   var opener: string = text.concat("WAVE ", str.view(target))
   string.append(opener, " ")
-  string.append(opener, str.view(string.from_float(cast.float(finish - start) / fps)))
+  string.append(opener, str.view(string.from_float(plan.duration)))
   var closer: string = text.concat("WAVECLOSE ", str.view(target))
-  match audio_session(child, reader, str.view(opener), sounds, str.view(closer)) {
+  match audio_session(child, reader, str.view(opener), plan.sounds, str.view(closer)) {
     err(problem) => {
       let _ = proc.terminate(child, 100)
       let _ = proc.close(child)
@@ -1034,13 +1045,21 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
   }
   let _ = proc.close_stdin(child)
   let finished: process.status = match proc.wait(child, proc.deadline_in(30000)) {
-    err(problem) => { return result.err("audio worker did not finish") },
+    err(problem) => {
+      let _ = proc.terminate(child, 100)
+      let _ = proc.close(child)
+      if staged { let _ = files.remove(str.view(target)) }
+      return result.err("audio worker did not finish")
+    },
     ok(value) => value,
   }
   let _ = proc.close(child)
-  if not proc.success(finished) { return result.err("audio worker exited unsuccessfully") }
+  if not proc.success(finished) {
+    if staged { let _ = files.remove(str.view(target)) }
+    return result.err("audio worker exited unsuccessfully")
+  }
   if staged {
-    let temporary: string = text.concat(output,
+    let temporary: string = text.concat(str.view(plan.output),
       text.concat(".genesis-air-", str.view(suffix)))
     match files.copy_new(str.view(target), str.view(temporary)) {
       err(problem) => {
@@ -1049,7 +1068,7 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
       },
       ok(_) => { },
     }
-    match files.rename(str.view(temporary), output) {
+    match files.rename(str.view(temporary), str.view(plan.output)) {
       err(problem) => {
         let _ = files.remove(str.view(temporary))
         let _ = files.remove(str.view(target))
@@ -1060,6 +1079,18 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
     let _ = files.remove(str.view(target))
   }
   result.ok(true)
+}
+
+pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output: str)
+                     -> result<bool, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let prepared: option<AudioPlan> = try audio_plan(doc, worker, start, output)
+  match prepared {
+    none => result.ok(false),
+    some(value) => {
+      var plan: AudioPlan = value
+      execute_audio_plan(plan)
+    },
+  }
 }
 
 fn render_into(doc: ref<editor.Document>, worker: str, output: str)

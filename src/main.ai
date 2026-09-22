@@ -19,6 +19,7 @@ import std.path as path
 import std.process as proc
 import std.png_tools as png_tools
 import std.system as system
+import std.tasks as tasks
 import std.text as text
 import std.time as clock
 import std.widgets as widgets
@@ -298,7 +299,13 @@ fn audio_player_result(player: ref<option<Child>>) -> option<bool> effects {proc
   }
 }
 
-fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
+fn mix_audio(plan: timeline_media.AudioPlan own) -> result<bool, string>
+             effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var owned: timeline_media.AudioPlan = plan
+  timeline_media.execute_audio_plan(owned)
+}
+
+fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
     err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
@@ -316,6 +323,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   let audition_file: string = provider.audition_path(struct.borrow(state, field=provider))
   var previous_playing: bool = false
   var previous_frame: i64 = editor.playhead(struct.borrow(state, field=document))
+  var audio_requested: bool = false
+  var audio_preparing: bool = false
+  var audio_generation: u64 = 0
+  var task_generation: u64 = 0
+  task.scope {
+  var audio_jobs: array<task<result<bool, string>>> = array.new()
   loop {
     if not app.running(state) { break }
     let now_ns: u64 = clock.start()
@@ -325,46 +338,87 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
     let frame_now: i64 = editor.playhead(struct.borrow(state, field=document))
     if playing_now and (not previous_playing or frame_now != previous_frame) {
       stop_audio(audio_player, str.view(audition_file))
-      let engine: ref<provider.Provider> = struct.borrow(state, field=provider)
-      if struct.get(engine, field=kind) == provider.kind_gcompose() {
-        let worker: string = provider.worker_path(engine)
-        match timeline_media.prepare_audio(struct.borrow(state, field=document),
-            str.view(worker), frame_now, str.view(audition_file)) {
-          err(problem) => {
-            app.set_status(state, str.view(problem))
-            let _ = commands.program(state, editor.pause())
-          },
-          ok(has_audio) => {
-            if has_audio {
-              var argv: array<string> = [string.copy("paplay"), string.copy(str.view(audition_file))]
-              match proc.spawn_piped(argv) {
-                ok(child) => {
-                  audio_player = option.some(child)
-                  audio_from_paplay = true
-                },
-                err(problem) => {
-                  var fallback: array<string> = [string.copy("aplay"), string.copy(str.view(audition_file))]
-                  match proc.spawn_piped(fallback) {
-                    ok(child) => {
-                      audio_player = option.some(child)
-                      audio_from_paplay = false
-                    },
-                    err(other) => {
-                      app.set_status(state, "no audio player is installed")
-                      let _ = commands.program(state, editor.pause())
-                    },
-                  }
-                },
-              }
-            }
-          },
-        }
-      }
+      audio_generation = audio_generation + 1
+      audio_requested = struct.get(struct.borrow(state, field=provider), field=kind) ==
+        provider.kind_gcompose()
+      audio_preparing = audio_requested
       elapsed_ns = 0
       clock_ns = clock.start()
     }
-    if transport_clock.advance(struct.borrow(state, field=document), elapsed_ns,
-        frame_clock) { dirty = true }
+    if not playing_now { audio_requested = false }
+    if array.len(audio_jobs) > 0 {
+      match tasks.join_next<result<bool, string>>(audio_jobs, tasks.now()) {
+        none => { },
+        some(outcome) => {
+          if task_generation != audio_generation or not playing_now {
+            let _ = files.remove(str.view(audition_file))
+          } else {
+            audio_preparing = false
+            match outcome {
+              err(problem) => {
+                app.set_status(state, str.view(problem))
+                let _ = commands.program(state, editor.pause())
+                dirty = true
+              },
+              ok(has_audio) => {
+                if has_audio {
+                  var argv: array<string> = [string.copy("paplay"), string.copy(str.view(audition_file))]
+                  match proc.spawn_piped(argv) {
+                    ok(child) => {
+                      audio_player = option.some(child)
+                      audio_from_paplay = true
+                    },
+                    err(problem) => {
+                      var fallback: array<string> = [string.copy("aplay"), string.copy(str.view(audition_file))]
+                      match proc.spawn_piped(fallback) {
+                        ok(child) => {
+                          audio_player = option.some(child)
+                          audio_from_paplay = false
+                        },
+                        err(other) => {
+                          app.set_status(state, "no audio player is installed")
+                          let _ = commands.program(state, editor.pause())
+                          dirty = true
+                        },
+                      }
+                    },
+                  }
+                }
+                clock_ns = clock.start()
+                elapsed_ns = 0
+              },
+            }
+          }
+        },
+      }
+    }
+    if audio_requested and array.len(audio_jobs) == 0 and playing_now {
+      let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+      match timeline_media.audio_plan(struct.borrow(state, field=document),
+          str.view(worker), frame_now, str.view(audition_file)) {
+        err(problem) => {
+          app.set_status(state, str.view(problem))
+          let _ = commands.program(state, editor.pause())
+          audio_preparing = false
+          dirty = true
+        },
+        ok(prepared) => {
+          match prepared {
+            none => { audio_preparing = false },
+            some(plan) => {
+              task_generation = audio_generation
+              array.push(audio_jobs, task.spawn(plan, fn=mix_audio))
+            },
+          }
+        },
+      }
+      audio_requested = false
+      clock_ns = clock.start()
+      elapsed_ns = 0
+    }
+    if not playing_now and array.len(audio_jobs) == 0 { audio_preparing = false }
+    if not audio_preparing and transport_clock.advance(
+        struct.borrow(state, field=document), elapsed_ns, frame_clock) { dirty = true }
     if not editor.playing(struct.borrow(state, field=document)) and previous_playing {
       stop_audio(audio_player, str.view(audition_file))
     }
@@ -529,12 +583,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
       if drained > 64 { break }
     }
   }
+  }
   stop_audio(audio_player, str.view(audition_file))
   gui.close(window)
   0
 }
 
-pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui} {
   if view.len(args) < 2 {
     say("genesis-air render OUT.png [PROJECT]")
     say("genesis-air export OUT.mp4 PROJECT.air")

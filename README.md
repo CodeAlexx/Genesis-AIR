@@ -152,8 +152,9 @@ requires a 30 fps sequence and a `.mp4` output path. Existing output files are r
 removed on failure.
 Window Play mixes the audible timeline into a WAV through the same AIR resolver as export,
 then plays it through `paplay` or `aplay`; Pause, seek, and end stop the player. Audio
-preparation currently runs on the window thread, so long timelines can pause the UI before
-playback starts. The `audio` command writes that exact mix for inspection.
+preparation runs in an AIR task. The visual clock waits for the completed WAV so picture
+and sound start together; a long mix delays playback without blocking window input.
+The `audio` command writes that exact mix for inspection.
 
 ## Keys
 
@@ -286,8 +287,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
 - The window runs export synchronously, so it does not repaint or accept cancellation during
   a long encode. The standalone `preview` and `export` commands support headless workflows.
 - The program Play control advances on a monotonic clock, skips frames after a slow paint,
-  and plays the mixed timeline audio. WAV preparation is synchronous, and this best-effort
-  system-player path has no sample-accurate audio/video clock or live scrub audio.
+  and plays the mixed timeline audio. This best-effort system-player path has no
+  sample-accurate audio/video clock or live scrub audio; source and program frame requests
+  still run synchronously in the window loop.
 - Zoom and pan live in this application (`app.Viewport`) because the AIR NLE toolkit records
   viewport policy as deliberately unported. If it proves generic it should be upstreamed.
 ## Provenance
