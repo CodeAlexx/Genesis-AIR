@@ -25,7 +25,8 @@ AIR stdlib
 ## What it is
 
 An AIR-native editing application with a tested project and control layer. Its media
-renderer covers the paths listed below; the remaining mappings are tracked under Known gaps.
+renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
+tracks every exposed control and its remaining media gate.
 
 ```
 menu
