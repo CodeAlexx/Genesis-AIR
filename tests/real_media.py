@@ -51,6 +51,18 @@ def audio_peak(movie, channel=None):
     return max((abs(v) for v in samples), default=0.0)
 
 
+def audio_rms_window(movie, start, duration):
+    done = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(start),
+                           "-i", str(movie), "-t", str(duration), "-vn",
+                           "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"],
+                          capture_output=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    samples = array("f")
+    samples.frombytes(done.stdout)
+    assert samples
+    return (sum(sample * sample for sample in samples) / len(samples)) ** 0.5
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -217,6 +229,35 @@ def main():
         assert changed_cue > 100, changed_cue
         assert not list(root.rglob("*.subtitle.rgba")), "caption raster left behind"
 
+        ramp = root / "ramp.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30",
+             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+             "-af", "afade=t=in:st=0:d=0.4", "-t", "0.4",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", ramp])
+        sped = json.loads(json.dumps(document))
+        sped["sources"][0]["path"] = str(ramp)
+        sped["clips"] = [sped["clips"][0]]
+        sped["clips"][0]["length"] = 6
+        sped["clips"][0]["speed"] = 2.0
+        sped["clips"][0]["reverse"] = True
+        sped["filters"] = []
+        sped["filter_params"] = []
+        speed_project = root / "reverse-speed.air"
+        speed_project.write_text(json.dumps(sped))
+        speed_movie = root / "reverse-speed.mp4"
+        run([args.binary, "export", speed_movie, speed_project], env)
+        first_loudness = audio_rms_window(speed_movie, 0.0, 0.04)
+        last_loudness = audio_rms_window(speed_movie, 0.15, 0.04)
+        assert first_loudness > last_loudness * 1.7, (first_loudness, last_loudness)
+        sped["clips"][0]["speed"] = 0.0
+        sped["clips"][0]["reverse"] = False
+        speed_project.write_text(json.dumps(sped))
+        freeze_movie = root / "freeze.mp4"
+        run([args.binary, "export", freeze_movie, speed_project], env)
+        assert audio_peak(freeze_movie) == 0.0
+
         tone = root / "audio only.wav"
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
              "-i", "sine=frequency=660:sample_rate=48000", "-t", "0.4", tone])
@@ -280,7 +321,8 @@ def main():
         assert bad_audio.returncode != 0 and "unsupported audio filter" in bad_audio.stdout
         assert not (root / "bad-audio.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
-              f"12 frames, three layers, timed captions, crossfade, mixed picture/audio filters, audible AAC and "
+              f"12 frames, three layers, timed captions, crossfade, reverse-speed audio, "
+              f"mixed picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
 

@@ -241,7 +241,8 @@ python3 tests/real_media.py --binary build/genesis-air \
 - **Real media**: the worker probe reads frame count, size, frame rate and audio presence;
   the preview and MP4 paths compose three colored clips in track order, add a timed caption,
   apply a touching-cut crossfade,
-  export an audio-only timeline, mix and pan a tone, apply picture and audio filters
+  export an audio-only timeline, retime and reverse a rising tone, keep freeze-frame
+  audio silent, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
   effect instead of silently dropping it.
 

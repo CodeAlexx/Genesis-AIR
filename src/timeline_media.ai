@@ -628,6 +628,24 @@ fn audio_filter_stage(doc: ref<editor.Document>, filter: u64)
   option.none()
 }
 
+fn tempo_stages(stages: ref<array<string>>, speed: f64) -> unit effects {alloc} {
+  var remaining: f64 = speed
+  loop {
+    if remaining <= 2.0 { break }
+    array.push(stages, string.copy("atempo=2"))
+    remaining = remaining / 2.0
+  }
+  loop {
+    if remaining >= 0.5 { break }
+    array.push(stages, string.copy("atempo=0.5"))
+    remaining = remaining * 2.0
+  }
+  if remaining < 0.999999 or remaining > 1.000001 {
+    array.push(stages, text.concat("atempo=", str.view(string.from_float(remaining))))
+  }
+  ()
+}
+
 fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
                -> result<array<string>, string> effects {alloc} {
   var lines: array<string> = array.new()
@@ -650,15 +668,21 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     let begin: i64 = if clip.start > start { clip.start } else { start }
     let end: i64 = if editor.clip_end(clip) < finish { editor.clip_end(clip) } else { finish }
     if end <= begin { continue }
-    if clip.speed != 1.0 or clip.reverse {
-      return result.err("audio speed or reverse is not rendered yet")
+    // A held picture has no progressing audio samples. Other audible clips can still mix.
+    if clip.speed == 0.0 { continue }
+    if not math.is_finite(clip.speed) or clip.speed < 0.05 or clip.speed > 16.0 {
+      return result.err("audible clip speed must be between 0.05 and 16")
     }
     let source_fps: f64 = if source.fps > 0.0 { source.fps } else { fps }
+    let local_start: i64 = if clip.reverse { clip.length - (end - clip.start) }
+      else { begin - clip.start }
     let source_s: f64 = cast.float(clip.source_in) / source_fps +
-      cast.float(begin - clip.start) / fps
-    let duration_s: f64 = cast.float(end - begin) / fps
+      cast.float(local_start) * clip.speed / fps
+    let duration_s: f64 = cast.float(end - begin) * clip.speed / fps
     let destination_s: f64 = cast.float(begin - start) / fps
     var stages: array<string> = array.new()
+    if clip.reverse { array.push(stages, string.copy("areverse")) }
+    tempo_stages(stages, clip.speed)
     if clip.pan != 0.0 {
       var stage: string = string.copy("stereotools=balance_out=")
       string.append(stage, str.view(string.from_float(clip.pan)))
