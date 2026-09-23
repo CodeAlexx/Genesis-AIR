@@ -35,12 +35,13 @@ fn put_f(values: ref<array<string>>, at: u64, value: f64) -> unit effects {alloc
 }
 
 // One authoritative set of neutral fields, shared by PREVIEW and ENC. The worker's
-// indexed grammar is intentionally contained here; index 101 is the clip fade.
+// indexed grammar is intentionally contained here; index 101 is the clip fade and
+// 102..104 extend the crop margins without changing older worker fields.
 fn neutral() -> array<string> effects {alloc} {
   var values: array<string> = array.new()
   var at: u64 = 0
   loop {
-    if at == 102 { break }
+    if at == 105 { break }
     array.push(values, string.copy("0"))
     at = at + 1
   }
@@ -283,8 +284,10 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     let top: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "top", 0.0)
     let right: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "right", 0.0)
     let bottom: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "bottom", 0.0)
-    if left != top or left != right or left != bottom { return false }
     put_f(values, 79, left)
+    put_f(values, 102, top)
+    put_f(values, 103, right)
+    put_f(values, 104, bottom)
   } else if str.eq(str.view(kind), "mask") and not overlay {
     // The inspector's mask is a centered full-frame rectangle with an adjustable
     // soft edge. The worker applies this to the base image before its look pass.

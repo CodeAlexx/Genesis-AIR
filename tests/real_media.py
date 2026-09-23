@@ -560,6 +560,21 @@ def main():
         crop_preview = root / "crop.png"
         run([args.binary, "preview", crop_preview, grade_project], env)
         assert pixel(crop_preview, 30, 30)[0] < 20
+        graded["filter_params"] = [dict(filter=11, name=edge, value=value)
+                                   for edge, value in (("left", 0.30), ("top", 0.10),
+                                                       ("right", 0.05), ("bottom", 0.25))]
+        grade_project.write_text(json.dumps(graded))
+        asymmetric_preview = root / "asymmetric-crop.png"
+        asymmetric_movie = root / "asymmetric-crop.mp4"
+        run([args.binary, "preview", asymmetric_preview, grade_project], env)
+        run([args.binary, "export", asymmetric_movie, grade_project], env)
+        for point, black in (((100, 180), True), ((320, 20), True),
+                             ((320, 320), True), ((580, 180), False),
+                             ((320, 180), False)):
+            preview_rgb = pixel(asymmetric_preview, *point)
+            movie_rgb = pixel(asymmetric_movie, point[0] * 3, point[1] * 3, True)
+            assert (preview_rgb[0] < 20) == black, (point, preview_rgb)
+            assert max(abs(a - b) for a, b in zip(preview_rgb, movie_rgb)) <= 18
         graded["filters"][0]["kind"] = "white_balance"
         graded["filter_params"] = [dict(filter=11, name="temperature", value=100.0)]
         grade_project.write_text(json.dumps(graded))
@@ -1059,6 +1074,7 @@ def main():
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
+              f"asymmetric crop, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
