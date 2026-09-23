@@ -43,6 +43,7 @@ EXPECTED = {
     "mixed_full_source_placed": "true",
     "mixed_last_native": "true",
     "mixed_inpoint_native": "true",
+    "speed_filter_native_frame": "true",
     "keyframed_opacity_start": "true",
     "keyframed_opacity_end": "true",
     "keyframed_brightness_start": "true",

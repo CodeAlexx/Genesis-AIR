@@ -283,6 +283,10 @@ python3 tests/window_playback.py --binary build/genesis-air \
   preview and MP4 export. The inspector's K action creates its filter and key in one
   undo step; it refuses automation with no media behavior. Audio filter and clip-fade
   automation remain open.
+  The library Speed filter multiplies the clip Rate property. AIR derives one effective
+  rate for source-frame selection, source bounds, and audio tempo. A generated 24 fps
+  source at 2x has a 15-frame, audible export on a 30 fps sequence. Animated speed
+  remains unsupported because a varying rate needs integrated source-time mapping.
   The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.

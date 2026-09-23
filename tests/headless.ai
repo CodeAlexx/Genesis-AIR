@@ -608,6 +608,24 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       emit_b("mixed_last_native", str.eq(str.view(array.borrow(fields, 3)), "23"))
     },
   }
+  var speed_doc: editor.Document = editor.document(30.0, 640, 360)
+  let speed_owner: u64 = speed_doc.active
+  let speed_source: u64 = editor.add_source(speed_doc, "/media/speed.mp4", "speed", 24, 24.0)
+  let speed_track: u64 = editor.add_track(speed_doc, speed_owner, editor.track_video(), "V1")
+  let speed_clip: u64 = match editor.place(speed_doc, speed_track, speed_source, 0, 15, 0) {
+    none => 0, some(value) => value,
+  }
+  let speed_filter: u64 = match editor.add_filter(speed_doc, speed_clip, "speed") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_param(speed_doc, speed_filter, "rate", 2.0)
+  match timeline_media.frame_line(speed_doc, 14, "ENC", "") {
+    err(problem) => { emit_b("speed_filter_native_frame", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("speed_filter_native_frame", str.eq(str.view(array.borrow(fields, 3)), "22"))
+    },
+  }
   var in_doc: editor.Document = editor.document(30.0, 640, 360)
   let in_owner: u64 = in_doc.active
   let in_source: u64 = editor.add_source(in_doc, "/media/24fps.mp4", "24fps", 24, 24.0)

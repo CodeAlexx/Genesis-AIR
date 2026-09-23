@@ -9,8 +9,8 @@ UI gate proves hit testing and command dispatch; it does not by itself prove med
 | Status | Kinds | Remaining gate or implementation |
 |---|---|---|
 | Mapped to the worker wire | brightness, contrast, saturation, gamma, hue, sharpen, blur, glow, grain, levels, lift_gamma_gain, rotate, flip, mirror, denoise | Pixel change and preview/export parity for each parameter value, including animation and every visible lane. |
-| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend, mask | Base and overlay opacity have preview/MP4 pixel gates. The centered base mask has feather/invert preview/MP4 center and edge gates. Tint, softness, fractional look amounts, asymmetric crop, overlay rotation/masking, other non-overlay uses, and blend modes 8–11 need real implementations. Existing unsupported values fail explicitly. |
-| No media mapping yet | text, timer, stabilize, lut3d, speed | Implement the advertised behavior and exercise it in preview and export. `speed` overlaps the clip rate control; decide one authoritative model before mapping it. |
+| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend, mask, speed | Base and overlay opacity have preview/MP4 pixel gates. The centered base mask has feather/invert preview/MP4 center and edge gates. Speed multiplies clip Rate and has a generated 24-to-30 fps, 2x picture/audio/15-frame export gate; animated speed remains unsupported. Tint, softness, fractional look amounts, asymmetric crop, overlay rotation/masking, other non-overlay uses, and blend modes 8–11 need real implementations. Existing unsupported values fail explicitly. |
+| No media mapping yet | text, timer, stabilize, lut3d | Implement the advertised behavior and exercise it in preview and export. |
 
 ## Audio filters (20)
 

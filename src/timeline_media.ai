@@ -97,7 +97,28 @@ fn source_path(doc: ref<editor.Document>, clip: editor.Clip) -> option<string> e
   }
 }
 
-fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64 effects {} {
+// The clip's Rate property and enabled Speed filters describe the same retime.
+// Multiple filters compose multiplicatively; picture, sound, and bounds use one
+// derived value, so no renderer maintains a second speed interpretation.
+fn effective_speed(doc: ref<editor.Document>, clip: editor.Clip) -> f64 effects {alloc} {
+  var speed: f64 = clip.speed
+  var index: u32 = 0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => { break },
+      some(filter) => {
+        if editor.filter_enabled(doc, filter) and
+           str.eq(str.view(editor.filter_kind(doc, filter)), "speed") {
+          speed = speed * editor.filter_param(doc, filter, "rate", 1.0)
+        }
+      },
+    }
+    index = index + 1
+  }
+  speed
+}
+
+fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64 effects {alloc} {
   let unclamped: i64 = frame - clip.start
   let local: i64 = if unclamped < 0 { 0 }
     else if unclamped >= clip.length { clip.length - 1 }
@@ -112,16 +133,17 @@ fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64
   } else { 1.0 }
   let position: i64 = if clip.reverse { clip.length - 1 - local } else { local }
   let result_frame: i64 = cast.sat(math.floor(
-    (cast.float(clip.source_in) + cast.float(position) * clip.speed) * ratio))
+    (cast.float(clip.source_in) + cast.float(position) * effective_speed(doc, clip)) * ratio))
   let bound: i64 = editor.source_frames(doc, clip.source)
   if bound > 0 and result_frame >= bound { bound - 1 }
   else if result_frame < 0 { 0 }
   else { result_frame }
 }
 
-fn source_range_ok(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {} {
-  if clip.speed == 0.0 { return true }
-  if not math.is_finite(clip.speed) or clip.speed < 0.0 { return false }
+fn source_range_ok(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {alloc} {
+  let speed: f64 = effective_speed(doc, clip)
+  if speed == 0.0 { return true }
+  if not math.is_finite(speed) or speed < 0.0 { return false }
   let slot: u64 = match editor.source_slot(doc, clip.source) {
     none => { return false }, some(value) => value,
   }
@@ -130,7 +152,7 @@ fn source_range_ok(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects
   if source.frames <= 0 { return true }
   if sequence_fps <= 0.0 or source.fps <= 0.0 { return false }
   let last_native: f64 = math.floor((cast.float(clip.source_in) +
-    cast.float(clip.length - 1) * clip.speed) * source.fps / sequence_fps)
+    cast.float(clip.length - 1) * speed) * source.fps / sequence_fps)
   last_native < cast.float(source.frames)
 }
 
@@ -166,7 +188,7 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
   if not editor.filter_enabled(doc, filter) { return true }
   let kind: string = editor.filter_kind(doc, filter)
   if chrome.is_audio_kind(str.view(kind)) { return true }
-  if str.eq(str.view(kind), "opacity") {
+  if str.eq(str.view(kind), "speed") or str.eq(str.view(kind), "opacity") {
     return true
   } else if str.eq(str.view(kind), "blend") and overlay {
     let mode: i64 = cast.sat(filter_value(doc, clip, filter, str.view(kind), frame, "mode", 0.0))
@@ -974,16 +996,17 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     if not source_range_ok(doc, clip) {
       return result.err("audio clip speed and length exceed its source frames")
     }
+    let speed: f64 = effective_speed(doc, clip)
     // A held picture has no progressing audio samples. Other audible clips can still mix.
-    if clip.speed == 0.0 { continue }
-    if not math.is_finite(clip.speed) or clip.speed < 0.05 or clip.speed > 16.0 {
+    if speed == 0.0 { continue }
+    if not math.is_finite(speed) or speed < 0.05 or speed > 16.0 {
       return result.err("audible clip speed must be between 0.05 and 16")
     }
     let local_start: i64 = if clip.reverse { clip.length - (end - clip.start) }
       else { begin - clip.start }
     let source_s: f64 = cast.float(clip.source_in) / fps +
-      cast.float(local_start) * clip.speed / fps
-    var duration_s: f64 = cast.float(end - begin) * clip.speed / fps
+      cast.float(local_start) * speed / fps
+    var duration_s: f64 = cast.float(end - begin) * speed / fps
     if source.frames > 0 and source.fps > 0.0 {
       let remaining_s: f64 = cast.float(source.frames) / source.fps - source_s
       if duration_s > remaining_s { duration_s = remaining_s }
@@ -992,7 +1015,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     let destination_s: f64 = cast.float(begin - start) / fps
     var stages: array<string> = array.new()
     if clip.reverse { array.push(stages, string.copy("areverse")) }
-    tempo_stages(stages, clip.speed)
+    tempo_stages(stages, speed)
     if clip.pan != 0.0 {
       var stage: string = string.copy("stereotools=balance_out=")
       string.append(stage, str.view(string.from_float(clip.pan)))
@@ -1016,7 +1039,8 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
                 none => { return result.err("an audio clip uses an unsupported audio filter") },
                 some(stage) => { array.push(stages, stage) },
               }
-            } else if editor.track_kind(doc, clip.track) != editor.track_video() {
+            } else if not str.eq(str.view(kind), "speed") and
+                      editor.track_kind(doc, clip.track) != editor.track_video() {
               return result.err("a picture filter cannot render on an audio lane")
             }
           }

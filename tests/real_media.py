@@ -272,6 +272,31 @@ def main():
         assert int(json.loads(mixed_meta.stdout)["streams"][0]["nb_frames"]) == 30
         assert audio_peak(mixed_movie) > 0.01
 
+        # The library Speed filter and the clip Rate property share one source
+        # clock. Twice the source rate fits one source second into 15 sequence
+        # frames and retimes its audio to the same half-second output.
+        speed_doc = json.loads(json.dumps(mixed_doc))
+        speed_doc["clips"][0]["length"] = 15
+        speed_doc["program"]["frame"] = 14
+        speed_doc["filters"] = [dict(id=70, clip=speed_doc["clips"][0]["id"],
+                                     kind="speed", order=0, enabled=True)]
+        speed_doc["filter_params"] = [dict(filter=70, name="rate", value=2.0)]
+        speed_doc["next_id"] = 71
+        speed_project = root / "speed.air"
+        speed_project.write_text(json.dumps(speed_doc))
+        speed_preview = root / "speed-preview.png"
+        speed_movie = root / "speed.mp4"
+        run([args.binary, "preview", speed_preview, speed_project], env)
+        run([args.binary, "export", speed_movie, speed_project], env)
+        speed_color = pixel(speed_preview, 320, 180)
+        speed_encoded = pixel(speed_movie, 960, 540, True, 14 / 30)
+        assert speed_color[2] > 200 and speed_color[0] < 30, speed_color
+        assert max(abs(a - b) for a, b in zip(speed_color, speed_encoded)) <= 15
+        speed_meta = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                          "-show_entries", "stream=nb_frames", "-of", "json", speed_movie])
+        assert int(json.loads(speed_meta.stdout)["streams"][0]["nb_frames"]) == 15
+        assert audio_peak(speed_movie) > 0.01
+
         # A video clip can carry picture and sound filters at once. The picture path
         # must ignore audio filters and the audio path must ignore picture filters.
         filtered = json.loads(json.dumps(document))
@@ -576,7 +601,8 @@ def main():
               f"base opacity {base_color}; "
               f"mask center/edge {mask_center}/{mask_edge}, inverted "
               f"{inverse_center}/{inverse_edge}; "
-              f"12 frames, three layers, timed captions, crossfade, reverse-speed audio, "
+              f"12 frames, 2x speed filter (15-frame AV), three layers, timed captions, "
+              f"crossfade, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
