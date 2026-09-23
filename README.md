@@ -255,7 +255,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   and saves its project.
 - **Real media**: the worker probe reads frame count, size, frame rate and audio presence;
   the preview and MP4 paths compose three colored clips in track order, add a timed caption,
-  apply touching-cut and overlapping-seam crossfades, and check gamma, sepia, vignette, levels, crop,
+  apply all eleven transition kinds across a touching cut, plus overlapping and
+  short-gap crossfades, and check gamma, sepia, vignette, levels, crop,
   and keyed overlay pixels,
   export an audio-only timeline, verify a 24 fps source across a full 30 fps sequence
   second, write an audible playback WAV (including a spaced output
@@ -269,10 +270,10 @@ python3 tests/window_playback.py --binary build/genesis-air \
 - Source probe, thumbnail, waveform and interactive preview still start one worker per
   request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
 - The media adapter composites visible video lanes in track order, timed captions,
-  and touching-cut and overlapping-seam transitions. The UI's Dissolve action,
-  Crossfade, and an overlapping midpoint seam have generated preview/MP4 gates.
-  All 11 worker transition kinds have AIR name mappings, while the other nine still
-  need media gates. Nested sequences, unsupported video filters, and keyframes for
+  and touching-cut, overlapping-seam, and short-gap transitions. All 11 named
+  worker transition kinds have generated preview/MP4 geometry gates; overlap and
+  short-gap crossfades have midpoint pixel gates. Nested sequences, unsupported video
+  filters, and keyframes for
   unsupported effects or clip properties are refused by
   preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
   parameter is shown as release time because that is the behavior `agate` implements.

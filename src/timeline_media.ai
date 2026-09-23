@@ -468,7 +468,7 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
             return result.err("this transition kind is not rendered yet")
           }
           let pair: TransitionPair = match transition_pair(doc, track, transition.center) {
-            none => { return result.err("crossfade needs two clips touching at its center") },
+            none => { return result.err("transition needs an adjacent clip pair at its seam") },
             some(value) => value,
           }
           let incoming_path: string = match source_path(doc, pair.incoming) {

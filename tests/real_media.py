@@ -637,6 +637,50 @@ def main():
         overlap_encoded = pixel(overlap_movie, 960, 540, True, 10 / 30)
         assert 85 <= overlap_color[0] <= 170 and 85 <= overlap_color[2] <= 170, overlap_color
         assert max(abs(a - b) for a, b in zip(overlap_color, overlap_encoded)) <= 18
+        short_gap = json.loads(json.dumps(dissolve))
+        short_gap["clips"][1]["start"] = 16
+        short_gap_project = root / "short-gap.air"
+        short_gap_project.write_text(json.dumps(short_gap))
+        short_gap_preview = root / "short-gap.png"
+        short_gap_movie = root / "short-gap.mp4"
+        run([args.binary, "preview", short_gap_preview, short_gap_project], env)
+        run([args.binary, "export", short_gap_movie, short_gap_project], env)
+        gap_color = pixel(short_gap_preview, 320, 180)
+        gap_encoded = pixel(short_gap_movie, 960, 540, True, 0.4)
+        assert 85 <= gap_color[0] <= 170 and 85 <= gap_color[2] <= 170, gap_color
+        assert max(abs(a - b) for a, b in zip(gap_color, gap_encoded)) <= 18
+
+        # Distinct points prove that each named transition reaches its intended
+        # geometry, and that the exported frame agrees with the monitor.
+        transition_sides = {
+            "wipe_lr": ((64, 180), (576, 180)),
+            "wipe_rl": ((576, 180), (64, 180)),
+            "wipe_up": ((320, 324), (320, 36)),
+            "wipe_down": ((320, 36), (320, 324)),
+            "slide_lr": ((576, 180), (64, 180)),
+            "zoom": ((320, 180), (64, 36)),
+            "iris": ((320, 180), (64, 36)),
+            "clock": ((64, 36), (576, 36)),
+            "barn_door": ((320, 180), (64, 180)),
+        }
+        for name, (blue_at, red_at) in transition_sides.items():
+            variant = json.loads(json.dumps(dissolve))
+            variant["names"][-1] = name
+            variant_project = root / f"{name}.air"
+            variant_project.write_text(json.dumps(variant))
+            variant_preview = root / f"{name}.png"
+            variant_movie = root / f"{name}.mp4"
+            run([args.binary, "preview", variant_preview, variant_project], env)
+            run([args.binary, "export", variant_movie, variant_project], env)
+            blue_pixel = pixel(variant_preview, *blue_at)
+            red_pixel = pixel(variant_preview, *red_at)
+            assert blue_pixel[2] > 200 and blue_pixel[0] < 40, (name, blue_pixel)
+            assert red_pixel[0] > 200 and red_pixel[2] < 40, (name, red_pixel)
+            for point, preview_pixel in ((blue_at, blue_pixel), (red_at, red_pixel)):
+                encoded_pixel = pixel(variant_movie, point[0] * 3, point[1] * 3,
+                                      True, 0.4)
+                assert max(abs(a - b) for a, b in zip(preview_pixel, encoded_pixel)) <= 18, (
+                    name, point, preview_pixel, encoded_pixel)
 
         # Unsupported edits must fail visibly rather than produce a plausible but wrong file.
         document["filters"].append(dict(id=12, clip=8, kind="stabilize",
@@ -677,7 +721,7 @@ def main():
               f"{inverse_center}/{inverse_edge}; "
               f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
               f"and three layers, timed captions, "
-              f"crossfade, overlap and UI dissolve, reverse-speed audio, "
+              f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
