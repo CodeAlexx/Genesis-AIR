@@ -2,6 +2,8 @@
 
 A native non-linear video editor written in AIR.
 
+Built with **AIR**, a native compiler designed for agent-assisted development: [air-lang.pages.dev](https://air-lang.pages.dev/)
+
 ![Genesis AIR main editor](genesis-air-main.png)
 
 Genesis AIR **uses** AIR; it is not part of it. The application lives here, the language,
