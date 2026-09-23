@@ -452,6 +452,43 @@ def main():
         crop_preview = root / "crop.png"
         run([args.binary, "preview", crop_preview, grade_project], env)
         assert pixel(crop_preview, 30, 30)[0] < 20
+        graded["filters"][0]["kind"] = "white_balance"
+        graded["filter_params"] = [dict(filter=11, name="temperature", value=100.0)]
+        grade_project.write_text(json.dumps(graded))
+        warm_preview = root / "warm.png"
+        warm_movie = root / "warm.mp4"
+        run([args.binary, "preview", warm_preview, grade_project], env)
+        run([args.binary, "export", warm_movie, grade_project], env)
+        warm = pixel(warm_preview, 320, 180)
+        assert 185 < warm[0] < 245 and 10 < warm[2] < 80, warm
+        assert max(abs(a - b) for a, b in zip(warm,
+            pixel(warm_movie, 960, 540, True, 0.1))) <= 18
+        graded["filter_params"] = [dict(filter=11, name="tint", value=100.0)]
+        grade_project.write_text(json.dumps(graded))
+        tint_preview = root / "tint.png"
+        tint_movie = root / "tint.mp4"
+        run([args.binary, "preview", tint_preview, grade_project], env)
+        run([args.binary, "export", tint_movie, grade_project], env)
+        tinted = pixel(tint_preview, 320, 180)
+        assert tinted[1] > tinted[0] + 45 and tinted[1] > tinted[2] + 45, tinted
+        assert max(abs(a - b) for a, b in zip(tinted,
+            pixel(tint_movie, 960, 540, True, 0.1))) <= 18
+        graded["filters"].append(dict(id=12, clip=base_id, kind="lift_gamma_gain",
+                                      order=1, enabled=True))
+        graded["filter_params"].append(dict(filter=12, name="gain", value=0.8))
+        graded["next_id"] = 13
+        grade_project.write_text(json.dumps(graded))
+        tinted_gain_preview = root / "tinted-gain.png"
+        run([args.binary, "preview", tinted_gain_preview, grade_project], env)
+        tinted_gain = pixel(tinted_gain_preview, 320, 180)
+        assert tinted_gain[1] < tinted[1] - 20, (tinted_gain, tinted)
+        graded["filters"][0]["order"] = 1
+        graded["filters"][1]["order"] = 0
+        grade_project.write_text(json.dumps(graded))
+        reversed_gain_preview = root / "reversed-gain.png"
+        run([args.binary, "preview", reversed_gain_preview, grade_project], env)
+        assert max(abs(a - b) for a, b in zip(tinted_gain,
+            pixel(reversed_gain_preview, 320, 180))) <= 2
         keyed = json.loads(json.dumps(document))
         keyed["sources"][1]["path"] = str(key_green)
         keyed["filters"][0]["kind"] = "chroma_key"
@@ -722,7 +759,7 @@ def main():
               f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
               f"and three layers, timed captions, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
-              f"graded picture/audio filters, audible AAC and "
+              f"white balance temperature/tint, graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
 

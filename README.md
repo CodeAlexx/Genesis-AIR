@@ -284,6 +284,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   darkening an upper clip leaves lower clips unchanged in preview and MP4. Cropping
   currently supports equal margins, and the worker supports eight of the
   twelve blend modes shown in the inspector; unsupported values fail explicitly.
+  White-balance temperature uses the worker's normalized range, and tint multiplies
+  per-channel gains; generated gray-frame preview/MP4 gates cover both controls and
+  their combination with Color Grading.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
   a keyed fade from black to half-strength red and base-clip opacity in both PNG

@@ -183,6 +183,15 @@ fn filter_value(doc: ref<editor.Document>, clip: editor.Clip, filter: u64,
   editor.clip_value_at(doc, clip.id, str.view(qualified), frame, base)
 }
 
+fn multiply_gain(values: ref<array<string>>, channel: u64, factor: f64)
+                 -> unit effects {alloc} {
+  let index: u64 = 30 + channel
+  let current: f64 = match text.parse_f64(str.view(array.borrow(values, index))) {
+    none => 1.0, some(value) => value,
+  }
+  put_f(values, index, current * factor)
+}
+
 fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<string>>,
                 filter: u64, overlay: bool, frame: i64) -> bool effects {alloc} {
   if not editor.filter_enabled(doc, filter) { return true }
@@ -237,7 +246,7 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
       if channel >= 3 { break }
       put_f(values, 24 + channel, lift)
       put_f(values, 27 + channel, gamma)
-      put_f(values, 30 + channel, gain)
+      multiply_gain(values, channel, gain)
       channel = channel + 1
     }
   } else if str.eq(str.view(kind), "rotate") and not overlay {
@@ -294,8 +303,17 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     put_f(values, 40, filter_value(doc, clip, filter, str.view(kind), frame, "tolerance", 0.25))
     put_f(values, 41, filter_value(doc, clip, filter, str.view(kind), frame, "softness", 0.10))
   } else if str.eq(str.view(kind), "white_balance") and not overlay {
-    if filter_value(doc, clip, filter, str.view(kind), frame, "tint", 0.0) != 0.0 { return false }
-    put_f(values, 100, filter_value(doc, clip, filter, str.view(kind), frame, "temperature", 0.0))
+    let temperature: f64 = filter_value(doc, clip, filter, str.view(kind), frame,
+      "temperature", 0.0)
+    let tint: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "tint", 0.0)
+    if temperature < -100.0 or temperature > 100.0 or tint < -100.0 or tint > 100.0 {
+      return false
+    }
+    put_f(values, 100, temperature / 100.0)
+    let bias: f64 = tint / 100.0
+    multiply_gain(values, 0, 1.0 - 0.2 * bias)
+    multiply_gain(values, 1, 1.0 + 0.4 * bias)
+    multiply_gain(values, 2, 1.0 - 0.2 * bias)
   } else if str.eq(str.view(kind), "glow") and not overlay {
     put_f(values, 66, filter_value(doc, clip, filter, str.view(kind), frame, "amount", 0.0))
     put_f(values, 67, filter_value(doc, clip, filter, str.view(kind), frame, "threshold", 0.7))
