@@ -36,12 +36,13 @@ fn put_f(values: ref<array<string>>, at: u64, value: f64) -> unit effects {alloc
 
 // One authoritative set of neutral fields, shared by PREVIEW and ENC. The worker's
 // indexed grammar is intentionally contained here; index 101 is the clip fade and
-// 102..104 extend the crop margins and 105 adds the simple-effect mix.
+// 102..104 extend the crop margins, 105 adds the simple-effect mix, and 106
+// carries vignette softness.
 fn neutral() -> array<string> effects {alloc} {
   var values: array<string> = array.new()
   var at: u64 = 0
   loop {
-    if at == 106 { break }
+    if at == 107 { break }
     array.push(values, string.copy("0"))
     at = at + 1
   }
@@ -86,6 +87,7 @@ fn neutral() -> array<string> effects {alloc} {
   put(values, 98, "1")
   put(values, 101, "1")
   put(values, 105, "1")
+  put(values, 106, "0.5")
   values
 }
 
@@ -249,8 +251,11 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     put_f(values, 55, white)
     put_f(values, 56, filter_value(doc, clip, filter, str.view(kind), frame, "gamma", 1.0))
   } else if str.eq(str.view(kind), "vignette") and not overlay {
-    if filter_value(doc, clip, filter, str.view(kind), frame, "softness", 0.5) != 0.5 { return false }
+    let softness: f64 = filter_value(doc, clip, filter, str.view(kind), frame,
+      "softness", 0.5)
+    if softness < 0.0 or softness > 1.0 { return false }
     put_f(values, 47, filter_value(doc, clip, filter, str.view(kind), frame, "amount", 0.4))
+    put_f(values, 106, softness)
   } else if str.eq(str.view(kind), "lift_gamma_gain") and not overlay {
     let lift: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "lift", 0.0)
     let gamma: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "gamma", 1.0)

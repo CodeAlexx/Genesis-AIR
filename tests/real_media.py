@@ -577,6 +577,20 @@ def main():
         vignette_preview = root / "vignette.png"
         run([args.binary, "preview", vignette_preview, grade_project], env)
         assert pixel(vignette_preview, 30, 30)[0] < pixel(plain_grade, 30, 30)[0] - 20
+        vignette_edges = []
+        for softness in (0.0, 1.0):
+            graded["filter_params"] = [dict(filter=11, name="amount", value=1.0),
+                                       dict(filter=11, name="softness", value=softness)]
+            grade_project.write_text(json.dumps(graded))
+            soft_preview = root / f"vignette-soft-{softness}.png"
+            soft_movie = root / f"vignette-soft-{softness}.mp4"
+            run([args.binary, "preview", soft_preview, grade_project], env)
+            run([args.binary, "export", soft_movie, grade_project], env)
+            edge_rgb = pixel(soft_preview, 100, 180)
+            movie_rgb = pixel(soft_movie, 300, 540, True)
+            assert max(abs(a - b) for a, b in zip(edge_rgb, movie_rgb)) <= 18
+            vignette_edges.append(edge_rgb[0])
+        assert vignette_edges[0] > vignette_edges[1] + 20, vignette_edges
         graded["filters"][0]["kind"] = "levels"
         graded["filter_params"] = [dict(filter=11, name="white", value=0.7)]
         grade_project.write_text(json.dumps(graded))
@@ -1104,7 +1118,7 @@ def main():
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
-              f"asymmetric crop, half-strength simple effects, "
+              f"asymmetric crop, half-strength simple effects, vignette softness, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
