@@ -267,6 +267,36 @@ def main():
             assert max(abs(a - b) for a, b in zip(preview_rgb, movie_rgb)) <= 18, (
                 mode, preview_rgb, movie_rgb)
 
+        simple_doc = json.loads(json.dumps(document))
+        simple_doc["clips"] = [simple_doc["clips"][0]]
+        simple_doc["filters"] = []
+        simple_doc["filter_params"] = []
+        simple_project = root / "simple-fx.air"
+        simple_project.write_text(json.dumps(simple_doc))
+        simple_plain = root / "simple-plain.png"
+        run([args.binary, "preview", simple_plain, simple_project], env)
+        plain_rgb = pixel(simple_plain, 320, 180)
+        for kind in ("invert", "sepia", "mono"):
+            simple_doc["filters"] = [dict(id=11, clip=simple_doc["clips"][0]["id"], kind=kind,
+                                          order=0, enabled=True)]
+            simple_doc["filter_params"] = [dict(filter=11, name="amount", value=1.0)]
+            simple_project.write_text(json.dumps(simple_doc))
+            full_preview = root / f"{kind}-full.png"
+            run([args.binary, "preview", full_preview, simple_project], env)
+            full_rgb = pixel(full_preview, 320, 180)
+            simple_doc["filter_params"][0]["value"] = 0.5
+            simple_project.write_text(json.dumps(simple_doc))
+            half_preview = root / f"{kind}-half.png"
+            half_movie = root / f"{kind}-half.mp4"
+            run([args.binary, "preview", half_preview, simple_project], env)
+            run([args.binary, "export", half_movie, simple_project], env)
+            half_rgb = pixel(half_preview, 320, 180)
+            expected = tuple(round((a + b) / 2) for a, b in zip(plain_rgb, full_rgb))
+            assert max(abs(a - b) for a, b in zip(half_rgb, expected)) <= 5, (
+                kind, half_rgb, expected)
+            movie_rgb = pixel(half_movie, 960, 540, True)
+            assert max(abs(a - b) for a, b in zip(half_rgb, movie_rgb)) <= 18
+
         rate24 = json.loads(json.dumps(document))
         rate24["sequences"][0]["fps"] = 24.0
         rate24["clips"] = [rate24["clips"][0]]
@@ -1074,7 +1104,7 @@ def main():
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
-              f"asymmetric crop, "
+              f"asymmetric crop, half-strength simple effects, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 

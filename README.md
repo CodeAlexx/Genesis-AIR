@@ -289,6 +289,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   supports four independent margins on base clips; an asymmetric generated preview/MP4
   gate checks the resulting edges. The twelve blend modes shown in the inspector map
   to their named worker formulas; generated preview and MP4 pixels exercise each one.
+  Invert, Sepia, and Mono mix at the Amount slider's fractional values; generated
+  preview and MP4 frames check their half-strength outputs.
   White-balance temperature uses the worker's normalized range, and tint multiplies
   per-channel gains; generated gray-frame preview/MP4 gates cover both controls and
   their combination with Color Grading.
@@ -307,7 +309,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   adds the optional timeline-rate field used for non-30 fps exports, and
   [`d715fe1`](https://github.com/CodeAlexx/Genesis-/commit/d715fe1a8efde81f4db2438b9b5dc5f35c489f91)
   supplies the four newer blend formulas. Independent Crop margins require
-  [`c990897`](https://github.com/CodeAlexx/Genesis-/commit/c990897c0ec6b6408827b2600e60f44e73cf2d8e).
+  [`c990897`](https://github.com/CodeAlexx/Genesis-/commit/c990897c0ec6b6408827b2600e60f44e73cf2d8e),
+  and fractional simple effects require
+  [`993dc20`](https://github.com/CodeAlexx/Genesis-/commit/993dc20fe028b7c3e6689330c278b991cbf05c67).
   Text currently accepts printable ASCII; other glyphs fail with an explicit message.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
@@ -347,10 +351,11 @@ python3 tests/window_playback.py --binary build/genesis-air \
 Behavior oracle: [`CodeAlexx/Genesis-`](https://github.com/CodeAlexx/Genesis-) at
 `b732f1c246493f029b531d3941e759b8d912bda1`. The reusable editor behavior was
 already ported into AIR; this application consumes it rather than reimplementing it.
-The separate `gcompose` worker has four later changes through `c990897`: transition
+The separate `gcompose` worker has five later changes through `993dc20`: transition
 partners can use the same RAW frame input already accepted for base and overlay slots,
 export can accept a timeline rate while preserving the legacy 30 fps default, and the
 last four displayed blend modes have native formulas. Crop accepts separate margins
-while older worker requests retain their symmetric margin.
+and simple effects accept fractional mix while older worker requests retain their
+symmetric margin and full-strength effect.
 `CodeAlexx/dif-inference` was consulted only for the `gcompose` wire; none of its server,
 browser, model-capability, job-queue or Comfy-compatibility code is here.

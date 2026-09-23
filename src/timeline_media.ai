@@ -36,12 +36,12 @@ fn put_f(values: ref<array<string>>, at: u64, value: f64) -> unit effects {alloc
 
 // One authoritative set of neutral fields, shared by PREVIEW and ENC. The worker's
 // indexed grammar is intentionally contained here; index 101 is the clip fade and
-// 102..104 extend the crop margins without changing older worker fields.
+// 102..104 extend the crop margins and 105 adds the simple-effect mix.
 fn neutral() -> array<string> effects {alloc} {
   var values: array<string> = array.new()
   var at: u64 = 0
   loop {
-    if at == 105 { break }
+    if at == 106 { break }
     array.push(values, string.copy("0"))
     at = at + 1
   }
@@ -85,6 +85,7 @@ fn neutral() -> array<string> effects {alloc} {
   put(values, 89, "1")
   put(values, 98, "1")
   put(values, 101, "1")
+  put(values, 105, "1")
   values
 }
 
@@ -271,11 +272,12 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
   } else if (str.eq(str.view(kind), "invert") or str.eq(str.view(kind), "sepia") or
              str.eq(str.view(kind), "mono")) and not overlay {
     let amount: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "amount", 1.0)
-    if amount != 0.0 and amount != 1.0 { return false }
+    if amount < 0.0 or amount > 1.0 { return false }
     if not str.eq(str.view(array.borrow(values, 50)), "0") { return false }
-    if amount == 1.0 {
+    if amount != 0.0 {
       put(values, 50, if str.eq(str.view(kind), "invert") { "1" }
         else if str.eq(str.view(kind), "sepia") { "2" } else { "3" })
+      put_f(values, 105, amount)
     }
   } else if str.eq(str.view(kind), "denoise") and not overlay {
     put_f(values, 65, filter_value(doc, clip, filter, str.view(kind), frame, "amount", 0.3))
