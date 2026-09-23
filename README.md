@@ -118,6 +118,7 @@ cd Genesis-AIR
 # Build the separate media worker from CodeAlexx/Genesis- (FFmpeg/OpenCL prerequisites
 # are described in that repository), then point Genesis AIR at it:
 cd ../Genesis
+git switch codex/air-raw-transition # RAW transition partner support for titled clips
 cargo build --release -p gcompose
 export GENESIS_GCOMPOSE="$PWD/target/release/gcompose"
 cd ../Genesis-AIR
@@ -235,7 +236,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib --worker /path/to/gcompose
 ```
 
-- **130 application facts** through the command layer with the fake provider: startup,
+- **150 application facts** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
   solo-wins, both transports, elapsed-time playback, reverse sampling at mixed frame
@@ -259,7 +260,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   the preview and MP4 paths compose three colored clips in track order, add a timed caption,
   apply all eleven transition kinds across a touching cut, plus overlapping and
   short-gap crossfades, and check gamma, sepia, vignette, levels, crop,
-  and keyed overlay pixels,
+  keyed overlay pixels, Text and Timer previews and exports,
   export an audio-only timeline, verify a 24 fps source across a full 30 fps sequence
   second, write an audible playback WAV (including a spaced output
   path), retime and reverse a rising tone, keep freeze-frame
@@ -293,6 +294,14 @@ python3 tests/window_playback.py --binary build/genesis-air \
   preview/MP4 pixels prove full-strength channel swapping; preview pixels prove a
   half-strength mix and clip-local Amount key endpoints. Missing or malformed LUT files
   fail with a specific message before a frame is rendered.
+  Text draws saved content with the vector font at keyed Size/X/Y coordinates;
+  Timer draws the clip-local timecode with its Size setting. They render on base and
+  upper clips, and the generated media gate compares their preview and MP4 pixels,
+  including titles on both sides of a crossfade. This requires a worker with RAW
+  transition-partner support; the Genesis worker's
+  [`cd6b40e`](https://github.com/CodeAlexx/Genesis-/commit/cd6b40e6e1003aea30fa81adc19dc9ee49b3bd50)
+  provides it.
+  Text currently accepts printable ASCII; other glyphs fail with an explicit message.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
   a keyed fade from black to half-strength red and base-clip opacity in both PNG
@@ -325,7 +334,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
 ## Provenance
 
 Behavior oracle: [`CodeAlexx/Genesis-`](https://github.com/CodeAlexx/Genesis-) at
-`b732f1c246493f029b531d3941e759b8d912bda1`, read-only and unmodified. The reusable editor
-behavior was already ported into AIR; this application consumes it rather than reimplementing
-it. `CodeAlexx/dif-inference` was consulted only for the `gcompose` wire; none of its server,
+`b732f1c246493f029b531d3941e759b8d912bda1`. The reusable editor behavior was
+already ported into AIR; this application consumes it rather than reimplementing it.
+The separate `gcompose` worker has one later change at `cd6b40e`: transition partners
+can use the same RAW frame input already accepted for base and overlay slots.
+`CodeAlexx/dif-inference` was consulted only for the `gcompose` wire; none of its server,
 browser, model-capability, job-queue or Comfy-compatibility code is here.

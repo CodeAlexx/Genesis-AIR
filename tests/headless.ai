@@ -670,6 +670,52 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       emit_b("speed_filter_native_frame", str.eq(str.view(array.borrow(fields, 3)), "22"))
     },
   }
+  var title_doc: editor.Document = editor.document(30.0, 640, 360)
+  let title_source: u64 = editor.add_source(title_doc, "/media/title.mp4", "title", 30, 30.0)
+  let title_track: u64 = editor.add_track(title_doc, title_doc.active, editor.track_video(), "V1")
+  let title_clip: u64 = match editor.place(title_doc, title_track, title_source, 0, 30, 0) {
+    none => 0, some(value) => value,
+  }
+  let plan_text_filter: u64 = match editor.add_filter(title_doc, title_clip, "text") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "AIR")
+  let title_scratch: string = text.concat(scratch, "/title-plan")
+  var title_cache: timeline_media.RenderCache = timeline_media.RenderCache {
+    subtitle: 0, validated_luts: array.new()}
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_plan_stages", false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("title_plan_stages", array.len(lines) == 3) },
+  }
+  timeline_media.cleanup_plan(str.view(title_scratch))
+  let title_grade: u64 = match editor.add_filter(title_doc, title_clip, "brightness") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_param(title_doc, title_grade, "level", 0.5)
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_grade_once", false) },
+    ok(value) => { var lines: array<string> = value
+      var pre_fields: array<string> = text.split(str.view(array.borrow(lines, 0)), " ")
+      var final_fields: array<string> = text.split(str.view(array.borrow(lines, 2)), " ")
+      let pre_level: f64 = match text.parse_f64(str.view(array.borrow(pre_fields, 22))) {
+        none => 100.0, some(number) => number,
+      }
+      let final_level: f64 = match text.parse_f64(str.view(array.borrow(final_fields, 22))) {
+        none => 100.0, some(number) => number,
+      }
+      emit_b("title_grade_once", pre_level == -0.5 and final_level == 0.0) },
+  }
+  timeline_media.cleanup_plan(str.view(title_scratch))
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "Café")
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_nonascii_refused",
+      text.contains(str.view(problem), "printable ASCII")) },
+    ok(lines) => { emit_b("title_nonascii_refused", false) },
+  }
   var transition_doc: editor.Document = editor.document(30.0, 640, 360)
   let transition_owner: u64 = transition_doc.active
   let transition_source: u64 = editor.add_source(transition_doc,
@@ -690,6 +736,36 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
         second_transition_clip != 0 and dissolve_id != 0 and
         str.eq(str.view(array.borrow(fields, 17)), "7"))
     },
+  }
+  let outgoing_title: u64 = match editor.add_filter(transition_doc,
+    first_transition_clip, "text") { none => 0, some(value) => value }
+  let _ = editor.set_filter_text_param(transition_doc, outgoing_title, "content", "OUT")
+  let transition_scratch: string = text.concat(scratch, "/transition-title")
+  match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
+    str.view(transition_scratch), title_cache) {
+    err(problem) => { emit_b("outgoing_title_at_cut", false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("outgoing_title_at_cut", array.len(lines) == 3) },
+  }
+  timeline_media.cleanup_plan(str.view(transition_scratch))
+  let incoming_title: u64 = match editor.add_filter(transition_doc,
+    second_transition_clip, "text") { none => 0, some(value) => value }
+  let _ = editor.set_filter_text_param(transition_doc, incoming_title, "content", "IN")
+  match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
+    str.view(transition_scratch), title_cache) {
+    err(problem) => { emit_b("incoming_title_at_cut", false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("incoming_title_at_cut", array.len(lines) == 5 and
+        text.contains(str.view(array.borrow(lines, 4)), ".textclip3.rgba")) },
+  }
+  timeline_media.cleanup_plan(str.view(transition_scratch))
+  let _ = editor.set_key(transition_doc, second_transition_clip,
+    "opacity", 12, 0.5, 0)
+  match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
+    str.view(transition_scratch), title_cache) {
+    err(problem) => { emit_b("incoming_opacity_refused",
+      text.contains(str.view(problem), "incoming clip has an unsupported edit")) },
+    ok(value) => { emit_b("incoming_opacity_refused", false) },
   }
   var in_doc: editor.Document = editor.document(30.0, 640, 360)
   let in_owner: u64 = in_doc.active

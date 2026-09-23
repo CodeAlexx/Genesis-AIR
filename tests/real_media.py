@@ -38,6 +38,18 @@ def rgb_frame(path, movie=False, time_s=0.1):
     return done.stdout
 
 
+def light_points(path, box, movie=False, time_s=0.1, threshold=150):
+    frame = rgb_frame(path, movie, time_s)
+    left, top, right, bottom = box
+    found = []
+    for y in range(top, bottom):
+        for x in range(left, right):
+            at = (y * 640 + x) * 3
+            if frame[at + 1] > threshold and frame[at + 2] > threshold:
+                found.append(x)
+    return found
+
+
 def audio_peak(movie, channel=None):
     argv = ["ffmpeg", "-v", "error", "-i", str(movie), "-vn"]
     if channel:
@@ -548,6 +560,116 @@ def main():
                                         str(root / "malformed-lut.png"), str(lut_project)],
                                        env=env, capture_output=True, text=True, timeout=30)
         assert malformed_lut.returncode != 0 and "supported 3D .cube" in malformed_lut.stdout
+        title_doc = json.loads(json.dumps(document))
+        title_doc["clips"] = [title_doc["clips"][0]]
+        title_doc["filters"] = [dict(id=11, clip=base_id, kind="text",
+                                     order=0, enabled=True)]
+        title_doc["filter_params"] = [dict(filter=11, name="size", value=36.0),
+                                       dict(filter=11, name="x", value=0.0),
+                                       dict(filter=11, name="y", value=0.0)]
+        title_doc["filter_text_params"] = [dict(filter=11, name="content", value="AIR")]
+        title_doc["next_id"] = 12
+        title_project = root / "title.air"
+        title_project.write_text(json.dumps(title_doc))
+        title_preview = root / "title.png"
+        title_movie = root / "title.mp4"
+        run([args.binary, "preview", title_preview, title_project], env)
+        run([args.binary, "export", title_movie, title_project], env)
+        title_points = light_points(title_preview, (170, 130, 470, 230))
+        encoded_title = light_points(title_movie, (170, 130, 470, 230), True)
+        assert len(title_points) > 40, len(title_points)
+        assert abs(len(encoded_title) - len(title_points)) < len(title_points) * 0.4
+        title_doc["filters"].append(dict(id=12, clip=base_id, kind="brightness",
+                                         order=1, enabled=True))
+        title_doc["filter_params"].append(dict(filter=12, name="level", value=0.5))
+        title_doc["next_id"] = 13
+        title_project.write_text(json.dumps(title_doc))
+        graded_title = root / "graded-title.png"
+        run([args.binary, "preview", graded_title, title_project], env)
+        assert 100 <= pixel(graded_title, 30, 30)[0] <= 150
+        title_doc["filters"].pop()
+        title_doc["filter_params"].pop()
+        title_doc["next_id"] = 12
+        title_doc["filter_text_params"][0]["value"] = "Café"
+        title_project.write_text(json.dumps(title_doc))
+        unsupported_glyph = subprocess.run([str(args.binary), "preview",
+                                            str(root / "unicode-title.png"),
+                                            str(title_project)], env=env,
+                                           capture_output=True, text=True, timeout=30)
+        assert unsupported_glyph.returncode != 0 and "printable ASCII" in unsupported_glyph.stdout
+        title_doc["filter_text_params"][0]["value"] = "AIR"
+        title_doc["filter_params"][1]["value"] = 0.5
+        title_project.write_text(json.dumps(title_doc))
+        moved_title = root / "title-right.png"
+        run([args.binary, "preview", moved_title, title_project], env)
+        moved_points = light_points(moved_title, (170, 130, 620, 230))
+        assert sum(moved_points) / len(moved_points) > sum(title_points) / len(title_points) + 120
+        title_doc["filter_params"][1]["value"] = 0.0
+        title_doc["filter_params"][2]["value"] = -0.5
+        title_project.write_text(json.dumps(title_doc))
+        raised_title = root / "title-raised.png"
+        run([args.binary, "preview", raised_title, title_project], env)
+        assert len(light_points(raised_title, (170, 50, 470, 135))) > 40
+        assert len(light_points(title_preview, (170, 50, 470, 135))) < 10
+        title_doc["filter_params"][2]["value"] = 0.0
+        title_doc["filter_params"][0]["value"] = 72.0
+        title_project.write_text(json.dumps(title_doc))
+        large_title = root / "title-large.png"
+        run([args.binary, "preview", large_title, title_project], env)
+        assert len(light_points(large_title, (170, 130, 470, 250))) > len(title_points) * 1.7
+        title_doc["filter_params"][0]["value"] = 36.0
+        title_doc["names"].append("text.x")
+        title_doc["keys"] = [dict(clip=base_id, owner=title_doc["active"],
+                                  param=len(title_doc["names"]), frame=frame,
+                                  value=value, interp=0)
+                             for frame, value in ((0, 0.0), (11, 0.5))]
+        title_doc["program"]["frame"] = 11
+        title_project.write_text(json.dumps(title_doc))
+        keyed_title = root / "title-keyed.png"
+        run([args.binary, "preview", keyed_title, title_project], env)
+        keyed_points = light_points(keyed_title, (170, 130, 620, 230))
+        assert sum(keyed_points) / len(keyed_points) > sum(title_points) / len(title_points) + 120
+        title_doc["filters"][0]["kind"] = "timer"
+        title_doc["keys"] = []
+        title_doc["filter_text_params"] = []
+        title_doc["filter_params"] = [dict(filter=11, name="size", value=36.0)]
+        title_doc["program"]["frame"] = 0
+        title_project.write_text(json.dumps(title_doc))
+        timer_start = root / "timer-start.png"
+        run([args.binary, "preview", timer_start, title_project], env)
+        title_doc["program"]["frame"] = 11
+        title_project.write_text(json.dumps(title_doc))
+        timer_end = root / "timer-end.png"
+        timer_movie = root / "timer.mp4"
+        run([args.binary, "preview", timer_end, title_project], env)
+        run([args.binary, "export", timer_movie, title_project], env)
+        start_points = light_points(timer_start, (0, 0, 220, 65))
+        end_points = light_points(timer_end, (0, 0, 220, 65))
+        encoded_timer = light_points(timer_movie, (0, 0, 220, 65), True, 11 / 30)
+        assert len(start_points) > 80 and len(end_points) > 80
+        assert start_points != end_points
+        assert abs(len(encoded_timer) - len(end_points)) < len(end_points) * 0.4
+        title_doc["filter_params"][0]["value"] = 72.0
+        title_project.write_text(json.dumps(title_doc))
+        large_timer = root / "timer-large.png"
+        run([args.binary, "preview", large_timer, title_project], env)
+        assert len(light_points(large_timer, (0, 0, 500, 120))) > len(end_points) * 1.7
+        upper_title = json.loads(json.dumps(document))
+        upper_title["filters"].append(dict(id=12, clip=10, kind="text",
+                                           order=1, enabled=True))
+        upper_title["filter_text_params"] = [dict(filter=12, name="content", value="AIR")]
+        upper_title["next_id"] = 13
+        upper_project = root / "upper-title.air"
+        upper_project.write_text(json.dumps(upper_title))
+        upper_preview = root / "upper-title.png"
+        upper_movie = root / "upper-title.mp4"
+        run([args.binary, "preview", upper_preview, upper_project], env)
+        run([args.binary, "export", upper_movie, upper_project], env)
+        upper_points = light_points(upper_preview, (170, 130, 470, 230), threshold=90)
+        upper_encoded = light_points(upper_movie, (170, 130, 470, 230), True,
+                                     threshold=90)
+        assert len(upper_points) > 40, len(upper_points)
+        assert abs(len(upper_encoded) - len(upper_points)) < len(upper_points) * 0.5
         keyed = json.loads(json.dumps(document))
         keyed["sources"][1]["path"] = str(key_green)
         keyed["filters"][0]["kind"] = "chroma_key"
@@ -707,6 +829,27 @@ def main():
         encoded_mid = pixel(dissolve_movie, 960, 540, True, 0.4)
         assert 85 <= mid[0] <= 170 and 85 <= mid[2] <= 170, mid
         assert max(abs(a - b) for a, b in zip(mid, encoded_mid)) <= 18, (mid, encoded_mid)
+        titled_dissolve = json.loads(json.dumps(dissolve))
+        titled_dissolve["filters"] = [dict(id=12, clip=dissolve["clips"][0]["id"],
+                                           kind="text", order=0, enabled=True),
+                                       dict(id=13, clip=dissolve["clips"][1]["id"],
+                                           kind="text", order=0, enabled=True)]
+        titled_dissolve["filter_params"] = [dict(filter=12, name="x", value=-0.35),
+                                            dict(filter=13, name="x", value=0.35)]
+        titled_dissolve["filter_text_params"] = [dict(filter=12, name="content", value="OUT"),
+                                                 dict(filter=13, name="content", value="IN")]
+        titled_dissolve["next_id"] = 14
+        titled_project = root / "titled-dissolve.air"
+        titled_project.write_text(json.dumps(titled_dissolve))
+        titled_preview = root / "titled-dissolve.png"
+        titled_movie = root / "titled-dissolve.mp4"
+        run([args.binary, "preview", titled_preview, titled_project], env)
+        run([args.binary, "export", titled_movie, titled_project], env)
+        for box in ((0, 130, 220, 240), (430, 130, 640, 240)):
+            preview_points = light_points(titled_preview, box, threshold=90)
+            movie_points = light_points(titled_movie, box, True, 0.4, threshold=90)
+            assert len(preview_points) > 20, (box, len(preview_points))
+            assert abs(len(movie_points) - len(preview_points)) < len(preview_points) * 0.5
         ui_dissolve = json.loads(json.dumps(dissolve))
         ui_dissolve["names"][-1] = "dissolve"
         ui_dissolve_project = root / "ui-dissolve.air"
@@ -819,6 +962,7 @@ def main():
               f"and three layers, timed captions, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
+              f"Text/Timer preview and MP4 with keyed placement, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
