@@ -322,7 +322,7 @@ fn overlay_opacity(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> 
   value
 }
 
-fn key_supported(param: str) -> bool effects {alloc} {
+pub fn key_supported(param: str) -> bool effects {alloc} {
   if str.eq(param, "opacity") or str.eq(param, "fade_in") or
      str.eq(param, "fade_out") { return true }
   var pieces: array<string> = text.split(param, ".")

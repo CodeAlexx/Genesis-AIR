@@ -280,7 +280,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
   a keyed fade from black to half-strength red and base-clip opacity in both PNG
-  preview and MP4 export. Audio filter and clip-fade automation remain open.
+  preview and MP4 export. The inspector's K action creates its filter and key in one
+  undo step; it refuses automation with no media behavior. Audio filter and clip-fade
+  automation remain open.
   The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.

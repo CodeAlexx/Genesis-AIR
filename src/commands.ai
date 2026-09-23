@@ -17,6 +17,7 @@ import std.path as path
 import std.codec as codec
 import "app.ai" as app
 import "provider.ai" as provider
+import "timeline_media.ai" as timeline_media
 
 pub type Result = struct { ok: bool, message: string, value: u64 }
 
@@ -699,7 +700,27 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
   var qualified: string = string.copy(kind)
   if str.len(kind) != 0 { string.append(qualified, ".") }
   string.append(qualified, name)
-  set_key(state, clip, str.view(qualified), frame, value, curve.linear())
+  if not timeline_media.key_supported(str.view(qualified)) or
+     editor.track_kind(struct.borrow(state, field=document), selected.track) !=
+       editor.track_video() or (domain == 1 and str.len(kind) != 0) or
+     (domain == 2 and str.len(kind) == 0) or (domain != 1 and domain != 2) {
+    return refused("this parameter has no keyframed media behavior yet")
+  }
+  // K on a parameter row can precede the first ordinary parameter edit. Create
+  // its filter along with the key so one Undo removes both changes.
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if domain == 2 and chrome_filter_of_kind(state, clip, kind) == 0 {
+    match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
+      none => { return refused("the filter could not be created") },
+      some(_) => { },
+    }
+  }
+  if not editor.set_key(struct.borrow(state, field=document), clip,
+                        str.view(qualified), frame, value, curve.linear()) {
+    return refused("that parameter could not be keyed")
+  }
+  app.mark_dirty(state, true)
+  done("keyframe set", clip)
 }
 
 // ---------------------------------------------------------------------------

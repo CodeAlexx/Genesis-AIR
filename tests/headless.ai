@@ -691,6 +691,17 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let key_entry: editor.Key = array.get(struct.borrow(
     struct.borrow(key_state, field=document), field=keys), 0)
   emit_b("keyframe_uses_local_frame", key_added.ok and key_entry.frame == 5)
+  emit_b("keyframe_creates_filter", editor.filter_count(
+    struct.borrow(key_state, field=document), key_clip.value) == 1)
+  var rejected_key: commands.Result = commands.keyframe_parameter(key_state,
+    chrome.domain_clip(), key_clip.value, "", "gain", 0.5)
+  emit_b("unrendered_key_refused", not rejected_key.ok and
+    str.eq(str.view(rejected_key.message),
+      "this parameter has no keyframed media behavior yet"))
+  let _ = commands.undo(key_state)
+  emit_b("keyframe_filter_one_undo", editor.key_count(
+    struct.borrow(key_state, field=document), key_clip.value, "opacity.level") == 0 and
+    editor.filter_count(struct.borrow(key_state, field=document), key_clip.value) == 0)
   0
 }
 
