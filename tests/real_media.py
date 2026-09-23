@@ -1164,8 +1164,117 @@ def main():
                 assert max(abs(a - b) for a, b in zip(preview_pixel, encoded_pixel)) <= 18, (
                     name, point, preview_pixel, encoded_pixel)
 
+        # A static scene with deliberate horizontal camera jumps exercises the
+        # source-frame stabilizer. Preview and encode must use the same corrected
+        # frames; Strength 0 must leave the measured jitter intact.
+        shake_offsets = (0, 2, 0, -2, 0, 2, 0)
+        for frame_no, offset in enumerate(shake_offsets):
+            pixels = bytearray()
+            for y in range(180):
+                for x in range(320):
+                    sx = x - offset
+                    if 142 <= sx < 178 and 75 <= y < 105:
+                        pixels.extend((0, 255, 255))
+                    else:
+                        shade = ((sx * 91 + y * 137 + sx * y * 17) & 63) + 8
+                        pixels.extend((shade, shade, shade))
+            image = root / f"shake-{frame_no:02d}.ppm"
+            image.write_bytes(b"P6\n320 180\n255\n" + pixels)
+        shake_source = root / "shake.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-framerate", "30",
+             "-i", root / "shake-%02d.ppm", "-c:v", "libx264", "-crf", "0",
+             "-pix_fmt", "yuv420p", shake_source])
+        shake_doc = json.loads(json.dumps(document))
+        shake_doc["sources"] = [dict(shake_doc["sources"][0], path=str(shake_source),
+                                     frames=len(shake_offsets), has_audio=False)]
+        shake_doc["clips"] = [shake_doc["clips"][0]]
+        shake_doc["clips"][0]["length"] = len(shake_offsets)
+        shake_doc["program"]["mark_out"] = len(shake_offsets)
+        shake_doc["filters"] = [dict(id=12, clip=base_id, kind="stabilize",
+                                      order=0, enabled=True)]
+        shake_doc["filter_params"] = [dict(filter=12, name="strength", value=0.0)]
+        shake_doc["next_id"] = 13
+        shake_project = root / "shake.air"
+
+        def marker_center(path, movie=False, time_s=0.1):
+            points = light_points(path, (260, 130, 380, 230), movie, time_s, 190)
+            assert len(points) > 100, (path, len(points))
+            return sum(points) / len(points)
+
+        centers = {}
+        for strength in (0.0, 1.0):
+            shake_doc["filter_params"][0]["value"] = strength
+            points = []
+            for frame_no in (1, 2, 3):
+                shake_doc["program"]["frame"] = frame_no
+                shake_project.write_text(json.dumps(shake_doc))
+                frame_path = root / f"shake-{strength}-{frame_no}.png"
+                run([args.binary, "preview", frame_path, shake_project], env)
+                points.append(marker_center(frame_path))
+            centers[strength] = points
+        assert max(centers[0.0]) - min(centers[0.0]) >= 3.0, centers
+        assert max(centers[1.0]) - min(centers[1.0]) <= 1.5, centers
+        shake_movie = root / "shake-stabilized.mp4"
+        run([args.binary, "export", shake_movie, shake_project], env)
+        for frame_no, expected in zip((1, 2, 3), centers[1.0]):
+            stabilized_encoded = marker_center(shake_movie, True, frame_no / 30 + 0.01)
+            assert abs(stabilized_encoded - expected) <= 1.5, (
+                frame_no, stabilized_encoded, expected)
+        shake_doc["names"].append("stabilize.strength")
+        strength_name = len(shake_doc["names"])
+        shake_doc["keys"] = [dict(clip=base_id, owner=shake_doc["clips"][0]["owner"],
+                                  param=strength_name, frame=at, value=value, interp=0)
+                             for at, value in ((1, 0.0), (3, 1.0))]
+        for frame_no, expected in ((1, centers[0.0][0]), (3, centers[1.0][2])):
+            shake_doc["program"]["frame"] = frame_no
+            shake_project.write_text(json.dumps(shake_doc))
+            keyed_frame = root / f"shake-key-{frame_no}.png"
+            run([args.binary, "preview", keyed_frame, shake_project], env)
+            assert abs(marker_center(keyed_frame) - expected) <= 1.5
+
+        # Stabilization also runs before compositing when the clip sits on an
+        # upper lane, rather than shifting the already-combined lower image.
+        upper_shake = json.loads(json.dumps(document))
+        upper_shake["sources"][1].update(path=str(shake_source),
+                                          frames=len(shake_offsets), has_audio=False)
+        upper_shake["clips"][1]["length"] = len(shake_offsets)
+        upper_shake["program"]["frame"] = 1
+        upper_shake["filters"].append(dict(id=12, clip=10, kind="stabilize",
+                                           order=1, enabled=True))
+        upper_shake["filter_params"][0]["value"] = 1.0
+        upper_shake["filter_params"].append(dict(filter=12, name="strength", value=1.0))
+        upper_shake["next_id"] = 13
+        upper_project = root / "shake-upper.air"
+        upper_project.write_text(json.dumps(upper_shake))
+        upper_preview = root / "shake-upper.png"
+        upper_movie = root / "shake-upper.mp4"
+        run([args.binary, "preview", upper_preview, upper_project], env)
+        run([args.binary, "export", upper_movie, upper_project], env)
+        assert abs(marker_center(upper_preview) - centers[1.0][0]) <= 1.5
+        assert abs(marker_center(upper_movie, True, 1 / 30 + 0.01) -
+                   centers[1.0][0]) <= 1.5
+        flat_shake = json.loads(json.dumps(document))
+        flat_shake["clips"] = [flat_shake["clips"][0]]
+        flat_shake["filters"] = [dict(id=12, clip=base_id, kind="stabilize",
+                                      order=0, enabled=True)]
+        flat_shake["filter_params"] = [dict(filter=12, name="strength", value=1.0)]
+        flat_shake["next_id"] = 13
+        flat_shake["program"]["frame"] = 5
+        flat_project = root / "stabilize-flat.air"
+        flat_project.write_text(json.dumps(flat_shake))
+        flat_preview = root / "stabilize-flat.png"
+        run([args.binary, "preview", flat_preview, flat_project], env)
+        flat_control = json.loads(json.dumps(flat_shake))
+        flat_control["filters"] = []
+        flat_control["filter_params"] = []
+        flat_project.write_text(json.dumps(flat_control))
+        flat_control_preview = root / "stabilize-flat-control.png"
+        run([args.binary, "preview", flat_control_preview, flat_project], env)
+        assert rgb_frame(flat_preview) == rgb_frame(flat_control_preview), (
+            "a flat shot moved despite having no motion evidence")
+
         # Unsupported edits must fail visibly rather than produce a plausible but wrong file.
-        document["filters"].append(dict(id=12, clip=8, kind="stabilize",
+        document["filters"].append(dict(id=12, clip=8, kind="unknown_video_filter",
                                         order=0, enabled=True))
         document["next_id"] = 13
         project.write_text(json.dumps(document))
@@ -1207,7 +1316,7 @@ def main():
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
               f"asymmetric crop, upper Crop/Mask/rotation, half-strength simple effects, "
-              f"vignette softness, "
+              f"vignette softness, Stabilize motion/key/upper-lane/flat-shot, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 

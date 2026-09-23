@@ -102,6 +102,35 @@ fn source_path(doc: ref<editor.Document>, clip: editor.Clip) -> option<string> e
   }
 }
 
+// Stabilization acts on decoded source frames before clip-local color/spatial
+// effects and compositing. The worker keeps the real media path inside this
+// source token, so audio always reads the original source.
+fn picture_path(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
+                source: string) -> result<string, string> effects {alloc} {
+  var amount: f64 = 0.0
+  var index: u32 = 0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => { break },
+      some(filter) => {
+        if editor.filter_enabled(doc, filter) and
+           str.eq(str.view(editor.filter_kind(doc, filter)), "stabilize") {
+          amount = filter_value(doc, clip, filter, "stabilize", frame, "strength", 0.5)
+          if not math.is_finite(amount) or amount < 0.0 or amount > 1.0 {
+            return result.err("stabilize strength must be between 0 and 1")
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  if amount == 0.0 { return result.ok(string.copy(str.view(source))) }
+  var wrapped: string = text.concat("STAB:", str.view(string.from_float(amount)))
+  string.append(wrapped, ":")
+  string.append(wrapped, str.view(source))
+  result.ok(wrapped)
+}
+
 // The clip's Rate property and enabled Speed filters describe the same retime.
 // Multiple filters compose multiplicatively; picture, sound, and bounds use one
 // derived value, so no renderer maintains a second speed interpretation.
@@ -207,6 +236,9 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
   }
   if str.eq(str.view(kind), "speed") or str.eq(str.view(kind), "opacity") {
     return true
+  } else if str.eq(str.view(kind), "stabilize") {
+    let amount: f64 = filter_value(doc, clip, filter, "stabilize", frame, "strength", 0.5)
+    return math.is_finite(amount) and amount >= 0.0 and amount <= 1.0
   } else if str.eq(str.view(kind), "blend") and overlay {
     let selected: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "mode", 0.0)
     let mode: i64 = cast.sat(selected)
@@ -426,9 +458,8 @@ pub fn key_supported(param: str) -> bool effects {alloc} {
   if str.eq(kind, "lut3d") {
     return str.eq(name, "amount")
   }
-  if str.eq(kind, "stabilize") or str.eq(kind, "speed") {
-    return false
-  }
+  if str.eq(kind, "stabilize") { return str.eq(name, "strength") }
+  if str.eq(kind, "speed") { return false }
   var video: array<string> = chrome.video_kinds()
   var index: u64 = 0
   loop {
@@ -595,7 +626,7 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
             string.copy(incoming_override)
           } else { match source_path(doc, pair.incoming) {
             none => { return result.err("the transition's incoming source is unavailable") },
-            some(value) => value,
+            some(value) => try picture_path(doc, pair.incoming, frame, value),
           } }
           chosen = option.some(pair.outgoing)
           put_i(values, 16, worker_kind)
@@ -635,7 +666,7 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                 let prepassed: bool = str.len(str.view(chosen_override)) != 0
                 let path: string = if prepassed { chosen_override }
                   else { match source_path(doc, clip) {
-                    some(value) => value,
+                    some(value) => try picture_path(doc, clip, frame, value),
                     none => { return result.err("a visible clip has no online video source") },
                   } }
                 let source_at: i64 = if prepassed { 0 } else { source_frame(doc, clip, frame) }
@@ -708,6 +739,7 @@ fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
           let kind: string = editor.filter_kind(doc, filter)
           if not chrome.is_audio_kind(str.view(kind)) and
              not str.eq(str.view(kind), "speed") and
+             not str.eq(str.view(kind), "stabilize") and
              not str.eq(str.view(kind), "opacity") and
              not str.eq(str.view(kind), "blend") and
              not str.eq(str.view(kind), "size_position") and
@@ -727,7 +759,7 @@ fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
   if not active { return result.ok(option.none()) }
   if upper { put(values, 107, "1") }
   let path: string = match source_path(doc, clip) {
-    some(value) => value,
+    some(value) => try picture_path(doc, clip, frame, value),
     none => { return result.err("an upper clip has no online video source") },
   }
   put(values, 0, str.view(provider.wire_path(str.view(path))))
@@ -866,7 +898,7 @@ fn text_clip_plan(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
     none => {
       let source: string = match source_path(doc, clip) {
         none => { return result.err("a text clip has no online video source") },
-        some(value) => value,
+        some(value) => try picture_path(doc, clip, frame, value),
       }
       var source_values: array<string> = neutral()
       put(source_values, 0, str.view(provider.wire_path(str.view(source))))
@@ -1008,7 +1040,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
       key_index = key_index + 1
     }
     var path: string = match source_path(doc, clip) {
-      some(value) => value,
+      some(value) => try picture_path(doc, clip, frame, value),
       none => { return result.err("a visible clip has no online video source") },
     }
     var prepassed: bool = false

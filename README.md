@@ -262,6 +262,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   apply all eleven transition kinds across a touching cut, plus overlapping and
   short-gap crossfades, and check gamma, sepia, vignette, levels, crop,
   keyed overlay pixels, Text and Timer previews and exports,
+  Stabilize on a synthetic shaky clip with keyed Strength and an upper-lane export,
   export an audio-only timeline, verify a 24 fps source across a full 30 fps sequence
   second, write an audible playback WAV (including a spaced output
   path), export a nine-frame 24 fps sequence with audio,
@@ -278,7 +279,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   and touching-cut, overlapping-seam, and short-gap transitions. All 11 named
   worker transition kinds have generated preview/MP4 geometry gates; overlap and
   short-gap crossfades have midpoint pixel gates. Nested sequences, unsupported video
-  filters, and keyframes for
+  filter combinations, and keyframes for
   unsupported effects or clip properties are refused by
   preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
   parameter is shown as release time because that is the behavior `agate` implements.
@@ -321,6 +322,13 @@ python3 tests/window_playback.py --binary build/genesis-air \
   [`3eeb822`](https://github.com/CodeAlexx/Genesis-/commit/3eeb822d40476db6e8c548e73187655c15ea461e).
   Upper Crop and Mask require
   [`2cf608c`](https://github.com/CodeAlexx/Genesis-/commit/2cf608cd5236819f7b83d2af581c86f4945e4fcb).
+  Stabilize requires
+  [`db7d56c`](https://github.com/CodeAlexx/Genesis-/commit/db7d56cf052cc21894f63500f425d7b3164af44c).
+  It estimates short horizontal and vertical camera jumps from adjacent source frames
+  before compositing. Strength 0 preserves the original; Strength 1 applies the measured
+  correction. Generated media checks reduced jitter, keyed endpoints, upper-lane
+  preview/MP4 agreement, and unchanged flat shots. The estimator handles translations
+  within 24 output pixels; rotation, perspective, and longer camera paths need separate work.
   Text currently accepts printable ASCII; other glyphs fail with an explicit message.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
@@ -360,7 +368,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
 Behavior oracle: [`CodeAlexx/Genesis-`](https://github.com/CodeAlexx/Genesis-) at
 `b732f1c246493f029b531d3941e759b8d912bda1`. The reusable editor behavior was
 already ported into AIR; this application consumes it rather than reimplementing it.
-The separate `gcompose` worker has seven later changes through `2cf608c`: transition
+The separate `gcompose` worker has eight later changes through `db7d56c`: transition
 partners can use the same RAW frame input already accepted for base and overlay slots,
 export can accept a timeline rate while preserving the legacy 30 fps default, and the
 last four displayed blend modes have native formulas. Crop accepts separate margins
@@ -368,5 +376,7 @@ and simple effects accept fractional mix while older worker requests retain thei
 symmetric margin and full-strength effect. Vignette accepts a falloff width while
 older requests keep the original width. Upper-clip spatial passes opt into clearing
 alpha for Crop and Mask; older requests keep their original opaque black regions.
+The latest worker adds source-frame translation stabilization; audio still reads the
+original source.
 `CodeAlexx/dif-inference` was consulted only for the `gcompose` wire; none of its server,
 browser, model-capability, job-queue or Comfy-compatibility code is here.
