@@ -282,8 +282,10 @@ python3 tests/window_playback.py --binary build/genesis-air \
   preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
   parameter is shown as release time because that is the behavior `agate` implements.
   The centered mask's feather and invert controls are mapped on base clips; a
-  generated-media gate checks center and edge pixels. Overlay mask, crop, and
-  rotation need transparency in the worker. Mapped picture effects on upper clips run in an AIR-planned
+  generated-media gate checks center and edge pixels. Overlay mask and crop need
+  transparency in the worker. Upper rotation runs through the per-clip pass; a
+  generated preview/MP4 gate checks that transparent rotated corners show the
+  lower lane. Mapped picture effects on upper clips run in an AIR-planned
   per-clip RGBA pass before compositing; generated two- and three-lane gates check that
   darkening an upper clip leaves lower clips unchanged in preview and MP4. Cropping
   supports four independent margins on base clips; an asymmetric generated preview/MP4

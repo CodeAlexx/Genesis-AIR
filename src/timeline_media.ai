@@ -694,7 +694,8 @@ fn preclip_path(prefix: str, slot: u64) -> string effects {alloc} {
 // Prepare an upper clip's picture effects before it meets lower lanes. Overlay-only
 // controls run in the composition pass. The worker's mask, crop, and rotation
 // produce black pixels in cleared areas without transparent alpha. On an upper
-// clip those pixels would cover lower lanes, so refuse those cases.
+// clip those pixels would cover lower lanes, so refuse Crop and Mask. Rotation's
+// out-of-bounds pixels are transparent in the worker and can be composited.
 fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
                 out: str, upper: bool)
                 -> result<option<string>, string> effects {alloc} {
@@ -708,7 +709,7 @@ fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
         if editor.filter_enabled(doc, filter) {
           let kind: string = editor.filter_kind(doc, filter)
           if upper and (str.eq(str.view(kind), "mask") or
-             str.eq(str.view(kind), "crop") or str.eq(str.view(kind), "rotate")) {
+             str.eq(str.view(kind), "crop")) {
             return result.err("an overlay spatial effect needs per-clip transparency")
           }
           if not chrome.is_audio_kind(str.view(kind)) and

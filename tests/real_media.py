@@ -216,6 +216,24 @@ def main():
         assert rejected_mask.returncode != 0 and "overlay spatial effect needs per-clip transparency" in (
             rejected_mask.stdout + rejected_mask.stderr)
         assert not overlay_mask_output.exists()
+        rotated_overlay = json.loads(json.dumps(document))
+        rotated_overlay["filter_params"][0]["value"] = 1.0
+        rotated_overlay["filters"].append(dict(id=12, clip=10, kind="rotate",
+                                               order=1, enabled=True))
+        rotated_overlay["filter_params"].append(dict(filter=12, name="angle", value=45.0))
+        rotated_overlay["next_id"] = 13
+        rotated_project = root / "rotated-overlay.air"
+        rotated_project.write_text(json.dumps(rotated_overlay))
+        rotated_preview = root / "rotated-overlay.png"
+        rotated_movie = root / "rotated-overlay.mp4"
+        run([args.binary, "preview", rotated_preview, rotated_project], env)
+        run([args.binary, "export", rotated_movie, rotated_project], env)
+        for point, lower in (((20, 300), True), ((320, 180), False)):
+            preview_rgb = pixel(rotated_preview, *point)
+            movie_rgb = pixel(rotated_movie, point[0] * 3, point[1] * 3, True)
+            assert (preview_rgb[0] > 200 and preview_rgb[2] < 30) == lower, (
+                point, preview_rgb)
+            assert max(abs(a - b) for a, b in zip(preview_rgb, movie_rgb)) <= 18
 
         media = run(["ffprobe", "-v", "error", "-show_entries",
                      "stream=codec_type,nb_frames,width,height", "-of", "json",
@@ -1118,7 +1136,8 @@ def main():
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
-              f"asymmetric crop, half-strength simple effects, vignette softness, "
+              f"asymmetric crop, rotated upper clip, half-strength simple effects, "
+              f"vignette softness, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
