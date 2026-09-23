@@ -71,10 +71,11 @@ The right-hand dock has four tabs:
 - **Audio** — per-track meters driven by the peak cache, and a strip per audio track with
   gain, pan, mute and solo.
 
-Mouse gestures on the timeline: click to select, drag to move a clip between lanes and along
-time, drag within seven pixels of a clip edge to trim it. A whole drag is one undo step —
-nothing is written until the pointer is released — and drops snap to neighbouring cuts when
-Snap is on.
+Mouse gestures on the timeline: click a clip to select it, drag a clip to move it between
+lanes or along time, and drag within seven pixels of a clip edge to trim it. Drag the ruler
+above the lanes to scrub the program preview; click it to seek once. A clip move or trim is
+one undo step — nothing is written until the pointer is released — and drops snap to
+neighbouring cuts when Snap is on.
 
 The right inspector scrolls under the pointer with the mouse wheel. Its scrollbar supports
 track clicks for page movement and direct thumb dragging; it does not depend on prior focus.
@@ -194,9 +195,12 @@ The `audio` command writes that exact mix for inspection.
 Text values and the file chooser fallback use a centered prompt: type the value, Enter to
 accept, Escape to cancel.
 
-To put a video on the timeline, use **Add** to import it, select its row in **MEDIA**,
-then choose **Add clip** at the bottom of that panel. The new clip is selected on V1.
-Drag across the timeline ruler to scrub the program preview; a single ruler click seeks.
+To put a video on the timeline, use toolbar **Add** to choose and import the file, select its
+row in **MEDIA**, then choose **Add clip** at the bottom of that panel. Import alone does not
+place a clip. **Add clip** appends it to V1, selects it, and reports the added filename in the
+status line. The ruler above the tracks controls the program playhead; drag it to scrub the
+preview or click it to seek once. Use **Save** to write the project; the first save opens a
+file chooser.
 
 ## The media provider seam
 

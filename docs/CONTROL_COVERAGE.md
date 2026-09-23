@@ -17,6 +17,14 @@ modes, Text/Timer, Stabilize, crop and mask transparency on upper clips, and the
 picture-effect pixel checks described below. These are focused outcomes, not acceptance
 of every exposed control.
 
+The X11 window gate covers the user path from toolbar **Add** through file selection,
+MEDIA row selection, **Add clip**, ruler drag, and the first **Save**. It checks that the saved
+project contains the imported media, a selected V1 clip, and the scrubbed frame 20. The
+same gate passed at 1× with the fake provider and at 2× in a maximized 4K window with a
+generated video and the real worker. This verifies timeline placement and ruler seeking
+through the saved project state; it does not establish live scrub audio, preview frame
+pixels, or long-timeline synchronization.
+
 Reproduce after `./build.sh` with the worker branch `codex/air-raw-transition` in
 `CodeAlexx/Genesis-`:
 
@@ -25,6 +33,8 @@ python3 tests/run_tests.py --airc "$AIRC" --stdlib "$AIR_HOME/stdlib" \
   --binary build/genesis-air
 python3 tests/real_media.py --binary build/genesis-air \
   --worker "$GENESIS_GCOMPOSE" --stdlib "$AIR_HOME/stdlib"
+python3 tests/window_file_picker.py --binary build/genesis-air \
+  --stdlib "$AIR_HOME/stdlib" --maximized --worker "$GENESIS_GCOMPOSE"
 ```
 
 The highest-impact remaining work is parameter and animation measurements for mapped
@@ -54,7 +64,7 @@ implements.
 
 | Area | Verified | Still required |
 |---|---|---|
-| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have midpoint crossfade gates; incoming and outgoing Text titles are checked through a crossfade | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, fast interactive preview. Incoming transition opacity, fade, and overlay-only effects currently fail explicitly. |
+| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; X11 import, V1 placement, ruler scrub, and save at 1× and 4K 2×; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have midpoint crossfade gates; incoming and outgoing Text titles are checked through a crossfade | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, fast interactive preview. Incoming transition opacity, fade, and overlay-only effects currently fail explicitly. |
 | Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed ASCII caption cues appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Unicode glyphs, richer typography, and subtitle placement. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Asynchronous export progress/cancel, precise audio/video sync, live scrub sound. |
