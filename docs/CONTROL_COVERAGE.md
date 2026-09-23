@@ -42,8 +42,9 @@ Gain, pan, three-band EQ, ten-band EQ, compressor, gate, normalize, reverb, dela
 low pass, high pass, tremolo, bass, treble, notch, chorus, flanger, phaser, and limiter
 have AIR-to-worker mappings. The real-media suite applies each and checks for audible
 output. Tremolo Depth now reaches the exposed 1.0 endpoint; a generated WAV gate
-distinguishes it from 0.95. Other parameter-specific signal measurements, animated
-parameters, and long-timeline playback timing remain acceptance work. The gate's stored
+distinguishes it from 0.95. A generated playback WAV gate checks that Pan's -1 and +1
+endpoints favor opposite output channels. Other parameter-specific signal measurements,
+animated parameters, and long-timeline playback timing remain acceptance work. The gate's stored
 `hold` is presented as release
 time because that is what the worker filter implements.
 

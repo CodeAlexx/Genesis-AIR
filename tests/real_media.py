@@ -593,6 +593,24 @@ def main():
         run([args.binary, "audio", tremolo_full, tremolo_project], env)
         assert audio_difference_rms(tremolo_95, tremolo_full) > 0.001
 
+        # The Pan filter's endpoints must move the mix to opposite output
+        # channels in the same WAV used for live playback.
+        pan_doc = json.loads(json.dumps(document))
+        pan_doc["filters"].append(dict(id=12, clip=base_id, kind="pan",
+                                       order=0, enabled=True))
+        pan_doc["filter_params"].append(dict(filter=12, name="position", value=-1.0))
+        pan_doc["next_id"] = 13
+        pan_project = root / "pan.air"
+        pan_project.write_text(json.dumps(pan_doc))
+        pan_left = root / "pan-left.wav"
+        run([args.binary, "audio", pan_left, pan_project], env)
+        pan_doc["filter_params"][-1]["value"] = 1.0
+        pan_project.write_text(json.dumps(pan_doc))
+        pan_right = root / "pan-right.wav"
+        run([args.binary, "audio", pan_right, pan_project], env)
+        assert audio_peak(pan_left, "c0") > audio_peak(pan_left, "c1") * 3
+        assert audio_peak(pan_right, "c1") > audio_peak(pan_right, "c0") * 3
+
         # Track.order is the toolkit's display order. Reordering the lanes must
         # change which opaque clip is on top in the program monitor as well.
         ordered = json.loads(json.dumps(document))
