@@ -86,8 +86,8 @@ user input  ->  editor command  ->  project state changes  ->  UI redraw
 
 `std.editor.Document` is the only place a project fact lives. A widget never holds a second
 copy of a clip, a track or a transport position; the view reads the document at paint time.
-[`src/commands.ai`](src/commands.ai) is the single path to a mutation, and every function in
-it is a snapshot capture followed by exactly one toolkit call. **There is no edit arithmetic
+[`src/commands.ai`](src/commands.ai) is the single path to a mutation. Each undoable action
+captures one snapshot, then applies its toolkit operations. **There is no edit arithmetic
 in this application** — split, trim, ripple, slip, roll, slide, grouping, undo/redo,
 transitions, keyframes, the media pool, subtitles, the mixer and the transport model all come
 from AIR's reusable NLE toolkit, which was itself derived from Genesis.
@@ -101,7 +101,7 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/chrome.ai` | every clickable control, built once as a list carrying its own rectangle, label and state — plus the filter library and its parameter schemas. The view paints this list; the input layer hit-tests the same list. Neither computes a rectangle. |
 | `src/view.ai` | painting. Holds no project state and mutates nothing. |
 | `src/input.ai` | which command a click, drag or key means. Never edits the document. |
-| `src/commands.ai` | the only path to a mutation: capture for undo, then one toolkit call. No edit arithmetic. |
+| `src/commands.ai` | the only path to a mutation: capture once for undo, then apply toolkit operations. No edit arithmetic. |
 | `src/provider.ai` | the media seam: source probe, frame and waveform retrieval, and the worker transport. |
 | `src/timeline_media.ai` | resolves AIR editor clips into the worker's preview, encode, and audio commands. |
 | `src/transport_clock.ai` | advances the program playhead from monotonic elapsed time, retaining fractional frames and stopping at the end. |

@@ -1,7 +1,7 @@
 // The application command layer.
 //
-// Every edit in Genesis AIR goes through a function here, and every function here does two
-// things: capture the document for undo, then call the reusable operation in `std.editor`.
+// Every edit in Genesis AIR goes through a function here. An undoable action captures
+// the document once, then calls the reusable operations in `std.editor`.
 // There is NO edit arithmetic in this file — no clip maths, no ripple, no source clamping.
 // If a command looks like it is computing an edit, that is a bug: the toolkit owns it.
 //
