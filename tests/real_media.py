@@ -198,6 +198,35 @@ def main():
         assert max(abs(a - b) for a, b in zip(base_color, base_encoded)) <= 15, (
             base_color, base_encoded)
 
+        # Feather and invert are the two exposed mask controls. Center and edge
+        # pixels verify that both actually reach the image, not just the wire.
+        fade_doc["filters"] = [dict(id=20, clip=fade_clip["id"], kind="mask",
+                                    order=0, enabled=True)]
+        fade_doc["filter_params"] = [dict(filter=20, name="feather", value=0.1),
+                                     dict(filter=20, name="invert", value=0.0)]
+        fade_project.write_text(json.dumps(fade_doc))
+        mask_preview = root / "mask.png"
+        mask_movie = root / "mask.mp4"
+        run([args.binary, "preview", mask_preview, fade_project], env)
+        run([args.binary, "export", mask_movie, fade_project], env)
+        mask_center = pixel(mask_preview, 320, 180)
+        mask_edge = pixel(mask_preview, 4, 180)
+        assert mask_center[0] > 220 and mask_edge[0] < 50, (mask_center, mask_edge)
+        assert max(abs(a - b) for a, b in zip(mask_center,
+                   pixel(mask_movie, 960, 540, True))) <= 15
+        fade_doc["filter_params"][1]["value"] = 1.0
+        fade_project.write_text(json.dumps(fade_doc))
+        mask_inverse = root / "mask-inverse.png"
+        mask_inverse_movie = root / "mask-inverse.mp4"
+        run([args.binary, "preview", mask_inverse, fade_project], env)
+        run([args.binary, "export", mask_inverse_movie, fade_project], env)
+        inverse_center = pixel(mask_inverse, 320, 180)
+        inverse_edge = pixel(mask_inverse, 4, 180)
+        assert inverse_center[0] < 30 and inverse_edge[0] > 200, (
+            inverse_center, inverse_edge)
+        assert max(abs(a - b) for a, b in zip(inverse_edge,
+                   pixel(mask_inverse_movie, 12, 540, True))) <= 20
+
         # Window audition uses the same AIR timeline resolver. Inspect the actual
         # WAV that its preparation step hands to the system audio player.
         audition = root / "audition result.wav"
@@ -545,6 +574,8 @@ def main():
         print(f"real media: purple preview {seen}, encoded {encoded}; "
               f"keyframed fade {first_color} to {middle_color}, "
               f"base opacity {base_color}; "
+              f"mask center/edge {mask_center}/{mask_edge}, inverted "
+              f"{inverse_center}/{inverse_edge}; "
               f"12 frames, three layers, timed captions, crossfade, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")

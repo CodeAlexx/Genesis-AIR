@@ -242,6 +242,16 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     let bottom: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "bottom", 0.0)
     if left != top or left != right or left != bottom { return false }
     put_f(values, 79, left)
+  } else if str.eq(str.view(kind), "mask") and not overlay {
+    // The inspector's mask is a centered full-frame rectangle with an adjustable
+    // soft edge. The worker applies this to the base image before its look pass.
+    put(values, 85, "1")
+    put_f(values, 88, 0.5)
+    put_f(values, 89, 0.5)
+    put_f(values, 90, filter_value(doc, clip, filter, str.view(kind), frame,
+      "feather", 0.1))
+    put(values, 91, if filter_value(doc, clip, filter, str.view(kind), frame,
+      "invert", 0.0) >= 0.5 { "1" } else { "0" })
   } else if str.eq(str.view(kind), "chroma_key") and overlay {
     let degrees: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "hue", 120.0)
     if degrees < 0.0 or degrees > 360.0 { return false }
@@ -318,7 +328,7 @@ fn key_supported(param: str) -> bool effects {alloc} {
   var pieces: array<string> = text.split(param, ".")
   if array.len(pieces) != 2 { return false }
   let kind: str = str.view(array.borrow(pieces, 0))
-  if str.eq(kind, "mask") or str.eq(kind, "text") or str.eq(kind, "timer") or
+  if str.eq(kind, "text") or str.eq(kind, "timer") or
      str.eq(kind, "stabilize") or str.eq(kind, "lut3d") or str.eq(kind, "speed") {
     return false
   }

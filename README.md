@@ -273,7 +273,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   unsupported video filters, and keyframes for unsupported effects or clip properties are refused by
   preview/export. All 20 audio filter kinds have export mappings; the saved gate `hold`
   parameter is shown as release time because that is the behavior `agate` implements.
-  Cropping currently supports equal margins, and the worker supports eight of the
+  The centered mask's feather and invert controls are mapped on base clips; a
+  generated-media gate checks center and edge pixels. Overlay masks still need
+  a per-clip render pass. Cropping currently supports equal margins, and the worker supports eight of the
   twelve blend modes shown in the inspector; unsupported values fail explicitly.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
