@@ -151,6 +151,53 @@ def main():
         assert any(s["codec_type"] == "audio" for s in streams), streams
         assert audio_peak(movie) > 0.01, "exported audio is silent"
 
+        # The inspector's fade keyframes must change actual pixels in both
+        # preview and MP4, even when the clip's stored fade is zero.
+        fade_doc = json.loads(json.dumps(document))
+        fade_doc["clips"] = [fade_doc["clips"][0]]
+        fade_doc["filters"] = []
+        fade_doc["filter_params"] = []
+        fade_doc["names"].append("fade_in")
+        fade_param = len(fade_doc["names"])
+        fade_clip = fade_doc["clips"][0]
+        fade_doc["keys"] = [dict(clip=fade_clip["id"], owner=fade_clip["owner"],
+                                 param=fade_param, frame=at, value=12.0, interp=0)
+                            for at in (0, 11)]
+        fade_project = root / "fade.air"
+        fade_project.write_text(json.dumps(fade_doc))
+        fade_first = root / "fade-first.png"
+        fade_middle = root / "fade-middle.png"
+        run([args.binary, "preview", fade_first, fade_project], env)
+        fade_doc["program"]["frame"] = 6
+        fade_project.write_text(json.dumps(fade_doc))
+        run([args.binary, "preview", fade_middle, fade_project], env)
+        fade_movie = root / "fade.mp4"
+        run([args.binary, "export", fade_movie, fade_project], env)
+        first_color = pixel(fade_first, 320, 180)
+        middle_color = pixel(fade_middle, 320, 180)
+        encoded_middle = pixel(fade_movie, 960, 540, True, 6 / 30)
+        assert first_color[0] < 20, first_color
+        assert 100 <= middle_color[0] <= 150, middle_color
+        assert max(abs(a - b) for a, b in zip(middle_color, encoded_middle)) <= 15, (
+            middle_color, encoded_middle)
+
+        # Opacity is also exposed on a sole/base clip. Its filter value must
+        # darken that clip in the same preview and encoded paths.
+        fade_doc["keys"] = []
+        fade_doc["filters"] = [dict(id=20, clip=fade_clip["id"], kind="opacity",
+                                    order=0, enabled=True)]
+        fade_doc["filter_params"] = [dict(filter=20, name="level", value=0.5)]
+        fade_project.write_text(json.dumps(fade_doc))
+        base_opacity_preview = root / "base-opacity.png"
+        base_opacity_movie = root / "base-opacity.mp4"
+        run([args.binary, "preview", base_opacity_preview, fade_project], env)
+        run([args.binary, "export", base_opacity_movie, fade_project], env)
+        base_color = pixel(base_opacity_preview, 320, 180)
+        base_encoded = pixel(base_opacity_movie, 960, 540, True)
+        assert 100 <= base_color[0] <= 150 and base_color[1] < 15, base_color
+        assert max(abs(a - b) for a, b in zip(base_color, base_encoded)) <= 15, (
+            base_color, base_encoded)
+
         # Window audition uses the same AIR timeline resolver. Inspect the actual
         # WAV that its preparation step hands to the system audio player.
         audition = root / "audition result.wav"
@@ -496,6 +543,8 @@ def main():
         assert broken.returncode != 0 and "audio filter chain" in broken.stdout, broken.stdout
         assert not (root / "broken-filter.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
+              f"keyframed fade {first_color} to {middle_color}, "
+              f"base opacity {base_color}; "
               f"12 frames, three layers, timed captions, crossfade, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")

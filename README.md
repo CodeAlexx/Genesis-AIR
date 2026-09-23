@@ -275,8 +275,10 @@ python3 tests/window_playback.py --binary build/genesis-air \
   parameter is shown as release time because that is the behavior `agate` implements.
   Cropping currently supports equal margins, and the worker supports eight of the
   twelve blend modes shown in the inspector; unsupported values fail explicitly.
-  Mapped video filter parameters and overlay opacity use AIR's clip-local keyframes at the
-  requested timeline frame; audio filter automation remains open.
+  Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
+  clip-local keyframes at the requested timeline frame. A generated-media gate checks
+  a keyed fade from black to half-strength red and base-clip opacity in both PNG
+  preview and MP4 export. Audio filter and clip-fade automation remain open.
   The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.
@@ -286,8 +288,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   frame rate. AIR's editor now converts source duration into the owning sequence's frame
   units, and the renderer samples native frames by the measured source rate. Preview and
   export refuse a clip whose speed and length would read beyond its measured source, instead
-  of silently repeating its last picture frame. The mixed-rate real-media gate needs a rerun
-  when the shared GPU is available.
+  of silently repeating its last picture frame. The generated 24-to-30 fps real-media gate
+  checks the final source frame, 30-frame export, and audible audio.
 - The window runs export synchronously, so it does not repaint or accept cancellation during
   a long encode. The standalone `preview` and `export` commands support headless workflows.
 - The program Play control advances on a monotonic clock, skips frames after a slow paint,

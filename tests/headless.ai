@@ -645,12 +645,30 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   }
   let _ = editor.set_key(anim_doc, base_clip, "brightness.level", 10, 1.0, 0)
   let _ = editor.set_key(anim_doc, base_clip, "brightness.level", 30, 2.0, 0)
+  let _ = editor.set_key(anim_doc, base_clip, "fade_in", 0, 20.0, 0)
+  let _ = editor.set_key(anim_doc, base_clip, "fade_in", 20, 20.0, 0)
   match timeline_media.frame_line(anim_doc, 10, "ENC", "") {
     err(problem) => { emit_b("keyframed_opacity_start", false) },
     ok(line) => {
       var fields: array<string> = text.split(str.view(line), " ")
       emit_b("keyframed_opacity_start", str.eq(str.view(array.borrow(fields, 5)), "0"))
       emit_b("keyframed_brightness_start", str.eq(str.view(array.borrow(fields, 22)), "0"))
+    },
+  }
+  match timeline_media.frame_line(anim_doc, 0, "ENC", "") {
+    err(problem) => { emit_b("keyframed_fade_start", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("keyframed_fade_start", str.eq(str.view(array.borrow(fields, 102)), "0"))
+    },
+  }
+  match timeline_media.frame_line(anim_doc, 10, "ENC", "") {
+    err(problem) => { emit_b("keyframed_fade_middle", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      // At local frame 10, a 20-frame fade yields half opacity. This exercises
+      // the base-lane worker field rather than merely checking stored keys.
+      emit_b("keyframed_fade_middle", str.eq(str.view(array.borrow(fields, 102)), "0.5"))
     },
   }
   match timeline_media.frame_line(anim_doc, 30, "ENC", "") {

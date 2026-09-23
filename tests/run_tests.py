@@ -47,6 +47,8 @@ EXPECTED = {
     "keyframed_opacity_end": "true",
     "keyframed_brightness_start": "true",
     "keyframed_brightness_end": "true",
+    "keyframed_fade_start": "true",
+    "keyframed_fade_middle": "true",
     "keyframe_uses_local_frame": "true",
     "provider": "fake",
     "tracks_at_start": "4",

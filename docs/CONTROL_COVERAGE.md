@@ -9,7 +9,7 @@ UI gate proves hit testing and command dispatch; it does not by itself prove med
 | Status | Kinds | Remaining gate or implementation |
 |---|---|---|
 | Mapped to the worker wire | brightness, contrast, saturation, gamma, hue, sharpen, blur, glow, grain, levels, lift_gamma_gain, rotate, flip, mirror, denoise | Pixel change and preview/export parity for each parameter value, including animation and every visible lane. |
-| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend | Tint, softness, fractional look amounts, asymmetric crop, overlay rotation, non-overlay use, and blend modes 8–11 need real implementations. Existing unsupported values fail explicitly. |
+| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend | Base and overlay opacity have preview/MP4 pixel gates. Tint, softness, fractional look amounts, asymmetric crop, overlay rotation, other non-overlay uses, and blend modes 8–11 need real implementations. Existing unsupported values fail explicitly. |
 | No media mapping yet | mask, text, timer, stabilize, lut3d, speed | Implement the advertised behavior and exercise it in preview and export. `speed` overlaps the clip rate control; decide one authoritative model before mapping it. |
 
 ## Audio filters (20)
@@ -26,10 +26,10 @@ time because that is what the worker filter implements.
 | Area | Verified | Still required |
 |---|---|---|
 | Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; generated-media preview/export and X11 Play/Pause for representative cases | Media outcomes for every edit operation, nested sequences, all transition kinds and overlap seams, fast interactive preview. |
-| Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire | Full mapped video parameter coverage, keyframed clip properties, unsupported video filters, and audio automation. A keyframe must never be accepted and later make export fail. |
+| Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filters, and audio automation. A keyframe must never be accepted and later make export fail. |
 | Subtitles and text | Two timed ASCII caption cues appear in preview and MP4 | Non-ASCII text, placement/typography controls, the `text` and `timer` filters. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Asynchronous export progress/cancel, precise audio/video sync, live scrub sound. |
-| Frame rates | AIR editor native-to-sequence bounds and pure-AIR wire sampling gates | Rerun the generated 24-to-30 fps real-media gate when the shared GPU is available; sequence export rates other than 30 fps. |
+| Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, and generated 24-to-30 fps preview/export/audio gate | Sequence export rates other than 30 fps. |
 
 Keep this ledger with the implementation. Add a measured output assertion when closing a
 row; a document mutation or successful worker reply alone is insufficient.

@@ -134,15 +134,21 @@ fn source_range_ok(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects
   last_native < cast.float(source.frames)
 }
 
-fn fade(clip: editor.Clip, frame: i64) -> f64 effects {} {
+fn fade(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> f64 effects {alloc} {
   let local: i64 = frame - clip.start
+  let fade_in: f64 = math.max(0.0, editor.clip_value_at(doc, clip.id, "fade_in",
+    frame, cast.float(clip.fade_in)))
+  let fade_out: f64 = math.max(0.0, editor.clip_value_at(doc, clip.id, "fade_out",
+    frame, cast.float(clip.fade_out)))
+  let local_f: f64 = cast.float(local)
   var value: f64 = 1.0
-  if clip.fade_in > 0 and local < clip.fade_in {
-    value = cast.float(local) / cast.float(clip.fade_in)
+  if fade_in > 0.0 and local_f < fade_in {
+    value = local_f / fade_in
   }
   let remaining: i64 = clip.length - local
-  if clip.fade_out > 0 and remaining <= clip.fade_out {
-    let tail: f64 = cast.float(remaining) / cast.float(clip.fade_out)
+  let remaining_f: f64 = cast.float(remaining)
+  if fade_out > 0.0 and remaining_f <= fade_out {
+    let tail: f64 = remaining_f / fade_out
     if tail < value { value = tail }
   }
   value
@@ -160,7 +166,7 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
   if not editor.filter_enabled(doc, filter) { return true }
   let kind: string = editor.filter_kind(doc, filter)
   if chrome.is_audio_kind(str.view(kind)) { return true }
-  if str.eq(str.view(kind), "opacity") and overlay {
+  if str.eq(str.view(kind), "opacity") {
     return true
   } else if str.eq(str.view(kind), "blend") and overlay {
     let mode: i64 = cast.sat(filter_value(doc, clip, filter, str.view(kind), frame, "mode", 0.0))
@@ -307,7 +313,8 @@ fn overlay_opacity(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> 
 }
 
 fn key_supported(param: str) -> bool effects {alloc} {
-  if str.eq(param, "opacity") { return true }
+  if str.eq(param, "opacity") or str.eq(param, "fade_in") or
+     str.eq(param, "fade_out") { return true }
   var pieces: array<string> = text.split(param, ".")
   if array.len(pieces) != 2 { return false }
   let kind: str = str.view(array.borrow(pieces, 0))
@@ -475,11 +482,13 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                 put(values, slot, str.view(provider.wire_path(str.view(path))))
                 put_i(values, if visible == 0 { 2 } else { 3 }, source_at)
                 if visible == 1 {
-                  put_f(values, 4, fade(clip, frame) *
+                  put_f(values, 4, fade(doc, clip, frame) *
                     editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) *
                     overlay_opacity(doc, clip, frame))
                 } else {
-                  put_f(values, 101, fade(clip, frame))
+                  put_f(values, 101, fade(doc, clip, frame) *
+                    editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) *
+                    overlay_opacity(doc, clip, frame))
                 }
                 if not filters(doc, clip, values, visible == 1, frame) {
                   return result.err("a visible clip uses an unsupported video filter")
@@ -563,7 +572,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
     put(values, 0, str.view(provider.wire_path(str.view(raw_base))))
     put(values, 1, str.view(provider.wire_path(str.view(path))))
     put_i(values, 3, source_frame(doc, clip, frame))
-    put_f(values, 4, fade(clip, frame) *
+    put_f(values, 4, fade(doc, clip, frame) *
       editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) *
       overlay_opacity(doc, clip, frame))
     if not filters(doc, clip, values, true, frame) {
