@@ -203,19 +203,42 @@ def main():
         assert 100 <= graded_color[0] <= 155 and graded_color[2] < 20, graded_color
         assert max(abs(a - b) for a, b in zip(graded_color, graded_encoded)) <= 15
         overlay_mask = json.loads(json.dumps(document))
+        overlay_mask["filter_params"][0]["value"] = 1.0
         overlay_mask["filters"].append(dict(id=24, clip=10, kind="mask",
                                             order=1, enabled=True))
         overlay_mask["filter_params"].append(dict(filter=24, name="feather", value=0.1))
+        overlay_mask["filter_params"].append(dict(filter=24, name="invert", value=1.0))
         overlay_mask["next_id"] = 25
         overlay_mask_project = root / "overlay-mask.air"
         overlay_mask_project.write_text(json.dumps(overlay_mask))
-        overlay_mask_output = root / "overlay-mask.png"
-        rejected_mask = subprocess.run([str(args.binary), "preview", str(overlay_mask_output),
-                                        str(overlay_mask_project)], env=env,
-                                       capture_output=True, text=True, timeout=30)
-        assert rejected_mask.returncode != 0 and "overlay spatial effect needs per-clip transparency" in (
-            rejected_mask.stdout + rejected_mask.stderr)
-        assert not overlay_mask_output.exists()
+        overlay_mask_preview = root / "overlay-mask.png"
+        overlay_mask_movie = root / "overlay-mask.mp4"
+        run([args.binary, "preview", overlay_mask_preview, overlay_mask_project], env)
+        run([args.binary, "export", overlay_mask_movie, overlay_mask_project], env)
+        mask_center = pixel(overlay_mask_preview, 320, 180)
+        mask_edge = pixel(overlay_mask_preview, 20, 180)
+        assert mask_center[0] > 200 and mask_center[2] < 30, mask_center
+        assert mask_edge[0] > 40 and mask_edge[2] > 20, mask_edge
+        for point in ((320, 180), (20, 180)):
+            preview_rgb = pixel(overlay_mask_preview, *point)
+            movie_rgb = pixel(overlay_mask_movie, point[0] * 3, point[1] * 3, True)
+            assert max(abs(a - b) for a, b in zip(preview_rgb, movie_rgb)) <= 18
+        overlay_crop = json.loads(json.dumps(overlay_mask))
+        overlay_crop["filters"][1]["kind"] = "crop"
+        overlay_crop["filter_params"] = [dict(filter=11, name="level", value=1.0),
+                                          dict(filter=24, name="left", value=0.2)]
+        overlay_crop_project = root / "overlay-crop.air"
+        overlay_crop_project.write_text(json.dumps(overlay_crop))
+        overlay_crop_preview = root / "overlay-crop.png"
+        overlay_crop_movie = root / "overlay-crop.mp4"
+        run([args.binary, "preview", overlay_crop_preview, overlay_crop_project], env)
+        run([args.binary, "export", overlay_crop_movie, overlay_crop_project], env)
+        for point, lower in (((50, 180), True), ((320, 180), False)):
+            preview_rgb = pixel(overlay_crop_preview, *point)
+            movie_rgb = pixel(overlay_crop_movie, point[0] * 3, point[1] * 3, True)
+            assert (preview_rgb[0] > 200 and preview_rgb[2] < 30) == lower, (
+                point, preview_rgb)
+            assert max(abs(a - b) for a, b in zip(preview_rgb, movie_rgb)) <= 18
         rotated_overlay = json.loads(json.dumps(document))
         rotated_overlay["filter_params"][0]["value"] = 1.0
         rotated_overlay["filters"].append(dict(id=12, clip=10, kind="rotate",
@@ -1136,7 +1159,7 @@ def main():
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
-              f"asymmetric crop, rotated upper clip, half-strength simple effects, "
+              f"asymmetric crop, upper Crop/Mask/rotation, half-strength simple effects, "
               f"vignette softness, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")

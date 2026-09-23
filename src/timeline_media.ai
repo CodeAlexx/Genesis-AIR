@@ -37,12 +37,12 @@ fn put_f(values: ref<array<string>>, at: u64, value: f64) -> unit effects {alloc
 // One authoritative set of neutral fields, shared by PREVIEW and ENC. The worker's
 // indexed grammar is intentionally contained here; index 101 is the clip fade and
 // 102..104 extend the crop margins, 105 adds the simple-effect mix, and 106
-// carries vignette softness.
+// carries vignette softness; 107 opts upper-clip spatial effects into alpha cuts.
 fn neutral() -> array<string> effects {alloc} {
   var values: array<string> = array.new()
   var at: u64 = 0
   loop {
-    if at == 107 { break }
+    if at == 108 { break }
     array.push(values, string.copy("0"))
     at = at + 1
   }
@@ -692,10 +692,8 @@ fn preclip_path(prefix: str, slot: u64) -> string effects {alloc} {
 }
 
 // Prepare an upper clip's picture effects before it meets lower lanes. Overlay-only
-// controls run in the composition pass. The worker's mask, crop, and rotation
-// produce black pixels in cleared areas without transparent alpha. On an upper
-// clip those pixels would cover lower lanes, so refuse Crop and Mask. Rotation's
-// out-of-bounds pixels are transparent in the worker and can be composited.
+// controls run in the composition pass. Crop and Mask clear alpha in this per-clip
+// pass, allowing lower lanes to show through their cleared areas.
 fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
                 out: str, upper: bool)
                 -> result<option<string>, string> effects {alloc} {
@@ -708,10 +706,6 @@ fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
       some(filter) => {
         if editor.filter_enabled(doc, filter) {
           let kind: string = editor.filter_kind(doc, filter)
-          if upper and (str.eq(str.view(kind), "mask") or
-             str.eq(str.view(kind), "crop")) {
-            return result.err("an overlay spatial effect needs per-clip transparency")
-          }
           if not chrome.is_audio_kind(str.view(kind)) and
              not str.eq(str.view(kind), "speed") and
              not str.eq(str.view(kind), "opacity") and
@@ -731,6 +725,7 @@ fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
     index = index + 1
   }
   if not active { return result.ok(option.none()) }
+  if upper { put(values, 107, "1") }
   let path: string = match source_path(doc, clip) {
     some(value) => value,
     none => { return result.err("an upper clip has no online video source") },
