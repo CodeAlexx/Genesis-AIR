@@ -1470,7 +1470,7 @@ fn audio_filter_stage(doc: ref<editor.Document>, filter: u64)
       editor.filter_param(doc, filter, "rate", 5.0))))
     string.append(stage, ":d=")
     let depth: f64 = editor.filter_param(doc, filter, "depth", 0.5)
-    string.append(stage, str.view(string.from_float(if depth > 0.95 { 0.95 } else { depth })))
+    string.append(stage, str.view(string.from_float(depth)))
     return option.some(stage)
   }
   if str.eq(str.view(kind), "bass") or str.eq(str.view(kind), "treble") {

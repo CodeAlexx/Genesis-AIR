@@ -106,6 +106,17 @@ def audio_rms_window(movie, start, duration):
     return (sum(sample * sample for sample in samples) / len(samples)) ** 0.5
 
 
+def audio_difference_rms(first, second):
+    import wave
+
+    with wave.open(str(first), "rb") as left, wave.open(str(second), "rb") as right:
+        assert left.getparams() == right.getparams()
+        a = array("h", left.readframes(left.getnframes()))
+        b = array("h", right.readframes(right.getnframes()))
+    assert len(a) == len(b) and a
+    return (sum((x - y) ** 2 for x, y in zip(a, b)) / len(a)) ** 0.5 / 32768
+
+
 def zero_crossings(movie):
     done = subprocess.run(["ffmpeg", "-v", "error", "-i", str(movie), "-vn",
                            "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"],
@@ -563,6 +574,24 @@ def main():
             effect_movie = root / f"audio-{kind}.mp4"
             run([args.binary, "export", effect_movie, effect_file], env)
             assert audio_peak(effect_movie) > 0.0, kind
+
+        # Depth 1.0 is exposed by the Tremolo control and accepted by the
+        # worker filter. Its output must remain distinguishable from 0.95;
+        # an earlier resolver cap made the last part of the slider inert.
+        tremolo_doc = json.loads(json.dumps(document))
+        tremolo_doc["filters"].append(dict(id=12, clip=base_id, kind="tremolo",
+                                           order=0, enabled=True))
+        tremolo_doc["filter_params"].append(dict(filter=12, name="depth", value=0.95))
+        tremolo_doc["next_id"] = 13
+        tremolo_project = root / "tremolo.air"
+        tremolo_project.write_text(json.dumps(tremolo_doc))
+        tremolo_95 = root / "tremolo-95.wav"
+        run([args.binary, "audio", tremolo_95, tremolo_project], env)
+        tremolo_doc["filter_params"][-1]["value"] = 1.0
+        tremolo_project.write_text(json.dumps(tremolo_doc))
+        tremolo_full = root / "tremolo-full.wav"
+        run([args.binary, "audio", tremolo_full, tremolo_project], env)
+        assert audio_difference_rms(tremolo_95, tremolo_full) > 0.001
 
         # Track.order is the toolkit's display order. Reordering the lanes must
         # change which opaque clip is on top in the program monitor as well.
