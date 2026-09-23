@@ -611,6 +611,18 @@ def main():
         encoded_mid = pixel(dissolve_movie, 960, 540, True, 0.4)
         assert 85 <= mid[0] <= 170 and 85 <= mid[2] <= 170, mid
         assert max(abs(a - b) for a, b in zip(mid, encoded_mid)) <= 18, (mid, encoded_mid)
+        ui_dissolve = json.loads(json.dumps(dissolve))
+        ui_dissolve["names"][-1] = "dissolve"
+        ui_dissolve_project = root / "ui-dissolve.air"
+        ui_dissolve_project.write_text(json.dumps(ui_dissolve))
+        ui_dissolve_preview = root / "ui-dissolve.png"
+        ui_dissolve_movie = root / "ui-dissolve.mp4"
+        run([args.binary, "preview", ui_dissolve_preview, ui_dissolve_project], env)
+        run([args.binary, "export", ui_dissolve_movie, ui_dissolve_project], env)
+        dissolve_color = pixel(ui_dissolve_preview, 320, 180)
+        dissolve_encoded = pixel(ui_dissolve_movie, 960, 540, True, 0.4)
+        assert dissolve_color[2] > 200 and dissolve_color[0] < 30, dissolve_color
+        assert max(abs(a - b) for a, b in zip(dissolve_color, dissolve_encoded)) <= 18
 
         # Unsupported edits must fail visibly rather than produce a plausible but wrong file.
         document["filters"].append(dict(id=12, clip=8, kind="stabilize",
@@ -651,7 +663,7 @@ def main():
               f"{inverse_center}/{inverse_edge}; "
               f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
               f"and three layers, timed captions, "
-              f"crossfade, reverse-speed audio, "
+              f"crossfade and UI dissolve, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 

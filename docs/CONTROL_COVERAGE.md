@@ -25,7 +25,7 @@ time because that is what the worker filter implements.
 
 | Area | Verified | Still required |
 |---|---|---|
-| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; generated-media preview/export and X11 Play/Pause for representative cases | Media outcomes for every edit operation, nested sequences, all transition kinds and overlap seams, fast interactive preview. |
+| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; generated-media preview/export and X11 Play/Pause for representative cases; Crossfade and the UI's Dissolve have preview/MP4 gates; all 11 transition names map to worker ids | Media outcomes for every edit operation, nested sequences, media gates for the other nine transition kinds and overlap seams, fast interactive preview. |
 | Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filters, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed ASCII caption cues appear in preview and MP4 | Non-ASCII text, placement/typography controls, the `text` and `timer` filters. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Asynchronous export progress/cancel, precise audio/video sync, live scrub sound. |

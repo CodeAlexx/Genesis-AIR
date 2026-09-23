@@ -391,6 +391,23 @@ fn visible_clip(doc: ref<editor.Document>, track: u64, frame: i64)
 
 type TransitionPair = struct {outgoing: editor.Clip, incoming: editor.Clip}
 
+// Match the worker's documented transition ids. Project files keep readable
+// names; this is the sole conversion at the media boundary.
+fn transition_kind(name: str) -> i64 effects {} {
+  if str.eq(name, "crossfade") { return 0 }
+  if str.eq(name, "wipe_lr") { return 1 }
+  if str.eq(name, "wipe_rl") { return 2 }
+  if str.eq(name, "wipe_up") { return 3 }
+  if str.eq(name, "wipe_down") { return 4 }
+  if str.eq(name, "slide_lr") { return 5 }
+  if str.eq(name, "zoom") { return 6 }
+  if str.eq(name, "dissolve") { return 7 }
+  if str.eq(name, "iris") { return 8 }
+  if str.eq(name, "clock") { return 9 }
+  if str.eq(name, "barn_door") { return 10 }
+  -1
+}
+
 // The worker's transition slot is supported for an ordinary touching cut. Overlap seams
 // need a different pair resolution, so they are refused until that case is implemented.
 fn transition_pair(doc: ref<editor.Document>, track: u64, center: i64)
@@ -469,7 +486,8 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
             some(value) => value,
           }
           let name: string = editor.name_text(doc, transition.kind)
-          if not str.eq(str.view(name), "crossfade") {
+          let worker_kind: i64 = transition_kind(str.view(name))
+          if worker_kind < 0 {
             return result.err("this transition kind is not rendered yet")
           }
           let pair: TransitionPair = match transition_pair(doc, track, transition.center) {
@@ -481,7 +499,7 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
             some(value) => value,
           }
           chosen = option.some(pair.outgoing)
-          put(values, 16, "0")
+          put_i(values, 16, worker_kind)
           put_f(values, 17, editor.transition_progress(transition, frame))
           put(values, 19, str.view(provider.wire_path(str.view(incoming_path))))
           put_i(values, 20, source_frame(doc, pair.incoming, frame))

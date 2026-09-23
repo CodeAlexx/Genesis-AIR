@@ -626,6 +626,27 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       emit_b("speed_filter_native_frame", str.eq(str.view(array.borrow(fields, 3)), "22"))
     },
   }
+  var transition_doc: editor.Document = editor.document(30.0, 640, 360)
+  let transition_owner: u64 = transition_doc.active
+  let transition_source: u64 = editor.add_source(transition_doc,
+    "/media/transition.mp4", "transition", 30, 30.0)
+  let transition_track: u64 = editor.add_track(transition_doc, transition_owner,
+    editor.track_video(), "V1")
+  let first_transition_clip: u64 = match editor.place(transition_doc, transition_track,
+    transition_source, 0, 12, 0) { none => 0, some(value) => value }
+  let second_transition_clip: u64 = match editor.place(transition_doc, transition_track,
+    transition_source, 12, 12, 12) { none => 0, some(value) => value }
+  let dissolve_id: u64 = editor.add_transition(transition_doc,
+    transition_track, 12, 6, "dissolve")
+  match timeline_media.frame_line(transition_doc, 12, "ENC", "") {
+    err(problem) => { emit_b("dissolve_wire_kind", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("dissolve_wire_kind", first_transition_clip != 0 and
+        second_transition_clip != 0 and dissolve_id != 0 and
+        str.eq(str.view(array.borrow(fields, 17)), "7"))
+    },
+  }
   var in_doc: editor.Document = editor.document(30.0, 640, 360)
   let in_owner: u64 = in_doc.active
   let in_source: u64 = editor.add_source(in_doc, "/media/24fps.mp4", "24fps", 24, 24.0)

@@ -44,6 +44,7 @@ EXPECTED = {
     "mixed_last_native": "true",
     "mixed_inpoint_native": "true",
     "speed_filter_native_frame": "true",
+    "dissolve_wire_kind": "true",
     "keyframed_opacity_start": "true",
     "keyframed_opacity_end": "true",
     "keyframed_brightness_start": "true",
