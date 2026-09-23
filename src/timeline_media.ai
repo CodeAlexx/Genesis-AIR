@@ -408,46 +408,23 @@ fn transition_kind(name: str) -> i64 effects {} {
   -1
 }
 
-// The worker's transition slot is supported for an ordinary touching cut. Overlap seams
-// need a different pair resolution, so they are refused until that case is implemented.
+// Use the editor's authoritative adjacent pair. It resolves touching cuts, short
+// gaps, and overlap midpoints with the same ordering as the timeline model.
 fn transition_pair(doc: ref<editor.Document>, track: u64, center: i64)
-                   -> option<TransitionPair> effects {} {
-  var outgoing_id: u64 = 0
-  var incoming_id: u64 = 0
-  var last_end: i64 = -1
-  var first_start: i64 = 9223372036854775807
-  var at: u64 = 0
-  loop {
-    if at >= editor.clip_count(doc) { break }
-    match editor.clip_at(doc, at) {
-      none => { },
-      some(clip) => {
-        if clip.track == track and clip.owner == doc.active and clip.enabled {
-          let end: i64 = editor.clip_end(clip)
-          if end <= center and end > last_end {
-            outgoing_id = clip.id
-            last_end = end
-          }
-          if clip.start >= center and clip.start < first_start {
-            incoming_id = clip.id
-            first_start = clip.start
-          }
-        }
-      },
-    }
-    at = at + 1
+                   -> option<TransitionPair> effects {alloc} {
+  let boundary: editor.Boundary = match editor.boundary_at(doc, track, center) {
+    none => { return option.none() }, some(value) => value,
   }
-  if outgoing_id == 0 or incoming_id == 0 or last_end != center or first_start != center {
-    return option.none()
-  }
-  let outgoing: editor.Clip = match editor.clip(doc, outgoing_id) {
+  let outgoing: editor.Clip = match editor.clip(doc, boundary.outgoing) {
     none => { return option.none() },
     some(value) => value,
   }
-  let incoming: editor.Clip = match editor.clip(doc, incoming_id) {
+  let incoming: editor.Clip = match editor.clip(doc, boundary.incoming) {
     none => { return option.none() },
     some(value) => value,
   }
+  if outgoing.owner != doc.active or incoming.owner != doc.active or
+     not outgoing.enabled or not incoming.enabled { return option.none() }
   option.some(TransitionPair {outgoing: outgoing, incoming: incoming})
 }
 

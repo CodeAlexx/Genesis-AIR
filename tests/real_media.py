@@ -623,6 +623,20 @@ def main():
         dissolve_encoded = pixel(ui_dissolve_movie, 960, 540, True, 0.4)
         assert dissolve_color[2] > 200 and dissolve_color[0] < 30, dissolve_color
         assert max(abs(a - b) for a, b in zip(dissolve_color, dissolve_encoded)) <= 18
+        overlap = json.loads(json.dumps(dissolve))
+        overlap["clips"][1]["start"] = 8
+        overlap["transitions"][0]["center"] = 10  # midpoint of [8, 12)
+        overlap["program"]["frame"] = 10
+        overlap_project = root / "overlap.air"
+        overlap_project.write_text(json.dumps(overlap))
+        overlap_preview = root / "overlap.png"
+        overlap_movie = root / "overlap.mp4"
+        run([args.binary, "preview", overlap_preview, overlap_project], env)
+        run([args.binary, "export", overlap_movie, overlap_project], env)
+        overlap_color = pixel(overlap_preview, 320, 180)
+        overlap_encoded = pixel(overlap_movie, 960, 540, True, 10 / 30)
+        assert 85 <= overlap_color[0] <= 170 and 85 <= overlap_color[2] <= 170, overlap_color
+        assert max(abs(a - b) for a, b in zip(overlap_color, overlap_encoded)) <= 18
 
         # Unsupported edits must fail visibly rather than produce a plausible but wrong file.
         document["filters"].append(dict(id=12, clip=8, kind="stabilize",
@@ -663,7 +677,7 @@ def main():
               f"{inverse_center}/{inverse_edge}; "
               f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
               f"and three layers, timed captions, "
-              f"crossfade and UI dissolve, reverse-speed audio, "
+              f"crossfade, overlap and UI dissolve, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
