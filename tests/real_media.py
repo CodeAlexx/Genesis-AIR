@@ -489,6 +489,65 @@ def main():
         run([args.binary, "preview", reversed_gain_preview, grade_project], env)
         assert max(abs(a - b) for a, b in zip(tinted_gain,
             pixel(reversed_gain_preview, 320, 180))) <= 2
+        cube = root / "swap channels.cube"
+        cube.write_text("TITLE \"RB swap\"\nLUT_3D_SIZE 2\n"
+                        "DOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n" +
+                        "".join(f"{blue_value} {green_value} {red_value}\n"
+                                for blue_value in (0, 1)
+                                for green_value in (0, 1)
+                                for red_value in (0, 1)))
+        lut_doc = json.loads(json.dumps(document))
+        lut_doc["clips"] = [lut_doc["clips"][0]]
+        lut_doc["filters"] = [dict(id=11, clip=base_id, kind="lut3d",
+                                   order=0, enabled=True)]
+        lut_doc["filter_params"] = [dict(filter=11, name="amount", value=1.0)]
+        lut_doc["filter_text_params"] = [dict(filter=11, name="path", value=str(cube))]
+        lut_doc["next_id"] = 12
+        lut_project = root / "lut.air"
+        lut_project.write_text(json.dumps(lut_doc))
+        lut_preview = root / "lut.png"
+        lut_movie = root / "lut.mp4"
+        run([args.binary, "preview", lut_preview, lut_project], env)
+        run([args.binary, "export", lut_movie, lut_project], env)
+        swapped = pixel(lut_preview, 320, 180)
+        assert swapped[2] > 200 and swapped[0] < 40, swapped
+        assert max(abs(a - b) for a, b in zip(swapped,
+            pixel(lut_movie, 960, 540, True, 0.1))) <= 18
+        lut_doc["filter_params"][0]["value"] = 0.5
+        lut_project.write_text(json.dumps(lut_doc))
+        half_lut_preview = root / "half-lut.png"
+        run([args.binary, "preview", half_lut_preview, lut_project], env)
+        half_swapped = pixel(half_lut_preview, 320, 180)
+        assert 85 < half_swapped[0] < 170 and 85 < half_swapped[2] < 170, half_swapped
+        lut_doc["names"].append("lut3d.amount")
+        amount_id = len(lut_doc["names"])
+        lut_doc["keys"] = [dict(clip=base_id, owner=lut_doc["active"],
+                                param=amount_id, frame=frame, value=value, interp=0)
+                           for frame, value in ((0, 0.0), (11, 1.0))]
+        lut_doc["program"]["frame"] = 0
+        lut_project.write_text(json.dumps(lut_doc))
+        keyed_lut_start = root / "keyed-lut-start.png"
+        run([args.binary, "preview", keyed_lut_start, lut_project], env)
+        lut_doc["program"]["frame"] = 11
+        lut_project.write_text(json.dumps(lut_doc))
+        keyed_lut_end = root / "keyed-lut-end.png"
+        run([args.binary, "preview", keyed_lut_end, lut_project], env)
+        assert pixel(keyed_lut_start, 320, 180)[0] > 200
+        assert pixel(keyed_lut_end, 320, 180)[2] > 200
+        lut_doc["keys"] = []
+        lut_doc["filter_text_params"][0]["value"] = str(root / "missing.cube")
+        lut_project.write_text(json.dumps(lut_doc))
+        missing_lut = subprocess.run([str(args.binary), "preview",
+                                      str(root / "missing-lut.png"), str(lut_project)],
+                                     env=env, capture_output=True, text=True, timeout=30)
+        assert missing_lut.returncode != 0 and "LUT file is unavailable" in missing_lut.stdout
+        cube.write_text("LUT_3D_SIZE 2\n0 0 0\n")
+        lut_doc["filter_text_params"][0]["value"] = str(cube)
+        lut_project.write_text(json.dumps(lut_doc))
+        malformed_lut = subprocess.run([str(args.binary), "preview",
+                                        str(root / "malformed-lut.png"), str(lut_project)],
+                                       env=env, capture_output=True, text=True, timeout=30)
+        assert malformed_lut.returncode != 0 and "supported 3D .cube" in malformed_lut.stdout
         keyed = json.loads(json.dumps(document))
         keyed["sources"][1]["path"] = str(key_green)
         keyed["filters"][0]["kind"] = "chroma_key"
@@ -759,7 +818,8 @@ def main():
               f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
               f"and three layers, timed captions, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
-              f"white balance temperature/tint, graded picture/audio filters, audible AAC and "
+              f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
+              f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
 

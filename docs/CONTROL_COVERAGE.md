@@ -2,15 +2,16 @@
 
 The target is every control Genesis AIR currently exposes. A control is complete when its
 document edit, saved/reloaded state, preview, export, and failure behavior agree. The 594-click
-UI gate proves hit testing and command dispatch; it does not by itself prove media output.
+UI gate proves hit testing and command dispatch in its representative panel states;
+state-dependent controls also need focused checks. It does not by itself prove media output.
 
 ## Video filters (31)
 
 | Status | Kinds | Remaining gate or implementation |
 |---|---|---|
 | Mapped to the worker wire | brightness, contrast, saturation, gamma, hue, sharpen, blur, glow, grain, levels, lift_gamma_gain, rotate, flip, mirror, denoise | Upper-clip brightness now has two- and three-lane preview/MP4 pixel gates proving lower clips stay unchanged. Pixel change and preview/export parity for the remaining parameter values and animation are still required. |
-| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend, mask, speed | Base and overlay opacity have preview/MP4 pixel gates. White-balance temperature and tint have preview/MP4 color gates, including gain composition with Color Grading. The centered base mask has feather/invert preview/MP4 center and edge gates; upper mask, crop, and rotation are refused because the worker paints cleared pixels black without changing transparency. Speed multiplies clip Rate and has a generated 24-to-30 fps, 2x picture/audio/15-frame export gate; animated speed remains unsupported. Softness, fractional look amounts, asymmetric crop, overlay rotation, other non-overlay uses, and blend modes 8–11 need real implementations. Existing unsupported values fail explicitly. |
-| No media mapping yet | text, timer, stabilize, lut3d | Implement the advertised behavior and exercise it in preview and export. |
+| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend, mask, speed, lut3d | Base and overlay opacity have preview/MP4 pixel gates. White-balance temperature and tint have preview/MP4 color gates, including gain composition with Color Grading. LUT3D accepts a `.cube` path through the filter panel, stores it in revision 2 projects, validates the grid, and has a full-strength preview/MP4 channel-swap gate, a half-mix preview gate, and keyed Amount preview endpoints. The centered base mask has feather/invert preview/MP4 center and edge gates; upper mask, crop, and rotation are refused because the worker paints cleared pixels black without changing transparency. Speed multiplies clip Rate and has a generated 24-to-30 fps, 2x picture/audio/15-frame export gate; animated speed remains unsupported. Softness, fractional look amounts, asymmetric crop, overlay rotation, other non-overlay uses, and blend modes 8–11 need real implementations. Existing unsupported values fail explicitly. |
+| No media mapping yet | text, timer, stabilize | Text content can now be edited and saved, but rendering it is still open. Implement the advertised behavior and exercise it in preview and export. |
 
 ## Audio filters (20)
 
@@ -26,7 +27,7 @@ time because that is what the worker filter implements.
 | Area | Verified | Still required |
 |---|---|---|
 | Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have midpoint crossfade gates | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, fast interactive preview. |
-| Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filters, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
+| Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount has keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filters, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed ASCII caption cues appear in preview and MP4 | Non-ASCII text, placement/typography controls, the `text` and `timer` filters. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Asynchronous export progress/cancel, precise audio/video sync, live scrub sound. |
 | Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, and generated 24-to-30 fps preview/export/audio gate | Sequence export rates other than 30 fps. |

@@ -122,6 +122,13 @@ EXPECTED = {
     "clean_after_save": "true",
     "opened": "true",
     "reload_exact": "true",
+    "filter_text_set": "true",
+    "reload_filter_text": "AIR title",
+    "title_text_prompt": "true",
+    "title_text_value": "AIR title",
+    "lut_relative_path": "true",
+    "lut_missing_refused": "true",
+    "lut_path_preserved": "true",
     "reload_sources": "3",
     "reload_tracks": "4",
     "reload_transitions": "1",
@@ -257,7 +264,10 @@ def headless(airc, stdlib):
         # The saved project is the AIR editor schema, not a Genesis-only invention.
         stored = json.loads((root / "project.air").read_text())
         assert stored["schema"] == "air.editor.project", stored["schema"]
-        assert stored["revision"] == 1, stored["revision"]
+        assert stored["revision"] == 2, stored["revision"]
+        assert len(stored["filter_text_params"]) == 1
+        assert stored["filter_text_params"][0]["name"] == "caption"
+        assert stored["filter_text_params"][0]["value"] == "AIR title"
         assert len(stored["tracks"]) == 4 and len(stored["sources"]) == 3, stored
         # Every stored clip stays inside the media it names.
         lengths = {s["id"]: s["frames"] for s in stored["sources"]}

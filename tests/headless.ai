@@ -280,6 +280,9 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var grain: commands.Result = commands.add_filter(state, second.value, "grain")
   emit_u("filters", editor.filter_count(struct.borrow(state, field=document), second.value))
   let _ = commands.set_filter_param(state, grade.value, "temperature", 0.4)
+  let stored_text: commands.Result = commands.set_filter_text_param(state,
+    grade.value, "caption", "AIR title")
+  emit_b("filter_text_set", stored_text.ok)
   emit("filter_param", str.view(math_text(editor.filter_param(
     struct.borrow(state, field=document), grade.value, "temperature", -1.0))))
   var toggled: commands.Result = commands.toggle_filter(state, grain.value)
@@ -513,11 +516,52 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var opened: commands.Result = commands.open_project(restored, project)
   emit_b("opened", opened.ok)
   emit_b("reload_exact", str.eq(str.view(digest(restored)), str.view(reference)))
+  emit("reload_filter_text", str.view(editor.filter_text_param(
+    struct.borrow(restored, field=document), grade.value, "caption", "")))
   emit_u("reload_sources", editor.source_count(struct.borrow(restored, field=document)))
   emit_u("reload_tracks", editor.track_count(struct.borrow(restored, field=document)))
   emit_u("reload_transitions", editor.transition_count(struct.borrow(restored, field=document)))
   emit_u("reload_markers", editor.marker_count(struct.borrow(restored, field=document)))
   emit_u("reload_subtitles", editor.subtitle_count(struct.borrow(restored, field=document)))
+  let _ = editor.select_only(struct.borrow(restored, field=document), second.value)
+  var title_filter: commands.Result = commands.add_filter(restored, second.value, "text")
+  app.set_dock_tab(restored, chrome.tab_filters())
+  app.set_selected_filter(restored, title_filter.value)
+  var title_controls: array<chrome.Control> = chrome.dock_panel(frame, restored)
+  var title_button: bool = false
+  var title_index: u64 = 0
+  loop {
+    if title_index >= array.len(title_controls) { break }
+    let control: ref<chrome.Control> = array.borrow(title_controls, title_index)
+    if struct.get(control, field=action) == chrome.act_filter_value() {
+      let _ = click_at(restored, struct.get(control, field=area))
+      title_button = app.prompt_active(restored)
+      break
+    }
+    title_index = title_index + 1
+  }
+  emit_b("title_text_prompt", title_button)
+  if title_button {
+    app.prompt_push(restored, "AIR title")
+    let _ = input.commit_prompt(restored)
+  }
+  emit("title_text_value", str.view(editor.filter_text_param(
+    struct.borrow(restored, field=document), title_filter.value, "content", "")))
+  let cube_file: string = text.concat(scratch, "/test.cube")
+  let _ = files.write_text(str.view(cube_file), "LUT_3D_SIZE 2\n")
+  var lut_filter: commands.Result = commands.add_filter(restored, second.value, "lut3d")
+  app.set_selected_filter(restored, lut_filter.value)
+  app.begin_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "test.cube")
+  let _ = input.commit_prompt(restored)
+  let recorded_path: string = editor.filter_text_param(
+    struct.borrow(restored, field=document), lut_filter.value, "path", "")
+  emit_b("lut_relative_path", str.eq(str.view(recorded_path), str.view(cube_file)))
+  app.begin_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "missing.cube")
+  let missing_lut_note: string = input.commit_prompt(restored)
+  emit_b("lut_missing_refused", text.contains(str.view(missing_lut_note), "unavailable"))
+  emit_b("lut_path_preserved", str.eq(str.view(editor.filter_text_param(
+    struct.borrow(restored, field=document), lut_filter.value, "path", "")),
+    str.view(cube_file)))
   var missing: commands.Result = commands.open_project(restored, "/nonexistent/none.air")
   emit_b("missing_project_refused", not missing.ok)
 

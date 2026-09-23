@@ -63,6 +63,8 @@ The right-hand dock has four tabs:
   creates the filter.
 - **Filters** — the stack on the selected clip (enable, reorder, remove, and the selected
   filter's own parameters) above a library of **51 filter kinds**, 31 video and 20 audio.
+  Text has an editable content field and LUT3D has a `.cube` path field. These strings
+  persist in revision 2 projects; revision 1 projects still load.
 - **Scopes** — histogram, RGB parade and luma waveform, read off the program frame that was
   already fetched for the monitor.
 - **Audio** — per-track meters driven by the peak cache, and a strip per audio track with
@@ -287,6 +289,10 @@ python3 tests/window_playback.py --binary build/genesis-air \
   White-balance temperature uses the worker's normalized range, and tint multiplies
   per-channel gains; generated gray-frame preview/MP4 gates cover both controls and
   their combination with Color Grading.
+  LUT3D sends a validated `.cube` grid through the worker's look pass. Generated
+  preview/MP4 pixels prove full-strength channel swapping; preview pixels prove a
+  half-strength mix and clip-local Amount key endpoints. Missing or malformed LUT files
+  fail with a specific message before a frame is rendered.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
   a keyed fade from black to half-strength red and base-clip opacity in both PNG

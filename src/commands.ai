@@ -493,6 +493,15 @@ pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64)
   done("parameter set", filter)
 }
 
+pub fn set_filter_text_param(state: ref<app.App>, filter: u64, name: str, value: str)
+                             -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_filter_text_param(struct.borrow(state, field=document), filter,
+    name, value) { return refused("no such filter") }
+  app.mark_dirty(state, true)
+  done("text parameter set", filter)
+}
+
 // ---------------------------------------------------------------------------
 // Mixer. Solo-wins is the toolkit's policy and is not restated here.
 

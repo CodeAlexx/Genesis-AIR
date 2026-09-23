@@ -11,8 +11,10 @@ module genesis.input
 import std.editor as editor
 import std.math as math
 import std.editor_view as editor_view
+import std.files as files
 import std.timeline as timeline
 import std.widgets as widgets
+import std.path as path
 import "app.ai" as app
 import "chrome.ai" as chrome
 import "commands.ai" as commands
@@ -339,6 +341,14 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_filter_pick() {
     app.set_selected_filter(state, target)
     return note(str.view(chrome.label_of(control)))
+  }
+  if action == chrome.act_filter_value() {
+    app.set_selected_filter(state, target)
+    let document: ref<editor.Document> = struct.borrow(state, field=document)
+    let seed: string = editor.filter_text_param(document, target, str.view(name), "")
+    app.begin_prompt(state, action, if str.eq(str.view(kind), "text") {
+      "Title text" } else { "LUT .cube file" }, str.view(seed))
+    return note("enter a value; empty clears it")
   }
   if action == chrome.act_filter_toggle() {
     var landed: commands.Result = commands.toggle_filter(state, target)
@@ -713,6 +723,42 @@ pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.
   let action: u32 = app.prompt_action(state)
   let typed: string = app.prompt_text(state)
   app.end_prompt(state)
+  if action == chrome.act_filter_value() {
+    let filter: u64 = app.selected_filter(state)
+    let kind: string = editor.filter_kind(struct.borrow(state, field=document), filter)
+    if str.eq(str.view(kind), "text") {
+      var landed: commands.Result = commands.set_filter_text_param(state, filter,
+        "content", str.view(typed))
+      return commands.message(landed)
+    }
+    if str.eq(str.view(kind), "lut3d") {
+      var resolved: string = string.copy(str.view(typed))
+      if str.len(str.view(typed)) != 0 {
+        let cwd: string = match files.cwd() {
+          err(problem) => { return note("cannot resolve the LUT path") },
+          ok(value) => value,
+        }
+        let project: string = app.project_path(state)
+        let project_path: string = path.join(str.view(cwd), str.view(project))
+        let base: string = if str.len(str.view(project)) == 0 { cwd }
+          else { path.dirname(str.view(project_path)) }
+        resolved = path.join(str.view(base), str.view(typed))
+        let extension: string = path.extension(str.view(resolved))
+        if not str.eq(str.view(extension), ".cube") {
+          return note("LUT file must end in .cube")
+        }
+        let is_file: bool = match files.is_file(str.view(resolved)) {
+          err(problem) => { return note("LUT file is unavailable") },
+          ok(value) => value,
+        }
+        if not is_file { return note("LUT path is not a file") }
+      }
+      var landed: commands.Result = commands.set_filter_text_param(state, filter,
+        "path", str.view(resolved))
+      return commands.message(landed)
+    }
+    return note("selected filter has no text value")
+  }
   if str.len(str.view(typed)) == 0 { return note("cancelled") }
 
   if action == chrome.act_open() {

@@ -99,6 +99,7 @@ pub fn act_filter_remove() -> u32 effects {} { 73 }
 pub fn act_filter_up() -> u32 effects {} { 74 }
 pub fn act_filter_down() -> u32 effects {} { 75 }
 pub fn act_filter_page() -> u32 effects {} { 76 }
+pub fn act_filter_value() -> u32 effects {} { 77 }
 
 pub fn act_param_dec() -> u32 effects {} { 80 }
 pub fn act_param_inc() -> u32 effects {} { 81 }
@@ -867,6 +868,22 @@ fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
   let id: u64 = filter_of_kind(doc, clip, kind)
   var specs: array<Spec> = params_for(kind)
   var cursor: f64 = top
+  if id != 0 and (str.eq(kind, "text") or str.eq(kind, "lut3d")) {
+    let field: str = if str.eq(kind, "text") { "content" } else { "path" }
+    let current: string = editor.filter_text_param(doc, id, field, "")
+    let label: str = if str.eq(kind, "text") { "Edit title text..." }
+      else { "Choose .cube file..." }
+    var edit: Control = button(act_filter_value(), label,
+      layout.rect(area.left + 4.0, cursor, area.right - 4.0,
+        cursor + row_height()), false)
+    struct.set(edit, domain_filter(), field=domain)
+    struct.set(edit, id, field=target)
+    let _ = ref.swap(struct.borrow(edit, field=kind), string.copy(kind))
+    let _ = ref.swap(struct.borrow(edit, field=name), string.copy(field))
+    array.push(out, edit)
+    cursor = cursor + row_height()
+    cursor = text_row(out, area, cursor, "Current", str.view(current))
+  }
   var index: u64 = 0
   loop {
     if index >= array.len(specs) { break }

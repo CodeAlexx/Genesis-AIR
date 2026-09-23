@@ -314,6 +314,17 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
     multiply_gain(values, 0, 1.0 - 0.2 * bias)
     multiply_gain(values, 1, 1.0 + 0.4 * bias)
     multiply_gain(values, 2, 1.0 - 0.2 * bias)
+  } else if str.eq(str.view(kind), "lut3d") and not overlay {
+    let lut: string = editor.filter_text_param(doc, filter, "path", "")
+    if str.len(str.view(lut)) == 0 { return true }
+    if not str.eq(str.view(array.borrow(values, 13)), "0") { return false }
+    let amount: f64 = filter_value(doc, clip, filter, str.view(kind), frame,
+      "amount", 1.0)
+    if amount < 0.0 or amount > 1.0 { return false }
+    put(values, 13, "2")
+    put_f(values, 14, amount)
+    let wire: string = provider.wire_path(str.view(lut))
+    put(values, 15, str.view(wire))
   } else if str.eq(str.view(kind), "glow") and not overlay {
     put_f(values, 66, filter_value(doc, clip, filter, str.view(kind), frame, "amount", 0.0))
     put_f(values, 67, filter_value(doc, clip, filter, str.view(kind), frame, "threshold", 0.7))
@@ -374,8 +385,11 @@ pub fn key_supported(param: str) -> bool effects {alloc} {
   var pieces: array<string> = text.split(param, ".")
   if array.len(pieces) != 2 { return false }
   let kind: str = str.view(array.borrow(pieces, 0))
+  if str.eq(kind, "lut3d") {
+    return str.eq(str.view(array.borrow(pieces, 1)), "amount")
+  }
   if str.eq(kind, "text") or str.eq(kind, "timer") or
-     str.eq(kind, "stabilize") or str.eq(kind, "lut3d") or str.eq(kind, "speed") {
+     str.eq(kind, "stabilize") or str.eq(kind, "speed") {
     return false
   }
   var video: array<string> = chrome.video_kinds()
@@ -723,7 +737,139 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   result.ok(lines)
 }
 
-pub type RenderCache = struct {subtitle: u64}
+pub type RenderCache = struct {subtitle: u64, validated_luts: array<string>}
+
+fn cube_fields(line: str) -> array<string> effects {alloc} {
+  let spaced: string = text.replace(line, "\t", " ")
+  var pieces: array<string> = text.split(str.view(spaced), " ")
+  var out: array<string> = array.new()
+  var index: u64 = 0
+  loop {
+    if index >= array.len(pieces) { break }
+    let piece: str = str.view(array.borrow(pieces, index))
+    if str.len(piece) != 0 { array.push(out, string.copy(piece)) }
+    index = index + 1
+  }
+  out
+}
+
+// Match the subset of .cube that the worker actually applies: one 3D grid of at
+// most 33 samples per axis, RGB triples, and the worker's fixed [0,1] domain.
+fn valid_cube(content: str) -> bool effects {alloc} {
+  var lines: array<string> = text.lines(content)
+  var size: u64 = 0
+  var samples: u64 = 0
+  var line_index: u64 = 0
+  loop {
+    if line_index >= array.len(lines) { break }
+    let trimmed: string = text.trim(str.view(array.borrow(lines, line_index)))
+    line_index = line_index + 1
+    if str.len(str.view(trimmed)) == 0 or str.starts_with(str.view(trimmed), "#") {
+      continue
+    }
+    var parts: array<string> = cube_fields(str.view(trimmed))
+    if array.len(parts) == 0 { continue }
+    let first: str = str.view(array.borrow(parts, 0))
+    if str.eq(first, "TITLE") { continue }
+    if str.eq(first, "LUT_1D_SIZE") { return false }
+    if str.eq(first, "LUT_3D_SIZE") {
+      if size != 0 or array.len(parts) < 2 { return false }
+      size = match text.parse_u64(str.view(array.borrow(parts, 1))) {
+        none => { return false }, some(value) => value,
+      }
+      if size < 2 or size > 33 { return false }
+      continue
+    }
+    if str.eq(first, "DOMAIN_MIN") or str.eq(first, "DOMAIN_MAX") {
+      if array.len(parts) < 4 { return false }
+      let expected: f64 = if str.eq(first, "DOMAIN_MIN") { 0.0 } else { 1.0 }
+      var channel: u64 = 1
+      loop {
+        if channel > 3 { break }
+        let value: f64 = match text.parse_f64(str.view(array.borrow(parts, channel))) {
+          none => { return false }, some(number) => number,
+        }
+        if value != expected { return false }
+        channel = channel + 1
+      }
+      continue
+    }
+    if size == 0 or array.len(parts) < 3 { return false }
+    var channel: u64 = 0
+    loop {
+      if channel == 3 { break }
+      let value: f64 = match text.parse_f64(str.view(array.borrow(parts, channel))) {
+        none => { return false }, some(number) => number,
+      }
+      if not math.is_finite(value) { return false }
+      channel = channel + 1
+    }
+    samples = samples + 1
+    if samples > size * size * size { return false }
+  }
+  size != 0 and samples == size * size * size
+}
+
+fn validate_lut_paths(doc: ref<editor.Document>, frame: i64, cache: ref<RenderCache>)
+                      -> result<unit, string> effects {alloc, fs.meta, fs.read} {
+  var clip_index: u64 = 0
+  loop {
+    match editor.clip_at(doc, clip_index) {
+      none => { break },
+      some(clip) => {
+        if clip.owner == doc.active and clip.enabled and clip.start <= frame and
+           editor.clip_end(clip) > frame and editor.track_visible(doc, clip.track) {
+          var filter_index: u32 = 0
+          loop {
+            match editor.filter_at(doc, clip.id, filter_index) {
+              none => { break },
+              some(filter) => {
+                let kind: string = editor.filter_kind(doc, filter)
+                if editor.filter_enabled(doc, filter) and str.eq(str.view(kind), "lut3d") {
+                  let lut: string = editor.filter_text_param(doc, filter, "path", "")
+                  if str.len(str.view(lut)) != 0 {
+                    var cached: bool = false
+                    var cache_index: u64 = 0
+                    loop {
+                      if cache_index >= array.len(struct.borrow(cache, field=validated_luts)) { break }
+                      if str.eq(str.view(array.borrow(struct.borrow(cache, field=validated_luts), cache_index)),
+                        str.view(lut)) { cached = true
+                        break }
+                      cache_index = cache_index + 1
+                    }
+                    if cached { filter_index = filter_index + 1
+                      continue }
+                    let exists: bool = match files.is_file(str.view(lut)) {
+                      err(problem) => { return result.err("LUT file is unavailable") },
+                      ok(value) => value,
+                    }
+                    if not exists { return result.err("LUT path is not a file") }
+                    let bytes: u64 = match files.file_size(str.view(lut)) {
+                      err(problem) => { return result.err("LUT file is unavailable") },
+                      ok(value) => value,
+                    }
+                    if bytes > 16777216 { return result.err("LUT file is too large") }
+                    let source: string = match files.read_text(str.view(lut)) {
+                      err(problem) => { return result.err("LUT file cannot be read") },
+                      ok(value) => value,
+                    }
+                    if not valid_cube(str.view(source)) {
+                      return result.err("LUT file is not a supported 3D .cube grid")
+                    }
+                    array.push(struct.borrow(cache, field=validated_luts), lut)
+                  }
+                }
+              },
+            }
+            filter_index = filter_index + 1
+          }
+        }
+      },
+    }
+    clip_index = clip_index + 1
+  }
+  result.ok(())
+}
 
 fn subtitle_path(prefix: str) -> string effects {alloc} {
   text.concat(prefix, ".subtitle.rgba")
@@ -768,7 +914,8 @@ fn raster_subtitle(doc: ref<editor.Document>, id: u64, prefix: str,
 
 pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                   scratch_prefix: str, cache: ref<RenderCache>)
-                  -> result<array<string>, string> effects {alloc, fs.write} {
+                  -> result<array<string>, string> effects {alloc, fs.meta, fs.read, fs.write} {
+  let _ = try validate_lut_paths(doc, frame, cache)
   let subtitle: u64 = match editor.subtitle_at(doc, doc.active, frame) {
     none => 0, some(id) => id,
   }
@@ -1269,7 +1416,7 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
 }
 
 fn render_into(doc: ref<editor.Document>, worker: str, output: str)
-               -> result<unit, string> effects {alloc, fs.meta, fs.write, process, time} {
+               -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let range: editor.Transport = editor.export_range(doc)
   if range.mark_out <= range.mark_in { return result.err("the export range is empty") }
   let sequence_slot: u64 = match editor.sequence_slot(doc, doc.active) {
@@ -1303,7 +1450,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
     string.copy("0"), string.copy("-"), string.copy("128000"), string.copy("aac")
   ]
   let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
-  var cache: RenderCache = RenderCache {subtitle: 0}
+  var cache: RenderCache = RenderCache {subtitle: 0, validated_luts: array.new()}
   var frame: i64 = range.mark_in
   loop {
     if frame >= range.mark_out { break }
@@ -1343,7 +1490,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
 }
 
 pub fn render(doc: ref<editor.Document>, worker: str, output: str)
-              -> result<unit, string> effects {alloc, fs.meta, fs.write, process, time} {
+              -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if not text.ends_with(output, ".mp4") {
     return result.err("video export needs a .mp4 output path")
   }
