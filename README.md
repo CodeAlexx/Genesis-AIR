@@ -194,6 +194,10 @@ The `audio` command writes that exact mix for inspection.
 Text values and the file chooser fallback use a centered prompt: type the value, Enter to
 accept, Escape to cancel.
 
+To put a video on the timeline, use **Add** to import it, select its row in **MEDIA**,
+then choose **Add clip** at the bottom of that panel. The new clip is selected on V1.
+Drag across the timeline ruler to scrub the program preview; a single ruler click seeks.
+
 ## The media provider seam
 
 Genesis AIR never learns where a frame came from.
@@ -241,9 +245,13 @@ python3 tests/real_media.py --binary build/genesis-air \
 python3 tests/window_playback.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib
 
-# Optional X11 file-chooser path check (uses a temporary picker stand-in).
+# Optional X11 import, timeline placement, ruler scrub, and save check.
 python3 tests/window_file_picker.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib
+
+# Exercise the same path at 4K with a generated video and the real worker.
+python3 tests/window_file_picker.py --binary build/genesis-air \
+  --stdlib /path/to/AIR/stdlib --maximized --worker /path/to/gcompose
 
 # Optional X11 real-audio check (also requires paplay/aplay and a working audio server).
 python3 tests/window_playback.py --binary build/genesis-air \

@@ -40,6 +40,7 @@ pub fn drag_none() -> u32 effects {} { 0 }
 pub fn drag_move() -> u32 effects {} { 1 }
 pub fn drag_trim_start() -> u32 effects {} { 2 }
 pub fn drag_trim_end() -> u32 effects {} { 3 }
+pub fn drag_scrub() -> u32 effects {} { 4 }
 
 pub type Drag = struct {
   kind: u32,

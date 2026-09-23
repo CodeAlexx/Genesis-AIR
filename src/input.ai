@@ -324,7 +324,14 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     let length: i64 = if frames > 0 { frames } else { 120 }
     let track: u64 = app.default_video_track(state)
     var landed: commands.Result = commands.append_clip(state, track, target, 0, length)
-    return commands.message(landed)
+    if not landed.ok { return commands.message(landed) }
+    let _ = commands.select_only(state, landed.value)
+    var named: string = editor.source_name(struct.borrow(state, field=document), target)
+    var short: string = path.basename(str.view(named))
+    var line: string = string.copy("Added ")
+    string.append(line, str.view(short))
+    string.append(line, " to V1")
+    return line
   }
 
   // ---- filters ----
@@ -560,6 +567,7 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
   // The ruler scrubs the program transport.
   if layout.contains(frame.ruler, x, y) {
     let frame_at: i64 = timeline.x_to_frame(model, x)
+    app.begin_gesture(state, app.drag_scrub(), 0, frame_at, 0, 0, 0, 0)
     var landed: commands.Result = commands.seek(state, frame_at)
     return commands.message(landed)
   }
@@ -622,6 +630,11 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
   if app.gesture_kind(state) == app.drag_none() { return note("") }
   let frame: layout.Frame = layout.frame(width, height)
   var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+  if app.gesture_kind(state) == app.drag_scrub() {
+    let at: i64 = timeline.x_to_frame(model, x)
+    var landed: commands.Result = commands.seek(state, at)
+    return commands.message(landed)
+  }
   let held: app.Drag = app.gesture(state)
   let now: i64 = timeline.x_to_frame(model, x)
   let delta: i64 = now - held.grab_frame
@@ -644,6 +657,14 @@ pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
   }
   let kind: u32 = app.gesture_kind(state)
   if kind == app.drag_none() { return note("") }
+  if kind == app.drag_scrub() {
+    let frame: layout.Frame = layout.frame(width, height)
+    var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+    let at: i64 = timeline.x_to_frame(model, x)
+    app.end_gesture(state)
+    var landed: commands.Result = commands.seek(state, at)
+    return commands.message(landed)
+  }
   if not app.gesture_moved(state) {
     app.end_gesture(state)
     return note("")
