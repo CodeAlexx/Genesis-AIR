@@ -3,6 +3,7 @@
 import argparse
 from array import array
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -48,6 +49,36 @@ def light_points(path, box, movie=False, time_s=0.1, threshold=150):
             if frame[at + 1] > threshold and frame[at + 2] > threshold:
                 found.append(x)
     return found
+
+
+def blend_reference(base, over, mode):
+    b, o = base / 255, over / 255
+    if mode == 0:
+        value = o
+    elif mode == 1:
+        value = min(1, b + o)
+    elif mode == 2:
+        value = 1 - (1 - b) * (1 - o)
+    elif mode == 3:
+        value = b * o
+    elif mode == 4:
+        value = 2 * b * o if b < 0.5 else 1 - 2 * (1 - b) * (1 - o)
+    elif mode == 5:
+        value = min(b, o)
+    elif mode == 6:
+        value = max(b, o)
+    elif mode == 7:
+        value = abs(b - o)
+    elif mode == 8:
+        value = max(0, b - o)
+    elif mode == 9:
+        value = 2 * b * o if o < 0.5 else 1 - 2 * (1 - b) * (1 - o)
+    elif mode == 10:
+        d = ((16 * b - 12) * b + 4) * b if b <= 0.25 else math.sqrt(b)
+        value = b - (1 - 2 * o) * b * (1 - b) if o <= 0.5 else b + (2 * o - 1) * (d - b)
+    else:
+        value = 1 if o >= 1 else min(1, b / (1 - o))
+    return round(value * 255)
 
 
 def audio_peak(movie, channel=None):
@@ -194,6 +225,47 @@ def main():
         assert (video["width"], video["height"], int(video["nb_frames"])) == (1920, 1080, 12)
         assert any(s["codec_type"] == "audio" for s in streams), streams
         assert audio_peak(movie) > 0.01, "exported audio is silent"
+
+        blend_base = root / "blend-base.mp4"
+        blend_over = root / "blend-over.mp4"
+        for color, destination in (("0x4060a0", blend_base), ("0xc08040", blend_over)):
+            run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                 "-i", f"color=c={color}:s=320x180:r=30", "-t", "0.4",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                 destination])
+        blend_doc = json.loads(json.dumps(document))
+        blend_doc["sources"][0]["path"] = str(blend_base)
+        blend_doc["sources"][0]["has_audio"] = False
+        blend_doc["sources"][1]["path"] = str(blend_over)
+        blend_doc["sources"][1]["has_audio"] = False
+        blend_doc["filters"] = [dict(id=11, clip=10, kind="blend", order=0, enabled=True)]
+        blend_doc["filter_params"] = [dict(filter=11, name="mode", value=0.0)]
+        blend_doc["next_id"] = 12
+        blend_project = root / "blend.air"
+        base_only = json.loads(json.dumps(blend_doc))
+        base_only["clips"] = [base_only["clips"][0]]
+        base_only["filters"] = []
+        base_only["filter_params"] = []
+        blend_project.write_text(json.dumps(base_only))
+        base_preview = root / "blend-base.png"
+        run([args.binary, "preview", base_preview, blend_project], env)
+        base_rgb = pixel(base_preview, 320, 180)
+        for mode in range(12):
+            blend_doc["filter_params"][0]["value"] = float(mode)
+            blend_project.write_text(json.dumps(blend_doc))
+            blend_preview = root / f"blend-{mode}.png"
+            blend_movie = root / f"blend-{mode}.mp4"
+            run([args.binary, "preview", blend_preview, blend_project], env)
+            run([args.binary, "export", blend_movie, blend_project], env)
+            preview_rgb = pixel(blend_preview, 320, 180)
+            movie_rgb = pixel(blend_movie, 960, 540, True)
+            if mode == 0:
+                over_rgb = preview_rgb
+            expected = tuple(blend_reference(b, o, mode) for b, o in zip(base_rgb, over_rgb))
+            assert max(abs(a - b) for a, b in zip(preview_rgb, expected)) <= 8, (
+                mode, base_rgb, over_rgb, preview_rgb, expected)
+            assert max(abs(a - b) for a, b in zip(preview_rgb, movie_rgb)) <= 18, (
+                mode, preview_rgb, movie_rgb)
 
         rate24 = json.loads(json.dumps(document))
         rate24["sequences"][0]["fps"] = 24.0
@@ -986,7 +1058,7 @@ def main():
               f"and three layers, timed captions, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
-              f"Text/Timer preview and MP4 with keyed placement, "
+              f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")
 
