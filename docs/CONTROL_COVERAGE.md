@@ -1,8 +1,10 @@
 # Control acceptance ledger
 
-The target is every control Genesis AIR currently exposes. A control is complete when its
-document edit, saved/reloaded state, preview, export, and failure behavior agree. The 594-click
-UI gate proves hit testing and command dispatch in its representative panel states;
+The target is every control Genesis AIR currently exposes. All 31 video and 20 audio filter
+kinds have a media mapping, but a mapping alone is not control acceptance. A control is
+complete when its document edit, saved/reloaded state, preview, export, and failure behavior
+agree. The 594-click UI gate proves hit testing and command dispatch in its representative
+panel states;
 state-dependent controls also need focused checks. It does not by itself prove media output.
 
 ## Verified checkpoint (2026-09-22)
@@ -26,8 +28,8 @@ python3 tests/real_media.py --binary build/genesis-air \
 ```
 
 The highest-impact remaining work is parameter and animation measurements for mapped
-filters, Unicode text, nested sequences, live scrub
-audio, asynchronous export progress/cancel, and long-timeline audio/video sync.
+filters, Unicode text, nested sequences, live scrub audio, asynchronous export
+progress/cancel, and long-timeline audio/video sync.
 
 ## Video filters (31)
 
@@ -44,9 +46,9 @@ have AIR-to-worker mappings. The real-media suite applies each and checks for au
 output. Tremolo Depth now reaches the exposed 1.0 endpoint; a generated WAV gate
 distinguishes it from 0.95. A generated playback WAV gate checks that Pan's -1 and +1
 endpoints favor opposite output channels. Other parameter-specific signal measurements,
-animated parameters, and long-timeline playback timing remain acceptance work. The gate's stored
-`hold` is presented as release
-time because that is what the worker filter implements.
+animated parameters, and long-timeline playback timing remain acceptance work. The
+gate's stored `hold` is presented as release time because that is what the worker filter
+implements.
 
 ## Other exposed controls
 

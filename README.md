@@ -60,7 +60,8 @@ The right-hand dock has four tabs:
   pass, tremolo, bass, treble, notch, chorus, flanger, phaser), a ten-band graphic EQ, and
   clip grade. Every parameter has a decrement, a click-anywhere bar, an increment and a
   keyframe button. A parameter whose filter does not exist yet is still shown; touching it
-  creates the filter.
+  creates the filter. Some keyframe actions are refused while their media automation path
+  is unfinished; the [control ledger](docs/CONTROL_COVERAGE.md) tracks those gaps.
 - **Filters** — the stack on the selected clip (enable, reorder, remove, and the selected
   filter's own parameters) above a library of **51 filter kinds**, 31 video and 20 audio.
   Text has an editable content field and LUT3D has a `.cube` path field. These strings
@@ -118,7 +119,7 @@ cd Genesis-AIR
 # Build the separate media worker from CodeAlexx/Genesis- (FFmpeg/OpenCL prerequisites
 # are described in that repository), then point Genesis AIR at it:
 cd ../Genesis
-git switch codex/air-raw-transition # RAW transition partner support for titled clips
+git switch codex/air-raw-transition # RAW transition partners and Stabilize source frames
 cargo build --release -p gcompose
 export GENESIS_GCOMPOSE="$PWD/target/release/gcompose"
 cd ../Genesis-AIR
@@ -345,8 +346,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   output. The worker's optional clock field keeps its original 30 fps default for
   existing Genesis clients; fractional rates and long-timeline sync need more gates.
   The inspector
-  still exposes more controls than the renderer can apply; completing their mappings and
-  tests remains necessary before calling the editor fully functional.
+  still exposes parameter combinations and edit paths without complete media behavior;
+  completing those paths and tests remains necessary before calling the editor fully functional.
 - Captions use AIR's portable vector font in a fixed lower-third position; it currently
   covers printable ASCII. More typography and placement controls remain open.
 - AIR's editor converts source duration into the owning sequence's frame units, and the

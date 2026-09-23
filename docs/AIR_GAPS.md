@@ -5,9 +5,10 @@ something AIR could not express, the gap was recorded here first — with the sm
 file it belonged in, and a reproducer — and the application worked around it in a way that
 stayed visible to the person using it, rather than pretending the feature existed.
 
-The AIR gaps below are closed in the compatible AIR main SDK recorded by
-`air-sdk.conf`. This file records the original issues and their language-level fixes;
-renderer integration status lives in the main README.
+The AIR gaps below are closed in the compatible SDK checkout pinned by
+`air-sdk.conf` (`codex/genesis-frame-units` at `c62b9c95ab27`). This file records
+the original issues and their language-level fixes; current renderer acceptance
+status lives in [the control ledger](CONTROL_COVERAGE.md).
 
 ---
 
