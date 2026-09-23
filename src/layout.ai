@@ -59,6 +59,22 @@ pub fn ruler_height() -> f64 effects {} { 24.0 }
 pub fn status_height() -> f64 effects {} { 26.0 }
 pub fn tab_height() -> f64 effects {} { 26.0 }
 
+// Canvas pixels are physical pixels, while every panel and control below uses logical
+// coordinates. Keep the original 1x layout at ordinary window sizes and enlarge it
+// uniformly on dense, large desktops. Painting and input both use this one scale.
+pub fn ui_scale(width: f64, height: f64) -> f64 effects {} {
+  if width >= 3200.0 and height >= 1600.0 { return 2.0 }
+  if width >= 2400.0 and height >= 1250.0 { return 1.5 }
+  1.0
+}
+
+pub fn prompt_panel(width: f64, height: f64) -> Rect effects {} {
+  let span: f64 = if width < 680.0 { width - 32.0 } else { 648.0 }
+  let left: f64 = (width - span) * 0.5
+  let top: f64 = (height - 132.0) * 0.5
+  rect(left, top, left + span, top + 132.0)
+}
+
 pub fn frame(width: f64, height: f64) -> Frame effects {} {
   let menu_bottom: f64 = menu_height()
   let toolbar_bottom: f64 = menu_bottom + toolbar_height()

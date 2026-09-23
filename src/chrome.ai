@@ -944,7 +944,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
 
   cursor = heading(out, area, cursor, "CLIP")
   match editor.clip(doc, clip) {
-    none => { text_row(out, area, cursor, "no clip selected", "select a clip in the timeline") },
+    none => { cursor = text_row(out, area, cursor, "no clip selected", "select a clip in the timeline") },
     some(value) => {
       let source_name: string = editor.source_name(doc, value.source)
       cursor = text_row(out, area, cursor, "Name", str.view(source_name))

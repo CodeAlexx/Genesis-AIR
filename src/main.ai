@@ -27,6 +27,7 @@ import "app.ai" as app
 import "commands.ai" as commands
 import "chrome.ai" as chrome
 import "input.ai" as input
+import "layout.ai" as layout
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
 import "transport_clock.ai" as transport_clock
@@ -306,6 +307,62 @@ fn mix_audio(plan: timeline_media.AudioPlan own) -> result<bool, string>
   timeline_media.execute_audio_plan(owned)
 }
 
+// The desktop picker returns one path on stdout. `none` means it could not be
+// started, so the canvas path prompt remains available; an empty path means
+// the person cancelled the picker.
+fn choose_file(title: str, save: bool) -> option<string> effects {alloc, process} {
+  var argv: array<string> = [string.copy("zenity"), string.copy("--file-selection"),
+    string.copy("--title"), string.copy(title)]
+  if save { array.push(argv, string.copy("--save")) }
+  match proc.spawn_piped(argv) {
+    err(problem) => option.none(),
+    ok(opened) => {
+      var child: Child = opened
+      var lines: proc.LineReader = proc.line_reader(8192)
+      var selected: string = match proc.read_line(child, lines, proc.forever()) {
+        err(problem) => {
+          let _ = proc.close(child)
+          return option.none()
+        },
+        ok(line) => match line {
+          none => string.new(),
+          some(value) => value,
+        },
+      }
+      // Reading the path may finish before the chooser itself exits. Wait before
+      // closing its handle; close terminates a child that is still running.
+      let status: result<process.status, fs.error> = proc.wait(child, proc.forever())
+      let _ = proc.close(child)
+      match status {
+        err(problem) => option.none(),
+        ok(done) => {
+          if not proc.success(done) { return option.some(string.new()) }
+          option.some(selected)
+        },
+      }
+    },
+  }
+}
+
+fn commit_render_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var where: string = app.prompt_text(state)
+  app.end_prompt(state)
+  if str.len(str.view(where)) == 0 { return string.copy("cancelled") }
+  let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+  let rendered: result<unit, string> = if provider.available(struct.borrow(state, field=provider)) and
+      str.len(str.view(worker)) != 0 {
+    timeline_media.render(struct.borrow(state, field=document), str.view(worker), str.view(where))
+  } else { result.err("the gcompose worker is required for video export") }
+  match rendered {
+    ok(written) => {
+      var said: string = string.copy("wrote video ")
+      string.append(said, str.view(where))
+      said
+    },
+    err(problem) => problem,
+  }
+}
+
 fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
@@ -453,6 +510,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
     let box: gui.Rect = gui.window_size(window)
     let width: u32 = if box.width < 640 { 640 } else { box.width }
     let height: u32 = if box.height < 480 { 480 } else { box.height }
+    let physical_width: u64 = cast.wrap(width)
+    let physical_height: u64 = cast.wrap(height)
+    let ui_scale: f64 = layout.ui_scale(cast.float(physical_width),
+      cast.float(physical_height))
+    let logical_width: f64 = cast.float(physical_width) / ui_scale
+    let logical_height: f64 = cast.float(physical_height) / ui_scale
     if dirty {
       let _ = refresh_waveforms(state)
       var images: array<draw.Surface> = monitor_images(state, 320, 180)
@@ -462,9 +525,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
         none => { },
         some(target) => {
           var canvas: draw.Canvas = draw.canvas(target)
-          let w: u64 = cast.wrap(width)
-          let h: u64 = cast.wrap(height)
-          painter.paint(state, canvas, cast.float(w), cast.float(h), source_image, program_image)
+          draw.set_transform(canvas, draw.scale(ui_scale, ui_scale))
+          painter.paint(state, canvas, logical_width, logical_height,
+            source_image, program_image)
           var finished: draw.Surface = draw.finish(canvas)
           var pixels: bytes = draw.surface_rgb24(finished, draw.rgb(0, 0, 0))
           match gui.present(window, bytes.view(pixels), width, height) {
@@ -489,27 +552,58 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             PointerDown(point) => {
               let at_x: u64 = cast.wrap(point.x)
               let at_y: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(at_x)
-              pointer_y = cast.float(at_y)
-              let w: u64 = cast.wrap(width)
-              let h: u64 = cast.wrap(height)
-              var note: string = input.pointer_down(state, cast.float(w), cast.float(h),
+              pointer_x = cast.float(at_x) / ui_scale
+              pointer_y = cast.float(at_y) / ui_scale
+              let prior_prompt: u32 = if app.prompt_active(state) { app.prompt_action(state) }
+                else { 0 }
+              var note: string = input.pointer_down(state, logical_width, logical_height,
                 pointer_x, pointer_y)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              if app.prompt_active(state) and app.prompt_action(state) != prior_prompt and
+                  (app.prompt_action(state) == chrome.act_import() or
+                   app.prompt_action(state) == chrome.act_open() or
+                   app.prompt_action(state) == chrome.act_save() or
+                   app.prompt_action(state) == chrome.act_render() or
+                   app.prompt_action(state) == chrome.act_pool_relink()) {
+                let action: u32 = app.prompt_action(state)
+                let title: str = if action == chrome.act_import() { "Add media" }
+                  else if action == chrome.act_open() { "Open project" }
+                  else if action == chrome.act_save() { "Save project" }
+                  else if action == chrome.act_render() { "Export video" }
+                  else { "Relink media" }
+                let saving: bool = action == chrome.act_save() or action == chrome.act_render()
+                match choose_file(title, saving) {
+                  none => { },
+                  some(chosen) => {
+                    if str.len(str.view(chosen)) == 0 {
+                      app.end_prompt(state)
+                      app.set_status(state, "cancelled")
+                    } else {
+                      var label: string = app.prompt_label(state)
+                      app.begin_prompt(state, action, str.view(label), "")
+                      app.prompt_push(state, str.view(chosen))
+                      var result_note: string = if action == chrome.act_render() {
+                        commit_render_prompt(state)
+                      } else { input.commit_prompt(state) }
+                      if str.len(str.view(result_note)) != 0 {
+                        app.set_status(state, str.view(result_note))
+                      }
+                    }
+                  },
+                }
+              }
               dirty = true
             },
             PointerMove(point) => {
               let mx: u64 = cast.wrap(point.x)
               let my: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(mx)
-              pointer_y = cast.float(my)
-              let w: u64 = cast.wrap(width)
-              let h: u64 = cast.wrap(height)
-              if input.pointer_hover(state, cast.float(w), cast.float(h), pointer_x, pointer_y) {
+              pointer_x = cast.float(mx) / ui_scale
+              pointer_y = cast.float(my) / ui_scale
+              if input.pointer_hover(state, logical_width, logical_height, pointer_x, pointer_y) {
                 dirty = true
               }
               if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
-                var moving: string = input.pointer_move(state, cast.float(w), cast.float(h),
+                var moving: string = input.pointer_move(state, logical_width, logical_height,
                   pointer_x, pointer_y)
                 if str.len(str.view(moving)) != 0 {
                   app.set_status(state, str.view(moving))
@@ -518,12 +612,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               }
             },
             Scroll(wheel) => {
-              let w: u64 = cast.wrap(width)
-              let h: u64 = cast.wrap(height)
               let wheel_x: u64 = cast.wrap(wheel.x)
               let wheel_y: u64 = cast.wrap(wheel.y)
-              var note: string = input.wheel(state, cast.float(w), cast.float(h),
-                cast.float(wheel_x), cast.float(wheel_y),
+              var note: string = input.wheel(state, logical_width, logical_height,
+                cast.float(wheel_x) / ui_scale, cast.float(wheel_y) / ui_scale,
                 wheel.down, wheel.lines, control)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               dirty = true
@@ -534,23 +626,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               // The window owns the canvas, so a committed "render" prompt is performed
               // here rather than in the input layer.
               if input.prompt_is_render(state) and press.code == widgets.key_return() {
-                var where: string = app.prompt_text(state)
-                app.end_prompt(state)
-                if str.len(str.view(where)) == 0 {
-                  app.set_status(state, "cancelled")
-                } else {
-                  let worker: string = provider.worker_path(struct.borrow(state, field=provider))
-                  let rendered: result<unit, string> = if provider.available(struct.borrow(state, field=provider)) and
-                      str.len(str.view(worker)) != 0 {
-                    timeline_media.render(struct.borrow(state, field=document), str.view(worker), str.view(where))
-                  } else { result.err("the gcompose worker is required for video export") }
-                  match rendered {
-                    ok(written) => { var said: string = string.copy("wrote video ")
-                      string.append(said, str.view(where))
-                      app.set_status(state, str.view(said)) },
-                    err(problem) => { app.set_status(state, str.view(problem)) },
-                  }
-                }
+                var result_note: string = commit_render_prompt(state)
+                app.set_status(state, str.view(result_note))
               } else {
                 var note: string = input.key(state, press.code, press.control, press.shift)
                 if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
@@ -562,12 +639,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             PointerUp(point) => {
               let ux: u64 = cast.wrap(point.x)
               let uy: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(ux)
-              pointer_y = cast.float(uy)
+              pointer_x = cast.float(ux) / ui_scale
+              pointer_y = cast.float(uy) / ui_scale
               if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
-                let w: u64 = cast.wrap(width)
-                let h: u64 = cast.wrap(height)
-                var released: string = input.pointer_up(state, cast.float(w), cast.float(h),
+                var released: string = input.pointer_up(state, logical_width, logical_height,
                   pointer_x, pointer_y)
                 if str.len(str.view(released)) != 0 {
                   app.set_status(state, str.view(released))

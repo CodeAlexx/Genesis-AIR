@@ -466,6 +466,9 @@ pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
 pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
   let frame: layout.Frame = layout.frame(width, height)
+  if app.prompt_active(state) and layout.contains(layout.prompt_panel(width, height), x, y) {
+    return note("")
+  }
   app.set_focus(state, panel_at(width, height, x, y))
 
   // The open popup is topmost, followed by the menu headings themselves. A click elsewhere
@@ -714,8 +717,8 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
 // ---------------------------------------------------------------------------
 // The prompt
 //
-// The canvas window has no file dialog, so the actions that need a path ask for one on the
-// status line. The prompt remembers WHICH action it is collecting for, so a committed line
+// The path prompt is used for text values and as a fallback when the desktop file picker
+// is unavailable. It remembers WHICH action it is collecting for, so a committed line
 // cannot be routed to a different command than the one that opened it.
 
 pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {

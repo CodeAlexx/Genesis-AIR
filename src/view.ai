@@ -184,23 +184,11 @@ fn paint_monitor(canvas: ref<draw.Canvas>, colors: Theme, area: layout.Rect, tit
     let draw_h: f64 = cast.float(tall) * scale
     let left: f64 = area.left + 6.0 + (box_w - draw_w) * 0.5
     let top: f64 = view_top + (box_h - draw_h) * 0.5
-    var y: f64 = 0.0
-    loop {
-      if y >= draw_h { break }
-      var x: f64 = 0.0
-      loop {
-        if x >= draw_w { break }
-        let sx: u32 = cast.sat(x / scale)
-        let sy: u32 = cast.sat(y / scale)
-        match draw.surface_pixel(image, sx, sy) {
-          some(colour) => { let px: i64 = cast.sat(left + x)
-            let py: i64 = cast.sat(top + y)
-            draw.device_pixel(canvas, px, py, colour) },
-          none => { },
-        }
-        x = x + 1.0
-      }
-      y = y + 1.0
+    // draw_image follows the canvas transform. Writing device pixels directly
+    // would leave the video unscaled while the surrounding controls enlarge.
+    match geometry.rect(left, top, left + draw_w, top + draw_h) {
+      some(target) => draw.draw_image(canvas, image, target),
+      none => { },
     }
   }
   let bar_top: f64 = view_bottom + 6.0
@@ -393,8 +381,7 @@ fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                 area: layout.Rect) -> unit effects {alloc} {
   fill(canvas, area, colors.panel_head)
-  // While a prompt is open the status line IS the prompt, so there is never a doubt about
-  // where the next keystroke goes.
+  // Mirror the centered prompt in the status line so its current value stays visible.
   if app.prompt_active(state) {
     fill(canvas, area, draw.rgb(46, 40, 22))
     var asking: string = app.prompt_label(state)
@@ -426,6 +413,34 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     string.append(line, " clip(s) with an unverifiable source length")
   }
   label(canvas, 8.0, area.top + 6.0, str.view(line), type_title(), colors.text)
+  ()
+}
+
+fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+                width: f64, height: f64) -> unit effects {alloc} {
+  if not app.prompt_active(state) { return () }
+  let box: layout.Rect = layout.prompt_panel(width, height)
+  fill_at(canvas, box.left + 7.0, box.top + 7.0, box.right + 7.0,
+    box.bottom + 7.0, draw.rgb(8, 9, 12))
+  fill(canvas, box, colors.panel_head)
+  outline(canvas, box, colors.focus)
+  var title: string = app.prompt_label(state)
+  label(canvas, box.left + 18.0, box.top + 18.0, str.view(title), type_title(), colors.text)
+  let field: layout.Rect = layout.rect(box.left + 18.0, box.top + 48.0,
+    box.right - 18.0, box.top + 84.0)
+  fill(canvas, field, colors.background)
+  outline(canvas, field, colors.edge)
+  var whole: string = app.prompt_text(state)
+  let count: u64 = str.len(str.view(whole))
+  let capacity: u64 = fits(layout.width_of(field) - 24.0, type_body())
+  let first: u64 = if count > capacity { count - capacity } else { 0 }
+  var visible: string = string.copy(str.slice(str.view(whole), first, count))
+  label(canvas, field.left + 8.0, field.top + 11.0, str.view(visible),
+    type_body(), colors.text)
+  let caret: f64 = field.left + 10.0 + font.text_vector_width(str.view(visible), type_body())
+  fill_at(canvas, caret, field.top + 8.0, caret + 2.0, field.bottom - 7.0, colors.accent)
+  label(canvas, box.left + 18.0, box.bottom - 28.0,
+    "Enter to accept    Escape to cancel", type_small(), colors.dim)
   ()
 }
 
@@ -900,6 +915,7 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   // Menus are painted last because their popup deliberately overlays the toolbar and panels.
   var menu: array<chrome.Control> = chrome.menu_popup(frame, state)
   paint_controls(canvas, colors, menu)
+  paint_prompt(canvas, colors, state, width, height)
   app.count_paint(state)
   ()
 }

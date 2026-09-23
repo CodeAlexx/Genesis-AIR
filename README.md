@@ -145,11 +145,19 @@ build/genesis-air open PROJECT.air
 build/genesis-air new
 ```
 
+The window enlarges the editor canvas, text, controls, and pointer targets to 1.5× on
+large displays (at least 2400×1250) and 2× on 4K sized windows (at least
+3200×1600). Smaller windows retain the original 1× layout. This changes only the
+editor interface; project dimensions and exported video resolution stay as set in
+the project.
+
 The app looks for a source-built worker in the sibling `Genesis/target/release/gcompose`
 relative to its own executable, then searches `PATH` for `genesis-gcompose`.
 `GENESIS_GCOMPOSE` overrides discovery. `AIRC` / `AIR_HOME` override the AIR toolchain,
 `GENESIS_FAKE_PROVIDER=1` forces the deterministic provider, and `GENESIS_SCRATCH` sets
-the provider's scratch directory.
+the provider's scratch directory. On Linux, Add, Open, Save as, Export video, and Relink
+open the desktop file chooser through `zenity`. If it is unavailable, a centered path
+prompt remains usable from the keyboard.
 
 The window's **Export video** action now encodes an MP4. The headless `render` command still writes a
 PNG of the editor canvas for layout checks. Video export requires the worker and a `.mp4`
@@ -183,8 +191,8 @@ The `audio` command writes that exact mix for inspection.
 | Tab | next inspector tab |
 | Page Up / Page Down, wheel over the dock | scroll the inspector |
 
-Actions that need a path — Add, Open, Save-as, Render, Relink — open a prompt on the status
-line: type the path, Enter to accept, Escape to cancel. The canvas window has no file dialog.
+Text values and the file chooser fallback use a centered prompt: type the value, Enter to
+accept, Escape to cancel.
 
 ## The media provider seam
 
@@ -231,6 +239,10 @@ python3 tests/real_media.py --binary build/genesis-air \
 
 # Optional X11 Play/Pause canvas check (requires python-xlib and an X display).
 python3 tests/window_playback.py --binary build/genesis-air \
+  --stdlib /path/to/AIR/stdlib
+
+# Optional X11 file-chooser path check (uses a temporary picker stand-in).
+python3 tests/window_file_picker.py --binary build/genesis-air \
   --stdlib /path/to/AIR/stdlib
 
 # Optional X11 real-audio check (also requires paplay/aplay and a working audio server).
