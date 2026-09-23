@@ -5,6 +5,29 @@ document edit, saved/reloaded state, preview, export, and failure behavior agree
 UI gate proves hit testing and command dispatch in its representative panel states;
 state-dependent controls also need focused checks. It does not by itself prove media output.
 
+## Verified checkpoint (2026-09-22)
+
+The clean `codex/full-editor` tree at `7521aa5` passes the deterministic application gate:
+150 application facts, 594 inspector clicks across four tabs, no enabled-control overlap,
+and a saved canvas render. The generated-media gate passes with the Genesis worker at
+`2cf608c`: 24 and 30 fps sequences, audible exports, all 11 transition kinds, all 12 blend
+modes, Text/Timer, crop and mask transparency on upper clips, and the picture-effect pixel
+checks described below. These are focused outcomes, not acceptance of every exposed control.
+
+Reproduce after `./build.sh` with the worker branch `codex/air-raw-transition` in
+`CodeAlexx/Genesis-`:
+
+```sh
+python3 tests/run_tests.py --airc "$AIRC" --stdlib "$AIR_HOME/stdlib" \
+  --binary build/genesis-air
+python3 tests/real_media.py --binary build/genesis-air \
+  --worker "$GENESIS_GCOMPOSE" --stdlib "$AIR_HOME/stdlib"
+```
+
+The highest-impact remaining work is a real media implementation for Stabilize, parameter
+and animation measurements for mapped filters, Unicode text, nested sequences, live scrub
+audio, asynchronous export progress/cancel, and long-timeline audio/video sync.
+
 ## Video filters (31)
 
 | Status | Kinds | Remaining gate or implementation |

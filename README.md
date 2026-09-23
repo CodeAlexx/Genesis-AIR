@@ -151,8 +151,9 @@ relative to its own executable, then searches `PATH` for `genesis-gcompose`.
 the provider's scratch directory.
 
 The window's **Export video** action now encodes an MP4. The headless `render` command still writes a
-PNG of the editor canvas for layout checks. Video export requires the worker and currently
-requires a 30 fps sequence and a `.mp4` output path. Existing output files are refused, and an incomplete encode is
+PNG of the editor canvas for layout checks. Video export requires the worker and a `.mp4`
+output path. The sequence rate is sent to the worker; generated media checks cover 24 and
+30 fps sequences. Existing output files are refused, and an incomplete encode is
 removed on failure.
 Window Play mixes the audible timeline into a WAV through the same AIR resolver as export,
 then plays it through `paplay` or `aplay`; Pause, seek, and end stop the player. Audio
@@ -340,12 +341,12 @@ python3 tests/window_playback.py --binary build/genesis-air \
   tests remains necessary before calling the editor fully functional.
 - Captions use AIR's portable vector font in a fixed lower-third position; it currently
   covers printable ASCII. More typography and placement controls remain open.
-- The worker stamps frames on a fixed 30 fps timeline. Export rejects sequences with another
-  frame rate. AIR's editor now converts source duration into the owning sequence's frame
-  units, and the renderer samples native frames by the measured source rate. Preview and
-  export refuse a clip whose speed and length would read beyond its measured source, instead
-  of silently repeating its last picture frame. The generated 24-to-30 fps real-media gate
-  checks the final source frame, 30-frame export, and audible audio.
+- AIR's editor converts source duration into the owning sequence's frame units, and the
+  renderer samples native frames by the measured source rate. Preview and export refuse a
+  clip whose speed and length would read beyond its measured source, instead of silently
+  repeating its last picture frame. The generated 24-to-30 fps real-media gate checks the
+  final source frame, 30-frame export, and audible audio. The separate 24 fps sequence gate
+  checks nine exported frames and audio; fractional rates and long-timeline sync remain open.
 - The window runs export synchronously, so it does not repaint or accept cancellation during
   a long encode. The standalone `preview` and `export` commands support headless workflows.
 - The program Play control advances on a monotonic clock, skips frames after a slow paint,
