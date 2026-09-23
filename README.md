@@ -263,7 +263,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   keyed overlay pixels, Text and Timer previews and exports,
   export an audio-only timeline, verify a 24 fps source across a full 30 fps sequence
   second, write an audible playback WAV (including a spaced output
-  path), retime and reverse a rising tone, keep freeze-frame
+  path), export a nine-frame 24 fps sequence with audio,
+  retime and reverse a rising tone, keep freeze-frame
   audio silent, mix and pan a tone, apply picture and audio filters
   to the same clip, and reject an unsupported
   effect instead of silently dropping it.
@@ -300,7 +301,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   including titles on both sides of a crossfade. This requires a worker with RAW
   transition-partner support; the Genesis worker's
   [`cd6b40e`](https://github.com/CodeAlexx/Genesis-/commit/cd6b40e6e1003aea30fa81adc19dc9ee49b3bd50)
-  provides it.
+  provides it. The same branch at
+  [`ee398dc`](https://github.com/CodeAlexx/Genesis-/commit/ee398dc80514b8a97fdf6751f5263a5cc8717b12)
+  adds the optional timeline-rate field used for non-30 fps exports.
   Text currently accepts printable ASCII; other glyphs fail with an explicit message.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
@@ -312,6 +315,10 @@ python3 tests/window_playback.py --binary build/genesis-air \
   rate for source-frame selection, source bounds, and audio tempo. A generated 24 fps
   source at 2x has a 15-frame, audible export on a 30 fps sequence. Animated speed
   remains unsupported because a varying rate needs integrated source-time mapping.
+  Export passes the sequence frame rate to the worker's timeline clock. A generated
+  nine-frame 24 fps project checks stream rate, duration, preview/MP4 color, and audible
+  output. The worker's optional clock field keeps its original 30 fps default for
+  existing Genesis clients; fractional rates and long-timeline sync need more gates.
   The inspector
   still exposes more controls than the renderer can apply; completing their mappings and
   tests remains necessary before calling the editor fully functional.
@@ -336,7 +343,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
 Behavior oracle: [`CodeAlexx/Genesis-`](https://github.com/CodeAlexx/Genesis-) at
 `b732f1c246493f029b531d3941e759b8d912bda1`. The reusable editor behavior was
 already ported into AIR; this application consumes it rather than reimplementing it.
-The separate `gcompose` worker has one later change at `cd6b40e`: transition partners
-can use the same RAW frame input already accepted for base and overlay slots.
+The separate `gcompose` worker has two later changes through `ee398dc`: transition
+partners can use the same RAW frame input already accepted for base and overlay slots,
+and export can accept a timeline rate while preserving the legacy 30 fps default.
 `CodeAlexx/dif-inference` was consulted only for the `gcompose` wire; none of its server,
 browser, model-capability, job-queue or Comfy-compatibility code is here.

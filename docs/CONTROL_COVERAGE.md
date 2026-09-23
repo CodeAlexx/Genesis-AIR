@@ -30,7 +30,7 @@ time because that is what the worker filter implements.
 | Inspector and keyframes | Every control is clicked; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount has keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filters, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed ASCII caption cues appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Unicode glyphs, richer typography, and subtitle placement. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Asynchronous export progress/cancel, precise audio/video sync, live scrub sound. |
-| Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, and generated 24-to-30 fps preview/export/audio gate | Sequence export rates other than 30 fps. |
+| Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, a generated 24-to-30 fps preview/export/audio gate, and a 24 fps sequence preview/9-frame MP4/audio gate | More sequence rates, especially fractional rates, and long-timeline audio sync. |
 
 Keep this ledger with the implementation. Add a measured output assertion when closing a
 row; a document mutation or successful worker reply alone is insufficient.

@@ -195,6 +195,30 @@ def main():
         assert any(s["codec_type"] == "audio" for s in streams), streams
         assert audio_peak(movie) > 0.01, "exported audio is silent"
 
+        rate24 = json.loads(json.dumps(document))
+        rate24["sequences"][0]["fps"] = 24.0
+        rate24["clips"] = [rate24["clips"][0]]
+        rate24["clips"][0]["length"] = 9
+        rate24["program"]["mark_out"] = 9
+        rate24["filters"] = []
+        rate24["filter_params"] = []
+        rate24_project = root / "rate24.air"
+        rate24_project.write_text(json.dumps(rate24))
+        rate24_preview = root / "rate24.png"
+        rate24_movie = root / "rate24.mp4"
+        run([args.binary, "preview", rate24_preview, rate24_project], env)
+        run([args.binary, "export", rate24_movie, rate24_project], env)
+        rate24_probe = run(["ffprobe", "-v", "error", "-show_entries",
+                            "stream=codec_type,nb_frames,avg_frame_rate,duration",
+                            "-of", "json", rate24_movie])
+        rate24_streams = json.loads(rate24_probe.stdout)["streams"]
+        rate24_video = next(s for s in rate24_streams if s["codec_type"] == "video")
+        assert (rate24_video["avg_frame_rate"], int(rate24_video["nb_frames"])) == ("24/1", 9)
+        assert abs(float(rate24_video["duration"]) - 9 / 24) < 0.03
+        assert audio_peak(rate24_movie) > 0.01
+        assert max(abs(a - b) for a, b in zip(pixel(rate24_preview, 320, 180),
+                                              pixel(rate24_movie, 960, 540, True))) <= 15
+
         # The inspector's fade keyframes must change actual pixels in both
         # preview and MP4, even when the clip's stored fade is zero.
         fade_doc = json.loads(json.dumps(document))
@@ -958,7 +982,7 @@ def main():
               f"base opacity {base_color}; "
               f"mask center/edge {mask_center}/{mask_edge}, inverted "
               f"{inverse_center}/{inverse_edge}; "
-              f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
+              f"12 frames and 24 fps 9-frame AV, 2x speed filter (15-frame AV), graded overlays on two "
               f"and three layers, timed captions, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "

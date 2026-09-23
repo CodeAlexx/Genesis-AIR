@@ -1737,10 +1737,6 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
   }
   let sequence: ref<editor.Sequence> = array.borrow(struct.borrow(doc, field=sequences), sequence_slot)
   let fps: f64 = sequence.fps
-  // The current gcompose worker stamps ENC frames at its fixed 30 fps timeline rate.
-  if fps < 29.999 or fps > 30.001 {
-    return result.err("the gcompose worker requires a 30 fps sequence")
-  }
   let width: u32 = sequence.width
   let height: u32 = sequence.height
   if not (fps > 0.0) { return result.err("the sequence frame rate is invalid") }
@@ -1759,7 +1755,8 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
     string.from_int(fps_number), string.copy("1000"),
     string.copy("0"), string.copy("4000000"), string.copy("mpeg4"),
     string.from_float(cast.float(range.mark_out - range.mark_in) / fps),
-    string.copy("0"), string.copy("-"), string.copy("128000"), string.copy("aac")
+    string.copy("0"), string.copy("-"), string.copy("128000"), string.copy("aac"),
+    string.from_float(fps)
   ]
   let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
   var cache: RenderCache = RenderCache {subtitle: 0, validated_luts: array.new()}
