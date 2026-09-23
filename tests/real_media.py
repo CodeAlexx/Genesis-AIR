@@ -142,6 +142,38 @@ def main():
         assert 100 <= seen[0] <= 155 and seen[1] < 15 and 100 <= seen[2] <= 155, seen
         assert max(abs(a - b) for a, b in zip(seen, encoded)) <= 15, (seen, encoded)
 
+        # An upper clip's grade must affect that clip before blending. Brightening
+        # or darkening the finished composite would also change the red base.
+        graded_overlay = json.loads(json.dumps(document))
+        graded_overlay["filters"].append(dict(id=24, clip=10, kind="brightness",
+                                              order=1, enabled=True))
+        graded_overlay["filter_params"].append(dict(filter=24, name="level", value=0.0))
+        graded_overlay["next_id"] = 25
+        graded_project = root / "graded-overlay.air"
+        graded_project.write_text(json.dumps(graded_overlay))
+        graded_preview = root / "graded-overlay.png"
+        graded_movie = root / "graded-overlay.mp4"
+        run([args.binary, "preview", graded_preview, graded_project], env)
+        run([args.binary, "export", graded_movie, graded_project], env)
+        graded_color = pixel(graded_preview, 320, 180)
+        graded_encoded = pixel(graded_movie, 960, 540, True)
+        assert 100 <= graded_color[0] <= 155 and graded_color[2] < 20, graded_color
+        assert max(abs(a - b) for a, b in zip(graded_color, graded_encoded)) <= 15
+        overlay_mask = json.loads(json.dumps(document))
+        overlay_mask["filters"].append(dict(id=24, clip=10, kind="mask",
+                                            order=1, enabled=True))
+        overlay_mask["filter_params"].append(dict(filter=24, name="feather", value=0.1))
+        overlay_mask["next_id"] = 25
+        overlay_mask_project = root / "overlay-mask.air"
+        overlay_mask_project.write_text(json.dumps(overlay_mask))
+        overlay_mask_output = root / "overlay-mask.png"
+        rejected_mask = subprocess.run([str(args.binary), "preview", str(overlay_mask_output),
+                                        str(overlay_mask_project)], env=env,
+                                       capture_output=True, text=True, timeout=30)
+        assert rejected_mask.returncode != 0 and "overlay spatial effect needs per-clip transparency" in (
+            rejected_mask.stdout + rejected_mask.stderr)
+        assert not overlay_mask_output.exists()
+
         media = run(["ffprobe", "-v", "error", "-show_entries",
                      "stream=codec_type,nb_frames,width,height", "-of", "json",
                      movie])
@@ -459,6 +491,22 @@ def main():
         assert max(abs(a - b) for a, b in zip(third_preview, third_encoded)) <= 18, (
             third_preview, third_encoded)
         assert not list(root.rglob("*.layer*.rgba")), "layer fold left raw frames behind"
+        graded_top = json.loads(json.dumps(layered))
+        graded_top["filters"].append(dict(id=24, clip=22, kind="brightness",
+                                          order=1, enabled=True))
+        graded_top["filter_params"].append(dict(filter=24, name="level", value=0.0))
+        graded_top["next_id"] = 25
+        graded_top_project = root / "graded-top.air"
+        graded_top_project.write_text(json.dumps(graded_top))
+        graded_top_preview = root / "graded-top.png"
+        graded_top_movie = root / "graded-top.mp4"
+        run([args.binary, "preview", graded_top_preview, graded_top_project], env)
+        run([args.binary, "export", graded_top_movie, graded_top_project], env)
+        top_color = pixel(graded_top_preview, 320, 180)
+        top_encoded = pixel(graded_top_movie, 960, 540, True)
+        assert 45 <= top_color[0] <= 85 and top_color[1] < 20 and 45 <= top_color[2] <= 85, top_color
+        assert max(abs(a - b) for a, b in zip(top_color, top_encoded)) <= 18
+        assert not list(root.rglob("*.preclip.rgba")), "overlay prepass left raw frames behind"
 
         captioned = json.loads(json.dumps(layered))
         captioned["subtitles"] = [
@@ -601,7 +649,8 @@ def main():
               f"base opacity {base_color}; "
               f"mask center/edge {mask_center}/{mask_edge}, inverted "
               f"{inverse_center}/{inverse_edge}; "
-              f"12 frames, 2x speed filter (15-frame AV), three layers, timed captions, "
+              f"12 frames, 2x speed filter (15-frame AV), graded overlays on two "
+              f"and three layers, timed captions, "
               f"crossfade, reverse-speed audio, "
               f"graded picture/audio filters, audible AAC and "
               f"audio-only timeline; unsupported edit refused")

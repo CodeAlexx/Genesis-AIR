@@ -304,13 +304,19 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
 }
 
 fn filters(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<string>>,
-           overlay: bool, frame: i64) -> bool effects {alloc} {
+           overlay: bool, frame: i64, prepassed: bool) -> bool effects {alloc} {
   var index: u32 = 0
   loop {
     match editor.filter_at(doc, clip.id, index) {
       none => { break },
       some(filter) => {
-        if not apply_filter(doc, clip, values, filter, overlay, frame) { return false }
+        if not apply_filter(doc, clip, values, filter, overlay, frame) {
+          if not overlay or not prepassed { return false }
+          // A picture effect already ran on this clip before it was composited.
+          // Verify it is genuinely mapped there; an unknown kind must still fail.
+          var probe: array<string> = neutral()
+          if not apply_filter(doc, clip, probe, filter, false, frame) { return false }
+        }
       },
     }
     index = index + 1
@@ -442,7 +448,8 @@ fn wire_line(values: ref<array<string>>, kind: str, out: str) -> string effects 
 }
 
 fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
-                   strict: bool) -> result<string, string> effects {alloc} {
+                   strict: bool, override_clip: u64, override_path: str)
+                   -> result<string, string> effects {alloc} {
   var values: array<string> = neutral()
   var visible: u64 = 0
   var lanes: array<u64> = editor_view.lanes(doc, doc.active)
@@ -505,11 +512,13 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                 if not source_range_ok(doc, clip) {
                   return result.err("clip speed and length exceed its source frames")
                 }
-                let path: string = match source_path(doc, clip) {
-                  some(value) => value,
-                  none => { return result.err("a visible clip has no online video source") },
-                }
-                let source_at: i64 = source_frame(doc, clip, frame)
+                let prepassed: bool = clip.id == override_clip
+                let path: string = if prepassed { string.copy(override_path) }
+                  else { match source_path(doc, clip) {
+                    some(value) => value,
+                    none => { return result.err("a visible clip has no online video source") },
+                  } }
+                let source_at: i64 = if prepassed { 0 } else { source_frame(doc, clip, frame) }
                 let slot: u64 = if visible == 0 { 0 } else { 1 }
                 put(values, slot, str.view(provider.wire_path(str.view(path))))
                 put_i(values, if visible == 0 { 2 } else { 3 }, source_at)
@@ -522,7 +531,7 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                     editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) *
                     overlay_opacity(doc, clip, frame))
                 }
-                if not filters(doc, clip, values, visible == 1, frame) {
+                if not filters(doc, clip, values, visible == 1, frame, prepassed) {
                   return result.err("a visible clip uses an unsupported video filter")
                 }
                 visible = visible + 1
@@ -541,11 +550,60 @@ pub fn frame_line(doc: ref<editor.Document>, frame: i64, kind: str, out: str)
     some(id) => { return result.err("subtitles need a frame plan") },
     none => { },
   }
-  frame_line_core(doc, frame, kind, out, true)
+  frame_line_core(doc, frame, kind, out, true, 0, "")
 }
 
 fn layer_path(prefix: str, number: u64) -> string effects {alloc} {
   text.concat(prefix, if number == 0 { ".layer0.rgba" } else { ".layer1.rgba" })
+}
+
+fn preclip_path(prefix: str) -> string effects {alloc} {
+  text.concat(prefix, ".preclip.rgba")
+}
+
+// Prepare an upper clip's picture effects before it meets lower lanes. Overlay-only
+// controls run in the composition pass. The worker's mask, crop, and rotation
+// produce black pixels in cleared areas without transparent alpha. On an upper
+// clip those pixels would cover lower lanes, so refuse those cases.
+fn preclip_line(doc: ref<editor.Document>, clip: editor.Clip, frame: i64, out: str)
+                -> result<option<string>, string> effects {alloc} {
+  var values: array<string> = neutral()
+  var active: bool = false
+  var index: u32 = 0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => { break },
+      some(filter) => {
+        if editor.filter_enabled(doc, filter) {
+          let kind: string = editor.filter_kind(doc, filter)
+          if str.eq(str.view(kind), "mask") or str.eq(str.view(kind), "crop") or
+             str.eq(str.view(kind), "rotate") {
+            return result.err("an overlay spatial effect needs per-clip transparency")
+          }
+          if not chrome.is_audio_kind(str.view(kind)) and
+             not str.eq(str.view(kind), "speed") and
+             not str.eq(str.view(kind), "opacity") and
+             not str.eq(str.view(kind), "blend") and
+             not str.eq(str.view(kind), "size_position") and
+             not str.eq(str.view(kind), "chroma_key") {
+            if not apply_filter(doc, clip, values, filter, false, frame) {
+              return result.err("an upper clip uses an unsupported picture filter")
+            }
+            active = true
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  if not active { return result.ok(option.none()) }
+  let path: string = match source_path(doc, clip) {
+    some(value) => value,
+    none => { return result.err("an upper clip has no online video source") },
+  }
+  put(values, 0, str.view(provider.wire_path(str.view(path))))
+  put_i(values, 2, source_frame(doc, clip, frame))
+  result.ok(option.some(wire_line(values, "PREVIEW", out)))
 }
 
 // Fold visible lanes bottom to top. The worker accepts RAW: RGBA as a base, so each
@@ -567,12 +625,28 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
     at = at + 1
   }
   var lines: array<string> = array.new()
+  var override_clip: u64 = 0
+  var override_path: string = string.new()
+  if array.len(visible) >= 2 {
+    let upper: editor.Clip = array.get(visible, 1)
+    let raster: string = preclip_path(scratch_prefix)
+    match try preclip_line(doc, upper, frame, str.view(raster)) {
+      none => { },
+      some(line) => {
+        array.push(lines, line)
+        override_clip = upper.id
+        override_path = text.concat("RAW:", str.view(raster))
+      },
+    }
+  }
   if array.len(visible) <= 2 {
-    array.push(lines, try frame_line_core(doc, frame, kind, out, true))
+    array.push(lines, try frame_line_core(doc, frame, kind, out, true,
+      override_clip, str.view(override_path)))
     return result.ok(lines)
   }
   let first_out: string = layer_path(scratch_prefix, 0)
-  array.push(lines, try frame_line_core(doc, frame, "PREVIEW", str.view(first_out), false))
+  array.push(lines, try frame_line_core(doc, frame, "PREVIEW", str.view(first_out), false,
+    override_clip, str.view(override_path)))
   var layer: u64 = 2
   var previous: string = first_out
   loop {
@@ -595,19 +669,29 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
       }
       key_index = key_index + 1
     }
-    let path: string = match source_path(doc, clip) {
+    var path: string = match source_path(doc, clip) {
       some(value) => value,
       none => { return result.err("a visible clip has no online video source") },
+    }
+    var prepassed: bool = false
+    let raster: string = preclip_path(scratch_prefix)
+    match try preclip_line(doc, clip, frame, str.view(raster)) {
+      none => { },
+      some(line) => {
+        array.push(lines, line)
+        path = text.concat("RAW:", str.view(raster))
+        prepassed = true
+      },
     }
     var values: array<string> = neutral()
     var raw_base: string = text.concat("RAW:", str.view(previous))
     put(values, 0, str.view(provider.wire_path(str.view(raw_base))))
     put(values, 1, str.view(provider.wire_path(str.view(path))))
-    put_i(values, 3, source_frame(doc, clip, frame))
+    put_i(values, 3, if prepassed { 0 } else { source_frame(doc, clip, frame) })
     put_f(values, 4, fade(doc, clip, frame) *
       editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) *
       overlay_opacity(doc, clip, frame))
-    if not filters(doc, clip, values, true, frame) {
+    if not filters(doc, clip, values, true, frame, prepassed) {
       return result.err("a visible clip uses an unsupported video filter")
     }
     let last: bool = layer + 1 == array.len(visible)
@@ -699,6 +783,7 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
 pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
   let _ = files.remove(str.view(layer_path(prefix, 0)))
   let _ = files.remove(str.view(layer_path(prefix, 1)))
+  let _ = files.remove(str.view(preclip_path(prefix)))
   let _ = files.remove(str.view(subtitle_path(prefix)))
   let _ = files.remove(str.view(text.concat(prefix, ".base.rgba")))
   let _ = files.remove(str.view(text.concat(prefix, ".caption.rgba")))
