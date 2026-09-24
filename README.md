@@ -2,6 +2,8 @@
 
 A native non-linear video editor written in AIR.
 
+![Genesis AIR main editor](genesis-air-main.png)
+
 Genesis AIR **uses** AIR; it is not part of it. The application lives here, the language,
 compiler and toolkit live in their own repository, and no AIR source is copied into this
 project — [`air-sdk.conf`](air-sdk.conf) records which AIR commit it is built against and
@@ -69,6 +71,9 @@ time, drag within seven pixels of a clip edge to trim it. A whole drag is one un
 nothing is written until the pointer is released — and drops snap to neighbouring cuts when
 Snap is on.
 
+The right inspector scrolls under the pointer with the mouse wheel. Its scrollbar supports
+track clicks for page movement and direct thumb dragging; it does not depend on prior focus.
+
 All of it is driven by project state, saved to and loaded from the AIR editor project schema.
 
 The rule the whole application is built around:
@@ -101,7 +106,7 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 ## Build and run
 
 ```sh
-cd /home/alex/genesis-air
+cd Genesis-AIR
 ./build.sh                       # -> build/genesis-air
 ```
 
@@ -180,7 +185,7 @@ python3 tests/run_tests.py                                  # headless, no GPU n
 python3 tests/run_tests.py --media SMALL_CLIP.mp4           # adds the real gcompose smoke
 ```
 
-- **101 application facts** through the command layer with the fake provider: startup,
+- **116 application facts** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
   solo-wins, both transports, panel focus and pool/ruler clicks, keyboard commands, and
@@ -190,7 +195,7 @@ python3 tests/run_tests.py --media SMALL_CLIP.mp4           # adds the real gcom
   rather than two that happen to agree. The drag gesture is asserted to land as a single
   undo step, and the prompt is asserted to route a committed line to the action that opened
   it.
-- **453 control clicks** across the four inspector tabs. Every control the chrome builds is
+- **594 control clicks** across the four inspector tabs. Every control the chrome builds is
   clicked at the centre of the rectangle it was built with, and the resulting document and
   application state is diffed against a baseline. Two properties are asserted, and both catch
   bugs that a screenshot cannot show: **no two enabled controls in a panel may overlap** — an
@@ -204,15 +209,6 @@ python3 tests/run_tests.py --media SMALL_CLIP.mp4           # adds the real gcom
 A missing worker or fixture is reported **BLOCKED**, never passed.
 
 ## Known gaps
-
-Gaps in AIR itself — things this application wanted and the language or toolkit could not
-express — are recorded in [`docs/AIR_GAPS.md`](docs/AIR_GAPS.md) with the smallest fix, the
-file it belongs in and a reproducer. Each was recorded and worked around visibly BEFORE it
-was fixed; all three have since been closed in AIR, on the commit `air-sdk.conf` pins:
-`std.editor` gained `set_clip_speed`, `set_clip_reverse` and `reorder_track`, and
-`std.vector_font` was redrawn — all 95 printable ASCII glyphs, at the right proportions.
-
-Gaps in this application:
 
 - **The media worker is still invoked once per request.** `gcompose --serve` is designed to
   be driven over a long-lived pipe. When this project started AIR had no primitive for that;
@@ -232,9 +228,6 @@ Gaps in this application:
   the editor, not an encode of the timeline.
 - Zoom and pan live in this application (`app.Viewport`) because the AIR NLE toolkit records
   viewport policy as deliberately unported. If it proves generic it should be upstreamed.
-- The menu bar is drawn but not interactive; everything it would hold is on the toolbar, the
-  timeline toolbar or a key.
-
 ## Provenance
 
 Behavior oracle: [`CodeAlexx/Genesis-`](https://github.com/CodeAlexx/Genesis-) at

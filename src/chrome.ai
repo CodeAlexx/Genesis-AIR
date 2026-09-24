@@ -56,6 +56,7 @@ pub fn act_go_start() -> u32 effects {} { 11 }
 pub fn act_go_end() -> u32 effects {} { 12 }
 pub fn act_step_back() -> u32 effects {} { 13 }
 pub fn act_step_forward() -> u32 effects {} { 14 }
+pub fn act_quit() -> u32 effects {} { 15 }
 
 pub fn act_split() -> u32 effects {} { 20 }
 pub fn act_lift() -> u32 effects {} { 21 }
@@ -105,6 +106,9 @@ pub fn act_param_set() -> u32 effects {} { 82 }
 pub fn act_param_toggle() -> u32 effects {} { 83 }
 pub fn act_param_reset() -> u32 effects {} { 84 }
 pub fn act_param_key() -> u32 effects {} { 85 }
+
+pub fn act_menu() -> u32 effects {} { 90 }
+pub fn act_about() -> u32 effects {} { 91 }
 
 // ---------------------------------------------------------------------------
 
@@ -176,6 +180,131 @@ pub fn hit(controls: ref<array<Control>>, x: f64, y: f64) -> option<u64> effects
     index = index + 1
   }
   found
+}
+
+// ---------------------------------------------------------------------------
+// Mouse menus. The bar and its open popup are ordinary controls, so the same rectangles are
+// painted and hit-tested. Menu state is view state in `genesis.app`; choosing an item reuses
+// the same action vocabulary as the toolbar and keyboard.
+
+pub fn menu_none() -> u32 effects {} { 0 }
+pub fn menu_file() -> u32 effects {} { 1 }
+pub fn menu_edit() -> u32 effects {} { 2 }
+pub fn menu_view() -> u32 effects {} { 3 }
+pub fn menu_project() -> u32 effects {} { 4 }
+pub fn menu_help() -> u32 effects {} { 5 }
+
+pub fn menu_name(which: u32) -> string effects {alloc} {
+  if which == menu_file() { return string.copy("File") }
+  if which == menu_edit() { return string.copy("Edit") }
+  if which == menu_view() { return string.copy("View") }
+  if which == menu_project() { return string.copy("Project") }
+  if which == menu_help() { return string.copy("Help") }
+  string.new()
+}
+
+pub fn menu_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
+  var out: array<Control> = array.new()
+  let area: layout.Rect = frame.menu
+  let size: f64 = top_bar_type()
+  var left: f64 = area.left + 4.0
+  var which: u32 = menu_file()
+  loop {
+    if which > menu_help() { break }
+    let owned: string = menu_name(which)
+    let wide: f64 = font.text_vector_width(str.view(owned), size) + 18.0
+    let target: u64 = cast.wrap(which)
+    var made: Control = button(act_menu(), str.view(owned),
+      layout.rect(left, area.top + 2.0, left + wide, area.bottom),
+      app.open_menu(state) == which or app.hovered(state, act_menu(), target))
+    struct.set(made, style_tab(), field=style)
+    struct.set(made, target, field=target)
+    struct.set(made, size, field=size)
+    array.push(out, made)
+    left = left + wide
+    which = which + 1
+  }
+  out
+}
+
+fn menu_item(out: ref<array<Control>>, state: ref<app.App>, left: f64, top: f64, action: u32,
+             target: u64, label: str, on: bool) -> f64 effects {alloc} {
+  let height: f64 = 27.0
+  var made: Control = button(action, label,
+    layout.rect(left, top, left + 238.0, top + height),
+    on or app.hovered(state, action, target))
+  struct.set(made, target, field=target)
+  struct.set(made, top_bar_type(), field=size)
+  array.push(out, made)
+  top + height
+}
+
+pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
+  var out: array<Control> = array.new()
+  let which: u32 = app.open_menu(state)
+  if which == menu_none() { return out }
+
+  var left: f64 = frame.menu.left + 4.0
+  var headings: array<Control> = menu_bar(frame, state)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(headings) { break }
+    let entry: ref<Control> = array.borrow(headings, index)
+    if struct.get(entry, field=target) == cast.wrap(which) {
+      left = struct.get(struct.get(entry, field=area), field=left)
+      break
+    }
+    index = index + 1
+  }
+  let chosen_tab: u32 = app.dock_tab(state)
+  var top: f64 = frame.menu.bottom
+
+  if which == menu_file() {
+    top = menu_item(out, state, left, top, act_new(), 0, "New project", false)
+    top = menu_item(out, state, left, top, act_open(), 0, "Open project...", false)
+    top = menu_item(out, state, left, top, act_save(), 0, "Save project", app.dirty(state))
+    top = menu_item(out, state, left, top, act_import(), 0, "Import media...", false)
+    top = menu_item(out, state, left, top, act_render(), 0, "Render still...", false)
+    top = menu_item(out, state, left, top, act_quit(), 0, "Quit Genesis AIR", false)
+    return out
+  }
+  if which == menu_edit() {
+    top = menu_item(out, state, left, top, act_undo(), 0, "Undo", false)
+    top = menu_item(out, state, left, top, act_redo(), 0, "Redo", false)
+    top = menu_item(out, state, left, top, act_cut(), 0, "Cut selected clip", false)
+    top = menu_item(out, state, left, top, act_copy(), 0, "Copy selected clip", false)
+    top = menu_item(out, state, left, top, act_paste(), 0, "Paste at playhead", app.has_clipboard(state))
+    top = menu_item(out, state, left, top, act_split(), 0, "Split at playhead", false)
+    top = menu_item(out, state, left, top, act_lift(), 0, "Lift selected clip", false)
+    top = menu_item(out, state, left, top, act_ripple(), 0, "Ripple delete", false)
+    return out
+  }
+  if which == menu_view() {
+    top = menu_item(out, state, left, top, act_tab(), cast.wrap(tab_properties()),
+      "Properties panel", chosen_tab == tab_properties())
+    top = menu_item(out, state, left, top, act_tab(), cast.wrap(tab_filters()),
+      "Filters panel", chosen_tab == tab_filters())
+    top = menu_item(out, state, left, top, act_tab(), cast.wrap(tab_scopes()),
+      "Scopes panel", chosen_tab == tab_scopes())
+    top = menu_item(out, state, left, top, act_tab(), cast.wrap(tab_audio()),
+      "Audio panel", chosen_tab == tab_audio())
+    top = menu_item(out, state, left, top, act_zoom_in(), 0, "Zoom in", false)
+    top = menu_item(out, state, left, top, act_zoom_fit(), 0, "Fit timeline", false)
+    top = menu_item(out, state, left, top, act_zoom_out(), 0, "Zoom out", false)
+    top = menu_item(out, state, left, top, act_snap(), 0, "Snapping", app.snap(state))
+    return out
+  }
+  if which == menu_project() {
+    top = menu_item(out, state, left, top, act_add_video_track(), 0, "Add video track", false)
+    top = menu_item(out, state, left, top, act_add_audio_track(), 0, "Add audio track", false)
+    top = menu_item(out, state, left, top, act_marker(), 0, "Add marker", false)
+    top = menu_item(out, state, left, top, act_transition(), 0, "Add transition", false)
+    top = menu_item(out, state, left, top, act_group(), 0, "Group selection", false)
+    top = menu_item(out, state, left, top, act_razor_all(), 0, "Razor all tracks", false)
+    return out
+  }
+  let _ = menu_item(out, state, left, top, act_about(), 0, "About Genesis AIR", false)
+  out
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,4 +1346,36 @@ pub fn dock_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
   if which == tab_scopes() { return scopes_panel(frame, state) }
   if which == tab_audio() { return audio_panel(frame, state) }
   properties_panel(frame, state)
+}
+
+// Scrollbar geometry for the inspector. This is shared by painting and input just like every
+// other control rectangle in Genesis, so the visible thumb is exactly the draggable target.
+pub fn dock_scroll_track(frame: layout.Frame) -> layout.Rect effects {} {
+  layout.rect(frame.dock_body.right - 14.0, frame.dock_body.top,
+    frame.dock_body.right, frame.dock_body.bottom)
+}
+
+pub fn dock_scroll_max(frame: layout.Frame, state: ref<app.App>) -> f64 effects {alloc} {
+  if app.dock_tab(state) == tab_scopes() { return 0.0 }
+  var controls: array<Control> = dock_panel(frame, state)
+  let natural: f64 = panel_extent(controls, frame.dock_body) + app.dock_scroll(state)
+  let maximum: f64 = natural - layout.height_of(frame.dock_body)
+  if maximum > 0.0 { maximum } else { 0.0 }
+}
+
+pub fn dock_scroll_thumb(frame: layout.Frame, state: ref<app.App>) -> layout.Rect effects {alloc} {
+  let track: layout.Rect = dock_scroll_track(frame)
+  let visible: f64 = layout.height_of(track)
+  let maximum: f64 = dock_scroll_max(frame, state)
+  if maximum <= 0.0 { return track }
+  let natural: f64 = visible + maximum
+  var height: f64 = visible * visible / natural
+  if height < 32.0 { height = 32.0 }
+  if height > visible { height = visible }
+  let travel: f64 = visible - height
+  var value: f64 = app.dock_scroll(state)
+  if value < 0.0 { value = 0.0 }
+  if value > maximum { value = maximum }
+  let top: f64 = track.top + travel * value / maximum
+  layout.rect(track.left, top, track.right, top + height)
 }

@@ -10,8 +10,12 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck disable=SC1091
 . "$here/air-sdk.conf"
 
-AIRC=${AIRC:-$AIR_TOOLCHAIN/build-dev/bin/airc}
+case "$AIR_SDK" in /*) ;; *) AIR_SDK="$here/$AIR_SDK" ;; esac
+case "$AIR_TOOLCHAIN" in /*) ;; *) AIR_TOOLCHAIN="$here/$AIR_TOOLCHAIN" ;; esac
 AIR_HOME=${AIR_HOME:-$AIR_SDK}
+case "$AIR_HOME" in /*) ;; *) AIR_HOME="$here/$AIR_HOME" ;; esac
+AIRC=${AIRC:-$AIR_TOOLCHAIN/build-dev/bin/airc}
+case "$AIRC" in /*) ;; *) AIRC="$here/$AIRC" ;; esac
 export AIR_STDLIB="$AIR_HOME/stdlib"
 
 if [ ! -x "$AIRC" ]; then
