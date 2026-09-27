@@ -833,13 +833,21 @@ def main():
         title_doc["filters"].pop()
         title_doc["filter_params"].pop()
         title_doc["next_id"] = 12
-        title_doc["filter_text_params"][0]["value"] = "Café"
+        # Titles use TrueType faces with fallbacks, so accented, Cyrillic and CJK text render.
+        title_doc["filter_text_params"][0]["value"] = "Café Привет 日本"
+        title_project.write_text(json.dumps(title_doc))
+        unicode_title = root / "unicode-title.png"
+        run([args.binary, "preview", unicode_title, title_project], env)
+        assert len(light_points(unicode_title, (40, 130, 600, 230))) > len(title_points), \
+            "Unicode title drew less than the ASCII one"
+        title_doc["filter_text_params"][0]["value"] = "A\U0010FFFD"
         title_project.write_text(json.dumps(title_doc))
         unsupported_glyph = subprocess.run([str(args.binary), "preview",
-                                            str(root / "unicode-title.png"),
+                                            str(root / "missing-glyph.png"),
                                             str(title_project)], env=env,
                                            capture_output=True, text=True, timeout=30)
-        assert unsupported_glyph.returncode != 0 and "printable ASCII" in unsupported_glyph.stdout
+        assert unsupported_glyph.returncode != 0 and "U+10FFFD" in unsupported_glyph.stdout, \
+            unsupported_glyph.stdout
         title_doc["filter_text_params"][0]["value"] = "AIR"
         title_doc["filter_params"][1]["value"] = 0.5
         title_project.write_text(json.dumps(title_doc))
@@ -974,7 +982,7 @@ def main():
             dict(id=24, owner=captioned["active"], start=0, finish=6,
                  text="AIR caption"),
             dict(id=25, owner=captioned["active"], start=6, finish=12,
-                 text="NEXT caption"),
+                 text="Café — Привет 日本"),
         ]
         captioned["next_id"] = 26
         caption_project = root / "caption.air"

@@ -12,6 +12,7 @@ module genesis.app
 import std.editor as editor
 import std.editor_io as editor_io
 import "provider.ai" as provider
+import "typeface.ai" as typeface
 
 // The panels a keystroke can be aimed at. The filter stack, the properties column and the
 // mixer used to be panels of their own; they are tabs of the dock now, and `chrome` decides
@@ -91,7 +92,9 @@ pub type App = struct {
   dirty: bool,
   running: bool,
   frames_painted: u64,
-  waveforms: array<Waveform>
+  waveforms: array<Waveform>,
+  // TrueType faces for titles and captions, earliest first; later faces are fallbacks.
+  fonts: array<string>
 }
 
 pub fn viewport() -> Viewport effects {} {
@@ -117,7 +120,8 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, frames_painted: 0, waveforms: array.new()}
+    running: true, frames_painted: 0, waveforms: array.new(),
+    fonts: typeface.defaults()}
 }
 
 pub fn status(state: ref<App>) -> string effects {alloc} {
@@ -182,6 +186,11 @@ pub fn set_selected_filter(state: ref<App>, value: u64) -> unit effects {} {
 // ---- dock, snapping and the clipboard --------------------------------------
 
 pub fn dock_tab(state: ref<App>) -> u32 effects {} { state.dock_tab }
+pub fn set_fonts(state: ref<App>, paths: array<string> own) -> unit effects {alloc} {
+  let _ = struct.replace(state, paths, field=fonts)
+  ()
+}
+
 pub fn set_dock_tab(state: ref<App>, value: u32) -> unit effects {} {
   struct.set(state, if value > 3 { 0 } else { value }, field=dock_tab)
   struct.set(state, 0.0, field=dock_scroll)

@@ -158,7 +158,9 @@ The app looks for a source-built worker in the sibling `Genesis/target/release/g
 relative to its own executable, then searches `PATH` for `genesis-gcompose`.
 `GENESIS_GCOMPOSE` overrides discovery. `AIRC` / `AIR_HOME` override the AIR toolchain,
 `GENESIS_FAKE_PROVIDER=1` forces the deterministic provider, and `GENESIS_SCRATCH` sets
-the provider's scratch directory. On Linux, Add, Open, Save as, Export video, and Relink
+the provider's scratch directory. `GENESIS_FONT` lists TrueType faces (colon-separated
+`.ttf` paths) to use for titles and captions ahead of the system's DejaVu Sans and Droid
+Sans Fallback. On Linux, Add, Open, Save as, Export video, and Relink
 open the desktop file chooser through `zenity`. If it is unavailable, a centered path
 prompt remains usable from the keyboard.
 
@@ -331,7 +333,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   preview/MP4 pixels prove full-strength channel swapping; preview pixels prove a
   half-strength mix and clip-local Amount key endpoints. Missing or malformed LUT files
   fail with a specific message before a frame is rendered.
-  Text draws saved content with the vector font at keyed Size/X/Y coordinates;
+  Text draws saved content with TrueType faces through AIR's `std.font` at keyed Size/X/Y
+  coordinates, falling back across faces, so accented, Cyrillic and CJK text render;
   Timer draws the clip-local timecode with its Size setting. They render on base and
   upper clips, and the generated media gate compares their preview and MP4 pixels,
   including titles on both sides of a crossfade. This requires a worker with RAW
@@ -356,7 +359,7 @@ python3 tests/window_playback.py --binary build/genesis-air \
   correction. Generated media checks reduced jitter, keyed endpoints, upper-lane
   preview/MP4 agreement, and unchanged flat shots. The estimator handles translations
   within 24 output pixels; rotation, perspective, and longer camera paths need separate work.
-  Text currently accepts printable ASCII; other glyphs fail with an explicit message.
+  A character that no installed face covers fails with a message naming its code point.
   Mapped video filter parameters, base/overlay opacity, and picture fades use AIR's
   clip-local keyframes at the requested timeline frame. A generated-media gate checks
   a keyed fade from black to half-strength red and base-clip opacity in both PNG
@@ -374,8 +377,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
   The inspector
   still exposes parameter combinations and edit paths without complete media behavior;
   completing those paths and tests remains necessary before calling the editor fully functional.
-- Captions use AIR's portable vector font in a fixed lower-third position; it currently
-  covers printable ASCII. More typography and placement controls remain open.
+- Captions use the same TrueType faces in a fixed lower-third position. There is no
+  shaping, so scripts that need it (Arabic, Indic) and right-to-left text are not laid out
+  correctly. More typography and placement controls remain open.
 - AIR's editor converts source duration into the owning sequence's frame units, and the
   renderer samples native frames by the measured source rate. Preview and export refuse a
   clip whose speed and length would read beyond its measured source, instead of silently

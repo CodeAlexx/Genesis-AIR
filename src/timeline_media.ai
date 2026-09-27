@@ -11,9 +11,10 @@ import std.path as path
 import std.process as proc
 import std.text as text
 import std.timeline as timeline
-import std.vector_font as font
+import std.font as font
 import "chrome.ai" as chrome
 import "provider.ai" as provider
+import "typeface.ai" as typeface
 
 type SourceInfo = struct {path: string, frames: i64, fps: f64, audio: bool, online: bool}
 
@@ -777,29 +778,9 @@ fn text_clip_path(prefix: str, slot: u64) -> string effects {alloc} {
   scratch_variant(prefix, ".textclip", slot)
 }
 
-fn draw_label(canvas: ref<draw.Canvas>, x: f64, y: f64, content: str, size: f64)
-              -> unit effects {alloc} {
-  font.draw_text_filled(canvas, x + 2.0, y + 2.0, content,
-    draw.rgb(0, 0, 0), size, 3.0)
-  font.draw_text_filled(canvas, x, y, content,
-    draw.rgb(255, 255, 255), size, 3.0)
-}
-
-fn vector_text_supported(content: str) -> bool effects {} {
-  var index: u64 = 0
-  loop {
-    if index >= str.len(content) { break }
-    let byte_value: byte = view.get(str.bytes(content), index)
-    let code: u8 = cast.bits(byte_value)
-    if code != 10 and (code < 32 or code > 126) { return false }
-    index = index + 1
-  }
-  true
-}
-
 fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
-                    prefix: str, slot: u64)
-                    -> result<option<string>, string> effects {alloc, fs.write} {
+                    prefix: str, slot: u64, cache: ref<RenderCache>)
+                    -> result<option<string>, string> effects {alloc, fs.meta, fs.read, fs.write} {
   var present: bool = false
   var index: u32 = 0
   loop {
@@ -844,9 +825,8 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
               timeline.timecode(frame - clip.start, editor.sequence_fps(doc, doc.active))
             } else { editor.filter_text_param(doc, filter, "content", "") }
             if str.len(str.view(content)) != 0 {
-              if not vector_text_supported(str.view(content)) {
-                return result.err("text filter currently supports printable ASCII")
-              }
+              let _ = try title_font(cache, size)
+              let typeface_ref: ref<font.Font> = struct.borrow(cache, field=title)
               let x_value: f64 = if str.eq(str.view(kind), "timer") { 0.0 }
                 else { filter_value(doc, clip, filter, str.view(kind), frame, "x", 0.0) }
               let y_value: f64 = if str.eq(str.view(kind), "timer") { 0.0 }
@@ -859,13 +839,13 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
               loop {
                 if row >= array.len(rows) { break }
                 let line: str = str.view(array.borrow(rows, row))
+                let _ = try typeface.covered(typeface_ref, line)
                 let x: f64 = if str.eq(str.view(kind), "timer") { 40.0 }
-                  else { 640.0 + 640.0 * x_value -
-                    font.text_vector_width(line, size) * 0.5 }
+                  else { 640.0 + 640.0 * x_value - font.measure(typeface_ref, line) * 0.5 }
                 let y: f64 = if str.eq(str.view(kind), "timer") {
                   40.0 + cast.float(row) * size * 1.3
                 } else { 428.0 + 428.0 * y_value + cast.float(row) * size * 1.3 }
-                draw_label(canvas, x, y, line, size)
+                typeface.draw_label(canvas, typeface_ref, x, y, line, size)
                 row = row + 1
               }
             }
@@ -886,9 +866,9 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
 }
 
 fn text_clip_plan(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
-                  prefix: str, slot: u64, upper: bool)
-                  -> result<option<PreparedClip>, string> effects {alloc, fs.write} {
-  let title: string = match try raster_clip_text(doc, clip, frame, prefix, slot) {
+                  prefix: str, slot: u64, upper: bool, cache: ref<RenderCache>)
+                  -> result<option<PreparedClip>, string> effects {alloc, fs.meta, fs.read, fs.write} {
+  let title: string = match try raster_clip_text(doc, clip, frame, prefix, slot, cache) {
     none => { return result.ok(option.none()) }, some(value) => value,
   }
   var lines: array<string> = array.new()
@@ -931,7 +911,8 @@ fn append_plan(lines: ref<array<string>>, prepared: ref<PreparedClip>) -> unit e
 // Fold visible lanes bottom to top. The worker accepts RAW: RGBA as a base, so each
 // PREVIEW output becomes the next input. ENC then consumes the completed raw frame.
 fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
-              scratch_prefix: str) -> result<array<string>, string> effects {alloc, fs.write} {
+              scratch_prefix: str, cache: ref<RenderCache>)
+              -> result<array<string>, string> effects {alloc, fs.meta, fs.read, fs.write} {
   var visible: array<editor.Clip> = array.new()
   var lanes: array<u64> = editor_view.lanes(doc, doc.active)
   var at: u64 = 0
@@ -952,7 +933,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   var incoming_override: string = string.new()
   if array.len(visible) >= 1 {
     let base: editor.Clip = array.get(visible, 0)
-    match try text_clip_plan(doc, base, frame, scratch_prefix, 0, false) {
+    match try text_clip_plan(doc, base, frame, scratch_prefix, 0, false, cache) {
       none => { },
       some(value) => { var prepared: PreparedClip = value
         base_override = string.copy(str.view(prepared.path))
@@ -961,7 +942,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   }
   if array.len(visible) >= 2 {
     let upper: editor.Clip = array.get(visible, 1)
-    match try text_clip_plan(doc, upper, frame, scratch_prefix, 1, true) {
+    match try text_clip_plan(doc, upper, frame, scratch_prefix, 1, true, cache) {
       some(value) => { var prepared: PreparedClip = value
         upper_override = string.copy(str.view(prepared.path))
         append_plan(lines, prepared) },
@@ -991,7 +972,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
           some(value) => value,
         }
         let incoming: editor.Clip = pair.incoming
-        match try text_clip_plan(doc, incoming, frame, scratch_prefix, 3, false) {
+        match try text_clip_plan(doc, incoming, frame, scratch_prefix, 3, false, cache) {
           some(value) => { var prepared: PreparedClip = value
             incoming_override = string.copy(str.view(prepared.path))
             append_plan(lines, prepared) },
@@ -1044,7 +1025,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
       none => { return result.err("a visible clip has no online video source") },
     }
     var prepassed: bool = false
-    match try text_clip_plan(doc, clip, frame, scratch_prefix, 2, true) {
+    match try text_clip_plan(doc, clip, frame, scratch_prefix, 2, true, cache) {
       some(value) => { var prepared: PreparedClip = value
         path = string.copy(str.view(prepared.path))
         append_plan(lines, prepared)
@@ -1088,7 +1069,49 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   result.ok(lines)
 }
 
-pub type RenderCache = struct {subtitle: u64, validated_luts: array<string>}
+// What one preview or export reuses between frames. Fonts are rebuilt only when their pixel
+// size changes (a two-face load is under 2 ms, so an animated size stays cheap).
+pub type RenderCache = struct {
+  subtitle: u64,
+  validated_luts: array<string>,
+  fonts: array<string>,
+  title_px: u64,
+  title: font.Font,
+  caption_px: u64,
+  caption: font.Font
+}
+
+pub fn render_cache(fonts: ref<array<string>>) -> RenderCache effects {alloc} {
+  var paths: array<string> = array.new()
+  var i: u64 = 0
+  loop {
+    if i >= array.len(fonts) { break }
+    array.push(paths, string.copy(str.view(array.borrow(fonts, i))))
+    i = i + 1
+  }
+  RenderCache {subtitle: 0, validated_luts: array.new(), fonts: paths,
+    title_px: 0, title: font.new(1), caption_px: 0, caption: font.new(1)}
+}
+
+fn title_font(cache: ref<RenderCache>, cap_height: f64) -> result<unit, string>
+              effects {alloc, fs.meta, fs.read} {
+  let px: u64 = typeface.px_for(cap_height)
+  if cache.title_px == px { return result.ok(()) }
+  let loaded: font.Font = try typeface.load(struct.borrow(cache, field=fonts), px)
+  let _ = struct.replace(cache, loaded, field=title)
+  struct.set(cache, px, field=title_px)
+  result.ok(())
+}
+
+fn caption_font(cache: ref<RenderCache>, cap_height: f64) -> result<unit, string>
+                effects {alloc, fs.meta, fs.read} {
+  let px: u64 = typeface.px_for(cap_height)
+  if cache.caption_px == px { return result.ok(()) }
+  let loaded: font.Font = try typeface.load(struct.borrow(cache, field=fonts), px)
+  let _ = struct.replace(cache, loaded, field=caption)
+  struct.set(cache, px, field=caption_px)
+  result.ok(())
+}
 
 fn cube_fields(line: str) -> array<string> effects {alloc} {
   let spaced: string = text.replace(line, "\t", " ")
@@ -1227,7 +1250,7 @@ fn subtitle_path(prefix: str) -> string effects {alloc} {
 }
 
 fn raster_subtitle(doc: ref<editor.Document>, id: u64, prefix: str,
-                   cache: ref<RenderCache>) -> result<string, string> effects {alloc, fs.write} {
+                   cache: ref<RenderCache>) -> result<string, string> effects {alloc, fs.meta, fs.read, fs.write} {
   let raster_file: string = subtitle_path(prefix)
   if cache.subtitle == id { return result.ok(raster_file) }
   match files.mkdirs(str.view(path.dirname(prefix))) {
@@ -1242,15 +1265,15 @@ fn raster_subtitle(doc: ref<editor.Document>, id: u64, prefix: str,
   draw.clear(canvas, draw.transparent())
   let caption: string = editor.subtitle_text(doc, id)
   var rows: array<string> = text.split(str.view(caption), "\n")
+  let _ = try caption_font(cache, 44.0)
+  let typeface_ref: ref<font.Font> = struct.borrow(cache, field=caption)
   var at: u64 = 0
   loop {
     if at >= array.len(rows) { break }
     let line: str = str.view(array.borrow(rows, at))
+    let _ = try typeface.covered(typeface_ref, line)
     let y: f64 = 720.0 + cast.float(at) * 48.0
-    font.draw_text_filled(canvas, 154.0 + 2.0, y + 2.0, line,
-      draw.rgb(0, 0, 0), 44.0, 3.0)
-    font.draw_text_filled(canvas, 154.0, y, line,
-      draw.rgb(255, 255, 255), 44.0, 3.0)
+    typeface.draw_label(canvas, typeface_ref, 154.0, y, line, 44.0)
     at = at + 1
   }
   var finished: draw.Surface = draw.finish(canvas)
@@ -1270,9 +1293,9 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   let subtitle: u64 = match editor.subtitle_at(doc, doc.active, frame) {
     none => 0, some(id) => id,
   }
-  if subtitle == 0 { return media_plan(doc, frame, kind, out, scratch_prefix) }
+  if subtitle == 0 { return media_plan(doc, frame, kind, out, scratch_prefix, cache) }
   let base: string = text.concat(scratch_prefix, ".base.rgba")
-  var lines: array<string> = try media_plan(doc, frame, "PREVIEW", str.view(base), scratch_prefix)
+  var lines: array<string> = try media_plan(doc, frame, "PREVIEW", str.view(base), scratch_prefix, cache)
   let caption: string = try raster_subtitle(doc, subtitle, scratch_prefix, cache)
   var values: array<string> = neutral()
   let raw_base: string = text.concat("RAW:", str.view(base))
@@ -1773,7 +1796,7 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
   }
 }
 
-fn render_into(doc: ref<editor.Document>, worker: str, output: str)
+fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>)
                -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let range: editor.Transport = editor.export_range(doc)
   if range.mark_out <= range.mark_in { return result.err("the export range is empty") }
@@ -1805,7 +1828,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
     string.from_float(fps)
   ]
   let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
-  var cache: RenderCache = RenderCache {subtitle: 0, validated_luts: array.new()}
+  var cache: RenderCache = render_cache(fonts)
   var frame: i64 = range.mark_in
   loop {
     if frame >= range.mark_out { break }
@@ -1844,7 +1867,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str)
   result.ok(())
 }
 
-pub fn render(doc: ref<editor.Document>, worker: str, output: str)
+pub fn render(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>)
               -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if not text.ends_with(output, ".mp4") {
     return result.err("video export needs a .mp4 output path")
@@ -1858,7 +1881,7 @@ pub fn render(doc: ref<editor.Document>, worker: str, output: str)
     ok(found) => { if found { return result.err(string.copy("an unfinished output already exists")) } },
     err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
   }
-  match render_into(doc, worker, str.view(partial)) {
+  match render_into(doc, worker, str.view(partial), fonts) {
     err(problem) => {
       cleanup_plan(str.view(partial))
       let _ = files.remove(str.view(partial))

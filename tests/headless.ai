@@ -681,8 +681,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   }
   let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "AIR")
   let title_scratch: string = text.concat(scratch, "/title-plan")
-  var title_cache: timeline_media.RenderCache = timeline_media.RenderCache {
-    subtitle: 0, validated_luts: array.new()}
+  var title_cache: timeline_media.RenderCache = timeline_media.render_cache(
+    struct.borrow(state, field=fonts))
   match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
     str.view(title_scratch), title_cache) {
     err(problem) => { emit_b("title_plan_stages", false) },
@@ -709,12 +709,19 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       emit_b("title_grade_once", pre_level == -0.5 and final_level == 0.0) },
   }
   timeline_media.cleanup_plan(str.view(title_scratch))
-  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "Café")
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "Café Привет 日本")
   match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
     str.view(title_scratch), title_cache) {
-    err(problem) => { emit_b("title_nonascii_refused",
-      text.contains(str.view(problem), "printable ASCII")) },
-    ok(lines) => { emit_b("title_nonascii_refused", false) },
+    err(problem) => { emit_b("title_unicode_planned", false) },
+    ok(lines) => { emit_b("title_unicode_planned", true) },
+  }
+  timeline_media.cleanup_plan(str.view(title_scratch))
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "A􏿽")
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_missing_glyph_refused",
+      text.contains(str.view(problem), "U+10FFFD")) },
+    ok(lines) => { emit_b("title_missing_glyph_refused", false) },
   }
   var transition_doc: editor.Document = editor.document(30.0, 640, 360)
   let transition_owner: u64 = transition_doc.active

@@ -24,6 +24,7 @@ import std.text as text
 import std.time as clock
 import std.widgets as widgets
 import "app.ai" as app
+import "typeface.ai" as typeface
 import "commands.ai" as commands
 import "chrome.ai" as chrome
 import "input.ai" as input
@@ -134,8 +135,8 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
   var program: provider.Frame = if struct.get(struct.borrow(state, field=provider), field=kind) ==
       provider.kind_gcompose() {
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
-    var frame_cache: timeline_media.RenderCache = timeline_media.RenderCache {
-      subtitle: 0, validated_luts: array.new()}
+    var frame_cache: timeline_media.RenderCache = timeline_media.render_cache(
+      struct.borrow(state, field=fonts))
     match timeline_media.frame_plan(document, program_frame, "PREVIEW", str.view(output),
       str.view(output), frame_cache) {
       ok(plan_lines) => {
@@ -351,7 +352,8 @@ fn commit_render_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, 
   let worker: string = provider.worker_path(struct.borrow(state, field=provider))
   let rendered: result<unit, string> = if provider.available(struct.borrow(state, field=provider)) and
       str.len(str.view(worker)) != 0 {
-    timeline_media.render(struct.borrow(state, field=document), str.view(worker), str.view(where))
+    timeline_media.render(struct.borrow(state, field=document), str.view(worker), str.view(where),
+      struct.borrow(state, field=fonts))
   } else { result.err("the gcompose worker is required for video export") }
   match rendered {
     ok(written) => {
@@ -683,6 +685,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   match env.get("GENESIS_SCRATCH") { some(value) => { scratch = value }, none => { }, }
   var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
   var state: app.App = app.app(engine)
+  app.set_fonts(state, typeface.search_paths())
   // Which inspector tab a headless render shows, so every panel is checkable without a
   // screen. The window path starts on Properties like any other launch.
   match env.get("GENESIS_TAB") {
@@ -723,7 +726,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       return 1
     }
     let worker: string = provider.worker_path(struct.borrow(state, field=provider))
-    match timeline_media.render(struct.borrow(state, field=document), str.view(worker), view.get(args, 2)) {
+    match timeline_media.render(struct.borrow(state, field=document), str.view(worker), view.get(args, 2),
+        struct.borrow(state, field=fonts)) {
       ok(_) => { say("Genesis AIR video written")
         return 0 },
       err(problem) => { say(str.view(problem))
@@ -770,8 +774,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     }
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
     let frame: i64 = editor.playhead(struct.borrow(state, field=document))
-    var frame_cache: timeline_media.RenderCache = timeline_media.RenderCache {
-      subtitle: 0, validated_luts: array.new()}
+    var frame_cache: timeline_media.RenderCache = timeline_media.render_cache(
+      struct.borrow(state, field=fonts))
     var plan: array<string> = match timeline_media.frame_plan(struct.borrow(state, field=document),
       frame, "PREVIEW", str.view(output), str.view(output), frame_cache) {
       ok(value) => value,
