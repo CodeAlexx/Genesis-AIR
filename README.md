@@ -112,6 +112,19 @@ cd Genesis-AIR
 ./build.sh                       # -> build/genesis-air
 ```
 
+On Windows, point the build at the separate AIR Windows checkout. The AIR compiler emits
+the application C source and MSVC links it with the native Win32/Direct2D adapter:
+
+```powershell
+.\build-windows.ps1 -AirSdk C:\path\to\AIR-windows-native
+# -> build-windows\Genesis-AIR.exe; also runs a deterministic render smoke
+
+.\build-windows.ps1 -AirSdk C:\path\to\AIR-windows-native -Launch
+```
+
+`AIR_HOME` can provide the checkout path instead of `-AirSdk`. Application and toolkit
+remain separate repositories; this script copies no AIR source into Genesis.
+
 ```sh
 # headless: paint one frame of a project
 build/genesis-air render OUT.png [PROJECT.air]

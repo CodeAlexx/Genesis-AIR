@@ -251,6 +251,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
         none => { },
         some(signal) => {
           match signal {
+            Tick => { },
             PointerDown(point) => {
               let at_x: u64 = cast.wrap(point.x)
               let at_y: u64 = cast.wrap(point.y)
@@ -262,6 +263,22 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
                 pointer_x, pointer_y)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               dirty = true
+            },
+            PointerUp(point) => {
+              let ux: u64 = cast.wrap(point.x)
+              let uy: u64 = cast.wrap(point.y)
+              pointer_x = cast.float(ux)
+              pointer_y = cast.float(uy)
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
+                let w: u64 = cast.wrap(width)
+                let h: u64 = cast.wrap(height)
+                var released: string = input.pointer_up(state, cast.float(w), cast.float(h),
+                  pointer_x, pointer_y)
+                if str.len(str.view(released)) != 0 {
+                  app.set_status(state, str.view(released))
+                }
+                dirty = true
+              }
             },
             PointerMove(point) => {
               let mx: u64 = cast.wrap(point.x)
@@ -317,26 +334,18 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               }
               dirty = true
             },
-            Resize(extent) => { dirty = true },
-            Tick => { },
-            PointerUp(point) => {
-              let ux: u64 = cast.wrap(point.x)
-              let uy: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(ux)
-              pointer_y = cast.float(uy)
-              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
-                let w: u64 = cast.wrap(width)
-                let h: u64 = cast.wrap(height)
-                var released: string = input.pointer_up(state, cast.float(w), cast.float(h),
-                  pointer_x, pointer_y)
-                if str.len(str.view(released)) != 0 {
-                  app.set_status(state, str.view(released))
-                }
-                dirty = true
-              }
+            Text(entry) => {
+              var note: string = input.text(state, entry)
+              if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              dirty = true
             },
-            Text(entry) => { },
+            Resize(extent) => { dirty = true },
             Progress(step) => { },
+            MenuAccess(code) => {
+              var note: string = input.menu_access(state, code)
+              if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              dirty = true
+            },
           }
         },
       }

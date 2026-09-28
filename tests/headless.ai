@@ -494,9 +494,13 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   // opened it rather than to whatever is focused now.
   app.begin_prompt(state, chrome.act_save(), "Save project as", "")
   emit_b("prompt_open", app.prompt_active(state))
-  let _ = input.key(state, 47, false, false)
-  let _ = input.key(state, 97, false, false)
+  let _ = input.text(state, 47)
+  let _ = input.text(state, 97)
   emit_b("prompt_takes_text", str.len(str.view(app.prompt_text(state))) != 0)
+  let _ = input.text(state, 233)
+  emit_b("prompt_takes_unicode", str.eq(str.view(app.prompt_text(state)), "/aé"))
+  let _ = input.menu_access(state, 102)
+  emit_b("menu_access_opens_file", app.open_menu(state) == chrome.menu_file())
   let _ = input.key(state, 65307, false, false)
   emit_b("prompt_escapes", not app.prompt_active(state))
 

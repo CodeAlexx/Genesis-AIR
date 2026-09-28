@@ -12,6 +12,7 @@ import std.editor as editor
 import std.math as math
 import std.editor_view as editor_view
 import std.timeline as timeline
+import std.unicode as unicode
 import std.widgets as widgets
 import "app.ai" as app
 import "chrome.ai" as chrome
@@ -20,19 +21,6 @@ import "layout.ai" as layout
 import "view.ai" as painter
 
 fn note(text: str) -> string effects {alloc} { string.copy(text) }
-
-// One printable ASCII character as an owned string. The `str` from `str.from_bytes` borrows
-// the byte array, so it is copied while that array is still alive.
-fn character(code: u32) -> string effects {alloc} {
-  if code < 32 or code > 126 { return string.new() }
-  var out: array<byte> = []
-  let small: u8 = cast.sat(code)
-  array.push(out, cast.bits(small))
-  match str.from_bytes(array.view(out)) {
-    some(text) => string.copy(text),
-    none => string.new(),
-  }
-}
 
 // Which panel a point belongs to, so a keystroke reaches the panel a person is pointing at.
 pub fn panel_at(width: f64, height: f64, x: f64, y: f64) -> u32 effects {} {
@@ -758,8 +746,6 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
       return note("")
     }
     if code == widgets.key_return() { return commit_prompt(state) }
-    var typed: string = character(code)
-    if str.len(str.view(typed)) != 0 { app.prompt_push(state, str.view(typed)) }
     return note("")
   }
 
@@ -873,9 +859,32 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
   note("")
 }
 
-// Printable text, which belongs to the prompt when one is open.
-pub fn text(state: ref<app.App>, entry: str) -> string effects {alloc} {
+// Committed text is separate from physical key presses on both X11 and Win32. Keeping it
+// here accepts IME/Unicode input and avoids entering every ASCII character twice on hosts
+// that deliver a key-down followed by a text event.
+pub fn text(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
   if not app.prompt_active(state) { return note("") }
-  app.prompt_push(state, entry)
+  var raw: array<byte> = unicode.encode(scalar)
+  match str.from_bytes(array.view(raw)) {
+    some(entry) => { app.prompt_push(state, entry) },
+    none => { },
+  }
   note("")
+}
+
+// Open a custom menu from the host's Alt+letter access event. The same operation is used
+// on Linux and Windows; only the adapter that produces MenuAccess differs.
+pub fn menu_access(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
+  var which: u32 = chrome.menu_none()
+  if scalar == 70 or scalar == 102 { which = chrome.menu_file() }
+  else if scalar == 69 or scalar == 101 { which = chrome.menu_edit() }
+  else if scalar == 86 or scalar == 118 { which = chrome.menu_view() }
+  else if scalar == 80 or scalar == 112 { which = chrome.menu_project() }
+  else if scalar == 72 or scalar == 104 { which = chrome.menu_help() }
+  if which == chrome.menu_none() { return note("") }
+  app.set_focus(state, app.panel_menu())
+  app.set_open_menu(state, which)
+  var opened: string = chrome.menu_name(which)
+  string.append(opened, " menu")
+  opened
 }
