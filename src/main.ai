@@ -45,6 +45,24 @@ fn choose_provider(scratch: str, force_fake: bool) -> provider.Provider effects 
   provider.fake(scratch)
 }
 
+// Dark is the default. GENESIS_APPEARANCE and the final --appearance option accept
+// dark, light, or system; system is resolved once by the native host at startup.
+fn wants_light(args: view<str>) -> bool effects {alloc, env, ui} {
+  var choice: string = string.copy("dark")
+  match env.get("GENESIS_APPEARANCE") { some(value) => { choice = value }, none => { }, }
+  var index: u64 = 1
+  loop {
+    if index + 1 >= view.len(args) { break }
+    if str.eq(view.get(args, index), "--appearance") {
+      choice = string.copy(view.get(args, index + 1))
+    }
+    index = index + 1
+  }
+  if str.eq(str.view(choice), "light") { return true }
+  if str.eq(str.view(choice), "system") { return ui.system_theme() == 0 }
+  false
+}
+
 // Ask the provider for the two monitor images the next repaint needs. The view never does
 // this itself, so painting stays free of media work.
 fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface> effects {alloc, fs.meta, fs.read, fs.write, process} {
@@ -243,11 +261,16 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
     loop {
       let event: ui.event = gui.wait(window, if drained == 0 { 40 } else { 0 })
       if event.kind == 0 { break }
-      if event.kind == 1 {
+      if event.kind == 18 {
+        var dropped: commands.Result = commands.import_drop(state,
+          str.view(gui.dropped_files(window)))
+        var note: string = commands.message(dropped)
+        app.set_status(state, str.view(note))
+        dirty = true
+      } else if event.kind == 1 {
         app.stop(state)
         break
-      }
-      match widgets.translate(event) {
+      } else { match widgets.translate(event) {
         none => { },
         some(signal) => {
           match signal {
@@ -348,7 +371,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             },
           }
         },
-      }
+      } }
       drained = drained + 1
       if drained > 64 { break }
     }
@@ -362,7 +385,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     say("genesis-air render OUT.png [PROJECT]")
     say("genesis-air demo   OUT.png [PROJECT.air]")
     say("genesis-air open   PROJECT.air")
-    say("genesis-air new")
+    say("genesis-air new [--appearance dark|light|system]")
     return 2
   }
   let verb: str = view.get(args, 1)
@@ -371,6 +394,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   match env.get("GENESIS_SCRATCH") { some(value) => { scratch = value }, none => { }, }
   var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
   var state: app.App = app.app(engine)
+  app.set_light(state, wants_light(args))
   // Which inspector tab a headless render shows, so every panel is checkable without a
   // screen. The window path starts on Properties like any other launch.
   match env.get("GENESIS_TAB") {

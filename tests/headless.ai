@@ -188,6 +188,21 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit("status_at_start", str.view(app.status(state)))
   emit_b("clean_at_start", not app.dirty(state))
 
+  // Native hosts only hand over paths. The shared command layer owns drop import policy,
+  // including Windows separators, Unicode names, ordering and provider use.
+  var drop_engine: provider.Provider = provider.fake(scratch)
+  var drop_state: app.App = app.app(drop_engine)
+  var dropped: commands.Result = commands.import_drop(drop_state,
+    "C:\\media\\first.mov\nD:\\日本語\\second.wav")
+  emit_b("drop_imported", dropped.ok)
+  emit_u("drop_count", editor.source_count(struct.borrow(drop_state, field=document)))
+  var first_drop: string = string.copy(str.view(struct.borrow(array.borrow(struct.borrow(
+    struct.borrow(drop_state, field=document), field=sources), 0), field=name)))
+  var second_drop: string = string.copy(str.view(struct.borrow(array.borrow(struct.borrow(
+    struct.borrow(drop_state, field=document), field=sources), 1), field=name)))
+  emit_b("drop_order", str.eq(str.view(first_drop), "first.mov") and
+    str.eq(str.view(second_drop), "second.wav"))
+
   // C. media import; the provider supplies the authoritative length
   var wide: commands.Result = commands.import_media(state, "media/wide.mov", "wide.mov")
   var close: commands.Result = commands.import_media(state, "media/close.mov", "close.mov")

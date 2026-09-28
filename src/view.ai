@@ -16,6 +16,8 @@ import std.geometry as geometry
 import std.math as math
 import std.timeline as timeline
 import std.vector_font as font
+import std.application_theme as themes
+import std.widgets as widgets
 import "app.ai" as app
 import "chrome.ai" as chrome
 import "layout.ai" as layout
@@ -30,15 +32,50 @@ pub type Theme = struct {
   dim: draw.Color,
   accent: draw.Color,
   warn: draw.Color,
-  focus: draw.Color
+  focus: draw.Color,
+  selected: draw.Color,
+  row: draw.Color,
+  timeline: draw.Color,
+  lane: draw.Color,
+  control: draw.Color,
+  control_on: draw.Color,
+  control_hover: draw.Color,
+  button_on: draw.Color,
+  button_hover: draw.Color,
+  toolbar: draw.Color,
+  prompt: draw.Color,
+  scroll_track: draw.Color
 }
 
-pub fn theme() -> Theme effects {} {
+fn dark_theme() -> Theme effects {} {
   Theme {background: draw.rgb(16, 17, 21), panel: draw.rgb(26, 28, 34),
     panel_head: draw.rgb(36, 39, 47), edge: draw.rgb(52, 56, 66),
     text: draw.rgb(226, 230, 238), dim: draw.rgb(132, 140, 155),
     accent: draw.rgb(250, 206, 100), warn: draw.rgb(232, 104, 112),
-    focus: draw.rgb(96, 150, 226)}
+    focus: draw.rgb(96, 150, 226), selected: draw.rgb(44, 60, 84),
+    row: draw.rgb(32, 35, 42), timeline: draw.rgb(20, 22, 27),
+    lane: draw.rgb(30, 32, 39), control: draw.rgb(20, 22, 27),
+    control_on: draw.rgb(62, 104, 160), control_hover: draw.rgb(52, 58, 70),
+    button_on: draw.rgb(52, 84, 128), button_hover: draw.rgb(38, 41, 50),
+    toolbar: draw.rgb(30, 33, 40), prompt: draw.rgb(46, 40, 22),
+    scroll_track: draw.rgb(19, 21, 26)}
+}
+
+fn light_theme() -> Theme effects {} {
+  let shared: widgets.Theme = themes.light()
+  Theme {background: shared.background, panel: shared.surface,
+    panel_head: shared.shade, edge: shared.line, text: shared.ink, dim: shared.faint,
+    accent: shared.accent, warn: shared.danger, focus: shared.selection,
+    selected: draw.rgb(205, 220, 244), row: draw.rgb(242, 244, 248),
+    timeline: draw.rgb(226, 230, 237), lane: draw.rgb(239, 241, 246),
+    control: draw.rgb(234, 237, 242), control_on: draw.rgb(91, 139, 205),
+    control_hover: draw.rgb(190, 204, 224), button_on: draw.rgb(91, 139, 205),
+    button_hover: draw.rgb(213, 220, 231), toolbar: draw.rgb(226, 230, 237),
+    prompt: draw.rgb(255, 244, 194), scroll_track: draw.rgb(218, 222, 229)}
+}
+
+pub fn theme(state: ref<app.App>) -> Theme effects {} {
+  if app.light(state) { light_theme() } else { dark_theme() }
 }
 
 fn fill(canvas: ref<draw.Canvas>, area: layout.Rect, value: draw.Color) -> unit effects {alloc} {
@@ -138,7 +175,7 @@ fn paint_pool(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     let chosen: bool = struct.get(entry, field=on)
     let online: bool = struct.get(entry, field=enabled)
     let source: u64 = struct.get(entry, field=target)
-    fill(canvas, row, if chosen { draw.rgb(44, 60, 84) } else { draw.rgb(32, 35, 42) })
+    fill(canvas, row, if chosen { colors.selected } else { colors.row })
     outline(canvas, row, if chosen { colors.focus } else { colors.edge })
     // A stand-in for the thumbnail the provider will fill in.
     fill_at(canvas, row.left + 4.0, row.top + 3.0, row.left + 30.0, row.bottom - 3.0,
@@ -248,7 +285,7 @@ pub fn timeline_model(state: ref<app.App>, area: layout.Rect) -> timeline.Timeli
 
 fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                area: layout.Rect, model: ref<timeline.Timeline>, fps: f64) -> unit effects {alloc} {
-  fill(canvas, area, draw.rgb(22, 24, 29))
+  fill(canvas, area, colors.timeline)
   outline(canvas, area, colors.edge)
   let step: i64 = if fps >= 1.0 { cast.sat(math.round(fps)) } else { 1 }
   // A timecode is eleven characters wide, so at close zoom only every Nth second can carry
@@ -307,7 +344,7 @@ fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 
 fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                  area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
-  fill(canvas, area, draw.rgb(22, 24, 29))
+  fill(canvas, area, colors.timeline)
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
   var lanes: array<u64> = editor_view.lanes(document, sequence)
@@ -321,7 +358,7 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     let top: f64 = timeline.track_top(model, lane)
     let height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=height)
     if top > area.bottom { break }
-    fill_at(canvas, area.left, top, area.right, top + height, draw.rgb(30, 32, 39))
+    fill_at(canvas, area.left, top, area.right, top + height, colors.lane)
     match geometry.rect(area.left, top, area.right, top + height) {
       some(box) => { draw.stroke_rect(canvas, box, colors.edge, 1.0) },
       none => { },
@@ -373,7 +410,7 @@ fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state
 
 fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                   area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
-  fill(canvas, area, draw.rgb(20, 22, 27))
+  fill(canvas, area, colors.timeline)
   let saved: draw.State = draw.state(canvas)
   match geometry.rect(area.left, area.top, area.right, area.bottom) {
     some(box) => { let _ = draw.clip_rect(canvas, box) },
@@ -396,7 +433,7 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   // While a prompt is open the status line IS the prompt, so there is never a doubt about
   // where the next keystroke goes.
   if app.prompt_active(state) {
-    fill(canvas, area, draw.rgb(46, 40, 22))
+    fill(canvas, area, colors.prompt)
     var asking: string = app.prompt_label(state)
     string.append(asking, ":  ")
     string.append(asking, str.view(app.prompt_text(state)))
@@ -478,10 +515,10 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
     var portion: f64 = (value - low) / span
     if portion < 0.0 { portion = 0.0 }
     if portion > 1.0 { portion = 1.0 }
-    fill(canvas, area, draw.rgb(20, 22, 27))
+    fill(canvas, area, colors.control)
     let filled: f64 = area.left + layout.width_of(area) * portion
     fill_at(canvas, area.left, area.top, filled, area.bottom,
-      if on { draw.rgb(62, 104, 160) } else { draw.rgb(52, 58, 70) })
+      if on { colors.control_on } else { colors.control_hover })
     outline(canvas, area, colors.edge)
     // Zero sits where it belongs on a signed range, so a cut is visibly below centre.
     if low < 0.0 and high > 0.0 {
@@ -495,7 +532,7 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
     return ()
   }
   if style == chrome.style_tab() {
-    fill(canvas, area, if on { colors.panel } else { draw.rgb(22, 24, 29) })
+    fill(canvas, area, if on { colors.panel } else { colors.timeline })
     if on { fill_at(canvas, area.left, area.top, area.right, area.top + 2.0, colors.accent) }
     outline(canvas, area, colors.edge)
     let tab_size: f64 = struct.get(control, field=size)
@@ -505,8 +542,8 @@ fn paint_control(canvas: ref<draw.Canvas>, colors: Theme,
     return ()
   }
   // Buttons and toggles.
-  let face: draw.Color = if on { draw.rgb(52, 84, 128) }
-    else if live { draw.rgb(38, 41, 50) } else { draw.rgb(28, 30, 36) }
+  let face: draw.Color = if on { colors.button_on }
+    else if live { colors.button_hover } else { colors.panel }
   fill(canvas, area, face)
   outline(canvas, area, if on { colors.focus } else { colors.edge })
   let measured: f64 = struct.get(control, field=size)
@@ -529,7 +566,7 @@ fn paint_controls(canvas: ref<draw.Canvas>, colors: Theme,
 
 fn paint_toolbar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                  frame: layout.Frame) -> unit effects {alloc} {
-  fill(canvas, frame.toolbar, draw.rgb(30, 33, 40))
+  fill(canvas, frame.toolbar, colors.toolbar)
   fill_at(canvas, 0.0, frame.toolbar.bottom - 1.0, frame.width, frame.toolbar.bottom,
     colors.edge)
   var controls: array<chrome.Control> = chrome.toolbar(frame, state)
@@ -554,7 +591,7 @@ fn paint_toolbar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 
 fn paint_timeline_bar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                       frame: layout.Frame) -> unit effects {alloc} {
-  fill(canvas, frame.tbar, draw.rgb(26, 28, 34))
+  fill(canvas, frame.tbar, colors.panel)
   outline(canvas, frame.tbar, colors.edge)
   var controls: array<chrome.Control> = chrome.timeline_bar(frame, state)
   paint_controls(canvas, colors, controls)
@@ -845,7 +882,7 @@ fn paint_dock(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   if which != chrome.tab_scopes() and chrome.dock_scroll_max(frame, state) > 0.0 {
     let track: layout.Rect = chrome.dock_scroll_track(frame)
     let thumb: layout.Rect = chrome.dock_scroll_thumb(frame, state)
-    fill(canvas, track, draw.rgb(19, 21, 26))
+    fill(canvas, track, colors.scroll_track)
     outline(canvas, track, colors.edge)
     fill(canvas, thumb, if app.dock_scroll_dragging(state) { colors.focus } else { colors.dim })
     outline(canvas, thumb, colors.edge)
@@ -858,7 +895,7 @@ fn paint_dock(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 // stays free of media work.
 pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
              source_image: ref<draw.Surface>, program_image: ref<draw.Surface>) -> unit effects {alloc} {
-  let colors: Theme = theme()
+  let colors: Theme = theme(state)
   let frame: layout.Frame = layout.frame(width, height)
   draw.clear(canvas, colors.background)
   paint_menu(canvas, colors, state, frame)

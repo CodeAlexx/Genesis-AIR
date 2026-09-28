@@ -82,6 +82,7 @@ pub type App = struct {
   dock_scroll_dragging: bool,
   dock_scroll_drag_offset: f64,
   snap: bool,
+  light: bool,
   clipboard: Clipboard,
   gesture: Drag,
   prompt: Prompt,
@@ -111,7 +112,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     viewport: viewport(), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
     pool_row: 0, selected_filter: 0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
-    dock_scroll_drag_offset: 0.0, snap: true,
+    dock_scroll_drag_offset: 0.0, snap: true, light: false,
     clipboard: Clipboard {source: 0, source_in: 0, length: 0, filled: false},
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
@@ -139,6 +140,11 @@ pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
   ()
 }
 pub fn running(state: ref<App>) -> bool effects {} { state.running }
+pub fn light(state: ref<App>) -> bool effects {} { state.light }
+pub fn set_light(state: ref<App>, value: bool) -> unit effects {} {
+  struct.set(state, value, field=light)
+  ()
+}
 pub fn stop(state: ref<App>) -> unit effects {} {
   struct.set(state, false, field=running)
   ()

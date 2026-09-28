@@ -137,8 +137,13 @@ build/genesis-air probe MEDIA.mp4 OUT.png
 
 # windowed (needs a display)
 build/genesis-air open PROJECT.air
-build/genesis-air new
+build/genesis-air new [--appearance dark|light|system]
 ```
+
+Genesis defaults to Dark. `--appearance light` uses the shared AIR light palette and
+`--appearance system` resolves the host preference at startup; `GENESIS_APPEARANCE` sets the
+same choice for launchers. On Windows the canvas accepts ordered Unicode file drops from
+Explorer and imports each usable path through the normal Genesis command/provider path.
 
 Environment: `AIRC` / `AIR_HOME` override the toolchain, `GENESIS_GCOMPOSE` points at the
 media worker, `GENESIS_FAKE_PROVIDER=1` forces the deterministic provider, `GENESIS_SCRATCH`

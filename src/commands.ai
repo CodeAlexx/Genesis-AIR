@@ -14,6 +14,8 @@ import std.editor_io as editor_io
 import std.curve as curve
 import std.files as files
 import std.codec as codec
+import std.path as path
+import std.text as text
 import "app.ai" as app
 import "provider.ai" as provider
 
@@ -113,6 +115,29 @@ pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects
   }
   app.set_status(state, "Imported")
   done("imported", id)
+}
+
+// Import an ordered native file-drop payload through the same provider/document path as
+// Add. The host owns only newline-delimited path transfer; Genesis owns the policy.
+pub fn import_drop(state: ref<app.App>, listing: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
+  var paths: array<string> = text.lines(listing)
+  var imported: u64 = 0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(paths) { break }
+    let source: str = str.view(array.borrow(paths, index))
+    if str.len(source) != 0 {
+      var named: string = path.basename(source)
+      var result: Result = import_media(state, source, str.view(named))
+      if result.ok { imported = imported + 1 }
+    }
+    index = index + 1
+  }
+  if imported == 0 { return refused("the dropped selection contains no usable media") }
+  var message: string = string.copy("imported ")
+  string.append(message, str.view(string.from_int(imported)))
+  string.append(message, if imported == 1 { " dropped file" } else { " dropped files" })
+  done(str.view(message), imported)
 }
 
 pub fn add_bin(state: ref<app.App>, name: str) -> Result effects {alloc} {
