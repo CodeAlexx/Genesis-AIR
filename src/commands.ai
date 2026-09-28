@@ -146,6 +146,7 @@ pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {al
     some(value) => value,
     none => { return refused("the media path could not be resolved") },
   }
+  provider.restart(struct.borrow(state, field=provider))
   let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, str.view(absolute),
@@ -571,6 +572,12 @@ pub fn open_source(state: ref<app.App>, source: u64) -> Result effects {alloc} {
     return refused("no such source")
   }
   done("source opened", source)
+}
+// Reload also restarts the media worker: a fresh one drops its cached decoders and LUTs,
+// so a file changed on disk is read again.
+pub fn reload_source(state: ref<app.App>, source: u64) -> Result effects {alloc, process} {
+  provider.restart(struct.borrow(state, field=provider))
+  open_source(state, source)
 }
 pub fn monitor(state: ref<app.App>, action: u32) -> Result effects {alloc} {
   let landed: editor.Transport = editor.monitor_action(struct.borrow(state, field=document), action)

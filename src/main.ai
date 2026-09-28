@@ -734,6 +734,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   if array.len(export_jobs) > 0 { timeline_media.request_export_cancel(str.view(export_cancel)) }
   }
   stop_audio(audio_player, str.view(audition_file))
+  provider.shutdown(struct.borrow(state, field=provider))
   gui.close(window)
   0
 }

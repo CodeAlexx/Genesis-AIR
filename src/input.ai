@@ -137,7 +137,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_reload() {
     let source: u64 = app.current_source(state)
     if source == 0 { return note("no media selected to reload") }
-    var landed: commands.Result = commands.open_source(state, source)
+    var landed: commands.Result = commands.reload_source(state, source)
     return commands.message(landed)
   }
 

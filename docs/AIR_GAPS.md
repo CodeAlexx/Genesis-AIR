@@ -102,5 +102,5 @@ they fit.
 - **No long-lived subprocess with writable stdin.** Recorded here first, then fixed upstream:
   `stdlib/process.ai` gained `spawn_piped` / `write_stdin` / `read_stdout` / `poll` / `wait`,
   backed by `runtime/air_proc_pipe.c`. This project now pins a commit that carries it; the
-  export now uses it for a persistent worker. Interactive probe and preview requests still
-  use short worker invocations, as recorded in the README.
+  export and the interactive provider (probe, thumbnail, waveform, preview) now each keep a
+  persistent worker.

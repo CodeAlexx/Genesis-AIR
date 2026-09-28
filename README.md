@@ -232,7 +232,10 @@ piped worker through `OPEN`, the frame and audio commands, and `CLOSE`.
 
 **Process isolation is preserved.** Genesis measured NVIDIA OpenCL initialization crashing
 intermittently against a UI GL/GLX stack, so the compositor stays out of this process. The
-provider drives `gcompose --serve` as a separate process and reads its `DONE`/`ERR` reply.
+provider keeps one `gcompose --serve` process open for probes, thumbnails, waveforms and
+previews, so OpenCL starts once and decoders stay open between requests. A worker that exits
+or crashes is replaced once and the request retried. Reload and Relink restart it so changed
+files are read again. Export runs its own worker.
 
 `gcompose` is selected automatically when its worker is present; otherwise the fake provider
 is used for editing and headless checks. Preview and export explicitly require the real worker.
@@ -306,8 +309,9 @@ python3 tests/window_playback.py --binary build/genesis-air \
 
 ## Known gaps
 
-- Source probe, thumbnail, waveform and interactive preview still start one worker per
-  request. Export uses a persistent piped worker, so it reuses decoder state for every frame.
+- Worker replies are awaited without a deadline, so a hung worker still stalls the window.
+  Source media or `.cube` files replaced in place are re-read after Reload or Relink, not
+  automatically.
 - The media adapter composites visible video lanes in track order, timed captions,
   and touching-cut, overlapping-seam, and short-gap transitions. All 11 named
   worker transition kinds have generated preview/MP4 geometry gates; overlap and

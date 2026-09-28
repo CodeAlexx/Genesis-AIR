@@ -32,7 +32,11 @@ pub type Provider = struct {
   calls: u64,
   failures: u64,
   last_error: string,
-  available: bool
+  available: bool,
+  // One `gcompose --serve` kept open across requests, started on first use.
+  session: option<Child>,
+  reader: proc.LineReader,
+  starts: u64
 }
 
 // What a probe learned about one source. `frames` 0 means the length is genuinely unknown,
@@ -52,7 +56,8 @@ pub type Frame = struct { ok: bool, width: u32, height: u32, pixels: draw.Surfac
 
 pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
-    calls: 0, failures: 0, last_error: string.new(), available: true}
+    calls: 0, failures: 0, last_error: string.new(), available: true,
+    session: option.none(), reader: proc.line_reader(65536), starts: 0}
 }
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
@@ -60,7 +65,8 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
 pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} {
   let there: bool = match files.exists(worker) { ok(found) => found, err(problem) => false, }
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
-    calls: 0, failures: 0, last_error: string.new(), available: there}
+    calls: 0, failures: 0, last_error: string.new(), available: there,
+    session: option.none(), reader: proc.line_reader(65536), starts: 0}
 }
 
 pub fn available(state: ref<Provider>) -> bool effects {} { state.available }
@@ -82,6 +88,7 @@ pub fn export_progress_path(state: ref<Provider>) -> string effects {alloc} {
   path.join(str.view(struct.borrow(state, field=scratch)), "export.progress")
 }
 pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
+pub fn worker_starts(state: ref<Provider>) -> u64 effects {} { state.starts }
 pub fn failures(state: ref<Provider>) -> u64 effects {} { state.failures }
 pub fn last_error(state: ref<Provider>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(state, field=last_error)))
@@ -90,6 +97,12 @@ pub fn describe(state: ref<Provider>) -> string effects {alloc} {
   if state.kind == kind_fake() { return string.copy("fake") }
   var out: string = string.copy("gcompose")
   if not state.available { string.append(out, " (worker missing)") }
+  else if state.starts > 1 {
+    string.append(out, " (restarted ")
+    let restarts: i64 = cast.sat(state.starts - 1)
+    string.append(out, str.view(string.from_int(restarts)))
+    string.append(out, ")")
+  }
   out
 }
 
@@ -102,9 +115,11 @@ fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc} {
 // ---------------------------------------------------------------------------
 // The gcompose transport
 //
-// Probe, thumbnail, waveform and interactive program requests use one bounded worker
-// invocation apiece. Export uses AIR's persistent process pipes in timeline_media.ai.
-// Reusing a worker here remains a performance improvement for interactive editing.
+// Probe, thumbnail, waveform and interactive program requests share one `gcompose --serve`
+// process, so OpenCL starts once and the worker's decoder and LUT caches carry across
+// requests. A broken pipe (the worker crashed or exited) gets one fresh worker and a retry;
+// an ERR reply leaves the session running. Replies are awaited without a deadline, as the
+// one-process-per-request transport did. Export keeps its own worker in timeline_media.ai.
 
 fn scratch_file(state: ref<Provider>, name: str) -> string effects {alloc} {
   path.join(str.view(struct.borrow(state, field=scratch)), name)
@@ -120,7 +135,69 @@ pub fn wire_path(value: str) -> string effects {alloc} {
   text.replace(str.view(encoded), "\r", "%0D")
 }
 
-// Run one command line through the worker and return its reply line, or none.
+// Stop the shared worker. The next request starts a new one, which also drops the worker's
+// decoder and LUT caches, so Reload and Relink see files that changed on disk.
+pub fn restart(state: ref<Provider>) -> unit effects {process} {
+  match ref.swap(struct.borrow(state, field=session), option.none()) {
+    none => { },
+    some(child) => { let _ = proc.close(child) },
+  }
+  ()
+}
+
+pub fn shutdown(state: ref<Provider>) -> unit effects {process} { restart(state) }
+
+fn start_worker(state: ref<Provider>) -> option<Child> effects {alloc, process} {
+  var argv: array<string> = [string.copy(str.view(struct.borrow(state, field=worker))),
+    string.copy("--serve")]
+  // Diagnostics share the reply pipe so an unread stderr can never fill and stall the worker.
+  match proc.spawn_piped_merged(argv) {
+    err(problem) => option.none(),
+    ok(child) => {
+      proc.reset_lines(struct.borrow(state, field=reader))
+      struct.set(state, state.starts + 1, field=starts)
+      option.some(child)
+    },
+  }
+}
+
+// What one request/reply exchange produced: 0 DONE (text is the reply), 1 ERR from a live
+// worker, 2 the pipe broke (text says how).
+type Exchange = struct {kind: u32, text: string}
+
+fn exchange(child: ref<Child>, reader: ref<proc.LineReader>, command: str) -> Exchange
+            effects {alloc, process} {
+  var request: string = string.copy(command)
+  string.append(request, "\n")
+  match proc.write_all_stdin(child, str.bytes(str.view(request)), proc.forever()) {
+    err(problem) => { return Exchange {kind: 2, text: string.copy("the worker stopped accepting requests")} },
+    ok(_) => { },
+  }
+  var count: u64 = 0
+  loop {
+    if count >= 256 { return Exchange {kind: 2, text: string.copy("the worker emitted too many diagnostic lines")} }
+    match proc.read_line(child, reader, proc.forever()) {
+      err(problem) => { return Exchange {kind: 2, text: string.copy("the worker's reply could not be read")} },
+      ok(value) => {
+        match value {
+          none => { return Exchange {kind: 2, text: string.copy("the worker exited")} },
+          some(line) => {
+            if str.starts_with(str.view(line), "DONE") {
+              let reply: string = if str.len(str.view(line)) <= 5 { string.new() }
+                else { string.copy(str.slice(str.view(line), 5, str.len(str.view(line)))) }
+              return Exchange {kind: 0, text: reply}
+            }
+            if str.starts_with(str.view(line), "ERR") { return Exchange {kind: 1, text: string.new()} }
+          },
+        }
+      },
+    }
+    count = count + 1
+  }
+  Exchange {kind: 2, text: string.copy("the worker gave no reply")}
+}
+
+// Run one command line through the shared worker and return its reply text, or none.
 fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {alloc, fs.meta, fs.read, fs.write, process} {
   struct.set(state, state.calls + 1, field=calls)
   if not state.available {
@@ -130,47 +207,33 @@ fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {
   match files.mkdirs(str.view(struct.borrow(state, field=scratch))) {
     ok(made) => { }, err(problem) => { },
   }
-  var log: string = scratch_file(state, tag)
-  var argv: array<string> = array.new()
-  array.push(argv, string.copy("/bin/sh"))
-  array.push(argv, string.copy("-c"))
-  // The command text and the worker path are passed as ARGUMENTS, never spliced into the
-  // script, so nothing a caller supplies is ever interpreted as shell.
-  array.push(argv, string.copy("printf '%s\\n' \"$1\" | \"$2\" --serve"))
-  array.push(argv, string.copy("genesis-provider"))
-  array.push(argv, string.copy(command))
-  array.push(argv, string.copy(str.view(struct.borrow(state, field=worker))))
-  match proc.run(argv, ".", str.view(log), false) {
-    err(problem) => { note_failure(state, "the worker could not be started")
-      return option.none() },
-    ok(status) => {
-      if not proc.success(status) {
-        note_failure(state, "the worker exited with a failure")
-        return option.none()
-      }
-    },
-  }
-  let reply: string = match files.read_text(str.view(log)) {
-    ok(text_value) => text_value,
-    err(problem) => { note_failure(state, "the worker produced no reply")
-      return option.none() },
-  }
-  var lines: array<string> = text.split(str.view(reply), "\n")
-  var index: u64 = array.len(lines)
+  var attempt: u64 = 0
   loop {
-    if index == 0 { break }
-    index = index - 1
-    let line: str = str.view(array.borrow(lines, index))
-    if str.starts_with(line, "DONE") {
-      if str.len(line) <= 5 { return option.some(string.new()) }
-      return option.some(string.copy(str.slice(line, 5, str.len(line))))
+    var child: Child = match ref.swap(struct.borrow(state, field=session), option.none()) {
+      some(live) => live,
+      none => match start_worker(state) {
+        some(fresh) => fresh,
+        none => { note_failure(state, "the worker could not be started")
+          return option.none() },
+      },
     }
-    if str.starts_with(line, "ERR") {
+    var outcome: Exchange = exchange(child, struct.borrow(state, field=reader), command)
+    if outcome.kind == 2 {
+      let _ = proc.close(child)
+      if attempt == 0 {
+        attempt = 1
+        continue
+      }
+      note_failure(state, str.view(outcome.text))
+      return option.none()
+    }
+    let _ = ref.swap(struct.borrow(state, field=session), option.some(child))
+    if outcome.kind == 1 {
       note_failure(state, "the worker refused the request")
       return option.none()
     }
+    return option.some(ref.swap(struct.borrow(outcome, field=text), string.new()))
   }
-  note_failure(state, "the worker gave no DONE or ERR reply")
   option.none()
 }
 

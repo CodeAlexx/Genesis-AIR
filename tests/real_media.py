@@ -858,6 +858,34 @@ def main():
         encoded_title = light_points(title_movie, (170, 130, 470, 230), True)
         assert len(title_points) > 40, len(title_points)
         assert abs(len(encoded_title) - len(title_points)) < len(title_points) * 0.4
+        # Interactive requests share one worker: the title's multi-step preview plan starts
+        # gcompose once, and a worker that dies before replying is replaced once and the
+        # request retried.
+        starts_log = root / "worker-starts.log"
+        crash_marker = root / "worker-crashed-once"
+        counting_worker = root / "counting-gcompose"
+        counting_worker.write_text(
+            "#!/bin/sh\n"
+            "echo start >> \"$GENESIS_TEST_STARTS\"\n"
+            "if [ -n \"$GENESIS_TEST_CRASH\" ] && [ ! -e \"$GENESIS_TEST_CRASH\" ]; then\n"
+            "  : > \"$GENESIS_TEST_CRASH\"\n"
+            "  exit 3\n"
+            "fi\n"
+            f"exec \"{args.worker}\" \"$@\"\n")
+        counting_worker.chmod(0o755)
+        counted_env = dict(env, GENESIS_GCOMPOSE=str(counting_worker),
+                           GENESIS_TEST_STARTS=str(starts_log))
+        shared_title = root / "title-shared-worker.png"
+        run([args.binary, "preview", shared_title, title_project], counted_env)
+        assert starts_log.read_text().count("start") == 1, starts_log.read_text()
+        assert len(light_points(shared_title, (170, 130, 470, 230))) == len(title_points)
+        starts_log.unlink()
+        recovered_title = root / "title-recovered-worker.png"
+        run([args.binary, "preview", recovered_title, title_project],
+            dict(counted_env, GENESIS_TEST_CRASH=str(crash_marker)))
+        assert crash_marker.exists()
+        assert starts_log.read_text().count("start") == 2, starts_log.read_text()
+        assert len(light_points(recovered_title, (170, 130, 470, 230))) == len(title_points)
         title_doc["filters"].append(dict(id=12, clip=base_id, kind="brightness",
                                          order=1, enabled=True))
         title_doc["filter_params"].append(dict(filter=12, name="level", value=0.5))
@@ -1355,7 +1383,7 @@ def main():
               f"mask center/edge {mask_center}/{mask_edge}, inverted "
               f"{inverse_center}/{inverse_edge}; "
               f"12 frames and 24 fps 9-frame AV, 2x speed filter (15-frame AV), graded overlays on two "
-              f"and three layers, timed captions, cancelled export at {reported}%, "
+              f"and three layers, timed captions, cancelled export at {reported}%, one shared preview worker with crash recovery, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
