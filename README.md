@@ -168,7 +168,11 @@ The window's **Export video** action now encodes an MP4. The headless `render` c
 PNG of the editor canvas for layout checks. Video export requires the worker and a `.mp4`
 output path. The sequence rate is sent to the worker; generated media checks cover 24 and
 30 fps sequences. Existing output files are refused, and an incomplete encode is
-removed on failure.
+removed on failure or cancellation. The window exports a snapshot of the project in a
+background task, so editing and repainting continue; the status line shows whole-percent
+progress and Esc cancels at the next frame. Export reports progress to `export.progress` and
+stops when `export.cancel` appears, both in the scratch directory, so the `export` command can
+be followed or cancelled from a script the same way.
 Window Play mixes the audible timeline into a WAV through the same AIR resolver as export,
 then plays it through `paplay` or `aplay`; Pause, seek, and end stop the player. Audio
 preparation runs in an AIR task. The visual clock waits for the completed WAV so picture
@@ -386,8 +390,8 @@ python3 tests/window_playback.py --binary build/genesis-air \
   repeating its last picture frame. The generated 24-to-30 fps real-media gate checks the
   final source frame, 30-frame export, and audible audio. The separate 24 fps sequence gate
   checks nine exported frames and audio; fractional rates and long-timeline sync remain open.
-- The window runs export synchronously, so it does not repaint or accept cancellation during
-  a long encode. The standalone `preview` and `export` commands support headless workflows.
+- The standalone `preview` and `export` commands support headless workflows. Cancellation
+  takes effect between frames, so a single slow frame finishes first.
 - The program Play control advances on a monotonic clock, skips frames after a slow paint,
   and plays the mixed timeline audio. This best-effort system-player path has no
   sample-accurate audio/video clock or live scrub audio; source and program frame requests

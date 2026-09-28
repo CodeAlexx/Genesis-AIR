@@ -9,6 +9,7 @@ import std.files as files
 import std.math as math
 import std.path as path
 import std.process as proc
+import std.tasks as tasks
 import std.text as text
 import std.timeline as timeline
 import std.font as font
@@ -1796,7 +1797,8 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
   }
 }
 
-fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>)
+fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
+               cancel: str, progress: str)
                -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let range: editor.Transport = editor.export_range(doc)
   if range.mark_out <= range.mark_in { return result.err("the export range is empty") }
@@ -1830,8 +1832,18 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
   var cache: RenderCache = render_cache(fonts)
   var frame: i64 = range.mark_in
+  var reported: i64 = -1
   loop {
     if frame >= range.mark_out { break }
+    if tasks.requested_at(cancel) {
+      let _ = proc.close(child)
+      return result.err("export cancelled")
+    }
+    let percent: i64 = (frame - range.mark_in) * 100 / (range.mark_out - range.mark_in)
+    if percent != reported and str.len(progress) != 0 {
+      let _ = files.write_text(progress, str.view(string.from_int(percent)))
+      reported = percent
+    }
     var lines: array<string> = try frame_plan(doc, frame, "ENC", "", output, cache)
     var step: u64 = 0
     loop {
@@ -1867,7 +1879,8 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   result.ok(())
 }
 
-pub fn render(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>)
+pub fn render(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
+              cancel: str, progress: str)
               -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if not text.ends_with(output, ".mp4") {
     return result.err("video export needs a .mp4 output path")
@@ -1881,7 +1894,7 @@ pub fn render(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<ar
     ok(found) => { if found { return result.err(string.copy("an unfinished output already exists")) } },
     err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
   }
-  match render_into(doc, worker, str.view(partial), fonts) {
+  match render_into(doc, worker, str.view(partial), fonts, cancel, progress) {
     err(problem) => {
       cleanup_plan(str.view(partial))
       let _ = files.remove(str.view(partial))
@@ -1899,4 +1912,74 @@ pub fn render(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<ar
       }
     },
   }
+}
+
+// Clear an earlier run's signals so a stale cancel cannot stop a new export.
+pub fn clear_export_signals(cancel: str, progress: str) -> unit effects {fs.write} {
+  let _ = files.remove(cancel)
+  let _ = files.remove(progress)
+  ()
+}
+
+pub fn request_export_cancel(cancel: str) -> unit effects {fs.write} {
+  let _ = files.write_text(cancel, "cancelled\n")
+  ()
+}
+
+// Whole percent written by a running export, when it has reported one.
+pub fn export_progress(progress: str) -> option<u64> effects {alloc, fs.read} {
+  match files.read_text(progress) {
+    err(_) => option.none(),
+    ok(content) => {
+      let trimmed: string = text.trim(str.view(content))
+      match text.parse_u64(str.view(trimmed)) {
+        none => option.none(),
+        some(value) => if value > 100 { option.none() } else { option.some(value) },
+      }
+    },
+  }
+}
+
+// Everything an export task needs, owned, so the editor keeps running and can change the
+// project while its snapshot renders.
+pub type ExportJob = struct {
+  document: editor.Document,
+  worker: string,
+  output: string,
+  fonts: array<string>,
+  cancel: string,
+  progress: string
+}
+
+pub fn export_job(doc: ref<editor.Document>, worker: str, output: str,
+                  fonts: ref<array<string>>, cancel: str, progress: str)
+                  -> ExportJob effects {alloc} {
+  var faces: array<string> = array.new()
+  var i: u64 = 0
+  loop {
+    if i >= array.len(fonts) { break }
+    array.push(faces, string.copy(str.view(array.borrow(fonts, i))))
+    i = i + 1
+  }
+  ExportJob {document: editor.copy_document(doc), worker: string.copy(worker),
+    output: string.copy(output), fonts: faces, cancel: string.copy(cancel),
+    progress: string.copy(progress)}
+}
+
+pub fn export_output(job: ref<ExportJob>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(job, field=output)))
+}
+
+pub fn run_export(job: ExportJob own) -> result<unit, string>
+                  effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var owned: ExportJob = job
+  let worker: string = string.copy(str.view(struct.borrow(owned, field=worker)))
+  let output: string = string.copy(str.view(struct.borrow(owned, field=output)))
+  let cancel: string = string.copy(str.view(struct.borrow(owned, field=cancel)))
+  let progress: string = string.copy(str.view(struct.borrow(owned, field=progress)))
+  var fonts: array<string> = struct.replace(owned, array.new(), field=fonts)
+  let outcome: result<unit, string> = render(struct.borrow(owned, field=document),
+    str.view(worker), str.view(output), fonts, str.view(cancel), str.view(progress))
+  clear_export_signals(str.view(cancel), str.view(progress))
+  outcome
 }

@@ -345,24 +345,36 @@ fn choose_file(title: str, save: bool) -> option<string> effects {alloc, process
   }
 }
 
-fn commit_render_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+// Take the committed Export prompt and snapshot the project for a background export.
+// `none` means nothing starts; the status line says why.
+fn begin_export(state: ref<app.App>, busy: bool) -> option<timeline_media.ExportJob>
+                effects {alloc, fs.write} {
   var where: string = app.prompt_text(state)
   app.end_prompt(state)
-  if str.len(str.view(where)) == 0 { return string.copy("cancelled") }
-  let worker: string = provider.worker_path(struct.borrow(state, field=provider))
-  let rendered: result<unit, string> = if provider.available(struct.borrow(state, field=provider)) and
-      str.len(str.view(worker)) != 0 {
-    timeline_media.render(struct.borrow(state, field=document), str.view(worker), str.view(where),
-      struct.borrow(state, field=fonts))
-  } else { result.err("the gcompose worker is required for video export") }
-  match rendered {
-    ok(written) => {
-      var said: string = string.copy("wrote video ")
-      string.append(said, str.view(where))
-      said
-    },
-    err(problem) => problem,
+  if str.len(str.view(where)) == 0 {
+    app.set_status(state, "cancelled")
+    return option.none()
   }
+  if busy {
+    app.set_status(state, "an export is already running; press Esc to cancel it")
+    return option.none()
+  }
+  let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+  if not provider.available(struct.borrow(state, field=provider)) or str.len(str.view(worker)) == 0 {
+    app.set_status(state, "the gcompose worker is required for video export")
+    return option.none()
+  }
+  let cancel: string = provider.export_cancel_path(struct.borrow(state, field=provider))
+  let progress: string = provider.export_progress_path(struct.borrow(state, field=provider))
+  timeline_media.clear_export_signals(str.view(cancel), str.view(progress))
+  app.set_status(state, "exporting 0% (Esc cancels)")
+  option.some(timeline_media.export_job(struct.borrow(state, field=document), str.view(worker),
+    str.view(where), struct.borrow(state, field=fonts), str.view(cancel), str.view(progress)))
+}
+
+fn run_export(job: timeline_media.ExportJob own) -> result<unit, string>
+              effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  timeline_media.run_export(job)
 }
 
 fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui} {
@@ -389,6 +401,11 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   var task_generation: u64 = 0
   task.scope {
   var audio_jobs: array<task<result<bool, string>>> = array.new()
+  var export_jobs: array<task<result<unit, string>>> = array.new()
+  var export_target: string = string.new()
+  var export_percent: u64 = 0
+  let export_cancel: string = provider.export_cancel_path(struct.borrow(state, field=provider))
+  let export_progress: string = provider.export_progress_path(struct.borrow(state, field=provider))
   loop {
     if not app.running(state) { break }
     let now_ns: u64 = clock.start()
@@ -406,6 +423,38 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
       clock_ns = clock.start()
     }
     if not playing_now { audio_requested = false }
+    if array.len(export_jobs) > 0 {
+      match tasks.join_next<result<unit, string>>(export_jobs, tasks.now()) {
+        some(outcome) => {
+          match outcome {
+            ok(_) => {
+              var said: string = string.copy("wrote video ")
+              string.append(said, str.view(export_target))
+              app.set_status(state, str.view(said))
+            },
+            err(problem) => { app.set_status(state, str.view(problem)) },
+          }
+          timeline_media.clear_export_signals(str.view(export_cancel), str.view(export_progress))
+          dirty = true
+        },
+        none => {
+          match timeline_media.export_progress(str.view(export_progress)) {
+            none => { },
+            some(percent) => {
+              if percent != export_percent and not tasks.requested_at(str.view(export_cancel)) {
+                export_percent = percent
+                var said: string = string.copy("exporting ")
+                let shown: i64 = cast.wrap(percent)
+                string.append(said, str.view(string.from_int(shown)))
+                string.append(said, "% (Esc cancels)")
+                app.set_status(state, str.view(said))
+                dirty = true
+              }
+            },
+          }
+        },
+      }
+    }
     if array.len(audio_jobs) > 0 {
       match tasks.join_next<result<bool, string>>(audio_jobs, tasks.now()) {
         none => { },
@@ -584,11 +633,20 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
                       var label: string = app.prompt_label(state)
                       app.begin_prompt(state, action, str.view(label), "")
                       app.prompt_push(state, str.view(chosen))
-                      var result_note: string = if action == chrome.act_render() {
-                        commit_render_prompt(state)
-                      } else { input.commit_prompt(state) }
-                      if str.len(str.view(result_note)) != 0 {
-                        app.set_status(state, str.view(result_note))
+                      if action == chrome.act_render() {
+                        export_target = string.copy(str.view(chosen))
+                        match begin_export(state, array.len(export_jobs) > 0) {
+                          none => { },
+                          some(job) => {
+                            export_percent = 0
+                            array.push(export_jobs, task.spawn(job, fn=run_export))
+                          },
+                        }
+                      } else {
+                        var result_note: string = input.commit_prompt(state)
+                        if str.len(str.view(result_note)) != 0 {
+                          app.set_status(state, str.view(result_note))
+                        }
                       }
                     }
                   },
@@ -628,8 +686,18 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               // The window owns the canvas, so a committed "render" prompt is performed
               // here rather than in the input layer.
               if input.prompt_is_render(state) and press.code == widgets.key_return() {
-                var result_note: string = commit_render_prompt(state)
-                app.set_status(state, str.view(result_note))
+                export_target = app.prompt_text(state)
+                match begin_export(state, array.len(export_jobs) > 0) {
+                  none => { },
+                  some(job) => {
+                    export_percent = 0
+                    array.push(export_jobs, task.spawn(job, fn=run_export))
+                  },
+                }
+              } else if press.code == widgets.key_escape() and array.len(export_jobs) > 0 and
+                  not app.prompt_active(state) {
+                timeline_media.request_export_cancel(str.view(export_cancel))
+                app.set_status(state, "cancelling export")
               } else {
                 var note: string = input.key(state, press.code, press.control, press.shift)
                 if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
@@ -661,6 +729,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
       if drained > 64 { break }
     }
   }
+  // Leaving the scope joins every task; stop an export at its next frame instead of
+  // holding the closed window open until it finishes.
+  if array.len(export_jobs) > 0 { timeline_media.request_export_cancel(str.view(export_cancel)) }
   }
   stop_audio(audio_player, str.view(audition_file))
   gui.close(window)
@@ -726,8 +797,13 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       return 1
     }
     let worker: string = provider.worker_path(struct.borrow(state, field=provider))
-    match timeline_media.render(struct.borrow(state, field=document), str.view(worker), view.get(args, 2),
-        struct.borrow(state, field=fonts)) {
+    let cancel: string = provider.export_cancel_path(struct.borrow(state, field=provider))
+    let progress: string = provider.export_progress_path(struct.borrow(state, field=provider))
+    timeline_media.clear_export_signals(str.view(cancel), str.view(progress))
+    var job: timeline_media.ExportJob = timeline_media.export_job(struct.borrow(state, field=document),
+      str.view(worker), view.get(args, 2), struct.borrow(state, field=fonts), str.view(cancel),
+      str.view(progress))
+    match timeline_media.run_export(job) {
       ok(_) => { say("Genesis AIR video written")
         return 0 },
       err(problem) => { say(str.view(problem))

@@ -73,6 +73,14 @@ pub fn preview_path(state: ref<Provider>) -> string effects {alloc} {
 pub fn audition_path(state: ref<Provider>) -> string effects {alloc} {
   path.join(str.view(struct.borrow(state, field=scratch)), "audition.wav")
 }
+// An export in progress watches the first file and reports whole percent to the second, so
+// the window, a script, or a test can follow or cancel it.
+pub fn export_cancel_path(state: ref<Provider>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(state, field=scratch)), "export.cancel")
+}
+pub fn export_progress_path(state: ref<Provider>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(state, field=scratch)), "export.progress")
+}
 pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
 pub fn failures(state: ref<Provider>) -> u64 effects {} { state.failures }
 pub fn last_error(state: ref<Provider>) -> string effects {alloc} {

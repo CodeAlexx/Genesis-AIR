@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import subprocess
+import time
 from tempfile import TemporaryDirectory
 
 
@@ -195,6 +196,41 @@ def main():
         seen, encoded = pixel(preview, 320, 180), pixel(movie, 960, 540, True)
         assert 100 <= seen[0] <= 155 and seen[1] < 15 and 100 <= seen[2] <= 155, seen
         assert max(abs(a - b) for a, b in zip(seen, encoded)) <= 15, (seen, encoded)
+
+        # Export runs as a cancellable job: it reports whole percent in the scratch
+        # directory and stops at its next frame once the cancel file appears. The window
+        # drives the same files from a background task.
+        long_clip = root / "long clip.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=s=320x180:r=30",
+             "-t", "20", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", long_clip])
+        long_project = root / "long.air"
+        run([args.binary, "probe", long_clip.name, root / "long-panel.png", long_project],
+            env, cwd=root)
+        long_doc = json.loads(long_project.read_text())
+        long_doc["clips"][0]["length"] = 600
+        long_project.write_text(json.dumps(long_doc))
+        progress_file = root / "scratch" / "export.progress"
+        cancel_file = root / "scratch" / "export.cancel"
+        long_movie = root / "long.mp4"
+        exporting = subprocess.Popen([str(args.binary), "export", str(long_movie),
+                                      str(long_project)], env=env, text=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        reported = 0
+        deadline = time.monotonic() + 120
+        while not reported and exporting.poll() is None and time.monotonic() < deadline:
+            try:
+                reported = int(progress_file.read_text())
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.005)
+        assert 0 < reported < 100, reported
+        cancel_file.write_text("cancel\n")
+        said, _ = exporting.communicate(timeout=120)
+        assert exporting.returncode != 0 and "export cancelled" in said, said
+        assert not long_movie.exists() and not list(root.glob("long.mp4.*")), "partial export left"
+        assert not cancel_file.exists() and not progress_file.exists(), "export signals left"
 
         # An upper clip's grade must affect that clip before blending. Brightening
         # or darkening the finished composite would also change the red base.
@@ -1319,7 +1355,7 @@ def main():
               f"mask center/edge {mask_center}/{mask_edge}, inverted "
               f"{inverse_center}/{inverse_edge}; "
               f"12 frames and 24 fps 9-frame AV, 2x speed filter (15-frame AV), graded overlays on two "
-              f"and three layers, timed captions, "
+              f"and three layers, timed captions, cancelled export at {reported}%, "
               f"all 11 transition kinds, overlap and short gap, reverse-speed audio, "
               f"white balance temperature/tint, LUT3D mix/keys and invalid-file refusal, "
               f"Text/Timer preview and MP4 with keyed placement, all 12 blend modes, "
