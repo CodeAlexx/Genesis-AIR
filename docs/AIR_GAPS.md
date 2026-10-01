@@ -240,6 +240,21 @@ events through a separate `std.channel` link. Seek, source and mix generations r
 the session and refuse stale results. Persisted Stop also closes an idle owner without
 a wake. No SDK change was needed for this path.
 
+Active playback previously used a single 120-second reply wait (and 30-second write
+wait), so an in-flight decode could delay cancellation despite the idle Stop check.
+Playback commands now retain partial pipe progress while checking the committed
+request and Stop in 50 ms I/O steps. Their background owner terminates the old child,
+closes its handles and removes incomplete output before servicing the next request.
+Cancellation does not publish a stale failure. Missing/invalid marker reads instead
+report `GA_AUDIO_STREAM_CONTROL`; other reply failures carry `GA_AUDIO_STREAM_REPLY`.
+
+Six native headless cases deliberately block replies or 512 KiB stdin writes during
+Stop, seek and a missing-marker fault. They confirm the blocked PID has exited, no
+partial WAV remains, and recovered samples equal the normal compositor mix. The
+latest run measured 166–169 ms active Stop joins, 315–317 ms seek recovery and
+152–169 ms coded marker failure. The full Windows gate passes. This proves active
+pipe cancellation; large reverse startup/memory and long-run A/V sync remain open.
+
 `PLAYWAVE` specifies an exact 48 kHz output sample count; `AUDIOSTREAM` pulls from a
 retained clip graph. Absolute sequence-frame endpoints determine chunk lengths instead
 of rounding each chunk's duration independently. EOF pads the requested output range

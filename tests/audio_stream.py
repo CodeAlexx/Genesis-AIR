@@ -2,7 +2,9 @@
 """Headless continuous audio: chunk boundaries must match one complete filter pass."""
 import argparse
 import array
+import ctypes
 import math
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -21,11 +23,32 @@ def pcm(path):
         return result
 
 
+def assert_process_exited(pid):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        assert ctypes.get_last_error() == 87, ("cannot verify stalled child exit", pid, ctypes.get_last_error())
+        return
+    try:
+        assert kernel.WaitForSingleObject(handle, 0) == 0, ("cancelled audio child survived", pid)
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", type=pathlib.Path, required=True)
     parser.add_argument("--client", type=pathlib.Path)
+    parser.add_argument("--cancel-client", type=pathlib.Path)
+    parser.add_argument("--wrapper", type=pathlib.Path)
     args = parser.parse_args()
+    if args.cancel_client and (not args.wrapper or os.name != "nt"):
+        parser.error("--cancel-client requires --wrapper on native Windows")
     with tempfile.TemporaryDirectory(prefix="genesis-audio-stream-") as directory:
         root = pathlib.Path(directory)
         source = root / "continuous 日本語 %20, clip.wav"
@@ -80,6 +103,29 @@ def main():
             expected = pcm(output / "case-3-whole.wav")[:5 * 48000 * 2]
             assert recovered == expected, "failed filter graph contaminated the next playback session"
             print(completed.stdout.strip(), flush=True)
+        if args.cancel_client:
+            for action in ("seek", "stop", "control"):
+                for phase in ("reply", "write"):
+                    output = root / f"cancel {action} {phase} 日本語"
+                    output.mkdir()
+                    env = dict(os.environ, GENESIS_TEST_WORKER=str(args.worker.resolve()),
+                        GENESIS_TEST_STARTS=str(output / "starts.log"),
+                        GENESIS_TEST_AUDIO_BLOCK=str(output / "blocked.pid"),
+                        GENESIS_TEST_AUDIO_PARTIAL=str(output / "cancelled.wav"))
+                    env.pop("GENESIS_TEST_CRASH", None)
+                    env.pop("GENESIS_TEST_AUDIO_BLOCK_WRITE", None)
+                    if phase == "write": env["GENESIS_TEST_AUDIO_BLOCK_WRITE"] = "1"
+                    completed = subprocess.run([str(args.cancel_client.resolve()), str(args.wrapper.resolve()),
+                        str(source), str(output), action, phase, str(args.worker.resolve())], env=env, text=True, encoding="utf-8",
+                        errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+                    assert completed.returncode == 0, (action, phase, completed.returncode, completed.stdout[-4000:])
+                    assert not (output / "cancelled.wav").exists(), "partial audio survived cancellation"
+                    assert_process_exited(int((output / "blocked.pid").read_text()))
+                    starts = (output / "starts.log").read_text().splitlines()
+                    assert len(starts) == (1 if action == "stop" else 2), starts
+                    if action != "stop":
+                        assert pcm(output / "recovered.wav") == pcm(output / "reference.wav")[:5 * 48000 * 2], "stale audio reached recovery output"
+                    print(f"active {action} during blocked {phase}: {completed.stdout.strip()}", flush=True)
         print("Continuous native audio graphs: Unicode paths, exact chunk lengths and cross-boundary filter history passed")
 
 

@@ -2,6 +2,34 @@
 #include <windows.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <string.h>
+
+/* A real blocked pipe/child for active audio cancellation, only when requested
+ * by the fixture. A later start delegates to the genuine compositor. */
+static int stall_audio(const wchar_t *marker) {
+    wchar_t write_mode[16], partial[32768];
+    int blocked_write = GetEnvironmentVariableW(L"GENESIS_TEST_AUDIO_BLOCK_WRITE", write_mode, 16) != 0;
+    char line[16384];
+    while (fgets(line, sizeof(line), stdin)) {
+        if (strncmp(line, "PLAYWAVE ", 9) == 0) {
+            fputs("DONE\n", stdout); fflush(stdout);
+            if (!blocked_write) continue;
+        } else if (strncmp(line, "AUDIOSTREAM ", 12) != 0) {
+            fputs("DONE\n", stdout); fflush(stdout); continue;
+        }
+        if (GetEnvironmentVariableW(L"GENESIS_TEST_AUDIO_PARTIAL", partial, 32768)) {
+            FILE *output = _wfopen(partial, L"wb");
+            if (!output) return 2;
+            fputs("partial", output); fclose(output);
+        }
+        FILE *record = _wfopen(marker, L"wb");
+        if (!record) return 2;
+        fprintf(record, "%lu\n", GetCurrentProcessId()); fclose(record);
+        Sleep(INFINITE);
+        return 3;
+    }
+    return 3;
+}
 
 /* Exercise recovery through a real process, inheriting the AIR worker pipes. */
 int wmain(int argc, wchar_t **argv) {
@@ -11,6 +39,9 @@ int wmain(int argc, wchar_t **argv) {
     FILE *log = _wfopen(starts, L"ab");
     if (!log) return 2;
     fputs("start\n", log); fclose(log);
+    wchar_t audio_block[32768];
+    if (GetEnvironmentVariableW(L"GENESIS_TEST_AUDIO_BLOCK", audio_block, 32768) &&
+        GetFileAttributesW(audio_block) == INVALID_FILE_ATTRIBUTES) return stall_audio(audio_block);
     if (GetEnvironmentVariableW(L"GENESIS_TEST_CRASH", crash, 32768) &&
         GetFileAttributesW(crash) == INVALID_FILE_ATTRIBUTES) {
         FILE *marker = _wfopen(crash, L"wb");

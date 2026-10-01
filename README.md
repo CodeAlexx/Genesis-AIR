@@ -278,6 +278,12 @@ at the device cursor after mixing. Preview decoding runs on a separate thread; r
 seeks publish the newest requested frame. Waveform completion is published independently
 so an early image result cannot hide a later audio envelope.
 
+Playback pipe reads and writes check Stop and superseding requests in bounded 50 ms
+steps. The owning thread terminates a stale worker and removes its partial WAV;
+partial write offsets and reply fragments survive ordinary short waits. An unreadable
+or invalid request marker reports `GA_AUDIO_STREAM_CONTROL` and permits recovery on
+the next valid request. Ordinary Stop/seek cancellation is silent.
+
 The `audio` command writes the program mix from the current playhead for inspection.
 
 ## Keys
@@ -486,10 +492,15 @@ clock, stereo output levels and immediate Stop. Continuous audio checks compare 
 worker cases and seventeen editor/source/rate cases against whole-range WAV output;
 the generated PCM fixture matches exactly across chunk boundaries. Cases cover eleven
 effects, reverse, 2x speed, fractional rates, seek reset and source audition, plus coded
-filter failure, recovery and idle Stop. Run that gate separately with:
+filter failure, recovery and idle Stop. Six additional native cases interrupt a worker
+blocked on a reply or a large stdin write: Stop, seek, and missing request-marker
+failure. They verify child exit, partial cleanup, coded failure/recovery and exact
+recovered PCM. Active Stop joined in 166–169 ms and seek recovery took 315–317 ms
+in the latest headless run; these are stalled-process checks, not interactive A/V
+sync measurements. Run that gate separately with:
 
 ```powershell
-python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe
+python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe --cancel-client .\build-windows\native-pro\bin\Release\genesis-audio-cancel.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
 ```
 
 The asynchronous preview test measures

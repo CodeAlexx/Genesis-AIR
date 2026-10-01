@@ -1,0 +1,103 @@
+// No window or device output: interrupt actual stalled worker reads and writes.
+module genesis.tests.audio_cancel
+import std.editor as editor
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+
+pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) < 7 {return 2}
+  let worker: str = view.get(args,1)
+  let source_path: str = view.get(args,2)
+  let root: str = view.get(args,3)
+  let control_failure: bool = str.eq(view.get(args,4),"control")
+  let seeking: bool = not str.eq(view.get(args,4),"stop")
+  let blocked_write: bool = str.eq(view.get(args,5),"write")
+  playback.reset(root)
+  var doc: editor.Document = editor.document(30.0,1920,1080)
+  let source: u64 = editor.add_source(doc,source_path,"Cancellation",360,30.0)
+  let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"Audio")
+  let _ = editor.append(doc,track,source,0,360)
+  if seeking {
+    // Compare with the normal compositor mix, including its PCM quantization.
+    match media.prepare_audio(doc,view.get(args,6),0,str.view(path.join(root,"reference.wav"))) {
+      ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+        return 1},
+    }
+  }
+  var stalled: media.AudioPlan = match media.audio_plan_range(doc,worker,0,150,str.view(path.join(root,"cancelled.wav"))) {
+    ok(value)=>value,err(_)=>{return 1},
+  }
+  if blocked_write {
+    var large: string = string.copy("AUDIOSTREAM ")
+    var i: u64 = 0
+    loop {if i == 32768 {break}
+      string.append(large,"0123456789abcdef")
+      i=i+1
+    }
+    let _ = struct.replace(stalled,[large],field=sounds)
+  }
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var failure: bool = false
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(config,fn=playback.run))
+    match link.connect(peer) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+      failure=true},}
+    if not failure {
+      if not playback.request(root,1,1,stalled) {failure=true}
+      let _ = link.wake(peer,false)
+      let deadline: u64 = time.monotonic_ns()+5000000000
+      loop {if match files.exists(path.join(root,"blocked.pid")) {ok(value)=>value,err(_)=>false,} {break}
+        if time.monotonic_ns() >= deadline {failure=true
+          break}
+        time.sleep_ms(10)
+      }
+    }
+    var began: u64 = time.monotonic_ns()
+    if control_failure and not failure {
+      let _ = files.remove(path.join(root,"request.id"))
+      match link.await_ready(peer,1,began+2500000000) {
+        ok(_)=>{failure=true},err(problem)=>{if not text.contains(str.view(problem),"GA_AUDIO_STREAM_CONTROL") {io.write(str.view(problem))
+          failure=true}},
+      }
+      io.write(text.concat("Control failure ms ",text.concat(str.view(string.from_int((time.monotonic_ns()-began)/1000000)),"\n")))
+      began=time.monotonic_ns()
+    }
+    if seeking and not failure {
+      match media.audio_plan_range(doc,worker,0,150,str.view(path.join(root,"recovered.wav"))) {
+        err(problem)=>{io.write(str.view(problem))
+          failure=true},
+        ok(value)=>{var recovered: media.AudioPlan = value
+          if not playback.request(root,2,2,recovered) {failure=true}
+          let _ = link.wake(peer,false)
+          match link.await_ready(peer,2,began+2500000000) {
+            ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+              failure=true},
+          }
+          if peer.ready != 2 or peer.error_generation != 0 {failure=true}
+        },
+      }
+      io.write(text.concat("Seek recovery ms ",text.concat(str.view(string.from_int((time.monotonic_ns()-began)/1000000)),"\n")))
+    }
+    playback.stop(root)
+    // Active Stop must interrupt the pipe without requiring the command wake.
+    if seeking or failure {let _ = link.wake(peer,true)
+      began=time.monotonic_ns()}
+    match tasks.join_next<bool>(jobs,2500) {
+      none=>{failure=true},some(answer)=>{if not answer {failure=true}},
+    }
+    if time.monotonic_ns()-began > 2500000000 {failure=true}
+    io.write(text.concat("Stop join ms ",text.concat(str.view(string.from_int((time.monotonic_ns()-began)/1000000)),"\n")))
+    link.close_commands(peer)
+  }
+  if match files.exists(path.join(root,"cancelled.wav")) {ok(value)=>value,err(_)=>true,} {failure=true}
+  if failure {1}else{io.write("Active audio cancellation, partial cleanup and owner shutdown passed\n")
+    0}
+}

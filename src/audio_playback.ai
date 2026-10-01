@@ -99,8 +99,9 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
     var plan: media.AudioPlan = media.AudioPlan {worker:string.copy(str.view(owned.worker)),
       output:decoded(str.view(array.borrow(lines,1))),duration:cast.float(frames)/48000.0,frames:frames,sounds:sounds}
     var job: media.AudioJob = media.audio_job(plan,ref.swap(session,option.none()))
-    match media.execute_playback_audio(job) {
-      err(problem)=>link.fail(peer,id,str.view(problem)),
+    match media.execute_playback_audio(job,str.view(owned.root),id) {
+      err(problem)=>{if not str.starts_with(str.view(problem),"[GA_AUDIO_STREAM_CANCELLED]") {
+        link.fail(peer,id,str.view(problem))}},
       ok(value)=>{session=option.some(value)
         let _ = link.notify(peer,1,id)},
     }

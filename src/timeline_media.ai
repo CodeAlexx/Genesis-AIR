@@ -1378,21 +1378,56 @@ pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
   ()
 }
 
-fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
-           -> result<unit, string> effects {alloc, process, time} {
+// Playback watches its committed request while process I/O waits. An empty root
+// keeps the normal preview/export command behavior and its existing deadlines.
+fn audio_request_current(root: str, id: u64) -> result<bool,string> effects {alloc, fs.meta, fs.read} {
+  if str.len(root) == 0 { return result.ok(true) }
+  if tasks.requested_at(path.join(root,"stop")) { return result.ok(false) }
+  let marker: string = match files.read_text(path.join(root,"request.id")) {
+    ok(value)=>value,err(_)=>{return result.err("[GA_AUDIO_STREAM_CONTROL] Cannot read playback request marker")},
+  }
+  match text.parse_u64(str.view(text.trim(str.view(marker)))) {
+    some(value)=>result.ok(value == id),none=>result.err("[GA_AUDIO_STREAM_CONTROL] Invalid playback request marker"),
+  }
+}
+fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: str, root: str, id: u64)
+           -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
   var request: string = string.copy(line)
   string.append(request, "\n")
-  match proc.write_all_stdin(child, str.bytes(str.view(request)), proc.deadline_in(30000)) {
-    err(problem) => { return result.err(text.concat("worker write: ", fs.error.message(problem))) },
-    ok(_) => { },
+  if str.len(root) == 0 {
+    match proc.write_all_stdin(child, str.bytes(str.view(request)), proc.deadline_in(30000)) {
+      err(problem) => { return result.err(text.concat("worker write: ", fs.error.message(problem))) },
+      ok(_) => { },
+    }
+  } else {
+    let deadline: u64 = proc.deadline_in(30000)
+    var sent: u64 = 0
+    loop {
+      let current: bool = try audio_request_current(root,id)
+      if not current { return result.err("[GA_AUDIO_STREAM_CANCELLED] Playback request was superseded") }
+      if sent >= str.len(str.view(request)) { break }
+      if time.monotonic_ns() >= deadline { return result.err("[GA_AUDIO_STREAM_TIMEOUT] Worker write timed out") }
+      let step: u64 = proc.deadline_in(50)
+      match proc.write_stdin(child,view.slice(str.bytes(str.view(request)),sent,str.len(str.view(request))),
+          if step < deadline {step}else{deadline}) {
+        ok(wrote)=>{sent=sent+wrote},
+        err(problem)=>{if problem.code != 10 {return result.err(text.concat("worker write: ",fs.error.message(problem))) }},
+      }
+    }
   }
   let deadline: u64 = proc.deadline_in(120000)
   var detail: string = string.new()
   var count: u64 = 0
   loop {
+    let current: bool = try audio_request_current(root,id)
+    if not current { return result.err("[GA_AUDIO_STREAM_CANCELLED] Playback request was superseded") }
     if count >= 256 { return result.err("worker emitted too many diagnostic lines") }
-    match proc.read_line(child, reader, deadline) {
-      err(problem) => { return result.err(text.concat("worker reply: ", fs.error.message(problem))) },
+    let step: u64 = if str.len(root) == 0 {deadline}else{proc.deadline_in(50)}
+    match proc.read_line(child, reader, if step < deadline {step}else{deadline}) {
+      err(problem) => {
+        if problem.code == 10 and str.len(root) != 0 and time.monotonic_ns() < deadline {continue}
+        return result.err(text.concat("worker reply: ", fs.error.message(problem)))
+      },
       ok(value) => {
         match value {
           none => { return result.err("worker closed its reply pipe") },
@@ -1416,18 +1451,27 @@ fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
   }
   result.err("worker gave no reply")
 }
+fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
+           -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
+  command_for_request(child,reader,line,"",0)
+}
 
 fn audio_session(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
                  sounds: ref<array<string>>, closer: str)
-                 -> result<unit, string> effects {alloc, process, time} {
-  try command(child, reader, opener)
+                 -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
+  audio_session_for_request(child,reader,opener,sounds,closer,"",0)
+}
+fn audio_session_for_request(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
+                 sounds: ref<array<string>>, closer: str, root: str, id: u64)
+                 -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
+  try command_for_request(child, reader, opener, root, id)
   var at: u64 = 0
   loop {
     if at >= array.len(sounds) { break }
-    try command(child, reader, str.view(array.borrow(sounds, at)))
+    try command_for_request(child, reader, str.view(array.borrow(sounds, at)), root, id)
     at = at + 1
   }
-  try command(child, reader, closer)
+  try command_for_request(child, reader, closer, root, id)
   result.ok(())
 }
 
@@ -1837,7 +1881,7 @@ pub fn shutdown_audio(session: AudioSession own) -> unit effects {process, time}
   }
   ()
 }
-pub fn execute_playback_audio(job: ref<AudioJob>) -> result<AudioSession,string>
+pub fn execute_playback_audio(job: ref<AudioJob>, root: str, id: u64) -> result<AudioSession,string>
     effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let plan: ref<AudioPlan> = struct.borrow(job,field=plan)
   var session: AudioSession = match ref.swap(struct.borrow(job,field=session),option.none()) {
@@ -1863,12 +1907,18 @@ pub fn execute_playback_audio(job: ref<AudioJob>) -> result<AudioSession,string>
   let closer: string = text.concat("WAVECLOSE ",str.view(target))
   var child: Child = option.unwrap(struct.replace(session,option.none(),field=child))
   var reader: proc.LineReader = struct.replace(session,proc.line_reader(65536),field=reader)
-  let answer: result<unit,string> = audio_session(child,reader,str.view(opener),struct.borrow(plan,field=sounds),str.view(closer))
+  var answer: result<unit,string> = audio_session_for_request(child,reader,str.view(opener),struct.borrow(plan,field=sounds),str.view(closer),root,id)
+  match audio_request_current(root,id) {
+    ok(current)=>{if not current {answer=result.err("[GA_AUDIO_STREAM_CANCELLED] Playback request was superseded")}},
+    err(problem)=>{answer=result.err(problem)},
+  }
   let _ = struct.replace(session,option.some(child),field=child)
   let _ = struct.replace(session,reader,field=reader)
   match answer {
     err(problem) => { shutdown_audio(session)
-      return result.err(problem) },
+      let _ = files.remove(str.view(plan.output))
+      return result.err(if str.starts_with(str.view(problem),"[GA_") {problem}
+        else {text.concat("[GA_AUDIO_STREAM_REPLY] ",str.view(problem))}) },
     ok(_) => result.ok(session),
   }
 }
