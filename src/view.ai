@@ -1048,9 +1048,22 @@ fn paint_live_monitor(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: The
   // Clear on physical pixel boundaries before reapplying fractional video edges.
   // Header, buttons and focus borders stay intact; transport changes repaint all.
   let scale: f64 = draw.transform(canvas).a
-  draw.fill_device_rect(canvas, cast.sat(math.floor((area.left + 4.0) * scale)),
-    cast.sat(math.floor((area.top + 30.0) * scale)), cast.sat(math.ceil((area.right - 4.0) * scale)),
-    cast.sat(math.ceil((area.bottom - 31.0) * scale)), colors.panel)
+  let left: i64 = cast.sat(math.floor((area.left + 4.0) * scale))
+  let top: i64 = cast.sat(math.floor((area.top + 30.0) * scale))
+  let right: i64 = cast.sat(math.ceil((area.right - 4.0) * scale))
+  let bottom: i64 = cast.sat(math.ceil((area.bottom - 31.0) * scale))
+  let inside_left: i64 = cast.sat(math.ceil((area.left + 6.0) * scale))
+  let inside_top: i64 = cast.sat(math.ceil((area.top + 30.0) * scale))
+  let inside_right: i64 = cast.sat(math.floor((area.right - 6.0) * scale))
+  let inside_bottom: i64 = cast.sat(math.floor((area.bottom - 72.0) * scale))
+  if inside_right > inside_left and inside_bottom > inside_top {
+    // The opaque picture background immediately overwrites this interior.
+    // Restore only its surrounding bands, including fractional edge pixels.
+    draw.fill_device_rect(canvas, left, top, right, inside_top, colors.panel)
+    draw.fill_device_rect(canvas, left, inside_bottom, right, bottom, colors.panel)
+    draw.fill_device_rect(canvas, left, inside_top, inside_left, inside_bottom, colors.panel)
+    draw.fill_device_rect(canvas, inside_right, inside_top, right, inside_bottom, colors.panel)
+  } else { draw.fill_device_rect(canvas, left, top, right, bottom, colors.panel) }
   fill_at(canvas, area.left + 6.0, area.top + 30.0, area.right - 6.0, area.bottom - 72.0,
     draw.rgb(8, 9, 11))
   paint_monitor_image(canvas, area, image)

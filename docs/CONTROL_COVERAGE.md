@@ -9,7 +9,7 @@ state-dependent controls also need focused checks. It does not by itself prove m
 
 ## Verified Windows checkpoint (2026-10-01)
 
-Branch `windows-native`, SDK `43fbd039602e0df2c2f43f6833529db175238179`, and the
+Branch `windows-native`, SDK `df80f270dd28af76674b6e80a4f08970c081be3e`, and the
 compositor revision/Windows patch recorded in `windows/source-pins.json` and
 `windows/gcompose-windows.patch` pass these measured gates:
 
@@ -33,11 +33,16 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The current retained-alpha checkpoint headless diagnostic uses 20 samples
+The current opaque-background checkpoint headless diagnostic uses 20 samples
 after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440. Editor
-medians are 27.96 ms request-to-ready, 2.12 ms image loading,
-6.00 ms retained paint and 36.34 ms serial. Fullscreen medians are
-30.32 ms, 3.12 ms, 21.82 ms and 55.32 ms respectively.
+medians are 27.83 ms request-to-ready, 2.41 ms image loading,
+2.52 ms retained paint and 33.28 ms serial. Fullscreen medians are
+29.97 ms, 3.30 ms, 6.69 ms and 39.59 ms respectively.
+The baseline before these changes measured 6.01/21.69 ms painting and 40.01/58.37 ms serial.
+Panel bands skip the picture interior that the opaque background overwrites;
+shared opaque rectangle interiors reuse a stored row. Fractional edges and alpha
+keep independent destination blending. The retained-alpha checkpoint measured
+6.00/21.82 ms painting and 36.34/55.32 ms serial.
 The opaque-row/span-copy checkpoint (`d5a7d25`) measured 6.12/22.54 ms painting
 and 35.80/56.11 ms serial. The retained painter now clears monitor backgrounds
 before composition without scanning either image for alpha or forcing transparent
@@ -54,6 +59,8 @@ invalid/wrapping ranges and invalid slices fail with coded diagnostics. The nati
 runtime suite also passes, preserving the exported slice helper ABI. The independent
 raster oracle passes 387 rectangle and 204 image checks, including opaque interiors,
 fractional edges, reflections, clipping and mixed alpha over varied row backgrounds.
+Rectangle backgrounds now vary by both row and column to expose incorrectly copied
+partially blended edges. The native retained painter still matches all 444 checks.
 
 Detailed phase timing exposed an 11.55 ms empty wake-coalescing wait. The shared
 SDK's `net.tcp_accept_now` / `net.tcp_recv_now` and `std.channel.recv_now` remove

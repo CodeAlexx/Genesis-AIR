@@ -256,3 +256,27 @@ produced nonzero audio in all seventeen cases; its seek-start comparison had a m
 892 PCM-unit difference and a mean 3.05 units in signed 16-bit samples. These checks
 establish retained processing history, not sample-identical seeking for every codec,
 sustained interactive 4K60 or measured long-run A/V synchronization.
+
+
+## Opaque backgrounds and rectangle interiors
+
+Retained monitor painting restored the complete panel body and then immediately
+overwrote its interior with the opaque picture background. It now restores only the
+surrounding bands, retaining physical pixel clearing at fractional edges. The picture
+background still clears transparent video correctly. The shared `std.draw.fill_rect`
+path also reuses its first fully covered opaque interior row through bounded span
+copies; fractional edges and transparent rows blend against their own destinations.
+
+The independent polygon oracle passes 387 rectangle checks with different background
+colors/alpha per row and column. That exposes an incorrectly copied partial edge.
+The image oracle passes 204 checks, native pixel handoff passes all 65,536 channel/alpha
+pairs, and the Windows retained painter passes all 24 cases / 444 exact byte checks.
+The standard Windows acceptance gate, including continuous audio, passes.
+
+On the supplied 4K/59.94 clip at 2560x1440, twenty headless samples after three warmups
+measure 2.52/6.69 ms editor/fullscreen painting, versus the earlier 6.01/21.69 ms
+baseline. Panel-band clearing alone measured 5.18/17.62 ms. Final serial medians are
+33.28/39.59 ms, versus 40.01/58.37 ms before both changes. Serial request timing also
+varied between runs; the isolated paint reduction is 58%/69%. These measurements
+exclude native presentation, audio and asynchronous overlap and do not establish
+sustained interactive 4K60 or long-run A/V synchronization.

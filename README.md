@@ -405,13 +405,16 @@ The resampler reserves its exact RGBA byte length, copies RGB spans and reuses
 repeated rows while preserving its existing alpha and letterbox behavior. The
 rasterizer reuses an opaque sampled interior row, trimming fractional edge columns
 outside the image; transparent rows blend independently against their backgrounds.
+Opaque rectangle interiors also reuse their first fully covered row. Fractional
+rectangle edges and transparent fills keep independent destination blending.
 
 Playback retains the window canvas and repaints the monitor pictures/timecodes,
 old/new playhead strips, status, and live scopes/audio or animated inspector values.
 Input and project/layout changes request a complete paint; project dialogs, open menus/prompts,
 changed picture dimensions also use a complete paint. Each retained monitor paint
-clears its destination before compositing, including transparent frames, so neither
-image needs a separate alpha scan. Closing an overlay also repaints its former pixels.
+restores its panel bands and picture background before compositing, including transparent
+frames, so neither image needs a separate alpha scan. The opaque picture interior
+overwrites its destination once. Closing an overlay also repaints its former pixels.
 Physical pixel damage boundaries preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
 
 At the retained-painter checkpoint (`77ea56a`), retained painting took 7.39 ms
@@ -422,20 +425,24 @@ actually delayed an empty wake-coalescing pass by 11.55 ms on Windows. The final
 build drains that queue in 0.03 ms median, without changing blocking
 channel delivery or discarding partial greetings/frames.
 
-The retained-alpha checkpoint was measured with 20 samples after three
+The opaque-background checkpoint was measured with 20 samples after three
 warmups on the supplied 4K/59.94 AV1/PQ clip and RTX 5080 in a 2560x1440 canvas:
 
 | Median phase (ms) | Editor | Fullscreen |
 |---|---:|---:|
-| Request to ready notification | 27.96 | 30.32 |
-| Load generation-checked images | 2.12 | 3.12 |
-| Retained canvas paint | 6.00 | 21.82 |
-| Complete serial diagnostic | 36.34 | 55.32 |
+| Request to ready notification | 27.83 | 29.97 |
+| Load generation-checked images | 2.41 | 3.30 |
+| Retained canvas paint | 2.52 | 6.69 |
+| Complete serial diagnostic | 33.28 | 39.59 |
+
+The baseline before panel-band clearing and opaque rectangle row reuse
+measured 6.01/21.69 ms painting and 40.01/58.37 ms serial. Painting fell 58% in the
+editor and 69% fullscreen. The preceding retained-alpha checkpoint measured
+6.00/21.82 ms painting and 36.34/55.32 ms serial; request timing varied between runs.
 
 The opaque-row/span-copy checkpoint (`d5a7d25`) measured 6.12/22.54 ms painting
-and 35.80/56.11 ms serial in editor/fullscreen. Removing the redundant alpha scans
-reduces fullscreen painting to 21.82 ms in this sample; the serial editor result is
-slightly slower. Before opaque-row reuse, `8203d66` measured 7.10/27.48 ms painting
+and 35.80/56.11 ms serial in editor/fullscreen. Before opaque-row reuse,
+`8203d66` measured 7.10/27.48 ms painting
 and 37.21/60.54 ms serial. The earlier channel-wake checkpoint
 (`25178c9`) measured 37.87/35.72 ms request-to-ready and 46.95/66.54 ms serial.
 These short headless samples exclude native presentation, audio and pipeline
