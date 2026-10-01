@@ -9,14 +9,14 @@ state-dependent controls also need focused checks. It does not by itself prove m
 
 ## Verified Windows checkpoint (2026-10-01)
 
-Branch `windows-native`, SDK `fe68ba62fd8efceb31ebffc7820f9900113ad41e`, and the
+Branch `windows-native`, SDK `43fbd039602e0df2c2f43f6833529db175238179`, and the
 compositor revision/Windows patch recorded in `windows/source-pins.json` and
 `windows/gcompose-windows.patch` pass these measured gates:
 
 | Gate | Evidence |
 |---|---|
 | Project and control model | 152 saved application facts, three native file-drop checks, 749 dispatched clicks across four tabs, no enabled-control overlap |
-| Native media and project I/O | Eight cases / 65 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status |
+| Native media and project I/O | Nine cases / 78 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status, file-based quadrant checks for exact alpha, opaque resized monitors, up/down sampling, aspect letterboxing, and zero/short input refusal |
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
 | Project safety and recovery | Fifteen cases / 84 checks. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
@@ -32,16 +32,23 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The current nonblocking-channel checkpoint headless diagnostic uses 20 samples
+The current opaque-row/span-copy checkpoint headless diagnostic uses 20 samples
 after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440. Editor
-medians are 27.86 ms request-to-ready, 2.18 ms image loading,
-7.10 ms retained paint and 37.21 ms serial. Fullscreen medians are
-29.95 ms, 3.14 ms, 27.48 ms and 60.54 ms respectively.
-The preceding checkpoint (`25178c9`) measured 37.87/35.72 ms request-to-ready and
-46.95/66.54 ms serial in editor/fullscreen. The earlier editor baseline (`40dafe4`)
-measured 41.79 ms request-to-ready and 49.91 ms serial. The retained-painter checkpoint
-(`77ea56a`) measured 42.23 ms for a complete paint. Native presentation, audio and
-overlap are excluded; sustained smooth 4K60 remains open.
+medians are 27.24 ms request-to-ready, 2.24 ms image loading,
+6.12 ms retained paint and 35.80 ms serial. Fullscreen medians are
+30.56 ms, 3.10 ms, 22.54 ms and 56.11 ms respectively.
+The preceding checkpoint (`8203d66`) measured 7.10/27.48 ms painting and
+37.21/60.54 ms serial in editor/fullscreen. The earlier checkpoint (`25178c9`)
+measured 46.95/66.54 ms serial. Native presentation, audio and overlap are excluded;
+sustained smooth 4K60 remains open.
+
+Shared span copying passes 313 checks on native and reference backends, including
+all legal offsets/counts, both overlap directions, zero-length end positions,
+plain records and floating-point bits; wrong types, overlapping owner borrows,
+invalid/wrapping ranges and invalid slices fail with coded diagnostics. The native
+runtime suite also passes, preserving the exported slice helper ABI. The independent
+raster oracle passes 387 rectangle and 204 image checks, including opaque interiors,
+fractional edges, reflections, clipping and mixed alpha over varied row backgrounds.
 
 Detailed phase timing exposed an 11.55 ms empty wake-coalescing wait. The shared
 SDK's `net.tcp_accept_now` / `net.tcp_recv_now` and `std.channel.recv_now` remove

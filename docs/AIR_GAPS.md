@@ -151,7 +151,7 @@ The actual Genesis painter, including glyphs and monitor scaling at physical cli
 resolution, was measured separately from worker throughput. Axis-aligned `std.draw`
 rectangles now preserve fixed 4x4 coverage without polygon scans. Axis-aligned images
 reuse column indices and skip blending opaque pixels. Rotation/skew use the generic paths.
-The SDK regression checks 387 rectangle cases and 98 image cases byte for byte.
+The SDK regression checks 387 rectangle cases and 204 image cases byte for byte.
 
 `std.gui.present_surface` borrows RGBA bytes directly. The host-neutral `ui.present`
 contract admits either RGB24 or straight RGBA32; Windows and X11 use the same alpha
@@ -181,7 +181,32 @@ The retained SDK fixture runs through both native and reference backends, and
 Windows has headless MSVC byte/EOF/idle-poll checks. Genesis's generation-bearing
 profile records queue draining separately from snapshot decode, source monitor,
 frame planning, program monitor and pixel publication. Final empty draining is
-about 0.03 ms median. The current editor serial diagnostic is 37.21 ms; fullscreen
+about 0.03 ms median. At the nonblocking checkpoint (`8203d66`), the editor serial diagnostic was
+37.21 ms; fullscreen
 is 60.54 ms, of which painting alone is 27.48 ms. These samples exclude audio,
 native present and asynchronous overlap. Smooth sustained 4K60 and continuous
 playback audio-filter state remain acceptance work.
+
+
+## Bounded span copies and opaque row reuse
+
+`array.copy_from` copies a plain-element view into an existing destination range;
+`array.copy_within` uses one owner for overlapping ranges. Both retain length and
+capacity, validate the complete range before stores, and preserve element bits.
+The shared inline `view.slice` body keeps the exported runtime ABI and lets small
+constant spans remain constant for the C optimizer. Native/reference tests cover
+313 values/ranges, coded type and ownership refusals, and invalid or wrapping spans.
+
+`std.draw` reuses consecutive nearest-neighbor rows only when their valid interior
+is wholly opaque. It preserves fractional edge pixels outside the source and
+blends transparent rows against each destination background. The independent
+oracle now covers 204 image cases over varying background pixels, plus 387 rectangle
+cases. Genesis's resampler reserves its byte length once, copies RGB spans and
+preserves existing exact-RGBA versus resized-opaque behavior; Windows quadrant
+fixtures cover up/down sampling, aspect bars, alpha and refused short/zero inputs.
+
+The supplied 4K clip's final 20-sample profile at 2560x1440 measured 6.12 ms editor
+painting and 22.54 ms fullscreen painting, against 7.10/27.48 ms before this change.
+Serial medians are 35.80/56.11 ms. These headless results exclude native presentation,
+audio and asynchronous overlap; sustained smooth 4K60 and long-run audio/video
+synchronization remain open.

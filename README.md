@@ -394,7 +394,12 @@ The shared AIR rasterizer now computes axis-aligned rectangle coverage and image
 sampling directly, preserving the existing pixels at fractional DPI and under reflection.
 Genesis borrows its RGBA window surface through `std.gui.present_surface`; the native
 host performs format conversion once, avoiding an AIR RGB24 allocation and a repeated
-Windows swizzle. The monitor resampler also uses integer source indices.
+Windows swizzle. The monitor resampler also uses integer source indices. Shared `array.copy_from`
+and `array.copy_within` copy bounded plain-element spans without growing the array.
+The resampler reserves its exact RGBA byte length, copies RGB spans and reuses
+repeated rows while preserving its existing alpha and letterbox behavior. The
+rasterizer reuses an opaque sampled interior row, trimming fractional edge columns
+outside the image; transparent rows blend independently against their backgrounds.
 
 Playback retains the window canvas and repaints the monitor pictures/timecodes,
 old/new playhead strips, status, and live scopes/audio or animated inspector values.
@@ -411,19 +416,20 @@ actually delayed an empty wake-coalescing pass by 11.55 ms on Windows. The final
 build drains that queue in 0.03 ms median, without changing blocking
 channel delivery or discarding partial greetings/frames.
 
-The nonblocking-channel checkpoint was measured with 20 samples after three
+The opaque-row/span-copy checkpoint was measured with 20 samples after three
 warmups on the supplied 4K/59.94 AV1/PQ clip and RTX 5080 in a 2560x1440 canvas:
 
 | Median phase (ms) | Editor | Fullscreen |
 |---|---:|---:|
-| Request to ready notification | 27.86 | 29.95 |
-| Load generation-checked images | 2.18 | 3.14 |
-| Retained canvas paint | 7.10 | 27.48 |
-| Complete serial diagnostic | 37.21 | 60.54 |
+| Request to ready notification | 27.24 | 30.56 |
+| Load generation-checked images | 2.24 | 3.10 |
+| Retained canvas paint | 6.12 | 22.54 |
+| Complete serial diagnostic | 35.80 | 56.11 |
 
-The previous checkpoint (`25178c9`) measured 37.87/35.72 ms request-to-ready and
-46.95/66.54 ms serial in editor/fullscreen respectively. The earlier editor
-baseline (`40dafe4`) measured 41.79 ms request-to-ready and 49.91 ms serial.
+The preceding checkpoint (`8203d66`) measured 7.10/27.48 ms painting and
+37.21/60.54 ms serial in editor/fullscreen respectively. Opaque-row reuse lowers
+fullscreen painting by about 18% in this sample. The earlier channel-wake checkpoint
+(`25178c9`) measured 37.87/35.72 ms request-to-ready and 46.95/66.54 ms serial.
 These short headless samples exclude native presentation, audio and pipeline
 overlap; they are not an interactive frame-rate claim. Fullscreen CPU painting
 and program-monitor preparation remain significant costs. Sustained smooth
@@ -459,7 +465,7 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 ```
 
 The Windows gate verifies 152 saved application facts, three native file-drop facts,
-749 control clicks with overlap checks, 65 native media/project checks and 58 focused
+749 control clicks with overlap checks, 78 native media/project checks and 58 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo output levels and immediate Stop. The asynchronous preview test measures
 red/blue pixels after a 32-request playhead drag, time changes during the drag,

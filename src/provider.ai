@@ -553,30 +553,34 @@ fn read_program(file: str, width: u32, height: u32, canvas_width: u32, canvas_he
     } else { cast.wrap(canvas_width) })
     x = x + 1
   }
-  var pixels: array<byte> = array.new()
   let opaque: u8 = 255
-  let black: u8 = 0
+  // The monitor is flattened to opaque pixels. Reserve the exact byte length
+  // once; copy RGB spans without changing the existing alpha behavior.
+  var pixels: array<byte> = array.repeat(cast.bits(opaque), total * 4)
+  var previous_row: u64 = 18446744073709551615
   var y: u64 = 0
   loop { if y >= cast.wrap(height) { break }
     let row: u64 = if y >= top and y < top + fit_height {
       (y - top) * cast.wrap(canvas_height) / fit_height * cast.wrap(canvas_width)
     } else { cast.wrap(canvas_width) * cast.wrap(canvas_height) }
+    let row_base: u64 = y * cast.wrap(width) * 4
+    if y > 0 and row == previous_row {
+      array.copy_within(pixels,row_base,row_base-cast.wrap(width)*4,cast.wrap(width)*4)
+      y = y + 1
+      continue
+    }
     x = 0
     loop { if x >= cast.wrap(width) { break }
       let sx: u64 = array.get(columns, x)
       if sx < cast.wrap(canvas_width) and row < cast.wrap(canvas_width) * cast.wrap(canvas_height) {
         let at: u64 = (row + sx) * 4
-        array.push(pixels, view.get(data, at))
-        array.push(pixels, view.get(data, at + 1))
-        array.push(pixels, view.get(data, at + 2))
+        array.copy_from(pixels,row_base+x*4,view.slice(data,at,at+3))
       } else {
-        array.push(pixels, cast.bits(black))
-        array.push(pixels, cast.bits(black))
-        array.push(pixels, cast.bits(black))
+        array.copy_from(pixels,row_base+x*4,b"\x{00}\x{00}\x{00}")
       }
-      array.push(pixels, cast.bits(opaque))
       x = x + 1
     }
+    previous_row = row
     y = y + 1
   }
   option.some(draw.Surface {width: width, height: height, pixels: pixels})
