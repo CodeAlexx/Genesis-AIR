@@ -119,7 +119,8 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/timeline_media.ai` | resolves AIR editor clips into the worker's preview, encode, and audio commands. |
 | `src/transport_clock.ai` | elapsed-time transport fallback; native Windows playback uses the audio device sample clock. |
 | `src/native_audio.ai`, `windows/native_audio.cpp` | typed C ABI adapter for Windows audio queues, sample clock and stereo output levels. |
-| `src/preview.ai` | asynchronous latest-request preview and waveform mailbox. |
+| `src/preview.ai` | atomic latest-request snapshots, generation-checked RGBA frames, waveforms and timeline bitmaps. |
+| `src/preview_link.ai` | bounded `std.channel` command/events and native socket wake for the preview task and window. |
 | `src/ui_text.ai` | cached, proportional system TrueType UI text through `std.font`. |
 | `src/main.ai` | the verbs and the window loop. |
 
@@ -357,6 +358,20 @@ picture, while timeline edits refresh it. Reload, Relink and opening a project
 invalidate the background media cache, including LUTs replaced at the same path.
 Timeline thumbnails and waveforms wait until both transports are paused.
 
+Preview requests and completed frames wake the worker and native window wait through
+bounded `std.channel` lanes. Rapid drag requests are coalesced before decoding; frame,
+waveform and thumbnail completion have separate events. Document, viewport, monitor
+quality and media revision publish as one atomic request snapshot. Reusable image
+slots invalidate their generation before writing and commit it after both pictures
+and dimensions are complete. The reader checks that generation before and after
+loading, retaining its last complete picture if a slot changed. This prevents a
+rapid scrub from displaying mixed generations or replacing a held frame with an
+incomplete publication. `GA_PREVIEW_REQUEST`, `GA_PREVIEW_GEOMETRY`,
+`GA_PREVIEW_PUBLISH` and `GA_PREVIEW_CHANNEL` identify request, size, pixel publication
+and delivery failures. Request errors carry their generation so a later valid
+request can recover. An idle lifecycle deadline also observes persisted Stop if
+its wake was lost; normal frame work wakes immediately.
+
 The worker keeps decoder image buffers between frames, composes in FP32, and packs
 the final preview on the GPU before downloading it. FLOAT intermediates and master
 exports retain their precision. Windows uses D3D11 decoding when supported and prefers
@@ -388,11 +403,20 @@ changed picture dimensions and transparent pictures also use a complete paint.
 Closing an overlay also repaints its former pixels. Physical pixel damage boundaries
 preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
 
-At the retained-painter checkpoint (`77ea56a`), 20 samples after three warmups on the
-supplied 4K clip in a 2560x1440 editor measured
-7.39 ms median retained painting versus 42.23 ms for a complete paint in the same build.
-Fullscreen painting measured 28.08 ms. The serial CPU/mailbox diagnostic measured
-49.94 ms in the editor and 68.07 ms in fullscreen. These totals exclude native
+At the retained-painter checkpoint (`77ea56a`), retained painting took 7.39 ms
+median versus 42.23 ms for a complete paint. The current channel-wake/frame-generation
+checkpoint was measured with 20 samples after three warmups on the supplied
+4K/59.94 AV1/PQ clip and RTX 5080 in a 2560x1440 canvas:
+
+| Median phase (ms) | Editor | Fullscreen |
+|---|---:|---:|
+| Request to ready notification | 37.87 | 35.72 |
+| Load generation-checked images | 2.36 | 3.29 |
+| Retained canvas paint | 7.07 | 27.44 |
+| Complete serial diagnostic | 46.95 | 66.54 |
+
+The same editor diagnostic before this change (`40dafe4`) measured 41.79 ms request
+to ready and 49.91 ms serial. These short headless samples exclude native
 presentation, audio and pipeline overlap; they are not an interactive frame-rate
 claim. Sustained smooth 4K60 remains unfinished.
 
@@ -425,8 +449,11 @@ The Windows gate verifies 152 saved application facts, three native file-drop fa
 749 control clicks with overlap checks, 65 native media/project checks and 58 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo output levels and immediate Stop. The asynchronous preview test measures
-red/blue pixels after rapid seeking, unchanged source caching, rewind to frame zero,
-timeline bitmaps and embedded audio waveform delivery. Project safety has 15 cases /
+red/blue pixels after a 32-request playhead drag, time changes during the drag,
+unchanged source caching, rewind to frame zero, painted timeline bitmaps and embedded
+audio waveform delivery. It also verifies coded malformed-request/publication
+failures, recovery on the same worker, refusal of a reused frame slot, fullscreen
+720p frames, in-place LUT reload and idle cancellation without a Stop wake. Project safety has 15 cases /
 84 checks for Save/Discard/Cancel, native close-request dispatch, failed-save retry,
 separate snapshots, paused final-edit autosave, atomic failure preservation, legacy
 recovery and selecting the active snapshot without replacing it while the decision is

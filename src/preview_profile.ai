@@ -12,6 +12,7 @@ import std.text as text
 import "app.ai" as app
 import "layout.ai" as layout
 import "preview.ai" as preview
+import "preview_link.ai" as link
 import "view.ai" as painter
 
 fn same_color(a: draw.Color, b: draw.Color) -> bool effects {} {
@@ -19,7 +20,7 @@ fn same_color(a: draw.Color, b: draw.Color) -> bool effects {} {
 }
 
 pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
-    fullscreen: bool, samples: u64, full_paint: bool) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, thread, time} {
+    fullscreen: bool, samples: u64, full_paint: bool) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, net, process, thread, time} {
   if width < 640 or height < 480 or width > 3840 or height > 2160 or samples == 0 or samples > 120 {
     io.write("[GA_PROFILE_ARGS] Use a 640x480..3840x2160 window and 1..120 samples\n")
     return 2
@@ -27,14 +28,16 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   let root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "profile")
   let _ = files.mkdirs(str.view(root))
   preview.reset(str.view(root))
-  let configured: preview.Config = preview.config(state, str.view(root))
+  var transport: link.Link = match link.open() {ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+    return 1},}
+  let configured: preview.Config = preview.config(state, str.view(root), link.ticket(transport))
   struct.set(state, if fullscreen { 1 } else { 0 }, field=fullscreen)
   let _ = editor.program_action(struct.borrow(state, field=document), editor.play())
   let pixels: u64 = cast.wrap(width) * cast.wrap(height)
   let monitor_width: u32 = if fullscreen { 1280 } else { 480 }
   let monitor_height: u32 = if fullscreen { 720 } else { 270 }
   let monitor_pixels: u64 = cast.wrap(monitor_width) * cast.wrap(monitor_height)
-  var ready: bench.Bench = bench.new("request_to_ready", "serialized document, worker decode/composite, monitor conversion and mailbox publication", monitor_pixels, "pixels", 3, samples)
+  var ready: bench.Bench = bench.new("request_to_ready", "wake delivery, serialized document, worker decode/composite, monitor conversion and ready notification", monitor_pixels, "pixels", 3, samples)
   var read: bench.Bench = bench.new("read_images", "RGBA mailbox images into AIR surfaces by bulk copy", monitor_pixels, "pixels", 3, samples)
   var paint: bench.Bench = bench.new("paint", if full_paint { "complete editor paint at physical window dimensions" } else { "retained playback paint at physical window dimensions" }, pixels, "pixels", 3, samples)
   var pack: bench.Bench = bench.new("present_handoff", "borrow the RGBA canvas bytes consumed by the native presenter", pixels, "pixels", 3, samples)
@@ -50,7 +53,10 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   task.scope {
     var jobs: array<task<bool>> = array.new()
     array.push(jobs, task.spawn(configured, fn=preview.run))
+    match link.connect(transport) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+      failure=true},}
     loop {
+      if failure { break }
       if not bench.next(total) { break }
       let _ = bench.next(ready)
       let _ = bench.next(read)
@@ -63,13 +69,16 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
         ok(value) => value, err(_) => { failure = true
           break },
       }
-      preview.request_quality(str.view(root), str.view(document), iteration, 0, 2.4, 450, monitor_width, monitor_height)
-      let deadline: u64 = time.monotonic_ns() + 30000000000
-      loop {
-        if preview.completed(str.view(root)) == iteration { break }
-        if time.monotonic_ns() >= deadline { failure = true
-          break }
-        time.sleep_ms(1)
+      if not preview.request_quality(str.view(root), str.view(document), iteration, 0, 2.4, 450, monitor_width, monitor_height) {
+        io.write("[GA_PREVIEW_REQUEST] Cannot publish the diagnostic preview request\n")
+        failure=true
+        break
+      }
+      match link.wake(transport,false) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+        failure=true},}
+      match link.await_ready(transport,iteration,time.monotonic_ns()+30000000000) {
+        ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+          failure=true},
       }
       if failure { break }
       let _ = bench.observe(ready, begin, 1)
@@ -99,7 +108,9 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
       let _ = bench.observe(total, begin, if painted { 1 } else { 0 })
     }
     preview.stop(str.view(root))
+    let _ = link.wake(transport,true)
     let _ = tasks.join_next<bool>(jobs, 30000)
+    link.close_commands(transport)
   }
   if failure { io.write("[GA_PROFILE_PREVIEW] The preview did not publish a complete frame\n")
     return 1 }

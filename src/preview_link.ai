@@ -1,0 +1,178 @@
+// Bounded command/event lanes wake the preview task and native event loop.
+// Pixels stay in the existing double-buffered RGBA mailbox.
+module genesis.preview_link
+import std.channel as channel
+import std.gui as gui
+import std.text as text
+
+pub type Link = struct {
+  events: channel.Receiver, commands: array<channel.Sender>,
+  ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64
+}
+pub type Peer = struct {events: channel.Sender, commands: channel.Receiver}
+fn problem(detail: str) -> string effects {alloc} { text.concat("[GA_PREVIEW_CHANNEL] ", detail) }
+pub fn open() -> result<Link,string> effects {alloc,net,time} {
+  var events: channel.Receiver = match channel.open(64,1024) {
+    ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
+  }
+  result.ok(Link {events:events,commands:array.new(),ready:0,waveforms:0,
+    thumbnails:0,closed:false,error:string.new(),error_generation:0})
+}
+pub fn ticket(link: ref<Link>) -> channel.Ticket effects {alloc} {
+  channel.ticket(struct.borrow(link,field=events))
+}
+pub fn peer(carried: ref<channel.Ticket>) -> result<Peer,string> effects {alloc,net,time} {
+  let deadline: u64 = time.monotonic_ns()+3000000000
+  var events: channel.Sender = match channel.connect(carried,deadline) {
+    ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
+  }
+  // Empty wake commands consume at most 4096 bounded headers. The document is
+  // authoritative in the mailbox, so a burst is coalesced before decoding.
+  var commands: channel.Receiver = match channel.open_command_lane(events,0,4096,1,deadline) {
+    ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
+  }
+  result.ok(Peer {events:events,commands:commands})
+}
+pub fn connect(link: ref<Link>) -> result<unit,string> effects {alloc,net,time} {
+  let deadline: u64 = time.monotonic_ns()+3000000000
+  var item: channel.Message = match channel.recv(struct.borrow(link,field=events),deadline) {
+    ok(value) => match value {some(message)=>message,none=>{return result.err(problem("Preview task ended before connecting"))},},
+    err(error) => { return result.err(problem(str.view(channel.message(error)))) },
+  }
+  if item.kind != 0 { return result.err(problem("Preview task did not provide its command lane")) }
+  let encoded: string = match channel.text_of(item) {some(value)=>value,none=>{return result.err(problem("Invalid command lane"))},}
+  var sender: channel.Sender = match channel.connect_command_lane(str.view(encoded),deadline) {
+    ok(value)=>value,err(error)=>{return result.err(problem(str.view(channel.message(error))))},
+  }
+  array.push(struct.borrow(link,field=commands),sender)
+  result.ok(())
+}
+pub fn wake(link: ref<Link>, stopping: bool) -> result<unit,string> effects {alloc,net,time} {
+  if array.len(struct.borrow(link,field=commands)) == 0 or link.closed {
+    return result.err(problem("Preview command lane is closed"))
+  }
+  match channel.send(array.borrow(struct.borrow(link,field=commands),0),
+      if stopping {9}else{1},b"",time.monotonic_ns()+100000000) {
+    ok(_)=>result.ok(()),err(error)=>result.err(problem(str.view(channel.message(error)))),
+  }
+}
+// Wait for work, then consume the queued burst. One decode reads the newest
+// committed document; a final Stop is never hidden by a later wake. The one-second
+// idle deadline permits cancellation if startup or command delivery failed; it
+// does not delay a request, which wakes the blocking receive immediately.
+pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
+  var message: channel.Message = match channel.recv(struct.borrow(peer,field=commands),time.monotonic_ns()+1000000000) {
+    ok(value)=>match value {some(value)=>value,none=>{return false},},
+    err(error)=>{return error.code == channel.code_empty()},
+  }
+  if message.kind == 9 { return false }
+  loop {
+    match channel.recv_now(struct.borrow(peer,field=commands),time.monotonic_ns()) {
+      ok(value)=>match value {some(value)=>{message=value
+        if message.kind == 9 { return false }},none=>{return false},},
+      err(error)=>{if error.code == channel.code_empty(){break}else{return false}},
+    }
+  }
+  true
+}
+pub fn notify(peer: ref<Peer>, kind: u64, generation: u64) -> bool effects {alloc,net,time} {
+  let value: string = string.from_int(generation)
+  match channel.send(struct.borrow(peer,field=events),kind,str.bytes(str.view(value)),
+    time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,}
+}
+pub fn finish(peer: ref<Peer>, generation: u64) -> unit effects {alloc,net,time} {
+  let _ = notify(peer,9,generation)
+  let sender: channel.Sender = struct.replace(peer,channel.orphan(),field=events)
+  let _ = channel.hang_up(sender)
+  ()
+}
+pub fn close_commands(link: ref<Link>) -> unit effects {alloc,net,time} {
+  loop {match array.pop(struct.borrow(link,field=commands)) {
+    some(sender)=>{let _ = channel.hang_up(sender)},none=>{break},
+  }}
+  ()
+}
+pub fn fail(peer: ref<Peer>, generation: u64, detail: str) -> unit effects {alloc,net,time} {
+  let payload: string = text.concat(str.view(string.from_int(generation)),text.concat("\n",detail))
+  let _ = channel.send(struct.borrow(peer,field=events),4,str.bytes(str.view(payload)),time.monotonic_ns()+100000000)
+  ()
+}
+fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
+  var item: channel.Message = message
+  if item.kind == 9 {struct.set(link,true,field=closed)
+    return ()}
+  let value: string = match channel.text_of(item) {some(value)=>value,none=>string.new(),}
+  if item.kind == 4 {
+    let split: u64 = match str.find(str.view(value),"\n") {some(value)=>value,none=>{return ()},}
+    let generation: u64 = match text.parse_u64(str.slice(str.view(value),0,split)) {some(value)=>value,none=>0,}
+    if generation < link.ready or generation < link.error_generation {return ()}
+    struct.set(link,generation,field=error_generation)
+    let _ = struct.replace(link,string.copy(str.slice(str.view(value),split+1,str.len(str.view(value)))),field=error)
+    return ()
+  }
+  let generation: u64 = match text.parse_u64(str.view(value)) {some(value)=>value,none=>0,}
+  if item.kind == 1 and generation > link.ready {
+    struct.set(link,generation,field=ready)
+    if generation >= link.error_generation {
+      let _ = struct.replace(link,string.new(),field=error)
+      struct.set(link,0,field=error_generation)
+    }
+  }
+  if item.kind == 2 and generation > link.waveforms {struct.set(link,generation,field=waveforms)}
+  if item.kind == 3 and generation > link.thumbnails {struct.set(link,generation,field=thumbnails)}
+  ()
+}
+pub fn poll(link: ref<Link>) -> unit effects {alloc,net,time} {
+  if link.closed { return () }
+  loop {
+    match channel.recv_now(struct.borrow(link,field=events),time.monotonic_ns()) {
+      ok(value)=>match value {some(value)=>take(link,value),none=>{struct.set(link,true,field=closed)
+        let _ = struct.replace(link,problem("Preview task ended unexpectedly"),field=error)
+        break},},
+      err(error)=>{if error.code != channel.code_empty() {
+        let _ = struct.replace(link,problem(str.view(channel.message(error))),field=error)
+        struct.set(link,true,field=closed)
+      }
+      break},
+    }
+    if link.closed {break}
+  }
+  ()
+}
+pub fn await_event(link: ref<Link>, kind: u64, generation: u64, deadline: u64) -> result<unit,string>
+    effects {alloc,net} {
+  loop {
+    let completed: u64 = if kind == 2 {link.waveforms}else if kind == 3 {link.thumbnails}else{link.ready}
+    if completed >= generation {return result.ok(())}
+    if link.closed {return result.err(problem("Preview task ended before completing the frame"))}
+    if link.error_generation >= generation and str.len(str.view(struct.borrow(link,field=error))) != 0 {
+      return result.err(string.copy(str.view(struct.borrow(link,field=error))))
+    }
+    match channel.recv(struct.borrow(link,field=events),deadline) {
+      ok(value)=>match value {some(value)=>take(link,value),none=>{struct.set(link,true,field=closed)},},
+      err(error)=>{return result.err(problem(str.view(channel.message(error))))},
+    }
+    if (link.closed or link.error_generation >= generation) and
+        str.len(str.view(struct.borrow(link,field=error))) != 0 {
+      return result.err(string.copy(str.view(struct.borrow(link,field=error))))
+    }
+  }
+  result.ok(())
+}
+pub fn await_ready(link: ref<Link>, generation: u64, deadline: u64) -> result<unit,string> effects {alloc,net} {
+  await_event(link,1,generation,deadline)
+}
+// The runtime wakes on the channel socket or native input. No window is opened
+// by this helper; already decoded messages return without a timed wait.
+pub fn wait(window: ref<Window>, link: ref<Link>, timeout: u64) -> ui.event effects {ui} {
+  if link.closed {return gui.wait(window,timeout)}
+  let events: ref<channel.Receiver> = struct.borrow(link,field=events)
+  if channel.ready(events) {return gui.wait(window,0)}
+  if array.len(struct.borrow(events,field=peer)) != 0 {
+    return ui.next_event_on(window,array.borrow(struct.borrow(events,field=peer),0),timeout)
+  }
+  if array.len(struct.borrow(events,field=listener)) != 0 and not events.ended {
+    return ui.next_event_on(window,array.borrow(struct.borrow(events,field=listener),0),timeout)
+  }
+  gui.wait(window,timeout)
+}

@@ -22,7 +22,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
 | Retained playback painter | Fifteen cases / 282 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation |
 | Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
-| Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; newest request wins; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue |
+| Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; the final picture matches a 32-request drag; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue; coded malformed-request and blocked-pixel-publication failures recover on the same worker; a reused image slot refuses its old generation; persisted Stop cancels an idle worker without a wake |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
 | Sequence/export quality | Six-frame 3840x2160 ProRes preserving four-pixel detail at 30000/1001 with 24-bit PCM; portrait preview square stays square; 1080x1920 H.264/HEVC output; exact held multicam cuts at frames 30/60 |
 | Precision/color/audio duration | 1024 distinct narrow-band values survive filtered three-layer FFV1 16-bit composition; a supplied 4K AV1/PQ source round trips into a 16-bit PQ/BT.2020 master; SDR preview agrees with the floating-point reference within mean 0.97/255; 100-nit SDR title white is converted to PQ correctly; HEVC HDR is 10-bit PQ/BT.2020; audio remains audible after 181 seconds |
@@ -32,13 +32,22 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The retained-painter checkpoint (`77ea56a`) headless serial preview diagnostic at
-2560x1440 measured 7.39 ms median
-retained painting versus 42.23 ms for a complete paint on the supplied 4K source
-(20 samples after three warmups). Fullscreen retained painting measured 28.08 ms.
-Serial mailbox/paint totals were 49.94 ms and 68.07 ms respectively; native
-presentation, audio and overlap are excluded. These measurements establish a CPU
-improvement and leave sustained smooth 4K60 open.
+The current channel-wake/frame-generation checkpoint headless diagnostic uses
+20 samples after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440.
+Editor medians are 37.87 ms request-to-ready, 2.36 ms image loading, 7.07 ms retained
+paint and 46.95 ms serial. Fullscreen medians are 35.72 ms, 3.29 ms, 27.44 ms and
+66.54 ms respectively. The same editor baseline before this change (`40dafe4`)
+measured 41.79 ms request-to-ready and 49.91 ms serial. The earlier retained-painter
+checkpoint (`77ea56a`) measured 42.23 ms for a complete paint. Native presentation,
+audio and overlap are excluded; these samples leave sustained smooth 4K60 open.
+
+Preview uses bounded `std.channel` command/events and the existing native
+`ui.next_event_on` socket/input wait. The request document and geometry are one
+atomic snapshot, and two image slots are checked by generation before and after
+reading. Request/publication failures carry their generation, allowing the next
+valid request to recover. The new wake path passes native headless channel/media
+checks; its window interaction has not been re-exercised interactively in this
+checkpoint.
 
 The native Windows window was also exercised with the supplied Costa Rica 4K clip:
 source/program images, visible transport controls, moving L/R meters, Mute silencing

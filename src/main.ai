@@ -39,6 +39,7 @@ import "layout.ai" as layout
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
 import "preview.ai" as preview
+import "preview_link.ai" as preview_link
 import "preview_profile.ai" as preview_profile
 import "transport_clock.ai" as transport_clock
 import "view.ai" as painter
@@ -274,7 +275,7 @@ fn pause_transport(state: ref<app.App>, source: bool) -> unit effects {alloc} {
   ()
 }
 
-fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui} {
+fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
     err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
@@ -317,8 +318,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   let preview_root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "preview")
   let _ = files.mkdirs(str.view(preview_root))
   preview.reset(str.view(preview_root))
-  let config: preview.Config = preview.config(state, str.view(preview_root))
+  var preview_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
+    return 1},}
+  let config: preview.Config = preview.config(state, str.view(preview_root), preview_link.ticket(preview_transport))
   array.push(preview_jobs, task.spawn(config, fn=preview.run))
+  match preview_link.connect(preview_transport) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))
+    preview.stop(str.view(preview_root))
+    return 1},}
   var preview_signature: string = string.new()
   var preview_requested: u64 = 0
   var preview_seen: u64 = 0
@@ -330,6 +336,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   var preview_width: u32 = 0
   var preview_media_revision: u64 = 0
   var preview_error: string = string.new()
+  var preview_channel_error: string = string.new()
   var source_image: draw.Surface = draw.empty_surface()
   var program_image: draw.Surface = draw.empty_surface()
   var export_jobs: array<task<result<unit, string>>> = array.new()
@@ -346,12 +353,23 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       waveform_seen = preview_requested
       thumbnail_seen = preview_requested
     }
-    let ready: u64 = preview.completed(str.view(preview_root))
+    preview_link.poll(preview_transport)
+    let channel_error: string = string.copy(str.view(struct.borrow(preview_transport,field=error)))
+    if str.len(str.view(channel_error)) != 0 and not str.eq(str.view(channel_error),str.view(preview_channel_error)) {
+      app.set_status(state,str.view(channel_error))
+      pause_transport(state,true)
+      pause_transport(state,false)
+      dirty=true
+    }
+    preview_channel_error=channel_error
+    let ready: u64 = preview_transport.ready
     if ready > preview_seen {
-      preview_seen = ready
       var images: array<draw.Surface> = preview.read_images(str.view(preview_root), ready)
-      let _ = ref.swap(program_image, match array.pop(images) { some(value) => value, none => draw.empty_surface(), })
-      let _ = ref.swap(source_image, match array.pop(images) { some(value) => value, none => draw.empty_surface(), })
+      if array.len(images) == 2 {
+        preview_seen = ready
+        let _ = ref.swap(program_image, option.unwrap(array.pop(images)))
+        let _ = ref.swap(source_image, option.unwrap(array.pop(images)))
+      }
       let problem: string = preview.error(str.view(preview_root))
       if str.len(str.view(problem)) != 0 and not str.eq(str.view(problem), str.view(preview_error)) {
         app.set_status(state, str.view(problem))
@@ -359,14 +377,14 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       preview_error = problem
       dirty = true
     }
-    let wave_ready: u64 = preview.waveforms_completed(str.view(preview_root))
+    let wave_ready: u64 = preview_transport.waveforms
     if wave_ready > waveform_seen {
       preview.read_waveforms(state, str.view(preview_root))
       waveform_seen = wave_ready
       repaint_all = true
       dirty = true
     }
-    let thumb_ready: u64 = preview.thumbnails_completed(str.view(preview_root))
+    let thumb_ready: u64 = preview_transport.thumbnails
     if thumb_ready > thumbnail_seen {
       preview.read_thumbnails(state, str.view(preview_root), thumb_ready)
       thumbnail_seen = thumb_ready
@@ -584,7 +602,11 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       let monitor_height: u32 = if state.fullscreen != 0 { 720 } else { 270 }
       if preview_media_revision != state.media_revision or preview_width != monitor_width or not str.eq(str.view(signature), str.view(preview_signature)) or preview_scroll != app.scroll(state) or preview_zoom != app.zoom(state) or preview_span != span {
         preview_requested = preview_requested + 1
-        preview.request_revision(str.view(preview_root), str.view(signature), preview_requested, app.scroll(state), app.zoom(state), span, monitor_width, monitor_height, state.media_revision)
+        if preview.request_revision(str.view(preview_root), str.view(signature), preview_requested, app.scroll(state), app.zoom(state), span, monitor_width, monitor_height, state.media_revision) {
+          match preview_link.wake(preview_transport,false) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))},}
+        } else {app.set_status(state,"[GA_PREVIEW_REQUEST] Cannot publish the timeline preview request")
+          pause_transport(state,true)
+          pause_transport(state,false)}
         preview_width = monitor_width
         preview_media_revision = state.media_revision
         preview_scroll = app.scroll(state)
@@ -603,8 +625,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     }
     var drained: u64 = 0
     loop {
-      let event: ui.event = gui.wait(window, if drained == 0 { if playing_now { 8 } else { 20 } } else { 0 })
-      if event.kind == 0 { break }
+      let event: ui.event = preview_link.wait(window,preview_transport,if drained == 0 {if playing_now {8}else{20}}else{0})
+      if event.kind == 0 or event.kind == 14 { break }
       if event.kind == 1 {
         let note: string = input.close_request(state)
         app.set_status(state, str.view(note))
@@ -771,6 +793,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   // holding the closed window open until it finishes.
   if array.len(export_jobs) > 0 { timeline_media.request_export_cancel(str.view(export_cancel)) }
   preview.stop(str.view(preview_root))
+  let _ = preview_link.wake(preview_transport,true)
+  let _ = tasks.join_next<bool>(preview_jobs, 30000)
+  preview_link.close_commands(preview_transport)
   }
   match ref.swap(audio_library, option.none()) {
     none => {}, some(opened) => { var library: CAbiLibrary = opened
@@ -781,7 +806,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   0
 }
 
-pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui} {
+pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
   let verb: string = if view.len(args) < 2 { string.copy("new") } else { string.copy(view.get(args, 1)) }
   let force_fake: bool = verb == "demo" or match env.get("GENESIS_FAKE_PROVIDER") {
     some(value) => value == "1", none => false,

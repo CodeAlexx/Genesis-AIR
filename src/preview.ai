@@ -10,6 +10,8 @@ import std.math as math
 import std.path as path
 import std.tasks as tasks
 import std.text as text
+import std.channel as channel
+import "preview_link.ai" as link
 import "app.ai" as app
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
@@ -168,8 +170,8 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
 }
 
 
-pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>}
-pub fn config(state: ref<app.App>, root: str) -> Config effects {alloc} {
+pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>, events: channel.Ticket}
+pub fn config(state: ref<app.App>, root: str, events: channel.Ticket own) -> Config effects {alloc} {
   let kind: u32 = struct.get(struct.borrow(state, field=provider), field=kind)
   let worker: string = provider.worker_path(struct.borrow(state, field=provider))
   let ffprobe: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=provider), field=ffprobe)))
@@ -179,13 +181,17 @@ pub fn config(state: ref<app.App>, root: str) -> Config effects {alloc} {
     array.push(fonts, string.copy(str.view(array.borrow(struct.borrow(state, field=fonts), i))))
     i = i + 1
   }
-  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts}
+  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts, events: events}
 }
 
-fn publish(root: str, name: str, value: str) -> unit effects {alloc, fs.write} {
+fn publish_checked(root: str, name: str, value: str) -> bool effects {alloc, fs.write} {
   let output: string = path.join(root, name)
   let temp: string = text.concat(str.view(output), ".tmp")
-  match files.write_text(str.view(temp), value) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
+  match files.write_text(str.view(temp), value) { err(_) => false,
+    ok(_) => match files.rename(str.view(temp), str.view(output)) {ok(_)=>true,err(_)=>false,}, }
+}
+fn publish(root: str, name: str, value: str) -> unit effects {alloc, fs.write} {
+  let _ = publish_checked(root,name,value)
   ()
 }
 fn number(root: str, name: str) -> u64 effects {alloc, fs.read} {
@@ -201,26 +207,32 @@ pub fn reset(root: str) -> unit effects {alloc, fs.write} {
   publish(root, "thumbnails.id", "0")
   ()
 }
-pub fn request(root: str, document: str, generation: u64) -> unit effects {alloc, fs.write} {
+pub fn request(root: str, document: str, generation: u64) -> bool effects {alloc, fs.write} {
   request_viewport(root, document, generation, 0, 2.4, 450)
 }
-pub fn request_viewport(root: str, document: str, generation: u64, start: i64, zoom: f64, span: i64) -> unit effects {alloc, fs.write} {
+pub fn request_viewport(root: str, document: str, generation: u64, start: i64, zoom: f64, span: i64) -> bool effects {alloc, fs.write} {
   request_quality(root, document, generation, start, zoom, span, 480, 270)
 }
 pub fn request_quality(root: str, document: str, generation: u64, start: i64, zoom: f64,
-    span: i64, width: u32, height: u32) -> unit effects {alloc, fs.write} {
+    span: i64, width: u32, height: u32) -> bool effects {alloc, fs.write} {
   request_revision(root, document, generation, start, zoom, span, width, height, 0)
 }
 pub fn request_revision(root: str, document: str, generation: u64, start: i64, zoom: f64,
-    span: i64, width: u32, height: u32, media_revision: u64) -> unit effects {alloc, fs.write} {
-  publish(root, "request.air", document)
+    span: i64, width: u32, height: u32, media_revision: u64) -> bool effects {alloc, fs.write} {
   let geometry: string = text.concat(str.view(string.from_int(start)), text.concat("\t",
     text.concat(str.view(string.from_float(zoom)), text.concat("\t", str.view(string.from_int(span))))))
   let sized: string = text.concat(str.view(geometry), text.concat("\t", text.concat(str.view(string.from_int(width)),
     text.concat("\t", str.view(string.from_int(height))))))
   let versioned: string = text.concat(str.view(sized), text.concat("\t", str.view(string.from_int(media_revision))))
-  publish(root, "viewport.tsv", str.view(versioned))
-  publish(root, "request.id", str.view(string.from_int(generation)))
+  // Document, viewport, quality and revision are one atomic snapshot. A reader
+  // cannot pair an old generation with the next drag's geometry or document.
+  let generation_text: string = string.from_int(generation)
+  var snapshot: string = text.concat(str.view(generation_text),"\t")
+  string.append(snapshot,str.view(versioned))
+  string.append(snapshot,"\n")
+  string.append(snapshot,document)
+  if not publish_checked(root,"request.air",str.view(snapshot)) {return false}
+  publish_checked(root,"request.id",str.view(generation_text))
 }
 pub fn stop(root: str) -> unit effects {alloc, fs.write} { let _ = files.write_text(str.view(path.join(root, "stop")), "stop")
  () }
@@ -233,12 +245,12 @@ pub fn error(root: str) -> string effects {alloc, fs.read} {
 fn image_file(root: str, id: u64, which: str) -> string effects {alloc} {
   path.join(root, str.view(text.concat(which, text.concat(str.view(string.from_int(id % 2)), ".rgba"))))
 }
-fn write_image(root: str, id: u64, which: str, image: ref<draw.Surface>) -> unit effects {alloc, fs.write} {
+fn write_image(root: str, id: u64, which: str, image: ref<draw.Surface>) -> bool effects {alloc, fs.write} {
   let output: string = image_file(root, id, which)
   let temp: string = text.concat(str.view(output), ".tmp")
   let pixels: view<byte> = array.view(struct.borrow(image, field=pixels))
-  match files.write_bytes(str.view(temp), pixels) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
-  ()
+  match files.write_bytes(str.view(temp), pixels) { err(_) => false,
+    ok(_) => match files.rename(str.view(temp), str.view(output)) {ok(_)=>true,err(_)=>false,}, }
 }
 fn image_size(root: str, id: u64) -> array<u32> effects {alloc, fs.read} {
   let filename: string = image_file(root, id, "size")
@@ -251,6 +263,8 @@ fn image_size(root: str, id: u64) -> array<u32> effects {alloc, fs.read} {
 }
 pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs.read} {
   var out: array<draw.Surface> = array.new()
+  let marker: string = text.concat("frame",text.concat(str.view(string.from_int(id % 2)),".id"))
+  if number(root,str.view(marker)) != id { return out }
   var size: array<u32> = image_size(root, id)
   var i: u64 = 0
   loop { if i == 2 { break }
@@ -262,6 +276,9 @@ pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs
     array.push(out, image)
  i = i + 1
   }
+  // A reused slot may have changed while its two files were being read. The
+  // consumer retains its held picture and takes the next ready event instead.
+  if number(root,str.view(marker)) != id {return array.new()}
   out
 }
 fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.write} {
@@ -302,9 +319,8 @@ pub fn read_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs
   ()
 }
 
-fn write_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  let geometry: string = match files.read_text(path.join(root, "viewport.tsv")) {ok(value) => value, err(_) => string.copy("0\t2.4\t450"),}
-  var fields: array<string> = text.split(str.view(geometry), "\t")
+fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var fields: array<string> = text.split(geometry, "\t")
   if array.len(fields) < 3 { return () }
   let start: i64 = match text.parse_i64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
   let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
@@ -337,7 +353,7 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {al
       if shot.ok {
         let name: string = text.concat("thumb-", text.concat(str.view(string.from_int(id % 2)), text.concat("-", str.view(string.from_int(total)))))
         var pixels: draw.Surface = provider.take_pixels(shot)
-        write_image(root, id, str.view(name), pixels)
+        if not write_image(root,id,str.view(name),pixels) {return ()}
         string.append(lines, str.view(string.from_int(clip.id)))
         string.append(lines, "\t")
         string.append(lines, str.view(string.from_int(at)))
@@ -373,8 +389,9 @@ pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects 
   ()
 }
 
-pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.write, net, process, time} {
   var owned: Config = config
+  var wake: link.Peer = match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}
   let root: string = string.copy(str.view(struct.borrow(owned, field=scratch)))
   var engine: provider.Provider = if owned.kind == provider.kind_gcompose() {
     provider.gcompose(str.view(struct.borrow(owned, field=worker)), str.view(root))
@@ -387,16 +404,30 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
   var media_revision: u64 = 0
   loop {
     if tasks.requested_at(str.view(path.join(str.view(root), "stop"))) { break }
+    if not link.next(wake) { break }
     let id: u64 = number(str.view(root), "request.id")
-    if id == 0 or id == seen { time.sleep_ms(10)
- continue }
-    let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => { continue }, }
-    let document: editor.Document = match editor_io.decode(str.view(data)) { ok(value) => value, err(_) => { continue }, }
+    if id == 0 or id == seen { continue }
+    let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => {
+      link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
+      continue }, }
+    let boundary: u64 = match str.find(str.view(data),"\n") {some(value)=>value,none=>{
+      link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
+      continue},}
+    let header: str = str.slice(str.view(data),0,boundary)
+    let separator: u64 = match str.find(header,"\t") {some(value)=>value,none=>{
+      link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
+      continue},}
+    let carried_id: u64 = match text.parse_u64(str.slice(header,0,separator)) {some(value)=>value,none=>0,}
+    if carried_id != id {continue}
+    let geometry: string = string.copy(str.slice(header,separator+1,boundary))
+    let document: editor.Document = match editor_io.decode(str.slice(str.view(data),boundary+1,str.len(str.view(data)))) {
+      ok(value) => value, err(_) => {
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
+        continue }, }
     if number(str.view(root), "request.id") != id { continue }
     seen = id
     let _ = struct.replace(state, document, field=document)
     let _ = struct.replace(struct.borrow(state, field=provider), string.new(), field=last_error)
-    let geometry: string = match files.read_text(path.join(str.view(root), "viewport.tsv")) {ok(value) => value, err(_) => string.new(),}
     var dimensions: array<string> = text.split(str.view(geometry), "\t")
     let width: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 3))) {some(value) => cast.sat(value), none => 480,} } else { 480 }
     let height: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 4))) {some(value) => cast.sat(value), none => 270,} } else { 270 }
@@ -406,24 +437,45 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       media_revision = revision
     }
     // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
-    if width == 0 or height == 0 or width > 1280 or height > 720 { continue }
+    if width == 0 or height == 0 or width > 1280 or height > 720 {
+      link.fail(wake,id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
+      continue
+    }
     var rendered: array<draw.Surface> = images(state, width, height)
     var program: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
     var source: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
-    write_image(str.view(root), id, "source", source)
-    write_image(str.view(root), id, "program", program)
+    let marker: string = text.concat("frame",text.concat(str.view(string.from_int(id % 2)),".id"))
+    if not publish_checked(str.view(root),str.view(marker),"0") {
+      link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot reserve the next frame slot")
+      continue
+    }
+    if not write_image(str.view(root),id,"source",source) or
+        not write_image(str.view(root),id,"program",program) {
+      link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot publish preview pixels")
+      continue
+    }
     publish(str.view(root), "error.txt", str.view(provider.last_error(struct.borrow(state, field=provider))))
     let size_text: string = text.concat(str.view(string.from_int(width)), text.concat("\t", str.view(string.from_int(height))))
-    let _ = files.write_text(str.view(image_file(str.view(root), id, "size")), str.view(size_text))
-    publish(str.view(root), "ready.id", str.view(string.from_int(id)))
+    let size_name: string = text.concat("size",text.concat(str.view(string.from_int(id % 2)),".rgba"))
+    let generation_text: string = string.from_int(id)
+    if not publish_checked(str.view(root),str.view(size_name),str.view(size_text)) or
+        not publish_checked(str.view(root),str.view(marker),str.view(generation_text)) {
+      link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot commit preview dimensions and generation")
+      continue
+    }
+    publish(str.view(root), "ready.id", str.view(generation_text))
+    if not link.notify(wake,1,id) { break }
     if not editor.playing(struct.borrow(state, field=document)) and
         not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) {
       let _ = waveforms(state)
       write_waveforms(state, str.view(root))
       publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))
-      write_thumbnails(state, str.view(root), id)
+      if not link.notify(wake,2,id) { break }
+      write_thumbnails(state, str.view(root), id, str.view(geometry))
+      if not link.notify(wake,3,number(str.view(root),"thumbnails.id")) { break }
     }
   }
   provider.shutdown(struct.borrow(state, field=provider))
+  link.finish(wake,seen)
   true
 }
