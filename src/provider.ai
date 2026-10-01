@@ -520,7 +520,9 @@ fn fake_image(source: str, frame: i64, width: u32, height: u32) -> draw.Surface 
 // Read a raw RGBA file the worker wrote and turn it into a surface.
 fn read_rgba(file: str, width: u32, height: u32) -> option<draw.Surface> effects {alloc, fs.read} {
   let raw: bytes = match files.read_bytes(file) { ok(value) => value, err(problem) => { return option.none() }, }
-  let data: view<byte> = bytes.view(raw)
+  rgba_surface(bytes.view(raw), width, height)
+}
+fn rgba_surface(data: view<byte>, width: u32, height: u32) -> option<draw.Surface> effects {alloc} {
   let wanted: u64 = cast.wrap(width) * cast.wrap(height) * 4
   if view.len(data) < wanted { return option.none() }
   let total: u64 = cast.wrap(width) * cast.wrap(height)
@@ -545,37 +547,49 @@ fn read_program(file: str, width: u32, height: u32, canvas_width: u32, canvas_he
   let raw: bytes = match files.read_bytes(file) { ok(value) => value, err(problem) => { return option.none() }, }
   let data: view<byte> = bytes.view(raw)
   if view.len(data) != cast.wrap(canvas_width) * cast.wrap(canvas_height) * 4 or width == 0 or height == 0 { return option.none() }
-  if width == canvas_width and height == canvas_height { return read_rgba(file, width, height) }
-  match draw.surface(width, height) {
-    none => option.none(),
-    some(target) => {
-      var canvas: draw.Canvas = draw.canvas(target)
-      draw.clear(canvas, draw.rgb(0, 0, 0))
-      let fit: f64 = math.min(cast.float(width) / cast.float(canvas_width), cast.float(height) / cast.float(canvas_height))
-      let fit_width: u32 = cast.sat(math.max(1.0, math.round(cast.float(canvas_width) * fit)))
-      let fit_height: u32 = cast.sat(math.max(1.0, math.round(cast.float(canvas_height) * fit)))
-      let left: i64 = cast.wrap((width - fit_width) / 2)
-      let top: i64 = cast.wrap((height - fit_height) / 2)
-      var y: u32 = 0
-      loop {
-        if y >= fit_height { break }
-        let sy: u64 = cast.wrap(y) * cast.wrap(canvas_height) / cast.wrap(fit_height)
-        var x: u32 = 0
-        loop {
-          if x >= fit_width { break }
-          let sx: u64 = cast.wrap(x) * cast.wrap(canvas_width) / cast.wrap(fit_width)
-          let at: u64 = (sy * cast.wrap(canvas_width) + sx) * 4
-          let red: u8 = cast.bits(view.get(data, at))
-          let green: u8 = cast.bits(view.get(data, at + 1))
-          let blue: u8 = cast.bits(view.get(data, at + 2))
-          draw.device_pixel(canvas, cast.wrap(x) + left, cast.wrap(y) + top, draw.rgb(red, green, blue))
-          x = x + 1
-        }
-        y = y + 1
-      }
-      option.some(draw.finish(canvas))
-    },
+  if width == canvas_width and height == canvas_height { return rgba_surface(data, width, height) }
+  let total: u64 = cast.wrap(width) * cast.wrap(height)
+  if total > draw.max_pixels() { return option.none() }
+  let fit: f64 = math.min(cast.float(width) / cast.float(canvas_width), cast.float(height) / cast.float(canvas_height))
+  let fit_width: u64 = cast.sat(math.max(1.0, math.round(cast.float(canvas_width) * fit)))
+  let fit_height: u64 = cast.sat(math.max(1.0, math.round(cast.float(canvas_height) * fit)))
+  let left: u64 = (cast.wrap(width) - fit_width) / 2
+  let top: u64 = (cast.wrap(height) - fit_height) / 2
+  var columns: array<u64> = array.new()
+  var x: u64 = 0
+  loop { if x >= cast.wrap(width) { break }
+    array.push(columns, if x >= left and x < left + fit_width {
+      (x - left) * cast.wrap(canvas_width) / fit_width
+    } else { cast.wrap(canvas_width) })
+    x = x + 1
   }
+  var pixels: array<byte> = array.new()
+  let opaque: u8 = 255
+  let black: u8 = 0
+  var y: u64 = 0
+  loop { if y >= cast.wrap(height) { break }
+    let row: u64 = if y >= top and y < top + fit_height {
+      (y - top) * cast.wrap(canvas_height) / fit_height * cast.wrap(canvas_width)
+    } else { cast.wrap(canvas_width) * cast.wrap(canvas_height) }
+    x = 0
+    loop { if x >= cast.wrap(width) { break }
+      let sx: u64 = array.get(columns, x)
+      if sx < cast.wrap(canvas_width) and row < cast.wrap(canvas_width) * cast.wrap(canvas_height) {
+        let at: u64 = (row + sx) * 4
+        array.push(pixels, view.get(data, at))
+        array.push(pixels, view.get(data, at + 1))
+        array.push(pixels, view.get(data, at + 2))
+      } else {
+        array.push(pixels, cast.bits(black))
+        array.push(pixels, cast.bits(black))
+        array.push(pixels, cast.bits(black))
+      }
+      array.push(pixels, cast.bits(opaque))
+      x = x + 1
+    }
+    y = y + 1
+  }
+  option.some(draw.Surface {width: width, height: height, pixels: pixels})
 }
 
 // The document signature includes edits and program time, but excludes source transport.

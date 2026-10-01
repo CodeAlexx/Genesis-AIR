@@ -50,7 +50,7 @@ $includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
   -DAIR_DESKTOP=OFF -DAIR_SAM3=OFF -DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE
 if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
 $targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio')
-if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-preview-async', 'genesis-inspector') }
+if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-preview-async', 'genesis-inspector', 'genesis-ui-pixels') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'

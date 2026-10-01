@@ -9,7 +9,7 @@ state-dependent controls also need focused checks. It does not by itself prove m
 
 ## Verified Windows checkpoint (2026-10-01)
 
-Branch `windows-native`, SDK `7195757a63852aaa5ab99d8a4d3b09d509200411`, and the
+Branch `windows-native`, SDK `65bc08d575375e458c4d822511374527aab3ee88`, and the
 compositor revision/Windows patch recorded in `windows/source-pins.json` and
 `windows/gcompose-windows.patch` pass these measured gates:
 
@@ -19,7 +19,8 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Native media and project I/O | Eight cases / 65 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status |
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
-| Asynchronous preview | Generated red/blue pixels after rapid seek; newest request wins; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; visible timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue |
+| Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
+| Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; newest request wins; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
 | Sequence/export quality | Six-frame 3840x2160 ProRes preserving four-pixel detail at 30000/1001 with 24-bit PCM; portrait preview square stays square; 1080x1920 H.264/HEVC output; exact held multicam cuts at frames 30/60 |
 | Precision/color/audio duration | 1024 distinct narrow-band values survive filtered three-layer FFV1 16-bit composition; a supplied 4K AV1/PQ source round trips into a 16-bit PQ/BT.2020 master; SDR preview agrees with the floating-point reference within mean 0.97/255; 100-nit SDR title white is converted to PQ correctly; HEVC HDR is 10-bit PQ/BT.2020; audio remains audible after 181 seconds |

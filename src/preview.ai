@@ -310,7 +310,10 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {al
   let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
   let span: i64 = match text.parse_i64(str.view(array.borrow(fields, 2))) {some(value) => value, none => 450,}
   if zoom <= 0.0 or span <= 0 { return () }
-  let step: i64 = cast.sat(math.max(1.0, math.ceil(96.0 / zoom)))
+  // Match the painted, aspect-fitted tile width at this lane height. A fixed
+  // 96px sampling interval left most of a 46px-high video lane without pictures.
+  let tile_width: f64 = 80.0 * math.max(1.0, app.track_height(state) - 20.0) / 45.0
+  let step: i64 = cast.sat(math.max(1.0, math.ceil((tile_width + 2.0) / zoom)))
   var doc: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   var lines: string = string.new()
   var total: u64 = 0

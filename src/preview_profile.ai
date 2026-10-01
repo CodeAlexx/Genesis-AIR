@@ -1,0 +1,121 @@
+// Headless measurement of the actual preview mailbox and AIR window renderer.
+// It excludes audio and the native present call; it opens no window.
+module genesis.preview_profile
+import std.bench as bench
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "app.ai" as app
+import "layout.ai" as layout
+import "preview.ai" as preview
+import "view.ai" as painter
+
+fn same_color(a: draw.Color, b: draw.Color) -> bool effects {} {
+  a.r == b.r and a.g == b.g and a.b == b.b
+}
+
+pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
+    fullscreen: bool, samples: u64) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, thread, time} {
+  if width < 640 or height < 480 or width > 3840 or height > 2160 or samples == 0 or samples > 120 {
+    io.write("[GA_PROFILE_ARGS] Use a 640x480..3840x2160 window and 1..120 samples\n")
+    return 2
+  }
+  let root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "profile")
+  let _ = files.mkdirs(str.view(root))
+  preview.reset(str.view(root))
+  let configured: preview.Config = preview.config(state, str.view(root))
+  struct.set(state, if fullscreen { 1 } else { 0 }, field=fullscreen)
+  let _ = editor.program_action(struct.borrow(state, field=document), editor.play())
+  let pixels: u64 = cast.wrap(width) * cast.wrap(height)
+  let monitor_width: u32 = if fullscreen { 1280 } else { 480 }
+  let monitor_height: u32 = if fullscreen { 720 } else { 270 }
+  let monitor_pixels: u64 = cast.wrap(monitor_width) * cast.wrap(monitor_height)
+  var ready: bench.Bench = bench.new("request_to_ready", "serialized document, worker decode/composite, monitor conversion and mailbox publication", monitor_pixels, "pixels", 3, samples)
+  var read: bench.Bench = bench.new("read_images", "RGB mailbox images into AIR surfaces", monitor_pixels, "pixels", 3, samples)
+  var paint: bench.Bench = bench.new("paint", "allocate and paint the editor at physical window dimensions", pixels, "pixels", 3, samples)
+  var pack: bench.Bench = bench.new("present_handoff", "borrow the RGBA canvas bytes consumed by the native presenter", pixels, "pixels", 3, samples)
+  var total: bench.Bench = bench.new("serial_pipeline", "preview mailbox plus CPU paint and the borrowed presenter handoff, without audio or native present", pixels, "pixels", 3, samples)
+  bench.expect(ready, 1)
+  bench.expect(read, monitor_pixels)
+  bench.expect(paint, 1)
+  bench.expect(pack, pixels * 4)
+  bench.expect(total, 1)
+  var iteration: u64 = 0
+  var failure: bool = false
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs, task.spawn(configured, fn=preview.run))
+    loop {
+      if not bench.next(total) { break }
+      let _ = bench.next(ready)
+      let _ = bench.next(read)
+      let _ = bench.next(paint)
+      let _ = bench.next(pack)
+      let begin: u64 = bench.mark()
+      iteration = iteration + 1
+      let _ = editor.seek(struct.borrow(state, field=document), cast.sat(iteration - 1))
+      let document: string = match editor_io.encode(struct.borrow(state, field=document)) {
+        ok(value) => value, err(_) => { failure = true
+          break },
+      }
+      preview.request_quality(str.view(root), str.view(document), iteration, 0, 2.4, 450, monitor_width, monitor_height)
+      let deadline: u64 = time.monotonic_ns() + 30000000000
+      loop {
+        if preview.completed(str.view(root)) == iteration { break }
+        if time.monotonic_ns() >= deadline { failure = true
+          break }
+        time.sleep_ms(1)
+      }
+      if failure { break }
+      let _ = bench.observe(ready, begin, 1)
+      let read_begin: u64 = bench.mark()
+      var images: array<draw.Surface> = preview.read_images(str.view(root), iteration)
+      var program: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
+      var source: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
+      let actual_pixels: u64 = cast.wrap(program.width) * cast.wrap(program.height)
+      let _ = bench.observe(read, read_begin, actual_pixels)
+      if actual_pixels != monitor_pixels { failure = true
+        break }
+      let paint_begin: u64 = bench.mark()
+      var surface: draw.Surface = match draw.surface(width, height) {some(value) => value, none => { failure = true
+        break },}
+      var canvas: draw.Canvas = draw.canvas(surface)
+      let scale: f64 = layout.ui_scale(cast.float(width), cast.float(height))
+      draw.set_transform(canvas, draw.scale(scale, scale))
+      painter.paint(state, canvas, cast.float(width) / scale, cast.float(height) / scale, source, program)
+      var finished: draw.Surface = draw.finish(canvas)
+      // A blank allocation cannot pass as an executed paint. Check a panel pixel
+      // away from text and outlines as well as the published program dimensions.
+      let colors: painter.Theme = painter.theme(state)
+      let expected: draw.Color = if fullscreen { colors.background } else { colors.panel_head }
+      let painted: bool = match draw.surface_pixel(finished, width - 2, height - 2) {
+        some(value) => same_color(value, expected), none => false,
+      }
+      let _ = bench.observe(paint, paint_begin, if painted { 1 } else { 0 })
+      let pack_begin: u64 = bench.mark()
+      let rgba: view<byte> = array.view(struct.borrow(finished, field=pixels))
+      let _ = bench.observe(pack, pack_begin, view.len(rgba))
+      let _ = bench.observe(total, begin, if painted { 1 } else { 0 })
+    }
+    preview.stop(str.view(root))
+    let _ = tasks.join_next<bool>(jobs, 30000)
+  }
+  if failure { io.write("[GA_PROFILE_PREVIEW] The preview did not publish a complete frame\n")
+    return 1 }
+  var group: bench.Group = bench.group("Genesis preview CPU and mailbox phases")
+  bench.add(group, ready, 120)
+  bench.add(group, read, 120)
+  bench.add(group, paint, 120)
+  bench.add(group, pack, 120)
+  bench.add(group, total, 120)
+  io.write(bench.text_report(ready))
+  io.write(bench.text_report(read))
+  io.write(bench.text_report(paint))
+  io.write(bench.text_report(pack))
+  io.write(bench.text_report(total))
+  bench.group_conclude(group, report, 5)
+}

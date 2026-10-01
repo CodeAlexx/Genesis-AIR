@@ -317,7 +317,8 @@ Ctrl+Shift+S opens Save as.
 Drag the timeline ruler or the playhead line to change program time and preview.
 The line takes precedence over a clip underneath it, so seeking cannot move or
 trim that clip. Video/audio lane crossing is refused with `GA_TRACK_KIND`. Cached
-frame bitmaps appear on visible video clips after paused background extraction;
+frame bitmaps fill visible video clips after paused background extraction;
+sampling follows the painted thumbnail width instead of leaving large empty gaps;
 waveforms also appear on video clips that contain audio.
 
 Both monitors reuse unchanged pictures. Source transport changes keep the program
@@ -342,6 +343,31 @@ frames; `--frame-step 2 --samples 30` reproduces the older sampling pattern.
 ```powershell
 python tests/preview_performance.py --worker .\genesis-gcompose.exe --source 'C:\path\to\clip.mp4'
 ```
+
+The shared AIR rasterizer now computes axis-aligned rectangle coverage and image
+sampling directly, preserving the existing pixels at fractional DPI and under reflection.
+Genesis borrows its RGBA window surface through `std.gui.present_surface`; the native
+host performs format conversion once, avoiding an AIR RGB24 allocation and a repeated
+Windows swizzle. The monitor resampler also uses integer source indices.
+
+The headless CPU/mailbox diagnostic exercises the same background preview and full-window
+painter. On the supplied 4K clip at a 2560x1440 editor size, 20 samples after three warmups
+reduced median CPU painting from 214.42 ms to 54.39 ms. Removing the intermediate RGB24
+buffer also removes a separately measured 23.82 ms packing step. The serial diagnostic
+measured 100.53 ms in the editor and 131.41 ms in fullscreen. These serial totals include
+mailbox decoding and painting, and exclude native presentation, audio and pipeline overlap;
+they are not an interactive frame-rate claim. Sustained smooth 4K60 remains unfinished.
+
+```powershell
+.\Genesis-AIR.exe profile-preview .\preview-profile.json .\project.air 2560 1440 20
+.\Genesis-AIR.exe profile-preview .\fullscreen-profile.json .\project.air 2560 1440 20 --fullscreen
+```
+
+This command opens no window. Its `std.bench` JSON separates request-to-ready, mailbox
+image loading, painting, borrowed presenter handoff and the serial pipeline. It validates
+published image dimensions and a painted panel pixel so an empty frame cannot pass.
+`GA_PROFILE_ARGS` identifies invalid dimensions/sample counts; `GA_PROFILE_PREVIEW`
+identifies a missing frame; `GA_UI_PRESENT` reports a native presentation failure in the editor.
 
 ## Tests
 

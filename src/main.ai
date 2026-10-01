@@ -37,6 +37,7 @@ import "layout.ai" as layout
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
 import "preview.ai" as preview
+import "preview_profile.ai" as preview_profile
 import "transport_clock.ai" as transport_clock
 import "view.ai" as painter
 
@@ -585,9 +586,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           painter.paint(state, canvas, logical_width, logical_height,
             source_image, program_image)
           var finished: draw.Surface = draw.finish(canvas)
-          var pixels: bytes = draw.surface_rgb24(finished, draw.rgb(0, 0, 0))
-          match gui.present(window, bytes.view(pixels), width, height) {
-            ok(shown) => { }, err(problem) => { },
+          match gui.present_surface(window, finished) {
+            ok(shown) => { },
+            err(problem) => { app.set_status(state, "[GA_UI_PRESENT] Native presenter could not display the window frame") },
           }
         },
       }
@@ -780,6 +781,19 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
       else if str.eq(str.view(named), "audio") { app.set_dock_tab(state, chrome.tab_audio()) }
     },
     none => { },
+  }
+
+  if str.eq(verb, "profile-preview") {
+    if view.len(args) < 4 { say("profile-preview needs a report path and a project")
+      return 2 }
+    var opened: commands.Result = commands.open_project(state, view.get(args, 3))
+    if not opened.ok { say(str.view(commands.message(opened)))
+      return 1 }
+    let width: u32 = if view.len(args) > 4 { match text.parse_u64(view.get(args, 4)) {some(value) => cast.sat(value), none => 0,} } else { 2560 }
+    let height: u32 = if view.len(args) > 5 { match text.parse_u64(view.get(args, 5)) {some(value) => cast.sat(value), none => 0,} } else { 1440 }
+    let samples: u64 = if view.len(args) > 6 { match text.parse_u64(view.get(args, 6)) {some(value) => value, none => 0,} } else { 20 }
+    return preview_profile.run(state, view.get(args, 2), width, height,
+      if view.len(args) > 7 { str.eq(view.get(args, 7), "--fullscreen") } else { false }, samples)
   }
 
   if str.eq(verb, "render") {

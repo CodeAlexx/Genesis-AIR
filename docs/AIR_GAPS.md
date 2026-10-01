@@ -6,7 +6,7 @@ file it belonged in, and a reproducer — and the application worked around it i
 stayed visible to the person using it, rather than pretending the feature existed.
 
 The AIR gaps below are closed in the compatible SDK checkout pinned by
-`air-sdk.conf` (`genesis-pro-windows` at `7195757a6385`). This file records
+`air-sdk.conf` (`genesis-pro-windows` at `65bc08d57537`). This file records
 the original issues and their language-level fixes; current renderer acceptance
 status lives in [the control ledger](CONTROL_COVERAGE.md).
 
@@ -143,3 +143,25 @@ consecutive frames; mailbox conversion, actual window throughput and sustained 6
 need further work. Fullscreen now requests a 1280x720 surface, with its size published
 beside each image slot. A media revision reaches the background provider on Reload,
 Relink and project open, so unchanged document JSON cannot retain replaced media or LUTs.
+
+
+## Shared raster and native canvas costs
+
+The actual Genesis painter, including glyphs and monitor scaling at physical client
+resolution, was measured separately from worker throughput. Axis-aligned `std.draw`
+rectangles now preserve fixed 4x4 coverage without polygon scans. Axis-aligned images
+reuse column indices and skip blending opaque pixels. Rotation/skew use the generic paths.
+The SDK regression checks 387 rectangle cases and 98 image cases byte for byte.
+
+`std.gui.present_surface` borrows RGBA bytes directly. The host-neutral `ui.present`
+contract admits either RGB24 or straight RGBA32; Windows and X11 use the same alpha
+rounding. Windows converts to BGRA once before dispatching to Direct2D or GDI.
+A headless MSVC regression checks all 65,536 channel/alpha pairs, row order and invalid
+buffers. Existing RGB24 callers and non-black alpha compositing remain available.
+
+At a 2560x1440 client size, median full-window CPU painting fell from 214.42 to 54.39 ms
+in the supplied 4K clip diagnostic, and an intermediate RGB packing step measured at
+23.82 ms was removed. These improvements still do not establish smooth interactive
+4K60. `profile-preview` separates the mailbox, image loading, painter and borrowed
+handoff. Its serial totals exclude audio, native presentation and asynchronous overlap.
+The native window's sustained throughput and long audio runs remain open acceptance work.

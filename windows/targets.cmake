@@ -6,3 +6,7 @@ foreach(name IN ITEMS headless controls native audio-device preview-async inspec
 endforeach()
 add_executable(genesis-worker-wrapper "${GENESIS_ROOT}/tests/worker_wrapper.c")
 set_target_properties(genesis-worker-wrapper PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(genesis-ui-pixels "${CMAKE_SOURCE_DIR}/tests/stdlib/ui_pixels.c")
+target_include_directories(genesis-ui-pixels PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
+set_target_properties(genesis-ui-pixels PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

@@ -37,6 +37,7 @@ try {
     -c:v libx264 -pix_fmt yuv420p -c:a aac -t 2 $media
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate the real video fixture.' }
 
+  Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
   $native = Invoke-Native 'genesis-native.exe' @($work, $media)
   Write-Host $native.TrimEnd()
   $wave = Join-Path $work 'queued audio 日本語.wav'
@@ -46,6 +47,7 @@ try {
   $worker = Join-Path $project 'genesis-gcompose.exe'
   if (Test-Path -LiteralPath $worker) {
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
+    Copy-Item -LiteralPath (Join-Path $work 'async/timeline-scrub.png') -Destination (Join-Path $root 'timeline-scrub.png') -Force
   }
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'inspector-tests.json') -Destination (Join-Path $root 'inspector-tests.json') -Force
