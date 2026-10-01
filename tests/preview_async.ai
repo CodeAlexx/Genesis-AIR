@@ -36,12 +36,30 @@ pub fn main(args: view<str>) -> i32 effects {alloc, fs.meta, fs.read, fs.write, 
   var state: app.App = app.app(provider.gcompose(view.get(args, 1), root))
   var imported: commands.Result = commands.import_media(state, view.get(args, 2), "actual clip")
   if not imported.ok { return 3 }
+  let _ = commands.open_source(state, imported.value)
   let track: u64 = app.default_video_track(state)
-  let _ = commands.append_clip(state, track, imported.value, 0, 60)
+  let added: commands.Result = commands.append_clip(state, track, imported.value, 0, 60)
   var source_first: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), view.get(args, 2), 0, 480, 270)
   let first_calls: u64 = provider.calls(struct.borrow(state, field=provider))
   var source_again: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), view.get(args, 2), 0, 480, 270)
   if not source_first.ok or not source_again.ok or provider.calls(struct.borrow(state, field=provider)) != first_calls { return 6 }
+  var initial: array<draw.Surface> = preview.images(state, 480, 270)
+  let rendered_calls: u64 = provider.calls(struct.borrow(state, field=provider))
+  let _ = editor.seek_monitor(struct.borrow(state, field=document), 30)
+  var advanced: array<draw.Surface> = preview.images(state, 480, 270)
+  if provider.calls(struct.borrow(state, field=provider)) != rendered_calls + 1 { return 7 }
+  var held: draw.Surface = option.unwrap(array.pop(advanced))
+  var audition: draw.Surface = option.unwrap(array.pop(advanced))
+  let held_color: draw.Color = option.unwrap(draw.surface_pixel(held, 240, 135))
+  let audition_color: draw.Color = option.unwrap(draw.surface_pixel(audition, 240, 135))
+  if held_color.r < 200 or audition_color.b < 200 { return 9 }
+  let _ = editor.set_clip_enabled(struct.borrow(state, field=document), added.value, false)
+  var changed: array<draw.Surface> = preview.images(state, 480, 270)
+  var disabled: draw.Surface = option.unwrap(array.pop(changed))
+  let black: draw.Color = option.unwrap(draw.surface_pixel(disabled, 240, 135))
+  if black.r > 5 or black.g > 5 or black.b > 5 { return 8 }
+  let _ = editor.set_clip_enabled(struct.borrow(state, field=document), added.value, true)
+  let _ = editor.seek_monitor(struct.borrow(state, field=document), 0)
   let configured: preview.Config = preview.config(state, root)
   task.scope {
     var jobs: array<task<bool>> = array.new()
@@ -67,12 +85,35 @@ pub fn main(args: view<str>) -> i32 effects {alloc, fs.meta, fs.read, fs.write, 
     }
     preview.read_thumbnails(state, root, 4)
     let strip: bool = array.len(struct.borrow(state, field=thumbnails)) >= 1
+    let _ = editor.monitor_action(struct.borrow(state, field=document), editor.play())
+    let _ = publish(state, root, 5)
+    let auditioned: bool = await_image(root, 5, false)
+    // Background strips must not interrupt the playing source's decoder.
+    time.sleep_ms(50)
+    let deferred: bool = preview.waveforms_completed(root) < 5 and preview.thumbnails_completed(root) < 5
+    let _ = editor.monitor_action(struct.borrow(state, field=document), editor.pause())
+    let snapshot: string = match editor_io.encode(struct.borrow(state, field=document)) {ok(value) => value, err(_) => { return 10 },}
+    preview.request_quality(root, str.view(snapshot), 6, 0, 2.4, 450, 1280, 720)
+    let full_picture: bool = await_image(root, 6, false)
+    var full_images: array<draw.Surface> = preview.read_images(root, 6)
+    var full_program: draw.Surface = option.unwrap(array.pop(full_images))
+    let full_size: bool = draw.surface_width(full_program) == 1280 and draw.surface_height(full_program) == 720
+    let cube: string = text.concat(root, "/reload.cube")
+    let _ = files.write_text(str.view(cube), "LUT_3D_SIZE 2\n1 0 0\n1 0 0\n1 0 0\n1 0 0\n1 0 0\n1 0 0\n1 0 0\n1 0 0\n")
+    let lut: u64 = option.unwrap(editor.add_filter(struct.borrow(state, field=document), added.value, "lut3d"))
+    let _ = editor.set_filter_text_param(struct.borrow(state, field=document), lut, "path", str.view(cube))
+    let _ = publish(state, root, 7)
+    let before_reload: bool = await_image(root, 7, false)
+    let _ = files.write_text(str.view(cube), "LUT_3D_SIZE 2\n0 0 1\n0 0 1\n0 0 1\n0 0 1\n0 0 1\n0 0 1\n0 0 1\n0 0 1\n")
+    let reloaded: string = match editor_io.encode(struct.borrow(state, field=document)) {ok(value) => value, err(_) => { return 11 },}
+    preview.request_revision(root, str.view(reloaded), 8, 0, 2.4, 450, 480, 270, 1)
+    let refreshed: bool = await_image(root, 8, true)
     preview.stop(root)
     match tasks.join_next<bool>(jobs, 15000) { none => { return 4 }, some(_) => {}, }
     provider.shutdown(struct.borrow(state, field=provider))
-    if not first or not second or not embedded or not rewound or not strip { io.write("asynchronous seek or embedded audio waveform failed\n")
+    if not first or not second or not embedded or not rewound or not strip or not auditioned or not deferred or not full_picture or not full_size or not before_reload or not refreshed { io.write("asynchronous seek or embedded audio waveform failed\n")
       return 5 }
   }
-  io.write("Async preview: real red/blue pixels, newest scrub request, rewind, timeline bitmaps and graceful worker Stop passed\n")
+  io.write("Async preview: real red/blue pixels, newest scrub request, rewind, timeline bitmaps, inactive monitor cache, edit invalidation, deferred playback strips, fullscreen 720p pixels, in-place LUT reload and graceful worker Stop passed\n")
   0
 }

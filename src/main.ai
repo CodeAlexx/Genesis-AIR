@@ -320,6 +320,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   var preview_scroll: i64 = -1
   var preview_zoom: f64 = 0.0
   var preview_span: i64 = 0
+  var preview_width: u32 = 0
+  var preview_media_revision: u64 = 0
   var preview_error: string = string.new()
   var source_image: draw.Surface = draw.empty_surface()
   var program_image: draw.Surface = draw.empty_surface()
@@ -554,9 +556,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       }
       let view_frame: layout.Frame = layout.frame(logical_width, logical_height)
       let span: i64 = cast.sat(layout.width_of(view_frame.timeline) / app.zoom(state))
-      if not str.eq(str.view(signature), str.view(preview_signature)) or preview_scroll != app.scroll(state) or preview_zoom != app.zoom(state) or preview_span != span {
+      let monitor_width: u32 = if state.fullscreen != 0 { 1280 } else { 480 }
+      let monitor_height: u32 = if state.fullscreen != 0 { 720 } else { 270 }
+      if preview_media_revision != state.media_revision or preview_width != monitor_width or not str.eq(str.view(signature), str.view(preview_signature)) or preview_scroll != app.scroll(state) or preview_zoom != app.zoom(state) or preview_span != span {
         preview_requested = preview_requested + 1
-        preview.request_viewport(str.view(preview_root), str.view(signature), preview_requested, app.scroll(state), app.zoom(state), span)
+        preview.request_revision(str.view(preview_root), str.view(signature), preview_requested, app.scroll(state), app.zoom(state), span, monitor_width, monitor_height, state.media_revision)
+        preview_width = monitor_width
+        preview_media_revision = state.media_revision
         preview_scroll = app.scroll(state)
         preview_zoom = app.zoom(state)
         preview_span = span

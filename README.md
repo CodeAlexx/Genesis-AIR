@@ -309,7 +309,9 @@ is used for editing and headless checks. Preview and export explicitly require t
 Each monitor has Start, Previous frame, Play/Pause, Stop, Next frame and End, plus
 **Full** for fullscreen playback. F11 opens the focused monitor; Esc or **Exit full**
 restores the editor. Transport buttons and the draggable seek bar remain available
-in fullscreen. Space plays or pauses. Ctrl+O opens a project and Ctrl+S saves it;
+in fullscreen. Fullscreen uses a 1280x720 monitor surface; the editor uses 480x270
+surfaces. Export resolution comes from the sequence. Space plays or pauses.
+Ctrl+O opens a project and Ctrl+S saves it;
 Ctrl+Shift+S opens Save as.
 
 Drag the timeline ruler or the playhead line to change program time and preview.
@@ -318,17 +320,24 @@ trim that clip. Video/audio lane crossing is refused with `GA_TRACK_KIND`. Cache
 frame bitmaps appear on visible video clips after paused background extraction;
 waveforms also appear on video clips that contain audio.
 
-The source monitor reuses its unchanged picture, and its decoder is separate from
-program decoding. Windows uses D3D11 hardware decoding when supported and prefers
-a discrete OpenCL GPU on hybrid PCs. Software decoding remains available with
-`GENESIS_SOFTWARE_DECODE=1`; `GENESIS_OPENCL_DEVICE` can select a GPU by name substring.
-`GENESIS_MEDIA_PROFILE=1` emits worker colour/RGB conversion timings.
+Both monitors reuse unchanged pictures. Source transport changes keep the program
+picture, while timeline edits refresh it. Reload, Relink and opening a project
+invalidate the background media cache, including LUTs replaced at the same path.
+Timeline thumbnails and waveforms wait until both transports are paused.
 
-A 30-sample measurement on the supplied 4K/59.94 AV1/PQ clip and RTX 5080 reached
-31.14 worker previews per second at a 1280x720 working canvas, with an identical
-frame-zero picture after rewind. The former repeated-source request pattern measured
-1.8 per second. This excludes Windows canvas painting and audio; sustained 60 fps
-playback and long-run synchronization are still acceptance work.
+The worker keeps decoder image buffers between frames, composes in FP32, and packs
+the final preview on the GPU before downloading it. FLOAT intermediates and master
+exports retain their precision. Windows uses D3D11 decoding when supported and prefers
+a discrete OpenCL GPU on hybrid PCs. Software decoding remains available with
+`GENESIS_SOFTWARE_DECODE=1`; `GENESIS_OPENCL_DEVICE` selects a GPU by name substring.
+`GENESIS_MEDIA_PROFILE=1` emits colour, RGB conversion and preview phase timings.
+
+A 120-sample measurement of consecutive frames on the supplied 4K/59.94 AV1/PQ clip
+and RTX 5080 reached 59.49 worker previews per second at a 1280x720 working canvas,
+with identical frame-zero pixels after rewind. This excludes Windows canvas painting,
+mailbox conversion and audio; sustained 60 fps in the editor and long-run
+synchronization are still acceptance work. The diagnostic defaults to 120 consecutive
+frames; `--frame-step 2 --samples 30` reproduces the older sampling pattern.
 
 ```powershell
 python tests/preview_performance.py --worker .\genesis-gcompose.exe --source 'C:\path\to\clip.mp4'

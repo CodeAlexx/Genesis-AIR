@@ -19,14 +19,15 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Native media and project I/O | Eight cases / 65 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status |
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
-| Asynchronous preview | Generated red/blue pixels after rapid seek; newest request wins; rewind restores frame-zero pixels; unchanged source monitor reuses its decoded frame; visible timeline bitmaps and embedded audio waveforms publish independently |
+| Asynchronous preview | Generated red/blue pixels after rapid seek; newest request wins; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; visible timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
 | Sequence/export quality | Six-frame 3840x2160 ProRes preserving four-pixel detail at 30000/1001 with 24-bit PCM; portrait preview square stays square; 1080x1920 H.264/HEVC output; exact held multicam cuts at frames 30/60 |
 | Precision/color/audio duration | 1024 distinct narrow-band values survive filtered three-layer FFV1 16-bit composition; a supplied 4K AV1/PQ source round trips into a 16-bit PQ/BT.2020 master; SDR preview agrees with the floating-point reference within mean 0.97/255; 100-nit SDR title white is converted to PQ correctly; HEVC HDR is 10-bit PQ/BT.2020; audio remains audible after 181 seconds |
 
-A 30-sample worker timing check on the supplied 4K/59.94 AV1/PQ clip and RTX 5080
-measured 31.14 previews/second with D3D11 decode and the NVIDIA OpenCL device. It excludes
-canvas painting and audio, and does not establish sustained 60 fps or long-run sync.
+A 120-sample worker timing check on consecutive frames of the supplied 4K/59.94 AV1/PQ
+clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDIA OpenCL
+device. It excludes mailbox conversion, canvas painting and audio, and does not
+establish sustained 60 fps in the window or long-run sync.
 
 The native Windows window was also exercised with the supplied Costa Rica 4K clip:
 source/program images, visible transport controls, moving L/R meters, Mute silencing

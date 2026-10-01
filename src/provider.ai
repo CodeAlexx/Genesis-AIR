@@ -47,6 +47,7 @@ pub type Provider = struct {
   session: option<Child>,
   reader: proc.LineReader,
   canvas_width: u32, canvas_height: u32,
+  program_signature: string,
   starts: u64
 }
 
@@ -69,7 +70,7 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
     ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_signature: string.new()}
 }
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
@@ -81,7 +82,7 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} 
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_signature: string.new()}
 }
 
 // FFmpeg is a real-media backend, selected only when gcompose is absent.
@@ -89,9 +90,10 @@ pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effec
   Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
     scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_signature: string.new()}
 }
 pub fn invalidate(state: ref<Provider>) -> unit effects {alloc} {
+  let _ = struct.replace(state, string.new(), field=program_signature)
   let _ = ref.swap(struct.borrow(state, field=probes), array.new())
   let _ = ref.swap(struct.borrow(state, field=frames), array.new())
   let _ = ref.swap(struct.borrow(state, field=envelopes), array.new())
@@ -521,39 +523,29 @@ fn read_rgba(file: str, width: u32, height: u32) -> option<draw.Surface> effects
   let data: view<byte> = bytes.view(raw)
   let wanted: u64 = cast.wrap(width) * cast.wrap(height) * 4
   if view.len(data) < wanted { return option.none() }
-  match draw.surface(width, height) {
-    none => option.none(),
-    some(target) => {
-      var canvas: draw.Canvas = draw.canvas(target)
-      var y: u32 = 0
-      loop {
-        if y >= height { break }
-        var x: u32 = 0
-        loop {
-          if x >= width { break }
-          let at: u64 = (cast.wrap(y) * cast.wrap(width) + cast.wrap(x)) * 4
-          let r: u8 = cast.bits(view.get(data, at))
-          let g: u8 = cast.bits(view.get(data, at + 1))
-          let b: u8 = cast.bits(view.get(data, at + 2))
-          let px: i64 = cast.wrap(x)
-          let py: i64 = cast.wrap(y)
-          draw.device_pixel(canvas, px, py, draw.rgb(r, g, b))
-          x = x + 1
-        }
-        y = y + 1
-      }
-      option.some(draw.finish(canvas))
-    },
+  let total: u64 = cast.wrap(width) * cast.wrap(height)
+  if total > draw.max_pixels() { return option.none() }
+  var pixels: array<byte> = array.new()
+  let opaque: u8 = 255
+  var i: u64 = 0
+  loop { if i >= total { break }
+    array.push(pixels, view.get(data, i * 4))
+    array.push(pixels, view.get(data, i * 4 + 1))
+    array.push(pixels, view.get(data, i * 4 + 2))
+    array.push(pixels, cast.bits(opaque))
+    i = i + 1
   }
+  option.some(draw.Surface {width: width, height: height, pixels: pixels})
 }
 
-// PREVIEW always writes the worker's fixed 1280x856 canvas. Sample that canvas into the
+// PREVIEW writes the provider's working canvas. Sample that canvas into the
 // monitor's requested size; interpreting the first width*height bytes as a small image
 // would instead show only a cropped corner of the composition.
 fn read_program(file: str, width: u32, height: u32, canvas_width: u32, canvas_height: u32) -> option<draw.Surface> effects {alloc, fs.read} {
   let raw: bytes = match files.read_bytes(file) { ok(value) => value, err(problem) => { return option.none() }, }
   let data: view<byte> = bytes.view(raw)
   if view.len(data) != cast.wrap(canvas_width) * cast.wrap(canvas_height) * 4 or width == 0 or height == 0 { return option.none() }
+  if width == canvas_width and height == canvas_height { return read_rgba(file, width, height) }
   match draw.surface(width, height) {
     none => option.none(),
     some(target) => {
@@ -584,6 +576,24 @@ fn read_program(file: str, width: u32, height: u32, canvas_width: u32, canvas_he
       option.some(draw.finish(canvas))
     },
   }
+}
+
+// The document signature includes edits and program time, but excludes source transport.
+// Keep the worker output on disk; copying it here avoids an unnecessary decode/composite.
+pub fn cached_program(state: ref<Provider>, signature: str, width: u32, height: u32)
+    -> option<Frame> effects {alloc, fs.read} {
+  if str.len(signature) == 0 or not str.eq(signature, str.view(struct.borrow(state, field=program_signature))) {
+    return option.none()
+  }
+  match read_program(str.view(preview_path(state)), width, height, state.canvas_width, state.canvas_height) {
+    none => option.none(),
+    some(pixels) => option.some(Frame {ok: true, width: width, height: height, pixels: pixels,
+      detail: string.copy("cached program monitor")}),
+  }
+}
+pub fn hold_program(state: ref<Provider>, signature: str) -> unit effects {alloc} {
+  let _ = struct.replace(state, string.copy(signature), field=program_signature)
+  ()
 }
 
 pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32) -> Frame

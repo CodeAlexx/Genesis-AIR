@@ -135,7 +135,11 @@ The latest-request background renderer publishes frame bitmaps and embedded-audi
 waveforms independently of the monitor image.
 
 The compositor now keeps source thumbnails apart from program decoder state, caches
-unchanged source pictures in AIR, resolves HDR preview colour at monitor dimensions,
-and supports native D3D11 decode with software fallback. OpenCL chooses a discrete GPU
-on hybrid PCs. The supplied 4K clip measured 31.14 worker previews/second over 30
-samples; actual window throughput and sustained 60 fps need further work.
+unchanged monitor pictures in AIR, resolves HDR preview colour at monitor dimensions,
+and supports native D3D11 decode with software fallback. Decoder buffers are reused;
+the FP32 compositor packs preview bytes on the GPU. OpenCL chooses a discrete GPU
+on hybrid PCs. The supplied 4K clip measured 59.49 worker previews/second over 120
+consecutive frames; mailbox conversion, actual window throughput and sustained 60 fps
+need further work. Fullscreen now requests a 1280x720 surface, with its size published
+beside each image slot. A media revision reaches the background provider on Reload,
+Relink and project open, so unchanged document JSON cannot retain replaced media or LUTs.

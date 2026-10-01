@@ -28,7 +28,10 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--repeat-source", action="store_true")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--frame-step", type=int, default=1, choices=(1, 2))
+    parser.add_argument("--samples", type=int, default=120)
     args = parser.parse_args()
+    assert 4 <= args.samples <= 1000, "samples must be 4..1000"
     # Read the application's authoritative neutral wire rather than maintaining
     # another collection of its 108 defaults in this diagnostic.
     source = (Path(__file__).resolve().parent.parent / "src/timeline_media.ai").read_text(encoding="utf-8")
@@ -63,7 +66,7 @@ def main():
                 diagnostics.append(line.strip())
                 if "OpenCL device:" in line or "Native D3D11 decode:" in line:
                     backends.add(line.strip())
-                if "frame color_us" in line:
+                if "frame color_us" in line or "preview upload_us" in line:
                     print(line.strip(), flush=True)
                 if line.startswith("DONE"):
                     return
@@ -71,11 +74,11 @@ def main():
         elapsed = []
         try:
             first = None
-            for index in range(34):
+            for index in range(args.samples + 4):
                 started = time.perf_counter()
                 if args.repeat_source or index == 0:
                     ask(f"THUMB {fields[0]} 0 480 270 {wire(thumbnail)}")
-                fields[2] = str(index * 2)
+                fields[2] = str(index * args.frame_step)
                 ask("PREVIEW " + " ".join(fields) + " " + wire(picture))
                 if index == 0:
                     pixels = picture.read_bytes()
@@ -97,7 +100,7 @@ def main():
         report = {"samples": len(elapsed), "mean_ms": round(statistics.mean(elapsed) * 1000, 2),
                   "median_ms": round(statistics.median(elapsed) * 1000, 2),
                   "worker_frames_per_second": round(1 / statistics.mean(elapsed), 2),
-                  "rewind_identical": True, "repeated_source": args.repeat_source, "backends": sorted(backends)}
+                  "frame_step": args.frame_step, "rewind_identical": True, "repeated_source": args.repeat_source, "backends": sorted(backends)}
         if args.report:
             args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report), flush=True)

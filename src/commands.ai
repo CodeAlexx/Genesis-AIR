@@ -153,6 +153,7 @@ pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
   app.mark_dirty(state, false)
   app.set_selected_filter(state, 0)
   app.end_parameter_drag(state)
+  app.mark_media_changed(state)
   app.set_status(state, "Opened")
   done("opened", 0)
 }
@@ -233,6 +234,7 @@ pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {al
     none => { return refused("the media path could not be resolved") },
   }
   provider.restart(struct.borrow(state, field=provider))
+  app.mark_media_changed(state)
   var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   if not report.ok { return refused(str.view(struct.borrow(report, field=detail))) }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
@@ -669,6 +671,7 @@ pub fn open_source(state: ref<app.App>, source: u64) -> Result effects {alloc} {
 // so a file changed on disk is read again.
 pub fn reload_source(state: ref<app.App>, source: u64) -> Result effects {alloc, process, time} {
   provider.restart(struct.borrow(state, field=provider))
+  app.mark_media_changed(state)
   open_source(state, source)
 }
 pub fn monitor(state: ref<app.App>, action: u32) -> Result effects {alloc} {

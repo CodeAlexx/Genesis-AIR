@@ -116,6 +116,7 @@ pub type App = struct {
   export_profile: u32,
   frames_painted: u64,
   fullscreen: u32,
+  media_revision: u64,
   waveforms: array<Waveform>,
   thumbnails: array<Thumbnail>,
   audio_left: f64,
@@ -149,7 +150,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, waveforms: array.new(), thumbnails: array.new(),
+    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, waveforms: array.new(), thumbnails: array.new(),
     audio_left: 0.0, audio_right: 0.0,
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
@@ -166,6 +167,11 @@ pub fn project_path(state: ref<App>) -> string effects {alloc} {
 }
 pub fn set_project_path(state: ref<App>, text: str) -> unit effects {alloc} {
   let _ = ref.swap(struct.borrow(state, field=project_path), string.copy(text))
+  ()
+}
+// A reload changes external media without necessarily changing saved project facts.
+pub fn mark_media_changed(state: ref<App>) -> unit effects {} {
+  struct.set(state, state.media_revision + 1, field=media_revision)
   ()
 }
 pub fn dirty(state: ref<App>) -> bool effects {} { state.dirty }

@@ -18,6 +18,11 @@ function Invoke-Native([string]$Name, [string[]]$Arguments, [int]$Expected = 0) 
   $stdout = $child.StandardOutput.ReadToEndAsync()
   $stderr = $child.StandardError.ReadToEndAsync()
   if (-not $child.WaitForExit(120000)) { $child.Kill($true); throw "$Name exceeded the test deadline." }
+  # A failed child can leave an inherited pipe open in a worker. Bound capture
+  # separately so that failure is reported instead of hanging after WaitForExit.
+  if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) {
+    throw "$Name exit $($child.ExitCode): [GA_TEST_CAPTURE] a child output pipe remained open."
+  }
   $text = $stdout.GetAwaiter().GetResult()
   $errorText = $stderr.GetAwaiter().GetResult()
   if ($child.ExitCode -ne $Expected) { throw "$Name exit $($child.ExitCode): $text $errorText" }
@@ -100,5 +105,6 @@ try {
   $resolved = (Resolve-Path -LiteralPath $work).Path
   $expectedRoot = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
   if (-not $resolved.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Test cleanup path escaped the build directory.' }
-  Remove-Item -LiteralPath $resolved -Recurse -Force
+  try { Remove-Item -LiteralPath $resolved -Recurse -Force }
+  catch { Write-Warning "[GA_TEST_CLEANUP] Could not remove $resolved : $($_.Exception.Message)" }
 }

@@ -14,6 +14,14 @@ import "app.ai" as app
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
 
+fn program_signature(document: ref<editor.Document>) -> string effects {alloc} {
+  var copy: editor.Document = editor.copy_document(document)
+  struct.set(copy, 0, field=monitor_source)
+  let _ = struct.replace(copy, editor.Transport {playing: false, frame: 0, mark_in: -1,
+    mark_out: -1, rate: 1.0, looping: false}, field=monitor)
+  match editor_io.encode(copy) {ok(value) => value, err(_) => string.new(),}
+}
+
 pub fn images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var out: array<draw.Surface> = array.new()
   let document: ref<editor.Document> = struct.borrow(state, field=document)
@@ -68,9 +76,16 @@ pub fn images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surfac
       str.view(output), frame_cache) {
       ok(plan_lines) => {
         var lines: array<string> = plan_lines
-        var picture: provider.Frame = provider.program_plan(struct.borrow(state, field=provider),
-          lines, width, height, frame_cache.width, frame_cache.height)
+        // Planning interns editor property names; compare after that deterministic
+        // preparation so incoming mailbox documents and direct calls use the same key.
+        let signature: string = program_signature(document)
+        var picture: provider.Frame = match provider.cached_program(struct.borrow(state, field=provider), str.view(signature), width, height) {
+          some(held) => held,
+          none => provider.program_plan(struct.borrow(state, field=provider),
+            lines, width, height, frame_cache.width, frame_cache.height),
+        }
         timeline_media.cleanup_plan(str.view(output))
+        if picture.ok { provider.hold_program(struct.borrow(state, field=provider), str.view(signature)) }
         picture
       },
       err(problem) => {
@@ -190,10 +205,21 @@ pub fn request(root: str, document: str, generation: u64) -> unit effects {alloc
   request_viewport(root, document, generation, 0, 2.4, 450)
 }
 pub fn request_viewport(root: str, document: str, generation: u64, start: i64, zoom: f64, span: i64) -> unit effects {alloc, fs.write} {
+  request_quality(root, document, generation, start, zoom, span, 480, 270)
+}
+pub fn request_quality(root: str, document: str, generation: u64, start: i64, zoom: f64,
+    span: i64, width: u32, height: u32) -> unit effects {alloc, fs.write} {
+  request_revision(root, document, generation, start, zoom, span, width, height, 0)
+}
+pub fn request_revision(root: str, document: str, generation: u64, start: i64, zoom: f64,
+    span: i64, width: u32, height: u32, media_revision: u64) -> unit effects {alloc, fs.write} {
   publish(root, "request.air", document)
   let geometry: string = text.concat(str.view(string.from_int(start)), text.concat("\t",
     text.concat(str.view(string.from_float(zoom)), text.concat("\t", str.view(string.from_int(span))))))
-  publish(root, "viewport.tsv", str.view(geometry))
+  let sized: string = text.concat(str.view(geometry), text.concat("\t", text.concat(str.view(string.from_int(width)),
+    text.concat("\t", str.view(string.from_int(height))))))
+  let versioned: string = text.concat(str.view(sized), text.concat("\t", str.view(string.from_int(media_revision))))
+  publish(root, "viewport.tsv", str.view(versioned))
   publish(root, "request.id", str.view(string.from_int(generation)))
 }
 pub fn stop(root: str) -> unit effects {alloc, fs.write} { let _ = files.write_text(str.view(path.join(root, "stop")), "stop")
@@ -214,14 +240,24 @@ fn write_image(root: str, id: u64, which: str, image: ref<draw.Surface>) -> unit
   match files.write_bytes(str.view(temp), bytes.view(pixels)) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
   ()
 }
+fn image_size(root: str, id: u64) -> array<u32> effects {alloc, fs.read} {
+  let filename: string = image_file(root, id, "size")
+  let content: string = match files.read_text(str.view(filename)) {ok(value) => value, err(_) => string.copy("480\t270"),}
+  var fields: array<string> = text.split(str.view(content), "\t")
+  if array.len(fields) != 2 { return [480, 270] }
+  let width: u32 = match text.parse_u64(str.view(array.borrow(fields, 0))) {some(value) => cast.sat(value), none => 480,}
+  let height: u32 = match text.parse_u64(str.view(array.borrow(fields, 1))) {some(value) => cast.sat(value), none => 270,}
+  [width, height]
+}
 pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs.read} {
   var out: array<draw.Surface> = array.new()
+  var size: array<u32> = image_size(root, id)
   var i: u64 = 0
   loop { if i == 2 { break }
     let name: str = if i == 0 { "source" } else { "program" }
     var image: draw.Surface = match files.read_bytes(str.view(image_file(root, id, name))) {
       err(_) => draw.empty_surface(),
-      ok(raw) => match draw.surface_from_rgb24(480, 270, bytes.view(raw)) { none => draw.empty_surface(), some(value) => value, },
+      ok(raw) => match draw.surface_from_rgb24(array.get(size, 0), array.get(size, 1), bytes.view(raw)) { none => draw.empty_surface(), some(value) => value, },
     }
     array.push(out, image)
  i = i + 1
@@ -269,7 +305,7 @@ pub fn read_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs
 fn write_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let geometry: string = match files.read_text(path.join(root, "viewport.tsv")) {ok(value) => value, err(_) => string.copy("0\t2.4\t450"),}
   var fields: array<string> = text.split(str.view(geometry), "\t")
-  if array.len(fields) != 3 { return () }
+  if array.len(fields) < 3 { return () }
   let start: i64 = match text.parse_i64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
   let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
   let span: i64 = match text.parse_i64(str.view(array.borrow(fields, 2))) {some(value) => value, none => 450,}
@@ -345,24 +381,40 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
   var state: app.App = app.app(engine)
   let _ = struct.replace(state, struct.replace(owned, array.new(), field=fonts), field=fonts)
   var seen: u64 = 0
+  var media_revision: u64 = 0
   loop {
     if tasks.requested_at(str.view(path.join(str.view(root), "stop"))) { break }
     let id: u64 = number(str.view(root), "request.id")
     if id == 0 or id == seen { time.sleep_ms(10)
  continue }
-    seen = id
     let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => { continue }, }
     let document: editor.Document = match editor_io.decode(str.view(data)) { ok(value) => value, err(_) => { continue }, }
+    if number(str.view(root), "request.id") != id { continue }
+    seen = id
     let _ = struct.replace(state, document, field=document)
     let _ = struct.replace(struct.borrow(state, field=provider), string.new(), field=last_error)
-    var rendered: array<draw.Surface> = images(state, 480, 270)
+    let geometry: string = match files.read_text(path.join(str.view(root), "viewport.tsv")) {ok(value) => value, err(_) => string.new(),}
+    var dimensions: array<string> = text.split(str.view(geometry), "\t")
+    let width: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 3))) {some(value) => cast.sat(value), none => 480,} } else { 480 }
+    let height: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 4))) {some(value) => cast.sat(value), none => 270,} } else { 270 }
+    let revision: u64 = if array.len(dimensions) >= 6 { match text.parse_u64(str.view(array.borrow(dimensions, 5))) {some(value) => value, none => 0,} } else { 0 }
+    if revision != media_revision {
+      provider.restart(struct.borrow(state, field=provider))
+      media_revision = revision
+    }
+    // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
+    if width == 0 or height == 0 or width > 1280 or height > 720 { continue }
+    var rendered: array<draw.Surface> = images(state, width, height)
     var program: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
     var source: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
     write_image(str.view(root), id, "source", source)
     write_image(str.view(root), id, "program", program)
     publish(str.view(root), "error.txt", str.view(provider.last_error(struct.borrow(state, field=provider))))
+    let size_text: string = text.concat(str.view(string.from_int(width)), text.concat("\t", str.view(string.from_int(height))))
+    let _ = files.write_text(str.view(image_file(str.view(root), id, "size")), str.view(size_text))
     publish(str.view(root), "ready.id", str.view(string.from_int(id)))
-    if not editor.playing(struct.borrow(state, field=document)) {
+    if not editor.playing(struct.borrow(state, field=document)) and
+        not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) {
       let _ = waveforms(state)
       write_waveforms(state, str.view(root))
       publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))
