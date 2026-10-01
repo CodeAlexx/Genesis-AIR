@@ -404,21 +404,30 @@ Closing an overlay also repaints its former pixels. Physical pixel damage bounda
 preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
 
 At the retained-painter checkpoint (`77ea56a`), retained painting took 7.39 ms
-median versus 42.23 ms for a complete paint. The current channel-wake/frame-generation
-checkpoint was measured with 20 samples after three warmups on the supplied
-4K/59.94 AV1/PQ clip and RTX 5080 in a 2560x1440 canvas:
+median versus 42.23 ms for a complete paint. AIR now provides true nonblocking
+socket accept/receive operations, which `std.channel.recv_now` uses instead of a
+timed empty read. The profile found that the former half-millisecond deadline
+actually delayed an empty wake-coalescing pass by 11.55 ms on Windows. The final
+build drains that queue in 0.03 ms median, without changing blocking
+channel delivery or discarding partial greetings/frames.
+
+The nonblocking-channel checkpoint was measured with 20 samples after three
+warmups on the supplied 4K/59.94 AV1/PQ clip and RTX 5080 in a 2560x1440 canvas:
 
 | Median phase (ms) | Editor | Fullscreen |
 |---|---:|---:|
-| Request to ready notification | 37.87 | 35.72 |
-| Load generation-checked images | 2.36 | 3.29 |
-| Retained canvas paint | 7.07 | 27.44 |
-| Complete serial diagnostic | 46.95 | 66.54 |
+| Request to ready notification | 27.86 | 29.95 |
+| Load generation-checked images | 2.18 | 3.14 |
+| Retained canvas paint | 7.10 | 27.48 |
+| Complete serial diagnostic | 37.21 | 60.54 |
 
-The same editor diagnostic before this change (`40dafe4`) measured 41.79 ms request
-to ready and 49.91 ms serial. These short headless samples exclude native
-presentation, audio and pipeline overlap; they are not an interactive frame-rate
-claim. Sustained smooth 4K60 remains unfinished.
+The previous checkpoint (`25178c9`) measured 37.87/35.72 ms request-to-ready and
+46.95/66.54 ms serial in editor/fullscreen respectively. The earlier editor
+baseline (`40dafe4`) measured 41.79 ms request-to-ready and 49.91 ms serial.
+These short headless samples exclude native presentation, audio and pipeline
+overlap; they are not an interactive frame-rate claim. Fullscreen CPU painting
+and program-monitor preparation remain significant costs. Sustained smooth
+4K60 remains unfinished.
 
 ```powershell
 .\Genesis-AIR.exe profile-preview .\preview-profile.json .\project.air 2560 1440 20
@@ -428,6 +437,10 @@ claim. Sustained smooth 4K60 remains unfinished.
 
 This command opens no window. Its `std.bench` JSON separates request-to-ready, mailbox
 image loading, retained painting, borrowed presenter handoff and the serial pipeline.
+It also records wake coalescing, snapshot read/decode, source monitor, frame planning,
+program monitor, image publication and remaining request time. Those worker phases
+carry their frame generation, and their warmup/sample counts match the outer pipeline.
+Ordinary playback retains its small generation-only completion messages.
 `--full-paint` measures a complete paint for comparison; it combines with `--fullscreen`. It validates
 published image dimensions and a painted panel pixel so an empty frame cannot pass.
 `GA_PROFILE_ARGS` identifies invalid dimensions/sample counts; `GA_PROFILE_PREVIEW`

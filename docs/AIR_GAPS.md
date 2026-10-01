@@ -165,3 +165,23 @@ in the supplied 4K clip diagnostic, and an intermediate RGB packing step measure
 4K60. `profile-preview` separates the mailbox, image loading, painter and borrowed
 handoff. Its serial totals exclude audio, native presentation and asynchronous overlap.
 The native window's sustained throughput and long audio runs remain open acceptance work.
+
+
+## Nonblocking channel dispatch
+
+A half-millisecond `recv_now` deadline became an approximately 11.55 ms Windows
+scheduler wait whenever the preview drained an empty command queue. The SDK now
+has explicit `net.tcp_accept_now` and `net.tcp_recv_now` operations on POSIX and
+Winsock. Not-ready is code 3, preserving the handle; EOF is a successful empty
+read. The existing expired-deadline operations still refuse available data.
+`std.channel.recv_now` uses the true poll operations while retaining partial
+greetings and frame payloads. Credit writes keep their bounded write deadline.
+
+The retained SDK fixture runs through both native and reference backends, and
+Windows has headless MSVC byte/EOF/idle-poll checks. Genesis's generation-bearing
+profile records queue draining separately from snapshot decode, source monitor,
+frame planning, program monitor and pixel publication. Final empty draining is
+about 0.03 ms median. The current editor serial diagnostic is 37.21 ms; fullscreen
+is 60.54 ms, of which painting alone is 27.48 ms. These samples exclude audio,
+native present and asynchronous overlap. Smooth sustained 4K60 and continuous
+playback audio-filter state remain acceptance work.

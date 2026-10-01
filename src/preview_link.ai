@@ -5,18 +5,25 @@ import std.channel as channel
 import std.gui as gui
 import std.text as text
 
+pub type FrameTiming = struct {
+  generation: u64, request_ns: u64, source_ns: u64, plan_ns: u64,
+  program_ns: u64, publish_ns: u64, coalesce_ns: u64
+}
+fn empty_timing() -> FrameTiming effects {} {
+  FrameTiming {generation:0,request_ns:0,source_ns:0,plan_ns:0,program_ns:0,publish_ns:0,coalesce_ns:0}
+}
 pub type Link = struct {
   events: channel.Receiver, commands: array<channel.Sender>,
-  ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64
+  ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64, timing: FrameTiming
 }
-pub type Peer = struct {events: channel.Sender, commands: channel.Receiver}
+pub type Peer = struct {events: channel.Sender, commands: channel.Receiver, last_drain_ns: u64}
 fn problem(detail: str) -> string effects {alloc} { text.concat("[GA_PREVIEW_CHANNEL] ", detail) }
 pub fn open() -> result<Link,string> effects {alloc,net,time} {
   var events: channel.Receiver = match channel.open(64,1024) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
   result.ok(Link {events:events,commands:array.new(),ready:0,waveforms:0,
-    thumbnails:0,closed:false,error:string.new(),error_generation:0})
+    thumbnails:0,closed:false,error:string.new(),error_generation:0,timing:empty_timing()})
 }
 pub fn ticket(link: ref<Link>) -> channel.Ticket effects {alloc} {
   channel.ticket(struct.borrow(link,field=events))
@@ -31,7 +38,7 @@ pub fn peer(carried: ref<channel.Ticket>) -> result<Peer,string> effects {alloc,
   var commands: channel.Receiver = match channel.open_command_lane(events,0,4096,1,deadline) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
-  result.ok(Peer {events:events,commands:commands})
+  result.ok(Peer {events:events,commands:commands,last_drain_ns:0})
 }
 pub fn connect(link: ref<Link>) -> result<unit,string> effects {alloc,net,time} {
   let deadline: u64 = time.monotonic_ns()+3000000000
@@ -66,6 +73,7 @@ pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
     err(error)=>{return error.code == channel.code_empty()},
   }
   if message.kind == 9 { return false }
+  let drain_begin: u64 = time.monotonic_ns()
   loop {
     match channel.recv_now(struct.borrow(peer,field=commands),time.monotonic_ns()) {
       ok(value)=>match value {some(value)=>{message=value
@@ -73,11 +81,27 @@ pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
       err(error)=>{if error.code == channel.code_empty(){break}else{return false}},
     }
   }
+  struct.set(peer,time.monotonic_ns()-drain_begin,field=last_drain_ns)
   true
 }
 pub fn notify(peer: ref<Peer>, kind: u64, generation: u64) -> bool effects {alloc,net,time} {
   let value: string = string.from_int(generation)
   match channel.send(struct.borrow(peer,field=events),kind,str.bytes(str.view(value)),
+    time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,}
+}
+// Detailed timings travel only for the explicit headless profile. Ordinary
+// playback keeps its small generation-only completion message.
+pub fn notify_frame(peer: ref<Peer>, generation: u64, request_ns: u64, source_ns: u64,
+    plan_ns: u64, program_ns: u64, publish_ns: u64, coalesce_ns: u64) -> bool effects {alloc,net,time} {
+  let values: array<u64> = [generation,request_ns,source_ns,plan_ns,program_ns,publish_ns,coalesce_ns]
+  var payload: string = string.new()
+  var index: u64 = 0
+  loop {if index >= array.len(values) {break}
+    if index != 0 {string.append(payload,"\t")}
+    string.append(payload,str.view(string.from_int(array.get(values,index))))
+    index=index+1
+  }
+  match channel.send(struct.borrow(peer,field=events),1,str.bytes(str.view(payload)),
     time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,}
 }
 pub fn finish(peer: ref<Peer>, generation: u64) -> unit effects {alloc,net,time} {
@@ -110,7 +134,27 @@ fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
     let _ = struct.replace(link,string.copy(str.slice(str.view(value),split+1,str.len(str.view(value)))),field=error)
     return ()
   }
-  let generation: u64 = match text.parse_u64(str.view(value)) {some(value)=>value,none=>0,}
+  var generation: u64 = match text.parse_u64(str.view(value)) {some(value)=>value,none=>0,}
+  if item.kind == 1 and option.is_some(str.find(str.view(value),"\t")) {
+    var fields: array<string> = text.split(str.view(value),"\t")
+    if array.len(fields) != 7 {return ()}
+    var numbers: array<u64> = array.new()
+    var index: u64 = 0
+    loop {if index == 7 {break}
+      let value: u64 = match text.parse_u64(str.view(array.borrow(fields,index))) {
+        some(value)=>value,none=>{return ()},
+      }
+      array.push(numbers,value)
+      index=index+1
+    }
+    generation=array.get(numbers,0)
+    if generation > link.ready {
+      let _ = struct.replace(link,FrameTiming {generation:generation,
+        request_ns:array.get(numbers,1),source_ns:array.get(numbers,2),
+        plan_ns:array.get(numbers,3),program_ns:array.get(numbers,4),
+        publish_ns:array.get(numbers,5),coalesce_ns:array.get(numbers,6)},field=timing)
+    }
+  }
   if item.kind == 1 and generation > link.ready {
     struct.set(link,generation,field=ready)
     if generation >= link.error_generation {

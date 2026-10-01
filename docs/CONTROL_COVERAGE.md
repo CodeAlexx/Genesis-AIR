@@ -9,7 +9,7 @@ state-dependent controls also need focused checks. It does not by itself prove m
 
 ## Verified Windows checkpoint (2026-10-01)
 
-Branch `windows-native`, SDK `de41096998dbb79415089887a19a36255a192f5a`, and the
+Branch `windows-native`, SDK `fe68ba62fd8efceb31ebffc7820f9900113ad41e`, and the
 compositor revision/Windows patch recorded in `windows/source-pins.json` and
 `windows/gcompose-windows.patch` pass these measured gates:
 
@@ -32,14 +32,25 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The current channel-wake/frame-generation checkpoint headless diagnostic uses
-20 samples after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440.
-Editor medians are 37.87 ms request-to-ready, 2.36 ms image loading, 7.07 ms retained
-paint and 46.95 ms serial. Fullscreen medians are 35.72 ms, 3.29 ms, 27.44 ms and
-66.54 ms respectively. The same editor baseline before this change (`40dafe4`)
-measured 41.79 ms request-to-ready and 49.91 ms serial. The earlier retained-painter
-checkpoint (`77ea56a`) measured 42.23 ms for a complete paint. Native presentation,
-audio and overlap are excluded; these samples leave sustained smooth 4K60 open.
+The current nonblocking-channel checkpoint headless diagnostic uses 20 samples
+after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440. Editor
+medians are 27.86 ms request-to-ready, 2.18 ms image loading,
+7.10 ms retained paint and 37.21 ms serial. Fullscreen medians are
+29.95 ms, 3.14 ms, 27.48 ms and 60.54 ms respectively.
+The preceding checkpoint (`25178c9`) measured 37.87/35.72 ms request-to-ready and
+46.95/66.54 ms serial in editor/fullscreen. The earlier editor baseline (`40dafe4`)
+measured 41.79 ms request-to-ready and 49.91 ms serial. The retained-painter checkpoint
+(`77ea56a`) measured 42.23 ms for a complete paint. Native presentation, audio and
+overlap are excluded; sustained smooth 4K60 remains open.
+
+Detailed phase timing exposed an 11.55 ms empty wake-coalescing wait. The shared
+SDK's `net.tcp_accept_now` / `net.tcp_recv_now` and `std.channel.recv_now` remove
+that timed read; the final editor drain is 0.03 ms median. The native and
+reference channel suite passes 162 harness checks, with the new three-case /
+17-check fixture covering idle polls, binary short reads, EOF, unchanged expired
+deadlines and resumable partial greetings/frames. Headless MSVC socket checks
+also pass: 32 idle reads take 0.019 ms on this machine. Profile JSON now includes
+all seven internal request phases with matching generations and sample counts.
 
 Preview uses bounded `std.channel` command/events and the existing native
 `ui.next_event_on` socket/input wait. The request document and geometry are one
