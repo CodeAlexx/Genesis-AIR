@@ -12,6 +12,7 @@ function Invoke-Native([string]$Name, [string[]]$Arguments, [int]$Expected = 0) 
   $start.RedirectStandardError = $true
   $start.Environment.Remove('GENESIS_FAKE_PROVIDER') | Out-Null
   $start.Environment['GENESIS_SCRATCH'] = $work
+  $start.Environment['GENESIS_FONT'] = Join-Path $project 'fonts/NotoSansJP.ttf'
   foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
   $child = [System.Diagnostics.Process]::Start($start)
   $stdout = $child.StandardOutput.ReadToEndAsync()
@@ -33,9 +34,20 @@ try {
 
   $native = Invoke-Native 'genesis-native.exe' @($work, $media)
   Write-Host $native.TrimEnd()
+  $wave = Join-Path $work 'queued audio 日本語.wav'
+  & ffmpeg -nostdin -y -v error -i $media -vn -ac 2 -ar 48000 -c:a pcm_s16le $wave
+  if ($LASTEXITCODE -ne 0) { throw 'Could not generate native audio fixture.' }
+  Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave)).TrimEnd()
+  $worker = Join-Path $project 'genesis-gcompose.exe'
+  if (Test-Path -LiteralPath $worker) {
+    Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
+  }
+  Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'inspector-tests.json') -Destination (Join-Path $root 'inspector-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'native-tests.json') -Destination (Join-Path $root 'native-tests.json') -Force
 
   $headless = Invoke-Native 'genesis-headless.exe' @($work, (Join-Path $work 'project.air'), (Join-Path $work 'frame.png'))
+  Set-Content -LiteralPath (Join-Path $root 'headless-output.txt') -Value $headless
   $facts = @{}
   foreach ($line in ($headless -split "`n")) {
     $parts = $line.TrimEnd("`r") -split "`t", 2
@@ -50,7 +62,6 @@ try {
   }
   foreach ($name in @('drop_imported', 'drop_order')) { if ($facts[$name] -ne 'true') { throw "Headless $name failed." } }
   if ($facts['drop_count'] -ne '2') { throw 'Headless native drop count failed.' }
-  Set-Content -LiteralPath (Join-Path $root 'headless-output.txt') -Value $headless
   Write-Host "Headless: $checked saved application facts and 3 native-drop checks passed."
 
   $clicks = 0

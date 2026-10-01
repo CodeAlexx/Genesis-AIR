@@ -12,7 +12,9 @@ import std.application_theme as themes
 import std.path as path
 import std.editor as editor
 import std.math as math
+import std.text as text
 import std.editor_view as editor_view
+import std.files as files
 import std.timeline as timeline
 import std.unicode as unicode
 import std.widgets as widgets
@@ -90,6 +92,18 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   }
 
   // ---- project ----
+  if action == chrome.act_sequence_preset() {
+    var changed: commands.Result = commands.sequence_preset(state, target)
+    return commands.message(changed)
+  }
+  if action == chrome.act_camera_cut() {
+    let selected: u64 = app.current_clip(state)
+    let clip: editor.Clip = match editor.clip(struct.borrow(state, field=document), selected) {
+      none => { return note("[GA_CAMERA_SELECTION] Select the camera clip first") }, some(value) => value,
+    }
+    var changed: commands.Result = commands.camera_cut(state, clip.track)
+    return commands.message(changed)
+  }
   if action == chrome.act_new() {
     var landed: commands.Result = commands.new_project(state)
     return commands.message(landed)
@@ -103,17 +117,31 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     return note("path to import?")
   }
   if action == chrome.act_render() {
-    app.begin_prompt(state, action, "Render still to", "genesis-air.png")
-    return note("write the frame where?")
+    struct.set(state, cast.sat(target), field=export_profile)
+    app.begin_prompt(state, action, "Export video to", if target == 3 or target == 5 { "genesis-master.mkv" } else if target == 2 { "genesis-master.mov" } else { "genesis-air.mp4" })
+    return note("write the video where?")
   }
   if action == chrome.act_save() {
     var where: string = app.project_path(state)
-    if str.len(str.view(where)) == 0 {
+    if str.len(str.view(where)) == 0 or target == 1 {
       app.begin_prompt(state, action, "Save project as", "project.air")
       return note("save where?")
     }
     var landed: commands.Result = commands.save(state)
     return commands.message(landed)
+  }
+  if action == chrome.act_recover() {
+    let scratch: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)))
+    let saved: string = path.join(str.view(scratch), "autosave.air")
+    var recovered: commands.Result = commands.open_project(state, str.view(saved))
+    if recovered.ok {
+      app.set_project_path(state, "")
+      app.mark_dirty(state, true)
+      let _ = commands.program(state, editor.pause())
+      let _ = commands.monitor(state, editor.pause())
+      return note("Autosave recovered; use Save as to keep it")
+    }
+    return note("[GA_RECOVERY_MISSING] No readable autosave is available")
   }
   if action == chrome.act_undo() {
     var landed: commands.Result = commands.undo(state)
@@ -126,8 +154,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_reload() {
     let source: u64 = app.current_source(state)
     if source == 0 { return note("no media selected to reload") }
-    provider.invalidate(struct.borrow(state, field=provider))
-    var landed: commands.Result = commands.open_source(state, source)
+    var landed: commands.Result = commands.reload_source(state, source)
     return commands.message(landed)
   }
 
@@ -144,27 +171,29 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     string.append(details, path.join(str.view(struct.borrow(engine, field=scratch)), "errors.jsonl"))
     return details
   }
+  if action == chrome.act_fullscreen() {
+    struct.set(state, if state.fullscreen == 0 { if target == 1 { 2 } else { 1 } } else { 0 }, field=fullscreen)
+    app.set_focus(state, if target == 1 { app.panel_source() } else { app.panel_program() })
+    return note(if state.fullscreen == 0 { "Editor view" } else { "Fullscreen: Space plays/pauses, Esc returns" })
+  }
   // ---- transport ----
-  if action == chrome.act_play() {
-    let playing: bool = editor.playing(struct.borrow(state, field=document))
-    var landed: commands.Result = commands.program(state,
-      if playing { editor.pause() } else { editor.play() })
-    return note(if playing { "Paused" } else { "Playing" })
-  }
-  if action == chrome.act_go_start() {
-    var landed: commands.Result = commands.program(state, editor.go_start())
-    return commands.message(landed)
-  }
-  if action == chrome.act_go_end() {
-    var landed: commands.Result = commands.program(state, editor.go_end())
-    return commands.message(landed)
-  }
-  if action == chrome.act_step_back() {
-    var landed: commands.Result = commands.program(state, editor.step_back())
-    return commands.message(landed)
-  }
-  if action == chrome.act_step_forward() {
-    var landed: commands.Result = commands.program(state, editor.step_forward())
+  if action == chrome.act_play() or action == chrome.act_stop() or action == chrome.act_go_start() or
+      action == chrome.act_go_end() or action == chrome.act_step_back() or action == chrome.act_step_forward() {
+    let source: bool = target == 1
+    let doc: ref<editor.Document> = struct.borrow(state, field=document)
+    let playing: bool = if source { struct.get(struct.borrow(doc, field=monitor), field=playing) }
+      else { editor.playing(doc) }
+    let command: u32 = if action == chrome.act_play() { if playing { editor.pause() } else { editor.play() } }
+      else if action == chrome.act_stop() { editor.pause() }
+      else if action == chrome.act_go_start() { editor.go_start() }
+      else if action == chrome.act_go_end() { editor.go_end() }
+      else if action == chrome.act_step_back() { editor.step_back() } else { editor.step_forward() }
+    if source { let _ = commands.program(state, editor.pause()) }
+    else { let _ = commands.monitor(state, editor.pause()) }
+    var landed: commands.Result = if source { commands.monitor(state, command) }
+      else { commands.program(state, command) }
+    if action == chrome.act_play() { return note(if playing { "Paused" } else { "Playing" }) }
+    if action == chrome.act_stop() { return note("Stopped") }
     return commands.message(landed)
   }
 
@@ -327,7 +356,14 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     let length: i64 = if frames > 0 { frames } else { 120 }
     let track: u64 = app.default_video_track(state)
     var landed: commands.Result = commands.append_clip(state, track, target, 0, length)
-    return commands.message(landed)
+    if not landed.ok { return commands.message(landed) }
+    let _ = commands.select_only(state, landed.value)
+    var named: string = editor.source_name(struct.borrow(state, field=document), target)
+    var short: string = path.basename(str.view(named))
+    var line: string = string.copy("Added ")
+    string.append(line, str.view(short))
+    string.append(line, " to V1")
+    return line
   }
 
   // ---- filters ----
@@ -344,6 +380,14 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_filter_pick() {
     app.set_selected_filter(state, target)
     return note(str.view(chrome.label_of(control)))
+  }
+  if action == chrome.act_filter_value() {
+    app.set_selected_filter(state, target)
+    let document: ref<editor.Document> = struct.borrow(state, field=document)
+    let seed: string = editor.filter_text_param(document, target, str.view(name), "")
+    app.begin_prompt(state, action, if str.eq(str.view(kind), "text") {
+      "Title text" } else { "LUT .cube file" }, str.view(seed))
+    return note("enter a value; empty clears it")
   }
   if action == chrome.act_filter_toggle() {
     var landed: commands.Result = commands.toggle_filter(state, target)
@@ -415,7 +459,33 @@ fn perform_slider(state: ref<app.App>, control: ref<chrome.Control>,
     struct.get(control, field=domain), struct.get(control, field=target), str.view(kind),
     str.view(name), next)
   if not landed.ok { return commands.message(landed) }
+  let label: string = chrome.label_of(control)
+  app.begin_parameter_drag(state, struct.get(control, field=domain), landed.value,
+    str.view(name), str.view(label), area.left, wide, low, high, step, next)
   var line: string = chrome.label_of(control)
+  string.append(line, " = ")
+  string.append(line, str.view(math.format_fixed(next, 2)))
+  line
+}
+
+fn continue_parameter_drag(state: ref<app.App>, x: f64) -> string effects {alloc} {
+  let drag: ref<app.ParameterDrag> = struct.borrow(state, field=parameter_drag)
+  let low: f64 = drag.low
+  let high: f64 = drag.high
+  let step: f64 = drag.step
+  if drag.width <= 0.0 { return note("") }
+  let portion: f64 = math.max(0.0, math.min(1.0, (x - drag.left) / drag.width))
+  var next: f64 = low + (high - low) * portion
+  if step > 0.0 { next = math.min(high, low + math.round((next - low) / step) * step) }
+  if next == drag.value { return note("") }
+  let name: string = string.copy(str.view(struct.borrow(drag, field=name)))
+  let label: string = string.copy(str.view(struct.borrow(drag, field=label)))
+  let domain: u32 = drag.domain
+  let target: u64 = drag.target
+  var landed: commands.Result = commands.update_parameter(state, domain, target, str.view(name), next)
+  if not landed.ok { return commands.message(landed) }
+  struct.set(struct.borrow(state, field=parameter_drag), next, field=value)
+  var line: string = string.copy(str.view(label))
   string.append(line, " = ")
   string.append(line, str.view(math.format_fixed(next, 2)))
   line
@@ -460,7 +530,28 @@ pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  // A fresh press ends any previous drag whose release was lost during focus changes.
+  app.end_parameter_drag(state)
+  app.end_gesture(state)
   let frame: layout.Frame = layout.frame(width, height)
+  if app.prompt_active(state) and layout.contains(layout.prompt_panel(width, height), x, y) {
+    return note("")
+  }
+  if state.fullscreen != 0 {
+    let source: bool = state.fullscreen == 2
+    app.set_focus(state, if source { app.panel_source() } else { app.panel_program() })
+    var controls: array<chrome.Control> = chrome.monitor_controls(frame, state, source)
+    match chrome.hit(controls, x, y) {
+      some(index) => { return perform(state, array.borrow(controls, index), width, height) }, none => {},
+    }
+    if layout.contains(layout.monitor_scrub(chrome.monitor_area(frame, state, source)), x, y) {
+      let _ = commands.program(state, editor.pause())
+      let _ = commands.monitor(state, editor.pause())
+      app.begin_gesture(state, if source { app.drag_source_scrub() } else { app.drag_program_scrub() }, 0, 0, 0, 0, 0, 0)
+      return seek_monitor_bar(state, frame, source, x)
+    }
+    return note("")
+  }
   app.set_focus(state, panel_at(width, height, x, y))
 
   // The open popup is topmost, followed by the menu headings themselves. A click elsewhere
@@ -511,6 +602,23 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
     some(index) => { return perform(state, array.borrow(bar, index), width, height) },
     none => { },
   }
+  var source_transport: array<chrome.Control> = chrome.monitor_controls(frame, state, true)
+  match chrome.hit(source_transport, x, y) {
+    some(index) => { return perform(state, array.borrow(source_transport, index), width, height) }, none => {},
+  }
+  var program_transport: array<chrome.Control> = chrome.monitor_controls(frame, state, false)
+  match chrome.hit(program_transport, x, y) {
+    some(index) => { return perform(state, array.borrow(program_transport, index), width, height) }, none => {},
+  }
+  let source_bar: layout.Rect = layout.monitor_scrub(frame.source)
+  let program_bar: layout.Rect = layout.monitor_scrub(frame.program)
+  if layout.contains(source_bar, x, y) or layout.contains(program_bar, x, y) {
+    let source: bool = layout.contains(source_bar, x, y)
+    let _ = commands.program(state, editor.pause())
+    let _ = commands.monitor(state, editor.pause())
+    app.begin_gesture(state, if source { app.drag_source_scrub() } else { app.drag_program_scrub() }, 0, 0, 0, 0, 0, 0)
+    return seek_monitor_bar(state, frame, source, x)
+  }
   var tbar: array<chrome.Control> = chrome.timeline_bar(frame, state)
   match chrome.hit(tbar, x, y) {
     some(index) => { return perform(state, array.borrow(tbar, index), width, height) },
@@ -522,6 +630,7 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
     none => { },
   }
   if layout.contains(frame.dock_body, x, y) {
+    if app.dock_tab(state) == chrome.tab_audio() and y < frame.dock_body.top + chrome.meter_height() { return note("") }
     var body: array<chrome.Control> = chrome.dock_panel(frame, state)
     match chrome.hit(body, x, y) {
       some(index) => {
@@ -551,12 +660,25 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
 
   // The ruler scrubs the program transport.
   if layout.contains(frame.ruler, x, y) {
+    let _ = commands.program(state, editor.pause())
+    let _ = commands.monitor(state, editor.pause())
     let frame_at: i64 = timeline.x_to_frame(model, x)
+    app.begin_gesture(state, app.drag_scrub(), 0, frame_at, 0, 0, 0, 0)
     var landed: commands.Result = commands.seek(state, frame_at)
     return commands.message(landed)
   }
 
   if layout.contains(frame.timeline, x, y) {
+    // The painted playhead is a seek handle above the clips, throughout the lane area.
+    let head: f64 = timeline.frame_to_x(model, editor.playhead(struct.borrow(state, field=document)))
+    if math.abs(x - head) <= 6.0 {
+      let _ = commands.program(state, editor.pause())
+      let _ = commands.monitor(state, editor.pause())
+      let at: i64 = timeline.x_to_frame(model, x)
+      app.begin_gesture(state, app.drag_scrub(), 0, at, 0, 0, 0, 0)
+      var landed: commands.Result = commands.seek(state, at)
+      return commands.message(landed)
+    }
     match timeline.clip_at(model, x, y) {
       some(index) => {
         let entry: ref<timeline.Clip> = array.borrow(struct.borrow(model, field=clips), index)
@@ -594,10 +716,26 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
   note("")
 }
 
+fn seek_monitor_bar(state: ref<app.App>, frame: layout.Frame, source: bool, x: f64)
+                     -> string effects {alloc} {
+  let bar: layout.Rect = layout.monitor_scrub(chrome.monitor_area(frame, state, source))
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let length: i64 = if source { editor.source_frames(doc, doc.monitor_source) } else { editor.duration(doc) }
+  let ratio: f64 = math.max(0.0, math.min(1.0, (x - bar.left) / layout.width_of(bar)))
+  let at: i64 = cast.sat(math.round(ratio * cast.float(if length > 0 { length - 1 } else { 0 })))
+  if source {
+    let landed: i64 = editor.seek_monitor(doc, at)
+    return text.concat("Source frame ", str.view(string.from_int(landed)))
+  }
+  var landed: commands.Result = commands.seek(state, at)
+  commands.message(landed)
+}
+
 // A drag in progress. Nothing is written yet; this only reports where a release would land,
 // so the whole gesture becomes ONE undo step.
 pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc} {
+  if app.parameter_dragging(state) { return continue_parameter_drag(state, x) }
   if app.dock_scroll_dragging(state) {
     let frame: layout.Frame = layout.frame(width, height)
     let track: layout.Rect = chrome.dock_scroll_track(frame)
@@ -614,6 +752,14 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
   if app.gesture_kind(state) == app.drag_none() { return note("") }
   let frame: layout.Frame = layout.frame(width, height)
   var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+  if app.gesture_kind(state) == app.drag_source_scrub() or app.gesture_kind(state) == app.drag_program_scrub() {
+    return seek_monitor_bar(state, frame, app.gesture_kind(state) == app.drag_source_scrub(), x)
+  }
+  if app.gesture_kind(state) == app.drag_scrub() {
+    let at: i64 = timeline.x_to_frame(model, x)
+    var landed: commands.Result = commands.seek(state, at)
+    return commands.message(landed)
+  }
   let held: app.Drag = app.gesture(state)
   let now: i64 = timeline.x_to_frame(model, x)
   let delta: i64 = now - held.grab_frame
@@ -630,12 +776,31 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
                   y: f64) -> string effects {alloc} {
+  if app.parameter_dragging(state) {
+    let line: string = continue_parameter_drag(state, x)
+    app.end_parameter_drag(state)
+    return line
+  }
   if app.dock_scroll_dragging(state) {
     app.end_dock_scroll_drag(state)
     return note("Inspector scrolled")
   }
   let kind: u32 = app.gesture_kind(state)
   if kind == app.drag_none() { return note("") }
+  if kind == app.drag_source_scrub() or kind == app.drag_program_scrub() {
+    let frame: layout.Frame = layout.frame(width, height)
+    let message: string = seek_monitor_bar(state, frame, kind == app.drag_source_scrub(), x)
+    app.end_gesture(state)
+    return message
+  }
+  if kind == app.drag_scrub() {
+    let frame: layout.Frame = layout.frame(width, height)
+    var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+    let at: i64 = timeline.x_to_frame(model, x)
+    app.end_gesture(state)
+    var landed: commands.Result = commands.seek(state, at)
+    return commands.message(landed)
+  }
   if not app.gesture_moved(state) {
     app.end_gesture(state)
     return note("")
@@ -709,8 +874,8 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
 // ---------------------------------------------------------------------------
 // The prompt
 //
-// The canvas window has no file dialog, so the actions that need a path ask for one on the
-// status line. The prompt remembers WHICH action it is collecting for, so a committed line
+// The path prompt is used for text values and as a fallback when the desktop file picker
+// is unavailable. It remembers WHICH action it is collecting for, so a committed line
 // cannot be routed to a different command than the one that opened it.
 
 pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
@@ -718,6 +883,42 @@ pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.
   let action: u32 = app.prompt_action(state)
   let typed: string = app.prompt_text(state)
   app.end_prompt(state)
+  if action == chrome.act_filter_value() {
+    let filter: u64 = app.selected_filter(state)
+    let kind: string = editor.filter_kind(struct.borrow(state, field=document), filter)
+    if str.eq(str.view(kind), "text") {
+      var landed: commands.Result = commands.set_filter_text_param(state, filter,
+        "content", str.view(typed))
+      return commands.message(landed)
+    }
+    if str.eq(str.view(kind), "lut3d") {
+      var resolved: string = string.copy(str.view(typed))
+      if str.len(str.view(typed)) != 0 {
+        let cwd: string = match files.cwd() {
+          err(problem) => { return note("cannot resolve the LUT path") },
+          ok(value) => value,
+        }
+        let project: string = app.project_path(state)
+        let project_path: string = path.join(str.view(cwd), str.view(project))
+        let base: string = if str.len(str.view(project)) == 0 { cwd }
+          else { path.dirname(str.view(project_path)) }
+        resolved = path.join(str.view(base), str.view(typed))
+        let extension: string = path.extension(str.view(resolved))
+        if not str.eq(str.view(extension), ".cube") {
+          return note("LUT file must end in .cube")
+        }
+        let is_file: bool = match files.is_file(str.view(resolved)) {
+          err(problem) => { return note("LUT file is unavailable") },
+          ok(value) => value,
+        }
+        if not is_file { return note("LUT path is not a file") }
+      }
+      var landed: commands.Result = commands.set_filter_text_param(state, filter,
+        "path", str.view(resolved))
+      return commands.message(landed)
+    }
+    return note("selected filter has no text value")
+  }
   if str.len(str.view(typed)) == 0 { return note("cancelled") }
 
   if action == chrome.act_open() {
@@ -753,6 +954,23 @@ pub fn prompt_is_render(state: ref<app.App>) -> bool effects {} {
 // printable keys belong to it instead.
 pub fn key(state: ref<app.App>, code: u32, control: bool,
            shift: bool) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  if state.fullscreen != 0 and code == widgets.key_escape() {
+    struct.set(state, 0, field=fullscreen)
+    app.end_gesture(state)
+    return note("Editor view")
+  }
+  if code == 65480 and not app.prompt_active(state) {
+    struct.set(state, if state.fullscreen != 0 { 0 } else if app.focus(state) == app.panel_source() { 2 } else { 1 }, field=fullscreen)
+    return note("Fullscreen toggled")
+  }
+  if app.parameter_dragging(state) and code == widgets.key_escape() {
+    app.end_parameter_drag(state)
+    var restored: commands.Result = commands.undo(state)
+    return note("Parameter edit cancelled")
+  }
+  if app.parameter_dragging(state) and control and (code == widgets.key_z() or code == widgets.key_y()) {
+    app.end_parameter_drag(state)
+  }
   if app.prompt_active(state) {
     if code == widgets.key_escape() {
       app.end_prompt(state)
@@ -766,7 +984,24 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     return note("")
   }
 
+  if control and (code == 115 or code == 111) {
+    var control: chrome.Control = chrome.button(if code == 115 { chrome.act_save() } else { chrome.act_open() },
+      "File shortcut", layout.rect(0.0, 0.0, 1.0, 1.0), false)
+    if code == 115 and shift { struct.set(control, 1, field=target) }
+    return perform(state, control, 0.0, 0.0)
+  }
+  if not control and app.focus(state) == app.panel_timeline() and code >= 49 and code <= 52 {
+    var changed: commands.Result = commands.camera_number(state, cast.wrap(code - 48))
+    return commands.message(changed)
+  }
   if code == widgets.key_space() {
+    if app.focus(state) == app.panel_source() {
+      let playing: bool = struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing)
+      let _ = commands.program(state, editor.pause())
+      var landed: commands.Result = commands.monitor(state, if playing { editor.pause() } else { editor.play() })
+      return commands.message(landed)
+    }
+    let _ = commands.monitor(state, editor.pause())
     let playing: bool = editor.playing(struct.borrow(state, field=document))
     var landed: commands.Result = commands.program(state,
       if playing { editor.pause() } else { editor.play() })

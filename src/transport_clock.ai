@@ -1,0 +1,38 @@
+module genesis.transport_clock
+
+import std.editor as editor
+
+pub type Clock = struct { remainder: f64 }
+
+// The document owns the playhead. The window supplies elapsed monotonic time and keeps only
+// the fractional frame remainder, so slow paints skip to the correct frame rather than
+// playing the sequence in slow motion.
+pub fn advance(doc: ref<editor.Document>, elapsed_ns: u64, clock: ref<Clock>) -> bool effects {} {
+  if not editor.playing(doc) {
+    struct.set(clock, 0.0, field=remainder)
+    return false
+  }
+  let program: editor.Transport = struct.get(doc, field=program)
+  let fps: f64 = editor.sequence_fps(doc, struct.get(doc, field=active))
+  let rate: f64 = if program.rate > 0.0 { program.rate } else { 1.0 }
+  let pending: f64 = struct.get(clock, field=remainder) +
+    cast.float(elapsed_ns) * fps * rate / 1000000000.0
+  let frames: i64 = cast.sat(pending)
+  struct.set(clock, pending - cast.float(frames), field=remainder)
+  if frames <= 0 { return false }
+  let total: i64 = editor.duration(doc)
+  let last: i64 = if total > 0 { total - 1 } else { 0 }
+  let current: i64 = editor.playhead(doc)
+  if current >= last or frames >= last - current {
+    if program.looping and total > 0 {
+      let _ = editor.seek(doc, (current + frames) % total)
+    } else {
+      let _ = editor.seek(doc, last)
+      let _ = editor.program_action(doc, editor.pause())
+      struct.set(clock, 0.0, field=remainder)
+    }
+    return true
+  }
+  let _ = editor.seek(doc, current + frames)
+  true
+}

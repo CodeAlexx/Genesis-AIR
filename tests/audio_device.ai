@@ -1,0 +1,48 @@
+module genesis.tests.audio_device
+import std.text as text
+import "../src/native_audio.ai" as audio
+pub fn main(args: view<str>) -> i32 effects {alloc, ffi, io.write, time} {
+  if view.len(args) < 2 { return 2 }
+  var library: CAbiLibrary = match audio.open() { ok(value) => value, err(problem) => { io.write(problem)
+    return 3 }, }
+  let opened: string = audio.request(library, "start", "")
+  if not str.eq(str.view(opened), "ok") { io.write(opened)
+    audio.close(library)
+    return 4 }
+  let first: string = audio.request(library, "queue", view.get(args, 1))
+  let second: string = audio.request(library, "queue", view.get(args, 1))
+  if not str.eq(str.view(first), "ok") or not str.eq(str.view(second), "ok") {
+    io.write(first)
+    io.write(second)
+    audio.close(library)
+    return 5
+  }
+  time.sleep_ms(150)
+  var playing: audio.Clock = audio.clock(library)
+  if not playing.ok or playing.samples < 1000 or playing.queued < 1 {
+    io.write("device clock or queue did not advance\n")
+    audio.close(library)
+    return 6
+  }
+  var levels: audio.Levels = audio.levels(library)
+  if not levels.ok or levels.left < 0.01 or levels.right < 0.01 {
+    io.write("post-mix output levels did not read audible PCM\n")
+    audio.close(library)
+    return 9
+  }
+  let before: u64 = playing.samples
+  time.sleep_ms(50)
+  var later: audio.Clock = audio.clock(library)
+  if later.samples <= before { audio.close(library)
+    return 7 }
+  let _ = audio.request(library, "stop", "")
+  var stopped: audio.Clock = audio.clock(library)
+  if stopped.ok { audio.close(library)
+    return 8 }
+  var silent: audio.Levels = audio.levels(library)
+  if silent.ok { audio.close(library)
+    return 10 }
+  audio.close(library)
+  io.write("Native audio: two queued WAV chunks, advancing device clock, post-mix stereo levels and immediate Stop passed\n")
+  0
+}

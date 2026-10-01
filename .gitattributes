@@ -2,3 +2,6 @@
 *.conf text eol=lf
 *.ai text eol=lf
 *.ps1 text eol=crlf
+
+# Unified patch context uses a single space on empty source lines.
+windows/*.patch text eol=lf whitespace=-blank-at-eol

@@ -13,10 +13,13 @@ import std.application_theme as themes
 import std.files as files
 import std.path as path
 import std.math as math
+import std.draw as draw
 import std.text as text
 import std.editor as editor
 import std.editor_io as editor_io
 import "provider.ai" as provider
+import "typeface.ai" as typeface
+import "ui_text.ai" as ui_text
 
 // The panels a keystroke can be aimed at. The filter stack, the properties column and the
 // mixer used to be panels of their own; they are tabs of the dock now, and `chrome` decides
@@ -38,6 +41,7 @@ pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_he
 // Peak data for one audio clip, keyed by the clip's STABLE id. The view reads this; only a
 // refresh step fills it, so painting never calls the media provider.
 pub type Waveform = struct { clip: u64, peaks: array<f64> }
+pub type Thumbnail = struct {clip: u64, frame: i64, pixels: draw.Surface}
 
 // What a press on a clip started. A drag is view state, not a project fact: nothing is
 // written to the document until the gesture resolves into a command.
@@ -45,6 +49,9 @@ pub fn drag_none() -> u32 effects {} { 0 }
 pub fn drag_move() -> u32 effects {} { 1 }
 pub fn drag_trim_start() -> u32 effects {} { 2 }
 pub fn drag_trim_end() -> u32 effects {} { 3 }
+pub fn drag_scrub() -> u32 effects {} { 4 }
+pub fn drag_source_scrub() -> u32 effects {} { 5 }
+pub fn drag_program_scrub() -> u32 effects {} { 6 }
 
 pub type Drag = struct {
   kind: u32,
@@ -71,6 +78,16 @@ pub type Clipboard = struct { source: u64, source_in: i64, length: i64, filled: 
 // will run when the line is committed, so a keystroke cannot be misrouted.
 pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string }
 
+pub type ParameterDrag = struct {
+  active: bool, domain: u32, target: u64, name: string, label: string,
+  left: f64, width: f64, low: f64, high: f64, step: f64, value: f64
+}
+
+pub fn parameter_drag() -> ParameterDrag effects {alloc} {
+  ParameterDrag {active: false, domain: 0, target: 0, name: string.new(), label: string.new(),
+    left: 0.0, width: 0.0, low: 0.0, high: 1.0, step: 0.1, value: 0.0}
+}
+
 pub type App = struct {
   document: editor.Document,
   history: editor.History,
@@ -96,8 +113,17 @@ pub type App = struct {
   status: string,
   dirty: bool,
   running: bool,
+  export_profile: u32,
   frames_painted: u64,
-  waveforms: array<Waveform>
+  fullscreen: u32,
+  waveforms: array<Waveform>,
+  thumbnails: array<Thumbnail>,
+  audio_left: f64,
+  audio_right: f64,
+  // TrueType faces for titles and captions, earliest first; later faces are fallbacks.
+  fonts: array<string>,
+  typography: ui_text.Typography,
+  parameter_drag: ParameterDrag
 }
 
 pub fn viewport() -> Viewport effects {} {
@@ -123,7 +149,9 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, frames_painted: 0, waveforms: array.new()}
+    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, waveforms: array.new(), thumbnails: array.new(),
+    audio_left: 0.0, audio_right: 0.0,
+    fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
 
 pub fn status(state: ref<App>) -> string effects {alloc} {
@@ -249,6 +277,39 @@ pub fn set_selected_filter(state: ref<App>, value: u64) -> unit effects {} {
 // ---- dock, snapping and the clipboard --------------------------------------
 
 pub fn dock_tab(state: ref<App>) -> u32 effects {} { state.dock_tab }
+pub fn set_fonts(state: ref<App>, paths: array<string> own) -> unit effects {alloc, fs.read, fs.meta} {
+  var font_paths: array<string> = paths
+  var ui_paths: array<string> = typeface.defaults()
+  var index: u64 = 0
+  loop {
+    if index >= array.len(font_paths) { break }
+    let face: str = str.view(array.borrow(font_paths, index))
+    if text.ends_with(face, "NotoSansJP.ttf") { array.push(ui_paths, string.copy(face)) }
+    index = index + 1
+  }
+  let _ = struct.replace(state, ui_text.load(ui_paths), field=typography)
+  let _ = struct.replace(state, font_paths, field=fonts)
+  ()
+}
+
+pub fn parameter_dragging(state: ref<App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=parameter_drag), field=active)
+}
+
+pub fn begin_parameter_drag(state: ref<App>, domain: u32, target: u64, name: str,
+                            label: str, left: f64, width: f64, low: f64, high: f64,
+                            step: f64, value: f64) -> unit effects {alloc} {
+  let _ = struct.replace(state, ParameterDrag {active: true, domain: domain, target: target,
+    name: string.copy(name), label: string.copy(label), left: left, width: width,
+    low: low, high: high, step: step, value: value}, field=parameter_drag)
+  ()
+}
+
+pub fn end_parameter_drag(state: ref<App>) -> unit effects {} {
+  struct.set(struct.borrow(state, field=parameter_drag), false, field=active)
+  ()
+}
+
 pub fn set_dock_tab(state: ref<App>, value: u32) -> unit effects {} {
   struct.set(state, if value > 3 { 0 } else { value }, field=dock_tab)
   struct.set(state, 0.0, field=dock_scroll)

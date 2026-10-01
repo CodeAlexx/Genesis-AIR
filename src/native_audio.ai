@@ -1,0 +1,44 @@
+module genesis.native_audio
+import std.cabi as foreign
+import std.text as text
+pub type Clock = struct {ok: bool, samples: u64, queued: u64, error: string}
+pub type Levels = struct {ok: bool, left: f64, right: f64, error: string}
+pub fn open() -> result<CAbiLibrary,string> effects {alloc, ffi} {
+  match foreign.open_package("genesis-native-audio") { ok(value) => result.ok(value), err(problem) => result.err(text.copy(problem.message)), }
+}
+pub fn request(library: ref<CAbiLibrary>, operation: str, path: str) -> string effects {alloc, ffi} {
+  let answer: result<string,cabi.error> = cabi.call(library, operation, path, symbol="air_genesis_audio", max_bytes=2048)
+  match answer {
+    ok(value) => value, err(problem) => text.concat("[GA_AUDIO_ABI] ", problem.message),
+  }
+}
+pub fn clock(library: ref<CAbiLibrary>) -> Clock effects {alloc, ffi} {
+  let reply: string = request(library, "clock", "")
+  var fields: array<string> = text.split(str.view(reply), " ")
+  if array.len(fields) == 2 {
+    let samples: option<u64> = text.parse_u64(str.view(array.borrow(fields, 0)))
+    let queued: option<u64> = text.parse_u64(str.view(array.borrow(fields, 1)))
+    match samples { none => {}, some(samples) => match queued {
+      none => {}, some(queued) => { return Clock {ok: true, samples: samples, queued: queued, error: string.new()} },
+    }, }
+  }
+  Clock {ok: false, samples: 0, queued: 0, error: reply}
+}
+pub fn levels(library: ref<CAbiLibrary>) -> Levels effects {alloc, ffi} {
+  let reply: string = request(library, "levels", "")
+  var fields: array<string> = text.split(str.view(reply), " ")
+  if array.len(fields) == 2 {
+    let left: option<f64> = text.parse_f64(str.view(array.borrow(fields, 0)))
+    let right: option<f64> = text.parse_f64(str.view(array.borrow(fields, 1)))
+    match left { none => {}, some(left) => match right {
+      none => {}, some(right) => { return Levels {ok: true, left: left, right: right, error: string.new()} },
+    }, }
+  }
+  Levels {ok: false, left: 0.0, right: 0.0, error: reply}
+}
+pub fn close(library: CAbiLibrary own) -> unit effects {alloc, ffi} {
+  var owned: CAbiLibrary = library
+  let _ = request(owned, "stop", "")
+  let _ = foreign.close(owned)
+  ()
+}

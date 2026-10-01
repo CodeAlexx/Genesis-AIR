@@ -1,0 +1,374 @@
+// A latest-request mailbox isolates the persistent worker and its process handle on one thread.
+// Requests/results publish by atomic rename; two image slots prevent partial frame reads.
+module genesis.preview
+import "chrome.ai" as chrome
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.math as math
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "app.ai" as app
+import "provider.ai" as provider
+import "timeline_media.ai" as timeline_media
+
+pub fn images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var out: array<draw.Surface> = array.new()
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let monitor_source: u64 = document.monitor_source
+  let monitor_frame: i64 = struct.get(struct.borrow(document, field=monitor), field=frame)
+  let program_frame: i64 = editor.playhead(document)
+  var source_path: string = string.new()
+  if monitor_source != 0 {
+    match editor.source_slot(document, monitor_source) {
+      some(slot) => {
+        let source: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), slot)
+        if source.has_video {
+          source_path = string.copy(str.view(struct.borrow(source, field=path)))
+        }
+      },
+      none => { },
+    }
+  }
+  // Which sources are under the playhead, bottom lane first.
+  var visible: array<string> = array.new()
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      none => { },
+      some(value) => {
+        if value.enabled and value.start <= program_frame and editor.clip_end(value) > program_frame {
+          match editor.source_slot(document, value.source) {
+            some(slot) => { array.push(visible, string.copy(str.view(struct.borrow(
+              array.borrow(struct.borrow(document, field=sources), slot), field=path)))) },
+            none => { },
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  if str.len(str.view(source_path)) != 0 {
+    var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
+      str.view(source_path), monitor_frame, width, height)
+    array.push(out, provider.take_pixels(shot))
+  } else {
+    array.push(out, draw.empty_surface())
+  }
+  var program: provider.Frame = if struct.get(struct.borrow(state, field=provider), field=kind) ==
+      provider.kind_gcompose() {
+    let output: string = provider.preview_path(struct.borrow(state, field=provider))
+    var frame_cache: timeline_media.RenderCache = timeline_media.render_cache(
+      struct.borrow(state, field=fonts))
+    timeline_media.configure_preview(document, frame_cache)
+    match timeline_media.frame_plan(document, program_frame, "PREVIEW", str.view(output),
+      str.view(output), frame_cache) {
+      ok(plan_lines) => {
+        var lines: array<string> = plan_lines
+        var picture: provider.Frame = provider.program_plan(struct.borrow(state, field=provider),
+          lines, width, height, frame_cache.width, frame_cache.height)
+        timeline_media.cleanup_plan(str.view(output))
+        picture
+      },
+      err(problem) => {
+        app.set_status(state, str.view(problem))
+        var empty: array<string> = array.new()
+        provider.program_frame(struct.borrow(state, field=provider), empty,
+          program_frame, width, height)
+      },
+    }
+  } else { provider.program_frame(struct.borrow(state, field=provider), visible,
+    program_frame, width, height) }
+  array.push(out, provider.take_pixels(program))
+  out
+}
+
+// Fill the waveform cache for every clip with audio, including video clips. This is the only place the application asks
+// the provider for envelopes, so painting never does media work.
+pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var wanted: array<u64> = array.new()
+  var paths: array<string> = array.new()
+  var widths: array<u64> = array.new()
+  var document: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      none => { },
+      some(value) => {
+        if value.owner == document.active and chrome.clip_has_audio(document, value.id) {
+          match editor.source_slot(document, value.source) {
+            some(slot) => {
+              array.push(wanted, value.id)
+              array.push(paths, string.copy(str.view(struct.borrow(
+                array.borrow(struct.borrow(document, field=sources), slot), field=path))))
+              let span: i64 = if value.length < 8 { 8 } else { value.length }
+              let widened: u64 = cast.wrap(span)
+              let buckets: u64 = if widened / 3 > 512 { 512 } else { widened / 3 }
+              array.push(widths, if buckets < 8 { 8 } else { buckets })
+            },
+            none => { },
+          }
+        }
+      },
+    }
+    index = index + 1
+  }
+  var filled: u64 = 0
+  var at: u64 = 0
+  loop {
+    if at >= array.len(wanted) { break }
+    var peaks: array<f64> = provider.envelope(struct.borrow(state, field=provider),
+      str.view(array.borrow(paths, at)), 512)
+    if array.len(peaks) != 0 {
+      let clip_id: u64 = array.get(wanted, at)
+      match editor.clip(document, clip_id) { none => {}, some(clip) => {
+        let slot: u64 = match editor.source_slot(document, clip.source) { some(value) => value, none => 0, }
+        let fps: f64 = editor.sequence_fps(document, document.active)
+        let speed: f64 = timeline_media.effective_speed(document, clip)
+        let source: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), slot)
+        let duration: f64 = cast.float(source.frames) / source.fps
+        var shown: array<f64> = array.new()
+        let buckets: u64 = array.get(widths, at)
+        var k: u64 = 0
+        loop { if k >= buckets { break }
+          let along: f64 = cast.float(clip.length) * cast.float(k) / cast.float(buckets)
+          let local: f64 = if clip.reverse { cast.float(clip.length - 1) - along } else { along }
+          let seconds: f64 = (cast.float(clip.source_in) + local * speed) / fps
+          var position: u64 = cast.sat(seconds / duration * cast.float(array.len(peaks)))
+          if position >= array.len(peaks) { position = array.len(peaks) - 1 }
+          array.push(shown, array.get(peaks, position))
+          k = k + 1
+        }
+        app.set_waveform(state, clip_id, shown)
+        filled = filled + 1
+      }, }
+    }
+    at = at + 1
+  }
+  filled
+}
+
+
+pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>}
+pub fn config(state: ref<app.App>, root: str) -> Config effects {alloc} {
+  let kind: u32 = struct.get(struct.borrow(state, field=provider), field=kind)
+  let worker: string = provider.worker_path(struct.borrow(state, field=provider))
+  let ffprobe: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=provider), field=ffprobe)))
+  var fonts: array<string> = array.new()
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(state, field=fonts)) { break }
+    array.push(fonts, string.copy(str.view(array.borrow(struct.borrow(state, field=fonts), i))))
+    i = i + 1
+  }
+  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts}
+}
+
+fn publish(root: str, name: str, value: str) -> unit effects {alloc, fs.write} {
+  let output: string = path.join(root, name)
+  let temp: string = text.concat(str.view(output), ".tmp")
+  match files.write_text(str.view(temp), value) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
+  ()
+}
+fn number(root: str, name: str) -> u64 effects {alloc, fs.read} {
+  match files.read_text(str.view(path.join(root, name))) {
+    err(_) => 0, ok(value) => match text.parse_u64(str.view(text.trim(str.view(value)))) { none => 0, some(value) => value, },
+  }
+}
+pub fn reset(root: str) -> unit effects {alloc, fs.write} {
+  let _ = files.remove(str.view(path.join(root, "stop")))
+  publish(root, "request.id", "0")
+  publish(root, "ready.id", "0")
+  publish(root, "waveforms.id", "0")
+  publish(root, "thumbnails.id", "0")
+  ()
+}
+pub fn request(root: str, document: str, generation: u64) -> unit effects {alloc, fs.write} {
+  request_viewport(root, document, generation, 0, 2.4, 450)
+}
+pub fn request_viewport(root: str, document: str, generation: u64, start: i64, zoom: f64, span: i64) -> unit effects {alloc, fs.write} {
+  publish(root, "request.air", document)
+  let geometry: string = text.concat(str.view(string.from_int(start)), text.concat("\t",
+    text.concat(str.view(string.from_float(zoom)), text.concat("\t", str.view(string.from_int(span))))))
+  publish(root, "viewport.tsv", str.view(geometry))
+  publish(root, "request.id", str.view(string.from_int(generation)))
+}
+pub fn stop(root: str) -> unit effects {alloc, fs.write} { let _ = files.write_text(str.view(path.join(root, "stop")), "stop")
+ () }
+pub fn completed(root: str) -> u64 effects {alloc, fs.read} { number(root, "ready.id") }
+pub fn thumbnails_completed(root: str) -> u64 effects {alloc, fs.read} { number(root, "thumbnails.id") }
+pub fn waveforms_completed(root: str) -> u64 effects {alloc, fs.read} { number(root, "waveforms.id") }
+pub fn error(root: str) -> string effects {alloc, fs.read} {
+  match files.read_text(str.view(path.join(root, "error.txt"))) { ok(value) => value, err(_) => string.new(), }
+}
+fn image_file(root: str, id: u64, which: str) -> string effects {alloc} {
+  path.join(root, str.view(text.concat(which, text.concat(str.view(string.from_int(id % 2)), ".rgb"))))
+}
+fn write_image(root: str, id: u64, which: str, image: ref<draw.Surface>) -> unit effects {alloc, fs.write} {
+  let output: string = image_file(root, id, which)
+  let temp: string = text.concat(str.view(output), ".tmp")
+  var pixels: bytes = draw.surface_rgb24(image, draw.rgb(0, 0, 0))
+  match files.write_bytes(str.view(temp), bytes.view(pixels)) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
+  ()
+}
+pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs.read} {
+  var out: array<draw.Surface> = array.new()
+  var i: u64 = 0
+  loop { if i == 2 { break }
+    let name: str = if i == 0 { "source" } else { "program" }
+    var image: draw.Surface = match files.read_bytes(str.view(image_file(root, id, name))) {
+      err(_) => draw.empty_surface(),
+      ok(raw) => match draw.surface_from_rgb24(480, 270, bytes.view(raw)) { none => draw.empty_surface(), some(value) => value, },
+    }
+    array.push(out, image)
+ i = i + 1
+  }
+  out
+}
+fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.write} {
+  var lines: string = string.new()
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(state, field=waveforms)) { break }
+    let wave: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), i)
+    string.append(lines, str.view(string.from_int(wave.clip)))
+    var k: u64 = 0
+    loop { if k >= array.len(struct.borrow(wave, field=peaks)) { break }
+      string.append(lines, "\t")
+ string.append(lines, str.view(string.from_float(array.get(struct.borrow(wave, field=peaks), k))))
+      k = k + 1
+    }
+    string.append(lines, "\n")
+ i = i + 1
+  }
+  publish(root, "waveforms.tsv", str.view(lines))
+}
+pub fn read_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.read} {
+  let content: string = match files.read_text(str.view(path.join(root, "waveforms.tsv"))) { ok(value) => value, err(_) => { return () }, }
+  var rows: array<string> = text.split(str.view(content), "\n")
+  var i: u64 = 0
+  loop { if i >= array.len(rows) { break }
+    var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
+    if array.len(fields) > 1 {
+      let clip: u64 = match text.parse_u64(str.view(array.borrow(fields, 0))) { some(value) => value, none => 0, }
+      var peaks: array<f64> = array.new()
+ var k: u64 = 1
+      loop { if k >= array.len(fields) { break }
+        array.push(peaks, match text.parse_f64(str.view(array.borrow(fields, k))) { some(value) => value, none => 0.0, })
+ k = k + 1
+      }
+      if clip != 0 { app.set_waveform(state, clip, peaks) }
+    }
+    i = i + 1
+  }
+  ()
+}
+
+fn write_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let geometry: string = match files.read_text(path.join(root, "viewport.tsv")) {ok(value) => value, err(_) => string.copy("0\t2.4\t450"),}
+  var fields: array<string> = text.split(str.view(geometry), "\t")
+  if array.len(fields) != 3 { return () }
+  let start: i64 = match text.parse_i64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
+  let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
+  let span: i64 = match text.parse_i64(str.view(array.borrow(fields, 2))) {some(value) => value, none => 450,}
+  if zoom <= 0.0 or span <= 0 { return () }
+  let step: i64 = cast.sat(math.max(1.0, math.ceil(96.0 / zoom)))
+  var doc: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  var lines: string = string.new()
+  var total: u64 = 0
+  var i: u64 = 0
+  loop { if i >= editor.clip_count(doc) or total >= 32 { break }
+    let clip: editor.Clip = option.unwrap(editor.clip_at(doc, i))
+    i = i + 1
+    if clip.owner != doc.active or editor.track_kind(doc, clip.track) != editor.track_video() or clip.nested != 0 { continue }
+    let source_slot: u64 = match editor.source_slot(doc, clip.source) {none => { continue }, some(value) => value,}
+    let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), source_slot)
+    if not source.has_video or not source.online { continue }
+    let filename: string = string.copy(str.view(struct.borrow(source, field=path)))
+    let last: i64 = if start + span < clip.start + clip.length { start + span } else { clip.start + clip.length }
+    var at: i64 = if start > clip.start { start } else { clip.start }
+    // Anchor the strip to the clip so a small scroll reuses the same samples.
+    at = clip.start + ((at - clip.start) / step) * step
+    loop { if at >= last or total >= 32 { break }
+      if number(root, "request.id") != id { return () }
+      let sample: i64 = timeline_media.source_frame(doc, clip, at)
+      var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), str.view(filename), sample, 80, 45)
+      if shot.ok {
+        let name: string = text.concat("thumb-", text.concat(str.view(string.from_int(id % 2)), text.concat("-", str.view(string.from_int(total)))))
+        var pixels: draw.Surface = provider.take_pixels(shot)
+        write_image(root, id, str.view(name), pixels)
+        string.append(lines, str.view(string.from_int(clip.id)))
+        string.append(lines, "\t")
+        string.append(lines, str.view(string.from_int(at)))
+        string.append(lines, "\t")
+        string.append(lines, str.view(name))
+        string.append(lines, "\n")
+        total = total + 1
+      }
+      at = at + step
+    }
+  }
+  publish(root, "thumbnails.tsv", str.view(lines))
+  publish(root, "thumbnails.id", str.view(string.from_int(id)))
+  ()
+}
+pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {alloc, fs.read} {
+  let content: string = match files.read_text(path.join(root, "thumbnails.tsv")) {ok(value) => value, err(_) => { return () },}
+  var rows: array<string> = text.split(str.view(content), "\n")
+  var thumbs: array<app.Thumbnail> = array.new()
+  var i: u64 = 0
+  loop { if i >= array.len(rows) { break }
+    var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
+    i = i + 1
+    if array.len(fields) != 3 { continue }
+    let clip: u64 = match text.parse_u64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
+    let frame: i64 = match text.parse_i64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 0,}
+    let filename: string = image_file(root, id, str.view(array.borrow(fields, 2)))
+    let raw: bytes = match files.read_bytes(str.view(filename)) {ok(value) => value, err(_) => { continue },}
+    var pixels: draw.Surface = match draw.surface_from_rgb24(80, 45, bytes.view(raw)) {some(value) => value, none => { continue },}
+    array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, pixels: pixels})
+  }
+  let _ = struct.replace(state, thumbs, field=thumbnails)
+  ()
+}
+
+pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var owned: Config = config
+  let root: string = string.copy(str.view(struct.borrow(owned, field=scratch)))
+  var engine: provider.Provider = if owned.kind == provider.kind_gcompose() {
+    provider.gcompose(str.view(struct.borrow(owned, field=worker)), str.view(root))
+  } else if owned.kind == provider.kind_ffmpeg() {
+    provider.native(str.view(struct.borrow(owned, field=worker)), str.view(struct.borrow(owned, field=ffprobe)), str.view(root))
+  } else { provider.fake(str.view(root)) }
+  var state: app.App = app.app(engine)
+  let _ = struct.replace(state, struct.replace(owned, array.new(), field=fonts), field=fonts)
+  var seen: u64 = 0
+  loop {
+    if tasks.requested_at(str.view(path.join(str.view(root), "stop"))) { break }
+    let id: u64 = number(str.view(root), "request.id")
+    if id == 0 or id == seen { time.sleep_ms(10)
+ continue }
+    seen = id
+    let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => { continue }, }
+    let document: editor.Document = match editor_io.decode(str.view(data)) { ok(value) => value, err(_) => { continue }, }
+    let _ = struct.replace(state, document, field=document)
+    let _ = struct.replace(struct.borrow(state, field=provider), string.new(), field=last_error)
+    var rendered: array<draw.Surface> = images(state, 480, 270)
+    var program: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
+    var source: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
+    write_image(str.view(root), id, "source", source)
+    write_image(str.view(root), id, "program", program)
+    publish(str.view(root), "error.txt", str.view(provider.last_error(struct.borrow(state, field=provider))))
+    publish(str.view(root), "ready.id", str.view(string.from_int(id)))
+    if not editor.playing(struct.borrow(state, field=document)) {
+      let _ = waveforms(state)
+      write_waveforms(state, str.view(root))
+      publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))
+      write_thumbnails(state, str.view(root), id)
+    }
+  }
+  provider.shutdown(struct.borrow(state, field=provider))
+  true
+}

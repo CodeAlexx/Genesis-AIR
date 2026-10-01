@@ -1,0 +1,1361 @@
+diff --git a/gcompose/csrc/fpx_aread.c b/gcompose/csrc/fpx_aread.c
+index 5e20142..a712431 100644
+--- a/gcompose/csrc/fpx_aread.c
++++ b/gcompose/csrc/fpx_aread.c
+@@ -15,11 +15,21 @@
+ #include <string.h>
+ #include <dirent.h>
+ #include <unistd.h>
++#ifdef _WIN32
++#include <process.h>
++#endif
+ 
+ // Spawn `path a1 a2` as a detached child (parent returns immediately). For launching a
+ // sibling tool window (e.g. the editor opening the audio mixer). Returns child pid or neg.
+ int fpx_spawn(const char* path, const char* a1, const char* a2) {
+     if (!path) return -1;
++#ifdef _WIN32
++    intptr_t handle = _spawnl(_P_NOWAIT, path, path, a1, a2, (char *)0);
++    if (handle == -1) return -1;
++    DWORD pid = GetProcessId((HANDLE)handle);
++    CloseHandle((HANDLE)handle);
++    return (int)pid;
++#else
+     pid_t pid = fork();
+     if (pid < 0) return -1;
+     if (pid == 0) {
+@@ -27,6 +37,7 @@ int fpx_spawn(const char* path, const char* a1, const char* a2) {
+         _exit(127);
+     }
+     return (int)pid;
++#endif
+ }
+ 
+ // ---- timeline primitives (kept in C so they stay OUT of the Mojo compile unit) ----
+diff --git a/gcompose/csrc/fpx_decode.c b/gcompose/csrc/fpx_decode.c
+index 8674e4c..7cfb00d 100644
+--- a/gcompose/csrc/fpx_decode.c
++++ b/gcompose/csrc/fpx_decode.c
+@@ -11,9 +11,23 @@
+ #include <libavcodec/avcodec.h>
+ #include <libswscale/swscale.h>
+ #include <libavutil/imgutils.h>
++#include <libavutil/pixdesc.h>
++#include <libavutil/hwcontext.h>
++#include <libavutil/time.h>
++#if defined(_M_X64) || defined(__SSE2__)
++#include <emmintrin.h>
++#endif
++#include <libavfilter/avfilter.h>
++#include <libavfilter/buffersrc.h>
++#include <libavfilter/buffersink.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ 
++static int working_hdr = 0;
++void fpx_set_hdr(int hdr) { working_hdr = hdr != 0; }
++int fpx_working_hdr(void) { return working_hdr; }
++
+ typedef struct {
+     AVFormatContext* fmt;
+     AVCodecContext*  dec;
+@@ -21,8 +35,16 @@ typedef struct {
+     struct SwsContext* sws2;     // scaled-output context (lazy, for fpx_decode_frame_scaled)
+     int sw, sh;                  // current scaled target size
+     struct SwsContext* sws_lb;   // letterbox context (aspect-preserving, lazy)
++    AVFilterGraph* color_graph;
++    AVFilterContext *color_src, *color_sink;
++    AVFrame* color_frame;
++    int color_width, color_height;
++    struct SwsContext* sws_hi;
++    int hi_dw, hi_dh;
+     int lb_dw, lb_dh;            // current letterbox inner (fit) size
+     int vindex;
++    int cpu_format;
++    AVFrame* hw_transfer;
+     int width, height;
+     AVRational time_base;
+     AVRational frame_rate;
+@@ -38,6 +60,51 @@ typedef struct {
+     int have_pos;
+ } FpxCtx;
+ 
++static enum AVPixelFormat fpx_hw_format(AVCodecContext* dec, const enum AVPixelFormat* formats) {
++    for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
++        if (*p == AV_PIX_FMT_D3D11) return *p;
++    for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p) {
++        const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(*p);
++        if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) return *p;
++    }
++    return AV_PIX_FMT_NONE;
++}
++
++// The compositor receives CPU pixels. Transfer a native D3D11 decoded frame once,
++// retaining its timestamps, transfer function and primaries for the float color path.
++static int fpx_receive(FpxCtx* c) {
++    int result = avcodec_receive_frame(c->dec, c->frame);
++    if (result < 0) return result;
++    const AVPixFmtDescriptor* format = av_pix_fmt_desc_get(c->frame->format);
++    if (format && (format->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
++        if (!c->hw_transfer) c->hw_transfer = av_frame_alloc();
++        if (!c->hw_transfer) return AVERROR(ENOMEM);
++        av_frame_unref(c->hw_transfer);
++        result = av_hwframe_transfer_data(c->hw_transfer, c->frame, 0);
++        if (result < 0) return result;
++        av_frame_copy_props(c->hw_transfer, c->frame);
++        av_frame_unref(c->frame);
++        av_frame_move_ref(c->frame, c->hw_transfer);
++    }
++    const AVCodecParameters* metadata = c->fmt->streams[c->vindex]->codecpar;
++    if (c->frame->color_primaries == AVCOL_PRI_UNSPECIFIED) c->frame->color_primaries = metadata->color_primaries;
++    if (c->frame->color_trc == AVCOL_TRC_UNSPECIFIED) c->frame->color_trc = metadata->color_trc;
++    if (c->frame->colorspace == AVCOL_SPC_UNSPECIFIED) c->frame->colorspace = metadata->color_space;
++    if (c->frame->color_range == AVCOL_RANGE_UNSPECIFIED) c->frame->color_range = metadata->color_range;
++    if (c->cpu_format != c->frame->format) {
++        c->cpu_format = c->frame->format;
++        if (c->sws) sws_freeContext(c->sws);
++        c->sws = sws_getContext(c->width, c->height, c->cpu_format,
++            c->width, c->height, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
++        if (c->sws2) sws_freeContext(c->sws2);
++        c->sws2 = c->sw > 0 && c->sh > 0 ? sws_getContext(c->width, c->height,
++            c->cpu_format, c->sw, c->sh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL) : NULL;
++        if (c->sws_lb) sws_freeContext(c->sws_lb);
++        c->sws_lb = NULL;
++    }
++    return 0;
++}
++
+ void* fpx_open(const char* path) {
+     FpxCtx* c = (FpxCtx*)calloc(1, sizeof(FpxCtx));
+     if (!c) return NULL;
+@@ -49,16 +116,48 @@ void* fpx_open(const char* path) {
+     c->vindex = idx;
+     AVStream* st = c->fmt->streams[idx];
+     c->dec = avcodec_alloc_context3(codec);
++    if (!c->dec) { avformat_close_input(&c->fmt); free(c); return NULL; }
+     avcodec_parameters_to_context(c->dec, st->codecpar);
++#ifdef _WIN32
++    // FFmpeg's native AV1 decoder exposes D3D11; libdav1d is the software fallback.
++    const AVCodec* hardware = codec->id == AV_CODEC_ID_AV1 ? avcodec_find_decoder_by_name("av1") : codec;
++    if (!getenv("GENESIS_SOFTWARE_DECODE") && hardware) {
++        for (int i = 0; ; ++i) {
++            const AVCodecHWConfig* config = avcodec_get_hw_config(hardware, i);
++            if (!config) break;
++            if (config->device_type != AV_HWDEVICE_TYPE_D3D11VA ||
++                !(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) continue;
++            AVBufferRef* device = NULL;
++            int device_result = av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_D3D11VA, NULL, NULL, 0);
++            if (device_result >= 0) {
++                avcodec_free_context(&c->dec);
++                c->dec = avcodec_alloc_context3(hardware);
++                if (!c->dec) { av_buffer_unref(&device); avformat_close_input(&c->fmt); free(c); return NULL; }
++                avcodec_parameters_to_context(c->dec, st->codecpar);
++                c->dec->hw_device_ctx = device;
++                c->dec->get_format = fpx_hw_format;
++                if (avcodec_open2(c->dec, hardware, NULL) >= 0) {
++                    fprintf(stderr, "[gcompose] Native D3D11 decode: %s\n", hardware->name);
++                    goto decoder_open;
++                }
++                avcodec_free_context(&c->dec);
++                c->dec = avcodec_alloc_context3(codec);
++                if (!c->dec) { avformat_close_input(&c->fmt); free(c); return NULL; }
++                avcodec_parameters_to_context(c->dec, st->codecpar);
++            }
++            break;
++        }
++    }
++#endif
+     if (avcodec_open2(c->dec, codec, NULL) < 0) { avcodec_free_context(&c->dec); avformat_close_input(&c->fmt); free(c); return NULL; }
++decoder_open:
++    c->cpu_format = AV_PIX_FMT_NONE;
+     c->width = c->dec->width;
+     c->height = c->dec->height;
+     c->time_base = st->time_base;
+     c->frame_rate = av_guess_frame_rate(c->fmt, st, NULL);
+     // SWS_BICUBIC like FramePFX; at native size this is pure pixel-format conversion (YUV->RGBA).
+-    c->sws = sws_getContext(c->width, c->height, c->dec->pix_fmt,
+-                            c->width, c->height, AV_PIX_FMT_RGBA,
+-                            SWS_BICUBIC, NULL, NULL, NULL);
++    c->sws = NULL;
+     c->pkt = av_packet_alloc();
+     c->frame = av_frame_alloc();
+     return c;
+@@ -85,7 +184,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
+     while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
+         if (c->pkt->stream_index == c->vindex) {
+             if (avcodec_send_packet(c->dec, c->pkt) == 0) {
+-                while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++                while (fpx_receive(c) == 0) {
+                     int64_t pts = c->frame->best_effort_timestamp;
+                     if (pts == AV_NOPTS_VALUE || pts >= target) {
+                         uint8_t* dst[4] = { out, NULL, NULL, NULL };
+@@ -107,7 +206,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
+     // remaining frames and take the first at/after target. Mirrors ffmpeg's end-of-stream drain.
+     if (got != 0) {
+         avcodec_send_packet(c->dec, NULL);
+-        while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++        while (fpx_receive(c) == 0) {
+             int64_t pts = c->frame->best_effort_timestamp;
+             if (pts == AV_NOPTS_VALUE || pts >= target) {
+                 uint8_t* dst[4] = { out, NULL, NULL, NULL };
+@@ -129,7 +228,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+     FpxCtx* c = (FpxCtx*)h;
+     if (!c->sws2 || c->sw != ow || c->sh != oh) {
+         if (c->sws2) sws_freeContext(c->sws2);
+-        c->sws2 = sws_getContext(c->width, c->height, c->dec->pix_fmt,
++        c->sws2 = sws_getContext(c->width, c->height, c->cpu_format,
+                                  ow, oh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
+         c->sw = ow; c->sh = oh;
+     }
+@@ -142,7 +241,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+     while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
+         if (c->pkt->stream_index == c->vindex) {
+             if (avcodec_send_packet(c->dec, c->pkt) == 0) {
+-                while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++                while (fpx_receive(c) == 0) {
+                     int64_t pts = c->frame->best_effort_timestamp;
+                     if (pts == AV_NOPTS_VALUE || pts >= target) {
+                         uint8_t* dst[4] = { out, NULL, NULL, NULL };
+@@ -161,7 +260,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+     // last ~GOP of a clip decodes instead of returning black.
+     if (got != 0) {
+         avcodec_send_packet(c->dec, NULL);
+-        while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++        while (fpx_receive(c) == 0) {
+             int64_t pts = c->frame->best_effort_timestamp;
+             if (pts == AV_NOPTS_VALUE || pts >= target) {
+                 uint8_t* dst[4] = { out, NULL, NULL, NULL };
+@@ -182,7 +281,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
+     FpxCtx* c = (FpxCtx*)h;
+     if (!c->sws2 || c->sw != ow || c->sh != oh) {
+         if (c->sws2) sws_freeContext(c->sws2);
+-        c->sws2 = sws_getContext(c->width, c->height, c->dec->pix_fmt,
++        c->sws2 = sws_getContext(c->width, c->height, c->cpu_format,
+                                  ow, oh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
+         c->sw = ow; c->sh = oh;
+     }
+@@ -191,7 +290,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
+     while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
+         if (c->pkt->stream_index == c->vindex) {
+             if (avcodec_send_packet(c->dec, c->pkt) == 0) {
+-                while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++                while (fpx_receive(c) == 0) {
+                     uint8_t* dst[4] = { out, NULL, NULL, NULL };
+                     int dstln[4] = { ow * 4, 0, 0, 0 };
+                     sws_scale(c->sws2, (const uint8_t* const*)c->frame->data, c->frame->linesize,
+@@ -222,7 +321,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+     int ox = (ow - dw) / 2, oy = (oh - dh) / 2;
+     if (!c->sws_lb || c->lb_dw != dw || c->lb_dh != dh) {
+         if (c->sws_lb) sws_freeContext(c->sws_lb);
+-        c->sws_lb = sws_getContext(c->width, c->height, c->dec->pix_fmt,
++        c->sws_lb = sws_getContext(c->width, c->height, c->cpu_format,
+                                    dw, dh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
+         c->lb_dw = dw; c->lb_dh = dh;
+     }
+@@ -237,6 +336,149 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+     return 0;
+ }
+ 
++// Normalize HDR and SDR sources into the chosen output-referred working space.
++// The display worker uses Rec.709 SDR; explicit HDR export workers use BT.2020 PQ.
++// zscale and tonemap run through linear FP32 before the final 16-bit RGB conversion.
++static AVFrame* fpx_color_frame(FpxCtx* c, int dw, int dh) {
++    AVFrame* frame = c->frame;
++    int transfer = frame->color_trc;
++    if (transfer == AVCOL_TRC_UNSPECIFIED) transfer = c->dec->color_trc;
++    int hdr = transfer == AVCOL_TRC_SMPTE2084 || transfer == AVCOL_TRC_ARIB_STD_B67;
++    if ((!working_hdr && !hdr) || (working_hdr && transfer == AVCOL_TRC_SMPTE2084 &&
++        frame->color_primaries == AVCOL_PRI_BT2020)) return frame;
++    if (c->color_graph && (c->color_width != dw || c->color_height != dh)) {
++        av_frame_free(&c->color_frame); avfilter_graph_free(&c->color_graph);
++    }
++    if (!c->color_graph) {
++        AVFilterGraph* graph = avfilter_graph_alloc();
++        if (!graph) return NULL;
++        graph->nb_threads = 4;
++        char args[256];
++        snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1:colorspace=%d:range=%d",
++            frame->width, frame->height, frame->format, c->time_base.num, c->time_base.den, frame->colorspace, frame->color_range);
++        AVFilterContext *source = NULL, *sink = NULL;
++        if (avfilter_graph_create_filter(&source, avfilter_get_by_name("buffer"), "in", args, NULL, graph) < 0 ||
++            avfilter_graph_create_filter(&sink, avfilter_get_by_name("buffersink"), "out", NULL, NULL, graph) < 0) {
++            avfilter_graph_free(&graph); return NULL;
++        }
++        const char* chain;
++        char sdr_chain[512];
++        if (!working_hdr) {
++            // Preview resolves HDR at the requested picture size. Native-size exports
++            // still process native dimensions, while a monitor avoids 4K FP32 intermediates.
++            snprintf(sdr_chain, sizeof(sdr_chain), "zscale=w=%d:h=%d:transfer=linear:npl=100,format=gbrpf32le,zscale=primaries=bt709,tonemap=tonemap=hable:desat=2,zscale=transfer=bt709:matrix=gbr:range=full,format=gbrp16le", dw, dh);
++            chain = sdr_chain;
++        }
++        else if (hdr) chain = "zscale=transfer=linear:npl=100,format=gbrpf32le,zscale=primaries=bt2020:transfer=smpte2084:matrix=gbr:range=full,format=gbrp16le";
++        else {
++            snprintf(sdr_chain, sizeof(sdr_chain), "format=gbrp16le,zscale=pin=bt709:tin=bt709:min=gbr:rin=full:p=bt709:t=linear:m=gbr:r=full:npl=100,format=gbrpf32le,zscale=pin=bt709:tin=linear:min=gbr:rin=full:p=bt2020:t=smpte2084:m=gbr:r=full:npl=100,format=gbrp16le");
++            chain = sdr_chain;
++        }
++        AVFilterInOut *outputs = avfilter_inout_alloc(), *inputs = avfilter_inout_alloc();
++        if (!outputs || !inputs) { avfilter_inout_free(&outputs); avfilter_inout_free(&inputs); avfilter_graph_free(&graph); return NULL; }
++        outputs->name = av_strdup("in"); outputs->filter_ctx = source; outputs->pad_idx = 0;
++        inputs->name = av_strdup("out"); inputs->filter_ctx = sink; inputs->pad_idx = 0;
++        int result = avfilter_graph_parse_ptr(graph, chain, &inputs, &outputs, NULL);
++        avfilter_inout_free(&inputs); avfilter_inout_free(&outputs);
++        if (result < 0 || avfilter_graph_config(graph, NULL) < 0) { avfilter_graph_free(&graph); return NULL; }
++        c->color_graph = graph; c->color_src = source; c->color_sink = sink;
++        c->color_width = dw; c->color_height = dh;
++        c->color_frame = av_frame_alloc();
++        if (!c->color_frame) return NULL;
++    }
++    av_frame_unref(c->color_frame);
++    if (av_buffersrc_add_frame_flags(c->color_src, frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0 ||
++        av_buffersink_get_frame(c->color_sink, c->color_frame) < 0) return NULL;
++    return c->color_frame;
++}
++
++// The media path retains 16-bit source precision, then uploads normalized FP32 to OpenCL.
++static int fpx_hi_blit(FpxCtx* c, float* out, int ow, int oh) {
++    int64_t started = av_gettime_relative();
++    int dw, dh;
++    if ((int64_t)c->width * oh >= (int64_t)ow * c->height) {
++        dw = ow; dh = (int)((int64_t)ow * c->height / c->width);
++    } else { dh = oh; dw = (int)((int64_t)oh * c->width / c->height); }
++    if (dw < 2) dw = 2; if (dh < 2) dh = 2;
++    dw &= ~1; dh &= ~1;
++    int ox = (ow - dw) / 2, oy = (oh - dh) / 2;
++    AVFrame* frame = fpx_color_frame(c, dw, dh);
++    if (!frame) { fprintf(stderr, "[GA_COLOR_CONVERSION] HDR/SDR transform failed fmt=%d transfer=%d primaries=%d matrix=%d range=%d\n", c->frame->format, c->frame->color_trc, c->frame->color_primaries, c->frame->colorspace, c->frame->color_range); return -6; }
++    int64_t converted = av_gettime_relative();
++    if (!c->sws_hi || c->hi_dw != dw || c->hi_dh != dh) {
++        if (c->sws_hi) sws_freeContext(c->sws_hi);
++        c->sws_hi = sws_getContext(frame->width, frame->height, frame->format,
++            dw, dh, AV_PIX_FMT_RGBA64LE, SWS_BICUBIC | SWS_ACCURATE_RND, NULL, NULL, NULL);
++        c->hi_dw = dw; c->hi_dh = dh;
++    }
++    if (!c->sws_hi) return -4;
++    int matrix = frame->colorspace;
++    if (matrix == AVCOL_SPC_UNSPECIFIED) matrix = c->dec->colorspace;
++    if (matrix == AVCOL_SPC_UNSPECIFIED || matrix == AVCOL_SPC_RGB) matrix = SWS_CS_DEFAULT;
++    const int* coefficients = sws_getCoefficients(matrix);
++    sws_setColorspaceDetails(c->sws_hi, coefficients,
++        frame->color_range == AVCOL_RANGE_JPEG, coefficients, 1, 0, 1 << 16, 1 << 16);
++    uint16_t* rgba = (uint16_t*)av_malloc((size_t)dw * dh * 8);
++    if (!rgba) return -5;
++    uint8_t* dst[4] = {(uint8_t*)rgba, NULL, NULL, NULL};
++    int lines[4] = {dw * 8, 0, 0, 0};
++    int rows = sws_scale(c->sws_hi, (const uint8_t* const*)frame->data,
++        frame->linesize, 0, frame->height, dst, lines);
++    if (rows != dh) { av_free(rgba); return -4; }
++    if (dw == ow && dh == oh) {
++        // A fitted full-canvas picture needs no black clear. SSE2 is part of the
++        // x64 baseline; convert eight 16-bit channels per iteration without
++        // changing the retained precision or requiring a newer CPU instruction set.
++        size_t count = (size_t)ow * oh * 4, i = 0;
++#if defined(_M_X64) || defined(__SSE2__)
++        const __m128 factor = _mm_set1_ps(1.0f / 65535.0f);
++        const __m128i zero = _mm_setzero_si128();
++        for (; i + 8 <= count; i += 8) {
++            __m128i values = _mm_loadu_si128((const __m128i*)(rgba + i));
++            _mm_storeu_ps(out + i, _mm_mul_ps(_mm_cvtepi32_ps(_mm_unpacklo_epi16(values, zero)), factor));
++            _mm_storeu_ps(out + i + 4, _mm_mul_ps(_mm_cvtepi32_ps(_mm_unpackhi_epi16(values, zero)), factor));
++        }
++#endif
++        for (; i < count; ++i) out[i] = rgba[i] * (1.0f / 65535.0f);
++    } else {
++        for (size_t i = 0; i < (size_t)ow * oh; ++i) {
++            out[i*4] = out[i*4+1] = out[i*4+2] = 0.0f; out[i*4+3] = 1.0f;
++        }
++        for (int y = 0; y < dh; ++y) for (int x = 0; x < dw; ++x) {
++            size_t src = ((size_t)y * dw + x) * 4;
++            size_t target = ((size_t)(y + oy) * ow + x + ox) * 4;
++            for (int ch = 0; ch < 4; ++ch) out[target+ch] = rgba[src+ch] * (1.0f / 65535.0f);
++        }
++    }
++    av_free(rgba);
++    if (getenv("GENESIS_MEDIA_PROFILE")) fprintf(stderr, "[gcompose] frame color_us=%lld rgb_us=%lld\n", (long long)(converted-started), (long long)(av_gettime_relative()-converted));
++    return 0;
++}
++
++// AIR's text raster supplies SDR RGB and alpha coverage. In an HDR master its
++// white is 100 nits, rather than an untagged PQ code value of 1 (10,000 nits).
++int fpx_hdr_raster(const unsigned char* rgba8, float* out, int w, int h) {
++    FpxCtx c = {0}; AVCodecContext dec = {0};
++    c.dec = &dec; c.width = w; c.height = h; c.time_base = (AVRational){1,30};
++    c.frame = av_frame_alloc();
++    if (!c.frame) return -1;
++    c.frame->format = AV_PIX_FMT_RGBA; c.frame->width = w; c.frame->height = h;
++    c.frame->color_primaries = AVCOL_PRI_BT709; c.frame->color_trc = AVCOL_TRC_BT709;
++    c.frame->colorspace = AVCOL_SPC_RGB; c.frame->color_range = AVCOL_RANGE_JPEG;
++    int result = -1;
++    if (av_frame_get_buffer(c.frame, 32) >= 0) {
++        for (int y=0; y<h; ++y) memcpy(c.frame->data[0]+y*c.frame->linesize[0], rgba8+(size_t)y*w*4, (size_t)w*4);
++        result = fpx_hi_blit(&c, out, w, h);
++        // The RGB color graph has no alpha plane; retain the original glyph coverage.
++        if (result >= 0) for (size_t i=0; i<(size_t)w*h; ++i) out[i*4+3] = rgba8[i*4+3]/255.0f;
++    }
++    if (c.sws_hi) sws_freeContext(c.sws_hi);
++    if (c.color_graph) avfilter_graph_free(&c.color_graph);
++    if (c.color_frame) av_frame_free(&c.color_frame);
++    av_frame_free(&c.frame);
++    return result;
++}
++
+ // Like fpx_decode_frame_scaled but ASPECT-PRESERVING (letterbox/pillarbox into ow x oh).
+ // Forward-decode window (frames): a request this many frames AHEAD of the current decoder position
+ // (or fewer) decodes forward WITHOUT seeking — the sequential playback/render case. A larger forward
+@@ -245,7 +487,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+ // returns the exact frame); it only trades a seek for a forward decode. ~1 GOP is the sweet spot.
+ #define FPX_SEQ_FWD_WINDOW 300
+ 
+-int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int ow, int oh) {
++static int fpx_decode_letterbox(void* h, int frame_index, void* out, int ow, int oh, int high) {
+     if (!h || !out || ow <= 0 || oh <= 0) return -1;
+     FpxCtx* c = (FpxCtx*)h;
+     int64_t target = av_rescale_q(frame_index, av_inv_q(c->frame_rate), c->time_base);
+@@ -271,13 +513,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+     // Return the FIRST frame with pts >= target (frame-accurate; identical selection to before).
+     int eof_sent = 0;
+     for (;;) {
+-        int r = avcodec_receive_frame(c->dec, c->frame);
++        int r = fpx_receive(c);
+         if (r == 0) {
+             int64_t pts = c->frame->best_effort_timestamp;
+             if (pts != AV_NOPTS_VALUE) { c->cur_pts = pts; c->have_pos = 1; }
+             if (pts == AV_NOPTS_VALUE || pts >= target) {
+                 if (pts == AV_NOPTS_VALUE) c->have_pos = 0; // can't track an unknown-pts position
+-                if (fpx_lb_blit(c, out, ow, oh) < 0) { c->have_pos = 0; return -4; }
++                if ((high ? fpx_hi_blit(c, (float*)out, ow, oh) : fpx_lb_blit(c, (unsigned char*)out, ow, oh)) < 0) { c->have_pos = 0; return -4; }
+                 return 0;
+             }
+             continue; // frame is before target: drop it and keep receiving
+@@ -302,6 +544,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+     }
+ }
+ 
++int fpx_decode_frame_letterbox(void* h, int index, unsigned char* out, int w, int ht) {
++    return fpx_decode_letterbox(h, index, out, w, ht, 0);
++}
++int fpx_decode_frame_f32(void* h, int index, float* out, int w, int ht) {
++    return fpx_decode_letterbox(h, index, out, w, ht, 1);
++}
++
+ // Aspect-preserving sequential decode (no seek) — for playback.
+ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
+     if (!h || !out || ow <= 0 || oh <= 0) return -1;
+@@ -310,7 +559,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
+     while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
+         if (c->pkt->stream_index == c->vindex) {
+             if (avcodec_send_packet(c->dec, c->pkt) == 0) {
+-                while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++                while (fpx_receive(c) == 0) {
+                     if (fpx_lb_blit(c, out, ow, oh) < 0) { av_packet_unref(c->pkt); return -4; }
+                     got = 0; break;
+                 }
+@@ -332,7 +581,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
+     while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
+         if (c->pkt->stream_index == c->vindex) {
+             if (avcodec_send_packet(c->dec, c->pkt) == 0) {
+-                while (avcodec_receive_frame(c->dec, c->frame) == 0) {
++                while (fpx_receive(c) == 0) {
+                     uint8_t* dst[4] = { out, NULL, NULL, NULL };
+                     int dstln[4] = { c->width * 4, 0, 0, 0 };
+                     sws_scale(c->sws, (const uint8_t* const*)c->frame->data, c->frame->linesize,
+@@ -359,7 +608,7 @@ int fpx_nframes(void* h) {
+     if (st->nb_frames > 0) return (int)st->nb_frames;
+     if (c->fmt->duration > 0 && c->frame_rate.num > 0) {
+         double secs = (double)c->fmt->duration / AV_TIME_BASE;
+-        return (int)(secs * av_q2d(c->frame_rate));
++        return (int)(secs * av_q2d(c->frame_rate) + 0.5);
+     }
+     return 0;
+ }
+@@ -369,7 +618,11 @@ void fpx_close(void* h) {
+     FpxCtx* c = (FpxCtx*)h;
+     if (c->sws2) sws_freeContext(c->sws2);
+     if (c->sws) sws_freeContext(c->sws);
++    if (c->color_frame) av_frame_free(&c->color_frame);
++    if (c->color_graph) avfilter_graph_free(&c->color_graph);
++    if (c->sws_hi) sws_freeContext(c->sws_hi);
+     if (c->sws_lb) sws_freeContext(c->sws_lb);   // letterbox scaler (fpx_lb_blit) — was leaked on close
++    if (c->hw_transfer) av_frame_free(&c->hw_transfer);
+     if (c->frame) av_frame_free(&c->frame);
+     if (c->pkt) av_packet_free(&c->pkt);
+     if (c->dec) avcodec_free_context(&c->dec);
+diff --git a/gcompose/csrc/fpx_encode.c b/gcompose/csrc/fpx_encode.c
+index 805883d..2bce0bc 100644
+--- a/gcompose/csrc/fpx_encode.c
++++ b/gcompose/csrc/fpx_encode.c
+@@ -30,6 +30,7 @@
+ #include <stdio.h>
+ 
+ // MILLISEC_TIMEBASE (FFUtils.cpp): {1,1000} — vmat.time_stamp is SECONDS, pts feed is ms.
++extern int fpx_working_hdr(void);
+ static const AVRational MILLISEC_TIMEBASE = {1, 1000};
+ 
+ typedef struct {
+@@ -122,20 +123,50 @@ int fpx_enc_config_video(void* h, const char* codecName,
+ 
+     // pick first non-hwaccel pixel format the encoder supports (cpp:711-729)
+     enum AVPixelFormat pixfmt = AV_PIX_FMT_NONE;
+-    if (venc->pix_fmts) {
+-        for (int i = 0; venc->pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
+-            const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(venc->pix_fmts[i]);
++    const enum AVPixelFormat *pix_fmts = NULL;
++#if LIBAVCODEC_VERSION_MAJOR >= 61
++    avcodec_get_supported_config(NULL, venc, AV_CODEC_CONFIG_PIX_FORMAT, 0,
++        (const void **)&pix_fmts, NULL);
++#else
++    pix_fmts = venc->pix_fmts;
++#endif
++    if (pix_fmts) {
++        for (int i = 0; pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
++            const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(pix_fmts[i]);
+             if (!d) continue;
+             if (d->flags & AV_PIX_FMT_FLAG_HWACCEL) continue;
+-            pixfmt = venc->pix_fmts[i];
++            pixfmt = pix_fmts[i];
+             break;
+         }
+     }
+     if (pixfmt == AV_PIX_FMT_NONE) pixfmt = AV_PIX_FMT_YUV420P;
++    enum AVPixelFormat preferred = AV_PIX_FMT_NONE;
++    if (!strcmp(codecName, "ffv1")) preferred = AV_PIX_FMT_GBRP16LE;
++    if (!strcmp(codecName, "libx265")) preferred = AV_PIX_FMT_YUV420P10LE;
++    if (preferred != AV_PIX_FMT_NONE) {
++        int found = 0;
++        for (int i = 0; pix_fmts && pix_fmts[i] != AV_PIX_FMT_NONE; ++i)
++            if (pix_fmts[i] == preferred) { found = 1; break; }
++        if (!found) return -8; // A high-depth profile must never silently become eight-bit.
++        pixfmt = preferred;
++    }
+ 
+     AVCodecContext* vctx = avcodec_alloc_context3(venc);
+     if (!vctx) return -3;
++    if (!strcmp(codecName, "ffv1")) {
++        vctx->bits_per_raw_sample = 16;
++        vctx->level = 3;
++        av_opt_set(vctx->priv_data, "coder", "1", 0);
++        av_opt_set(vctx->priv_data, "context", "1", 0);
++        av_opt_set(vctx->priv_data, "slicecrc", "1", 0);
++    }
+     vctx->pix_fmt = pixfmt;                 // cpp:850
++    int hdr = fpx_working_hdr();
++    vctx->color_primaries = hdr ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
++    vctx->color_trc = hdr ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
++    int rgb = (av_pix_fmt_desc_get(pixfmt)->flags & AV_PIX_FMT_FLAG_RGB) != 0;
++    vctx->colorspace = rgb ? AVCOL_SPC_RGB : (hdr ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709);
++    vctx->color_range = rgb ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+     vctx->width = width;                    // cpp:851
+     vctx->height = height;                  // cpp:852
+     vctx->time_base = (AVRational){ fps_den, fps_num };  // cpp:853
+@@ -163,15 +194,21 @@ int fpx_enc_config_video(void* h, const char* codecName,
+     avcodec_parameters_from_context(vstm->codecpar, vctx);// cpp:698
+ 
+     // RGBA(input) -> encoder pix_fmt, BICUBIC (matches decode shim's scaler family).
+-    e->vsws = sws_getContext(in_w, in_h, AV_PIX_FMT_RGBA,
++    e->vsws = sws_getContext(in_w, in_h, AV_PIX_FMT_RGBA64LE,
+                              width, height, pixfmt,
+                              SWS_BICUBIC, NULL, NULL, NULL);
+     if (!e->vsws) { return -6; }
++    const int* coefficients = sws_getCoefficients(hdr ? SWS_CS_BT2020 : SWS_CS_ITU709);
++    sws_setColorspaceDetails(e->vsws, coefficients, 1, coefficients, rgb, 0, 1 << 16, 1 << 16);
+ 
+     e->vfrm = av_frame_alloc();
+     e->vfrm->format = pixfmt;
+     e->vfrm->width = width;
+     e->vfrm->height = height;
++    e->vfrm->color_primaries = vctx->color_primaries;
++    e->vfrm->color_trc = vctx->color_trc;
++    e->vfrm->colorspace = vctx->colorspace;
++    e->vfrm->color_range = vctx->color_range;
+     if (av_frame_get_buffer(e->vfrm, 0) < 0) return -7;
+ 
+     e->venc = venc; e->vctx = vctx; e->vstm = vstm;
+@@ -204,6 +241,11 @@ int fpx_enc_set_quality(void* h, int crf, int gop, const char* preset) {
+     nv->pix_fmt = e->vctx->pix_fmt;
+     nv->width = e->vctx->width;
+     nv->height = e->vctx->height;
++    nv->color_primaries = e->vctx->color_primaries;
++    nv->color_trc = e->vctx->color_trc;
++    nv->colorspace = e->vctx->colorspace;
++    nv->color_range = e->vctx->color_range;
++    nv->bits_per_raw_sample = e->vctx->bits_per_raw_sample;
+     nv->time_base = e->vctx->time_base;
+     nv->framerate = e->vctx->framerate;
+     nv->sample_aspect_ratio = e->vctx->sample_aspect_ratio;
+@@ -252,7 +294,14 @@ int fpx_enc_config_audio(void* h, const char* codecName,
+     const AVCodec* aenc = avcodec_find_encoder_by_name(codecName);
+     if (!aenc || aenc->type != AVMEDIA_TYPE_AUDIO) return -2;
+ 
+-    enum AVSampleFormat encfmt = aenc->sample_fmts ? aenc->sample_fmts[0]
++    const enum AVSampleFormat *sample_fmts = NULL;
++#if LIBAVCODEC_VERSION_MAJOR >= 61
++    avcodec_get_supported_config(NULL, aenc, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
++        (const void **)&sample_fmts, NULL);
++#else
++    sample_fmts = aenc->sample_fmts;
++#endif
++    enum AVSampleFormat encfmt = sample_fmts ? sample_fmts[0]
+                                                    : AV_SAMPLE_FMT_FLT;   // cpp:930-933
+ 
+     AVCodecContext* actx = avcodec_alloc_context3(aenc);
+@@ -314,22 +363,22 @@ int fpx_enc_video_frame_f32(void* h, const float* rgba_f32, int in_w, int in_h,
+     if (e->vidx < 0 || !e->vctx) return -2;
+     if (in_w != e->vw || in_h != e->vh) return -3;
+ 
+-    // f32[0,1] -> RGBA8 (the input the encoder's sws expects).
++    // FP32 compositor -> RGBA64LE; only the selected output codec reduces precision.
+     int n = in_w * in_h * 4;
+-    uint8_t* rgba8 = (uint8_t*)malloc((size_t)n);
+-    if (!rgba8) return -4;
++    uint16_t* rgba16 = (uint16_t*)malloc((size_t)n * sizeof(uint16_t));
++    if (!rgba16) return -4;
+     for (int i = 0; i < n; i++) {
+-        float v = rgba_f32[i] * 255.0f + 0.5f;
++        float v = rgba_f32[i] * 65535.0f + 0.5f;
+         if (v < 0.0f) v = 0.0f;
+-        if (v > 255.0f) v = 255.0f;
+-        rgba8[i] = (uint8_t)v;
++        if (v > 65535.0f) v = 65535.0f;
++        rgba16[i] = (uint16_t)v;
+     }
+ 
+-    if (av_frame_make_writable(e->vfrm) < 0) { free(rgba8); return -5; }
+-    const uint8_t* src[4] = { rgba8, NULL, NULL, NULL };
+-    int srcln[4] = { in_w * 4, 0, 0, 0 };
++    if (av_frame_make_writable(e->vfrm) < 0) { free(rgba16); return -5; }
++    const uint8_t* src[4] = { (const uint8_t*)rgba16, NULL, NULL, NULL };
++    int srcln[4] = { in_w * 8, 0, 0, 0 };
+     sws_scale(e->vsws, src, srcln, 0, in_h, e->vfrm->data, e->vfrm->linesize);
+-    free(rgba8);
++    free(rgba16);
+ 
+     int64_t pts = av_rescale_q((int64_t)(ts_sec * 1000.0), MILLISEC_TIMEBASE, e->vctx->time_base);
+     e->vfrm->pts = pts;
+diff --git a/gcompose/csrc/fpx_gpu.c b/gcompose/csrc/fpx_gpu.c
+index 0705636..7b547cb 100644
+--- a/gcompose/csrc/fpx_gpu.c
++++ b/gcompose/csrc/fpx_gpu.c
+@@ -26,8 +26,14 @@
+ #include <math.h>
+ 
+ // fixed working resolution (matches the editor's VW/VH/vlayout)
+-#define GVW 1280
+-#define GVH 856
++static int genesis_width = 1280;
++static int genesis_height = 856;
++#define GVW genesis_width
++#define GVH genesis_height
++int fpx_gpu_set_size(int width, int height) {
++  if (width < 16 || height < 16 || width > 8192 || height > 8192) return -1;
++  genesis_width = width; genesis_height = height; return 0;
++}
+ #define GPIX (GVW * GVH)
+ #define GN (GPIX * 4)
+ #define MAXLUTF (33 * 33 * 33 * 3)
+@@ -997,7 +1003,8 @@ static cl_kernel kChroma; // P4 chroma key (green-screen) on the OVER buffer
+ static cl_kernel kTrans[11]; // 0..10 (P36 added 8=iris, 9=clock, 10=barndoor)
+ 
+ static int launch(cl_kernel k){
+-  size_t gl[2] = { GVW, GVH };
++  // Kernels guard VW/VH; OpenCL 1.2 requires each global dimension to fit lo.
++  size_t gl[2] = { ((size_t)GVW + 7u) & ~(size_t)7u, ((size_t)GVH + 7u) & ~(size_t)7u };
+   size_t lo[2] = { 8, 8 };
+   cl_int e = clEnqueueNDRangeKernel(g_q, k, 2, NULL, gl, lo, 0, NULL, NULL);
+   return e==CL_SUCCESS ? 0 : -1;
+@@ -1008,14 +1015,37 @@ int fpx_gpu_init(void){
+   cl_uint np=0; cl_platform_id plat[8];
+   if (clGetPlatformIDs(8, plat, &np)!=CL_SUCCESS || np==0) return -1;
+   cl_int e;
+-  // first platform with a GPU device
+-  for (cl_uint p=0;p<np && !g_dev;p++){
+-    cl_uint nd=0; if (clGetDeviceIDs(plat[p], CL_DEVICE_TYPE_GPU, 1, &g_dev, &nd)!=CL_SUCCESS || nd==0) g_dev=NULL;
++  // A hybrid Windows PC often enumerates its integrated GPU before its discrete
++  // adapter. Prefer a discrete device, then compute capacity; allow an explicit
++  // device-name override for workstation configurations.
++  if (np > 8) np = 8;
++  const char* preferred = getenv("GENESIS_OPENCL_DEVICE");
++  unsigned long long best = 0;
++  for (cl_uint p=0;p<np;p++) {
++    cl_uint nd=0; cl_device_id devices[16];
++    if (clGetDeviceIDs(plat[p], CL_DEVICE_TYPE_GPU, 16, devices, &nd)!=CL_SUCCESS) continue;
++    if (nd > 16) nd = 16;
++    for (cl_uint d=0; d<nd; ++d) {
++      char name[256] = {0}; cl_uint units=0, frequency=0; cl_bool shared=CL_TRUE;
++      clGetDeviceInfo(devices[d], CL_DEVICE_NAME, sizeof(name)-1, name, NULL);
++      clGetDeviceInfo(devices[d], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(units), &units, NULL);
++      clGetDeviceInfo(devices[d], CL_DEVICE_MAX_CLOCK_FREQUENCY, sizeof(frequency), &frequency, NULL);
++      clGetDeviceInfo(devices[d], CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(shared), &shared, NULL);
++      if (preferred && *preferred && !strstr(name, preferred)) continue;
++      unsigned long long score = (shared ? 0 : (1ull<<40)) + (unsigned long long)units * (frequency ? frequency : 1) + 1;
++      if (!g_dev || score > best) { g_dev = devices[d]; best = score; }
++    }
++  }
++  if (preferred && *preferred && !g_dev) {
++    fprintf(stderr, "[GA_GPU_DEVICE] Requested OpenCL device was not found\n"); return -2;
+   }
+   if (!g_dev){ // fall back to any device
+     for (cl_uint p=0;p<np && !g_dev;p++){ cl_uint nd=0; clGetDeviceIDs(plat[p], CL_DEVICE_TYPE_ALL, 1, &g_dev, &nd); }
+   }
+   if (!g_dev) return -2;
++  char device_name[256] = {0};
++  clGetDeviceInfo(g_dev, CL_DEVICE_NAME, sizeof(device_name)-1, device_name, NULL);
++  fprintf(stderr, "[gcompose] OpenCL device: %s\n", device_name);
+   g_ctx = clCreateContext(NULL, 1, &g_dev, NULL, NULL, &e); if (e!=CL_SUCCESS) return -3;
+   g_q = clCreateCommandQueue(g_ctx, g_dev, 0, &e); if (e!=CL_SUCCESS) return -4;
+   g_prog = clCreateProgramWithSource(g_ctx, 1, &KSRC, NULL, &e); if (e!=CL_SUCCESS) return -5;
+diff --git a/gcompose/src/ffi.rs b/gcompose/src/ffi.rs
+index 7bc6fbe..b41ee37 100644
+--- a/gcompose/src/ffi.rs
++++ b/gcompose/src/ffi.rs
+@@ -7,6 +7,9 @@ use std::ffi::CString;
+ use std::os::raw::{c_char, c_double, c_int, c_longlong, c_void};
+ 
+ extern "C" {
++    fn fpx_set_hdr(hdr: c_int);
++    fn fpx_working_hdr() -> c_int;
++    fn fpx_hdr_raster(input: *const u8, output: *mut f32, w: c_int, h: c_int) -> c_int;
+     fn fpx_open(path: *const c_char) -> *mut c_void;
+     fn fpx_decode_frame_letterbox(
+         h: *mut c_void,
+@@ -15,12 +18,15 @@ extern "C" {
+         ow: c_int,
+         oh: c_int,
+     ) -> c_int;
++    fn fpx_decode_frame_f32(h: *mut c_void, frame: c_int, out: *mut f32, w: c_int, ht: c_int) -> c_int;
+     fn fpx_close(h: *mut c_void);
+     // Total video frame count (stream nb_frames, else estimated from duration*fps). 0 if unknown.
+     fn fpx_nframes(h: *mut c_void) -> c_int;
+ 
+-    // OpenCL compute shim (fpx_gpu.c). Fixed working resolution GVW x GVH.
++    // OpenCL compute shim (fpx_gpu.c). Fixed working resolution width() x height().
+     fn fpx_gpu_init() -> c_int;
++    fn fpx_gpu_set_size(width: c_int, height: c_int) -> c_int;
++    fn fpx_gpu_upload_f32(slot: c_int, rgba: *const f32) -> c_int;
+     fn fpx_gpu_upload_u8(slot: c_int, rgba8: *const u8) -> c_int;
+     fn fpx_gpu_track1(tt: c_int, t: f32, param: f32);
+     // P31: `blend` (0=Normal..7=Difference) selects the per-channel blend of the over RGB with the
+@@ -339,9 +345,18 @@ extern "C" {
+     ) -> c_int;
+ }
+ 
+-/// The OpenCL shim's fixed working resolution (matches GVW/GVH in fpx_gpu.c).
+-pub const GVW: usize = 1280;
+-pub const GVH: usize = 856;
++/// The OpenCL shim's fixed working resolution (matches width()/height() in fpx_gpu.c).
++static WIDTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1280);
++static HEIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(856);
++pub fn width() -> usize { WIDTH.load(std::sync::atomic::Ordering::Relaxed) }
++pub fn height() -> usize { HEIGHT.load(std::sync::atomic::Ordering::Relaxed) }
++// Called exactly once before GPU initialization or any decode.
++pub fn set_size(w: usize, h: usize) -> bool {
++    if !(16..=8192).contains(&w) || !(16..=8192).contains(&h) { return false; }
++    if unsafe { fpx_gpu_set_size(w as c_int, h as c_int) } != 0 { return false; }
++    WIDTH.store(w, std::sync::atomic::Ordering::Relaxed);
++    HEIGHT.store(h, std::sync::atomic::Ordering::Relaxed); true
++}
+ 
+ /// Scope-image dimensions (fpx_gpu.c renders waveform/vectorscope as a fixed SVW×SVH RGBA8 image,
+ /// and the histogram is rendered into the same size here). Matches the C shim's hard-coded 256×256
+@@ -412,8 +427,8 @@ impl Gpu {
+     /// void), so `--serve` fails fast + clean BEFORE printing "serve ready" rather than serving a
+     /// broken worker whose first real PREVIEW/ENC would produce garbage.
+     ///
+-    /// Finding #1: the old check only asserted `out.len() == GVW*GVH*4`. But `compose()` allocates
+-    /// `vec![0u8; GVW*GVH*4]` and the C void downloads never resize it, so the length is ALWAYS
++    /// Finding #1: the old check only asserted `out.len() == width()*height()*4`. But `compose()` allocates
++    /// `vec![0u8; width()*height()*4]` and the C void downloads never resize it, so the length is ALWAYS
+     /// exact and the check was a tautology that could never fail. The real signal is the pixel
+     /// VALUES: we pre-fill the output with a sentinel that the upload value can't produce, upload a
+     /// mid-gray (0x7F) frame, run an identity grade, and require the download to have (a) overwritten
+@@ -429,13 +444,13 @@ impl Gpu {
+         const SENTINEL: u8 = 0xAB; // pre-fill the download buffer with a value upload can't produce
+ 
+         // Upload a uniform mid-gray frame into slot 0; op=0 disables PiP so slot 1 isn't required.
+-        let gray = vec![FILL; GVW * GVH * 4];
++        let gray = vec![FILL; width() * height() * 4];
+         self.upload(0, &gray);
+ 
+         // Identity grade (bright=0, contrast=1, sat=1) and look=none: out should ≈ the uploaded gray.
+         // We pre-seed `out` with SENTINEL so a download that never actually ran (CL read failed and
+         // was swallowed) leaves the sentinel and is detectable.
+-        let mut out = vec![SENTINEL; GVW * GVH * 4];
++        let mut out = vec![SENTINEL; width() * height() * 4];
+         unsafe {
+             fpx_gpu_track1(-1, 0.0, 4.0); // no transition: copy base (slot 0)
+             fpx_gpu_pip(0.0, 0, 0.0, 0.0, 1.0, 1.0); // op=0: no overlay (blend=0 Normal)
+@@ -445,11 +460,11 @@ impl Gpu {
+             fpx_gpu_finish();
+         }
+ 
+-        if out.len() != GVW * GVH * 4 {
++        if out.len() != width() * height() * 4 {
+             eprintln!(
+                 "[gpu] self-check FAILED: compose returned {} bytes (expected {})",
+                 out.len(),
+-                GVW * GVH * 4
++                width() * height() * 4
+             );
+             return false;
+         }
+@@ -509,12 +524,26 @@ impl Gpu {
+         true
+     }
+ 
+-    /// Upload an RGBA8 GVW×GVH frame to a slot (0=base/V1, 1=over/V2, 2=transition partner).
++    /// Upload an RGBA8 GVW×height() frame to a slot (0=base/V1, 1=over/V2, 2=transition partner).
+     pub fn upload(&self, slot: i32, rgba: &[u8]) {
+-        debug_assert_eq!(rgba.len(), GVW * GVH * 4);
++        debug_assert_eq!(rgba.len(), width() * height() * 4);
+         unsafe { fpx_gpu_upload_u8(slot as c_int, rgba.as_ptr()) };
+     }
+ 
++    pub fn upload_raster(&self, slot: i32, bytes: &[u8]) -> bool {
++        if unsafe { fpx_working_hdr() } == 0 { self.upload(slot, bytes); return true; }
++        let mut floats = vec![0.0f32; bytes.len()];
++        if unsafe { fpx_hdr_raster(bytes.as_ptr(), floats.as_mut_ptr(), width() as c_int, height() as c_int) } < 0 {
++            return false;
++        }
++        self.upload_f32(slot, &floats); true
++    }
++
++    pub fn upload_f32(&self, slot: i32, rgba: &[f32]) {
++        debug_assert_eq!(rgba.len(), width() * height() * 4);
++        unsafe { fpx_gpu_upload_f32(slot as c_int, rgba.as_ptr()) };
++    }
++
+     /// Run the FIRST stage of the on-device pipeline directly (the transition / track-1 blend).
+     ///
+     /// `tt` = transition kind: -1 = none (copy slot-0 base into the track-1 buffer, today's
+@@ -552,7 +581,7 @@ impl Gpu {
+     }
+ 
+     /// Run the on-device pipeline (no transition → PiP composite of slot1 over slot0 → grade →
+-    /// look) and download the result as an RGBA8 GVW×GVH buffer.
++    /// look) and download the result as an RGBA8 GVW×height() buffer.
+     ///
+     /// `look_kind` selects the look (0=none, 1=VHS, 2=LUT3D), `look_amt` is the mix, and `lut_n` is
+     /// the uploaded LUT's grid size N (only read by the kernel when `look_kind==2`; pass 0 otherwise).
+@@ -573,7 +602,7 @@ impl Gpu {
+         look_amt: f32,
+         lut_n: i32,
+     ) -> (Vec<u8>, bool) {
+-        let mut out = vec![0u8; GVW * GVH * 4];
++        let mut out = vec![0u8; width() * height() * 4];
+         let fin = unsafe {
+             fpx_gpu_track1(-1, 0.0, 4.0); // no transition: copy base (slot 0)
+             fpx_gpu_pip(op, 0, px, py, pw, ph); // composite slot 1 over, into the PiP rect (blend=0 Normal)
+@@ -593,6 +622,7 @@ impl Gpu {
+     /// Pipeline order matches MojoMedia: track1(tt, prog, param) → pip → grade → look. Returns the
+     /// composed RGBA8 buffer + `final_is_look` (see `compose`).
+     #[allow(clippy::too_many_arguments)]
++    #[allow(dead_code)]
+     pub fn compose_trans(
+         &self,
+         tt: i32,
+@@ -772,7 +802,7 @@ impl Gpu {
+         fade: f32,
+         spatial_alpha: i32,
+     ) -> (Vec<u8>, bool) {
+-        let mut out = vec![0u8; GVW * GVH * 4];
++        let mut out = vec![0u8; width() * height() * 4];
+         let fin = unsafe {
+             fpx_gpu_track1(tt as c_int, trans_prog, trans_param); // transition (or -1 copy base)
+             fpx_gpu_transform(rot, scale); // P2: rotate+scale the BASE frame (TRACK1), before pip
+@@ -1031,7 +1061,7 @@ impl Gpu {
+         fade: f32,
+         spatial_alpha: i32,
+     ) -> (Vec<f32>, bool) {
+-        let mut out = vec![0f32; GVW * GVH * 4];
++        let mut out = vec![0f32; width() * height() * 4];
+         let fin = unsafe {
+             fpx_gpu_track1(tt as c_int, trans_prog, trans_param); // transition (or -1 copy base)
+             fpx_gpu_transform(rot, scale); // P2: rotate+scale the BASE frame (TRACK1), before pip
+@@ -1129,7 +1159,7 @@ impl Gpu {
+         look_amt: f32,
+         lut_n: i32,
+     ) -> (Vec<f32>, bool) {
+-        let mut out = vec![0f32; GVW * GVH * 4];
++        let mut out = vec![0f32; width() * height() * 4];
+         let fin = unsafe {
+             fpx_gpu_track1(-1, 0.0, 4.0); // no transition: copy base (slot 0)
+             fpx_gpu_pip(op, 0, px, py, pw, ph); // composite slot 1 over, into the PiP rect (blend=0 Normal)
+@@ -1431,9 +1461,11 @@ pub fn decode_audio_range(
+     // `cap <= 0` guard or silently truncate the decoded audio. Callers already clamp (see
+     // audio_feed's CAP_MAX), but clamp here too so this wrapper is sound for ANY caller. We shrink
+     // the requested cap to the largest value the c_int can carry rather than over-allocating.
+-    let cap = cap.min(c_int::MAX as usize);
++    if cap > c_int::MAX as usize { return None; }
+     let c = CString::new(path).ok()?;
+-    let mut buf = vec![0f32; cap];
++    let mut buf = Vec::new();
++    buf.try_reserve_exact(cap).ok()?;
++    buf.resize(cap, 0.0f32);
+     let rc = unsafe {
+         fpx_decode_audio_range(
+             c.as_ptr(),
+@@ -1510,6 +1542,8 @@ pub fn au_apply(chain: &str, samples: &[f32], sr: i32, ch: i32) -> Option<Vec<f3
+ /// Holds a raw `*mut c_void` (the C decoder handle). `Decoder` is NOT `Hash`/`Eq` itself, but
+ /// it is fine to store in a `HashMap<String, Decoder>` keyed by the media path — that is how the
+ /// persistent serve loop caches one open handle per file and reuses it for repeated frames.
++pub fn set_hdr(hdr: bool) { unsafe { fpx_set_hdr(hdr as c_int); } }
++
+ pub struct Decoder {
+     h: *mut c_void,
+ }
+@@ -1546,6 +1580,12 @@ impl Decoder {
+         }
+     }
+ 
++    pub fn decode_f32(&mut self, frame: i32, w: usize, h: usize) -> Option<Vec<f32>> {
++        let mut buf = vec![0.0f32; w.checked_mul(h)?.checked_mul(4)?];
++        let rc = unsafe { fpx_decode_frame_f32(self.h, frame, buf.as_mut_ptr(), w as c_int, h as c_int) };
++        if rc >= 0 { Some(buf) } else { None }
++    }
++
+     /// Total video frame count of the open media (0 if unknown). Used to clamp a clip's length so it
+     /// never references source frames past the media end.
+     pub fn nframes(&self) -> i32 {
+diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
+index c987aa3..f859dd6 100644
+--- a/gcompose/src/main.rs
++++ b/gcompose/src/main.rs
+@@ -180,7 +180,15 @@ fn dec_path(s: &str) -> String {
+ 
+ fn main() {
+     let args: Vec<String> = std::env::args().collect();
++    ffi::set_hdr(args.iter().any(|arg| arg == "--hdr"));
+ 
++    if args.len() >= 5 && args[2] == "--size" {
++        let width = args[3].parse::<usize>().unwrap_or(0);
++        let height = args[4].parse::<usize>().unwrap_or(0);
++        if !ffi::set_size(width, height) {
++            eprintln!("[GA_COMPOSE_SIZE] Invalid composition size"); std::process::exit(2);
++        }
++    }
+     // Persistent serve mode: `gcompose --serve`.
+     if args.len() >= 2 && args[1] == "--serve" {
+         serve();
+@@ -198,7 +206,7 @@ fn main() {
+     match buf {
+         Some(b) => {
+             std::fs::write(out, &b).expect("write rgba");
+-            println!("OK {} {} bytes={}", ffi::GVW, ffi::GVH, b.len());
++            println!("OK {} {} bytes={}", ffi::width(), ffi::height(), b.len());
+         }
+         None => {
+             eprintln!("FAIL: could not decode {base}");
+@@ -240,6 +248,7 @@ fn serve() {
+ 
+     // One open decoder per media path, reused across requests (held playhead / repeated frames).
+     let mut decoders: HashMap<String, ffi::Decoder> = HashMap::new();
++    let mut thumbnail_decoders: HashMap<String, ffi::Decoder> = HashMap::new();
+ 
+     // LUT cache (Slice A — per-clip LOOK / LUT3D): one parsed `.cube` per path, reused across
+     // frames so a held playhead / a long render with the same look does NOT reparse the file every
+@@ -391,10 +400,9 @@ fn serve() {
+                 // drain and finishes video-only.
+                 let ok = match enc.take() {
+                     Some(mut e) => {
+-                        if enc_audio_ok {
+-                            prog.drain_into_encoder(&mut e);
+-                        }
+-                        e.finish() // drop after this scope closes the encoder
++                        let audio_ok = !enc_audio_ok || prog.drain_into_encoder(&mut e);
++                        let finish_ok = e.finish();
++                        audio_ok && finish_ok // drop after this scope closes the encoder
+                     }
+                     None => false,
+                 };
+@@ -406,7 +414,7 @@ fn serve() {
+                     Reply::Err
+                 }
+             }
+-            "THUMB" => match thumb(&mut decoders, line) {
++            "THUMB" => match thumb(&mut thumbnail_decoders, line) {
+                 Some(out) => Reply::Done(Some(out)),
+                 None => Reply::Err,
+             },
+@@ -445,7 +453,7 @@ fn serve() {
+             // UI is showing. The only way it changes is another compose (a later PREVIEW/ENC) — which
+             // is why the worker.rs `scope()` sends its PREVIEW immediately before SCOPE under one held
+             // mutex.
+-            "PREVIEW" => match handle_request(
++            "PREVIEW" | "FLOAT" => match handle_request(
+                 &gpu,
+                 &mut decoders,
+                 &mut lut_cache,
+@@ -596,8 +604,8 @@ fn open_render(
+     // OUTPUT (encoded) dims = the requested out_w×out_h. config_video builds the RGBA(in)→pixfmt
+     // sws scaler from in_w/in_h to width/height, so the composed GVW×GVH frame is rescaled to the
+     // chosen output resolution by the encoder — no change to the OpenCL compose path.
+-    let in_w = ffi::GVW;
+-    let in_h = ffi::GVH;
++    let in_w = ffi::width();
++    let in_h = ffi::height();
+ 
+     // Drop any previous (unfinished) encoder before starting a new job.
+     *enc = None;
+@@ -650,6 +658,7 @@ fn open_render(
+         return false;
+     }
+ 
++    if !prog.alloc(total_s) { return false; }
+     *enc = Some(e);
+     // ENC timestamps each supplied timeline frame at enc_count / timeline_fps. Existing clients
+     // omit the optional field and retain 30 fps. AIR supplies its sequence rate so the frame and
+@@ -659,7 +668,6 @@ fn open_render(
+ 
+     // Allocate the program-audio accumulator for this render's full timeline duration (silence).
+     // Each AUDIO line mixes a clip range into it; CLOSE drains it into the encoder.
+-    prog.alloc(total_s);
+     true
+ }
+ 
+@@ -1133,9 +1141,9 @@ fn enc_frame(
+     // RGBA8 file): read it straight into the slot, SKIPPING decode (see `upload_slot`). A black
+     // frame also keeps timing if a real base can't be decoded.
+     if base_path == "-" {
+-        gpu.upload(0, &vec![0u8; ffi::GVW * ffi::GVH * 4]);
++        gpu.upload(0, &vec![0u8; ffi::width() * ffi::height() * 4]);
+     } else {
+-        upload_slot(gpu, decoders, 0, &base_path, base_frame);
++        if !upload_slot(gpu, decoders, 0, &base_path, base_frame) { return false; }
+     }
+ 
+     // Decode overlay if present and op>0; otherwise disable the composite. A `RAW:<path>` overlay is
+@@ -1300,21 +1308,18 @@ impl ProgAudio {
+     /// (Re)allocate the accumulator to `total_s` seconds of silence and mark it active. A prior
+     /// (unconsumed) buffer is dropped. `total_s` is clamped to a sane ceiling so a pathological
+     /// duration can't blow up the allocation.
+-    fn alloc(&mut self, total_s: f64) {
+-        // Ceiling on the WHOLE-program accumulator (24h stereo 48k ≈ 33 GB floats — far past any
+-        // real timeline; this only guards against a corrupt/huge total_s, not normal use).
+-        const MAX_FRAMES: usize = 24 * 3600 * PROG_SR;
+-        let frames = if total_s.is_finite() && total_s > 0.0 {
+-            (total_s * PROG_SR as f64).ceil() as usize
+-        } else {
+-            0
+-        };
+-        let frames = frames.min(MAX_FRAMES);
+-        self.buf = vec![0.0f32; frames.saturating_mul(PROG_CH)];
++    fn alloc(&mut self, total_s: f64) -> bool {
++        self.clear();
++        if !total_s.is_finite() || !(0.0..=6.0 * 3600.0).contains(&total_s) {
++            eprintln!("[GA_AUDIO_CAPACITY] timeline duration must be between 0 and 6 hours"); return false;
++        }
++        let floats = ((total_s * PROG_SR as f64).ceil() as usize).saturating_mul(PROG_CH);
++        if self.buf.try_reserve_exact(floats).is_err() {
++            eprintln!("[GA_AUDIO_ALLOCATION] cannot reserve program audio"); return false;
++        }
++        self.buf.resize(floats, 0.0);
+         self.active = true;
+-        // P27: a fresh session starts with NO master envelope (GAINENV sets it after the opener);
+-        // resetting here stops a previous render's envelope from leaking into the next session.
+-        self.gain_env.clear();
++        true
+     }
+ 
+     /// Drop the accumulator and mark inactive (after CLOSE/WAVECLOSE consumes it).
+@@ -1360,9 +1365,9 @@ impl ProgAudio {
+     /// across calls), so chunking is purely to bound the per-call slice — the muxed result is the
+     /// single continuous timeline-length program audio. Best-effort: a rejected chunk is logged and
+     /// the drain stops (the already-fed audio still muxes on finish).
+-    fn drain_into_encoder(&self, e: &mut ffi::Encoder) {
++    fn drain_into_encoder(&self, e: &mut ffi::Encoder) -> bool {
+         if self.buf.is_empty() {
+-            return;
++            return true;
+         }
+         // ~0.25 s of stereo @ 48k per chunk (12000 frames). Aligned to whole interleaved samples.
+         const CHUNK_FRAMES: usize = 12_000;
+@@ -1374,10 +1379,11 @@ impl ProgAudio {
+             let slice = &self.buf[off..off + nb * PROG_CH];
+             if !e.audio_samples(slice, nb) {
+                 eprintln!("[gcompose] enc audio_samples failed draining accumulator @ frame {f}");
+-                return;
++                return false;
+             }
+             f += nb;
+         }
++        true
+     }
+ 
+     /// Per-channel PEAK + RMS of the accumulator, in dBFS (P3 level meter). Returns
+@@ -1534,7 +1540,7 @@ fn gainenv_set(line: &str, prog: &mut ProgAudio) -> bool {
+ /// Per-clip audio-decode capacity ceiling (in FLOATS), shared by AUDIO mixing. Mirrors MojoMedia's
+ /// AUF (180 s stereo 48k + headroom) used as a per-decode cap. Bounds the temp decode buffer and
+ /// guarantees the `cap as c_int` narrowing in ffi::decode_audio_range is lossless & positive.
+-const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
++const AUDIO_CAP_MAX: usize = i32::MAX as usize;
+ 
+ /// `AUDIO <path> <src_in_s> <dur_s> <dst_offset_s> <gain> <fade_in_s> <fade_out_s> <clip_len_s>
+ /// <range_local_s> <fx_chain|->` — decode the SOURCE audio range [src_in_s, src_in_s+dur_s) of
+@@ -1636,8 +1642,8 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+     let want = if want.is_finite() && want >= 0.0 { want as usize } else { 0 };
+     let cap = want
+         .saturating_mul(PROG_CH)
+-        .saturating_add(8192)
+-        .min(AUDIO_CAP_MAX);
++        .saturating_add(8192);
++    if cap > AUDIO_CAP_MAX { eprintln!("[GA_AUDIO_CAPACITY] audio range exceeds decoder capacity"); return false; }
+ 
+     let mut samples = match ffi::decode_audio_range(&path, src_in_s, dur_s, sr, ch, cap) {
+         Some(s) => s,
+@@ -1739,8 +1745,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
+     if !total_s.is_finite() || total_s < 0.0 {
+         return false;
+     }
+-    prog.alloc(total_s);
+-    true
++    prog.alloc(total_s)
+ }
+ 
+ /// `WAVECLOSE <out_wav>` — write the playback accumulator to `<out_wav>` as a 16-bit PCM stereo @
+@@ -1753,12 +1758,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
+         eprintln!("[gcompose] bad WAVECLOSE ({} fields): {line}", f.len());
+         return None;
+     }
+-    let out = f[1];
++    let out = dec_path(f[1]);
+     if !prog.active {
+         eprintln!("[gcompose] WAVECLOSE with no active accumulator");
+         return None;
+     }
+-    let ok = write_wav_pcm16(out, &prog.buf, PROG_SR as u32, PROG_CH as u16);
++    let ok = write_wav_pcm16(&out, &prog.buf, PROG_SR as u32, PROG_CH as u16);
+     prog.clear();
+     if ok {
+         Some(out.to_string())
+@@ -1788,8 +1793,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
+     if !window_s.is_finite() || window_s < 0.0 {
+         return false;
+     }
+-    prog.alloc(window_s);
+-    true
++    prog.alloc(window_s)
+ }
+ 
+ /// `LEVELS <out>` — measure the active accumulator's per-channel PEAK + RMS (dBFS), write the 4
+@@ -1974,7 +1978,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
+         decoders.insert(path.clone(), d);
+     }
+     let dec = decoders.get_mut(&path)?;
+-    let buf = dec.decode_rgba(frame.max(0), w, h)?;
++    let floats = dec.decode_f32(frame.max(0), w, h)?;
++    let buf: Vec<u8> = floats.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+     if std::fs::write(&out, &buf).is_err() {
+         eprintln!("[gcompose] THUMB write failed: {out}");
+         return None;
+@@ -2243,7 +2248,8 @@ fn handle_request(
+     // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
+     // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
+     // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
+-    if f.first() == Some(&"PREVIEW") {
++    let high_output = f.first() == Some(&"FLOAT");
++    if f.first() == Some(&"PREVIEW") || high_output {
+         f.remove(0);
+     }
+     if f.len() != 103 && f.len() != 106 && f.len() != 107 && f.len() != 108 && f.len() != 109 {
+@@ -2475,9 +2481,9 @@ fn handle_request(
+     // rasterized TITLE layer (a raw GVW*GVH*4 RGBA8 file): read it straight into the slot, SKIPPING
+     // decode (see `upload_slot`). A raw-read failure uploads black (the title just doesn't show).
+     if base_path == "-" {
+-        gpu.upload(0, &vec![0u8; ffi::GVW * ffi::GVH * 4]);
++        gpu.upload(0, &vec![0u8; ffi::width() * ffi::height() * 4]);
+     } else {
+-        upload_slot(gpu, decoders, 0, &base_path, base_frame);
++        if !upload_slot(gpu, decoders, 0, &base_path, base_frame) { return None; }
+     }
+ 
+     // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
+@@ -2506,7 +2512,7 @@ fn handle_request(
+     // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
+     // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
+     let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
+-    let (out, fin) = gpu.compose_trans(
++    let (out, fin) = gpu.compose_trans_f32(
+         eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
+         contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
+         gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
+@@ -2526,7 +2532,10 @@ fn handle_request(
+     // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
+     *last_final_is_look = fin;
+ 
+-    if std::fs::write(&out_path, &out).is_err() {
++    let bytes: Vec<u8> = if high_output {
++        out.iter().flat_map(|sample| sample.to_le_bytes()).collect()
++    } else { out.iter().map(|sample| (sample.clamp(0.0, 1.0) * 255.0).round() as u8).collect() };
++    if std::fs::write(&out_path, &bytes).is_err() {
+         eprintln!("[gcompose] write failed: {out_path}");
+         return None;
+     }
+@@ -2539,34 +2548,33 @@ fn decode_cached(
+     decoders: &mut HashMap<String, ffi::Decoder>,
+     path: &str,
+     frame: i32,
+-) -> Option<Vec<u8>> {
++) -> Option<Vec<f32>> {
+     if !decoders.contains_key(path) {
+         let d = ffi::Decoder::open(path)?;
+         decoders.insert(path.to_string(), d);
+     }
+     let dec = decoders.get_mut(path)?;
+     let f = if frame < 0 { 0 } else { frame }; // never seek a negative frame (C-side guard).
+-    dec.decode_rgba(f, ffi::GVW, ffi::GVH)
++    dec.decode_f32(f, ffi::width(), ffi::height())
+ }
+ 
+ // Estimate the translation between two decoded frames. Sampling a regular grid
+ // keeps this bounded even though the compositor's canvas is full HD. The inner
+ // margin avoids comparing black borders introduced by an earlier camera move.
+-fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+-    let w = ffi::GVW as i32;
+-    let h = ffi::GVH as i32;
+-    let mut dark = u8::MAX;
+-    let mut light = 0u8;
++fn frame_shift(current: &[f32], neighbor: &[f32]) -> Option<(i32, i32)> {
++    let w = ffi::width() as i32;
++    let h = ffi::height() as i32;
++    let mut dark = 1.0f32;
++    let mut light = 0.0f32;
+     for y in (64..h - 64).step_by(16) {
+         for x in (64..w - 64).step_by(16) {
+             let at = ((y * w + x) * 4) as usize;
+-            let gray = ((current[at] as u16 + current[at + 1] as u16 +
+-                current[at + 2] as u16) / 3) as u8;
++            let gray = (current[at] + current[at + 1] + current[at + 2]) / 3.0;
+             dark = dark.min(gray);
+             light = light.max(gray);
+         }
+     }
+-    if light - dark < 12 { return None; }
++    if light - dark < 12.0 / 255.0 { return None; }
+     let mut best = (0, 0);
+     let mut lowest = u64::MAX;
+     for dy in (-24..=24).step_by(4) {
+@@ -2578,9 +2586,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+                     let b = (((y + dy) * w + x + dx) * 4) as usize;
+                     // RGB differences distinguish camera motion on both bright
+                     // and low-contrast material without a separate grayscale copy.
+-                    error += (current[a] as i32 - neighbor[b] as i32).unsigned_abs() as u64;
+-                    error += (current[a + 1] as i32 - neighbor[b + 1] as i32).unsigned_abs() as u64;
+-                    error += (current[a + 2] as i32 - neighbor[b + 2] as i32).unsigned_abs() as u64;
++                    error += ((current[a] - neighbor[b]).abs() * 65535.0) as u64;
++                    error += ((current[a + 1] - neighbor[b + 1]).abs() * 65535.0) as u64;
++                    error += ((current[a + 2] - neighbor[b + 2]).abs() * 65535.0) as u64;
+                 }
+             }
+             if error < lowest ||
+@@ -2592,7 +2600,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+     }
+     // A scene cut has no defensible motion estimate.
+     let samples = ((h - 128 + 15) / 16 * ((w - 128 + 15) / 16)) as u64;
+-    if lowest > samples * 3 * 32 { None } else { Some(best) }
++    if lowest > samples * 3 * (32 * 257) { None } else { Some(best) }
+ }
+ 
+ fn stabilized_frame(
+@@ -2600,7 +2608,7 @@ fn stabilized_frame(
+     path: &str,
+     frame: i32,
+     strength: f32,
+-) -> Option<Vec<u8>> {
++) -> Option<Vec<f32>> {
+     let current = decode_cached(decoders, path, frame)?;
+     if strength <= 0.0 { return Some(current); }
+     let mut sum_x = 0i32;
+@@ -2629,9 +2637,9 @@ fn stabilized_frame(
+     let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
+     let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
+     if shift_x == 0 && shift_y == 0 { return Some(current); }
+-    let w = ffi::GVW as i32;
+-    let h = ffi::GVH as i32;
+-    let mut output = vec![0u8; current.len()];
++    let w = ffi::width() as i32;
++    let h = ffi::height() as i32;
++    let mut output = vec![0.0f32; current.len()];
+     for y in 0..h {
+         let sy = y - shift_y;
+         if sy < 0 || sy >= h { continue; }
+@@ -2669,24 +2677,35 @@ fn upload_slot(
+     path: &str,
+     frame: i32,
+ ) -> bool {
+-    const FRAME_BYTES: usize = ffi::GVW * ffi::GVH * 4;
+-    if let Some(raw_path) = path.strip_prefix("RAW:") {
++    let frame_bytes: usize = ffi::width() * ffi::height() * 4;
++    if let Some(raw_path) = path.strip_prefix("FLOAT:") {
++        if let Ok(bytes) = std::fs::read(raw_path) {
++            if bytes.len() == frame_bytes * 4 {
++                let samples: Vec<f32> = bytes.chunks_exact(4)
++                    .map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
++                if samples.iter().all(|v| v.is_finite()) {
++                    gpu.upload_f32(slot, &samples); return true;
++                }
++            }
++        }
++        eprintln!("[gcompose] invalid FP32 intermediate: {raw_path}");
++        gpu.upload(slot, &vec![0u8; frame_bytes]); false
++    } else if let Some(raw_path) = path.strip_prefix("RAW:") {
+         match std::fs::read(raw_path) {
+-            Ok(bytes) if bytes.len() == FRAME_BYTES => {
+-                gpu.upload(slot, &bytes);
+-                true
++            Ok(bytes) if bytes.len() == frame_bytes => {
++                gpu.upload_raster(slot, &bytes)
+             }
+             Ok(bytes) => {
+                 eprintln!(
+-                    "[gcompose] RAW layer wrong size ({} bytes, expected {FRAME_BYTES}): {raw_path}",
++                    "[gcompose] RAW layer wrong size ({} bytes, expected {frame_bytes}): {raw_path}",
+                     bytes.len()
+                 );
+-                gpu.upload(slot, &vec![0u8; FRAME_BYTES]); // transparent/black fallback.
++                gpu.upload(slot, &vec![0u8; frame_bytes]); // transparent/black fallback.
+                 false
+             }
+             Err(_) => {
+                 eprintln!("[gcompose] RAW layer read failed: {raw_path}");
+-                gpu.upload(slot, &vec![0u8; FRAME_BYTES]);
++                gpu.upload(slot, &vec![0u8; frame_bytes]);
+                 false
+             }
+         }
+@@ -2703,11 +2722,11 @@ fn upload_slot(
+         } else { decode_cached(decoders, path, frame) };
+         match decoded {
+             Some(rgba) => {
+-                gpu.upload(slot, &rgba);
++                gpu.upload_f32(slot, &rgba);
+                 true
+             }
+             None => {
+-                gpu.upload(slot, &vec![0u8; FRAME_BYTES]);
++                gpu.upload(slot, &vec![0u8; frame_bytes]);
+                 false
+             }
+         }
+@@ -2718,13 +2737,13 @@ fn upload_slot(
+ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+     let gpu = ffi::Gpu::init()?;
+     let mut b = ffi::Decoder::open(base)?;
+-    let base_rgba = b.decode_rgba(60, ffi::GVW, ffi::GVH)?;
++    let base_rgba = b.decode_rgba(60, ffi::width(), ffi::height())?;
+     gpu.upload(0, &base_rgba);
+ 
+     let mut has_over = false;
+     if over != "-" {
+         if let Some(mut o) = ffi::Decoder::open(over) {
+-            if let Some(ov) = o.decode_rgba(0, ffi::GVW, ffi::GVH) {
++            if let Some(ov) = o.decode_rgba(0, ffi::width(), ffi::height()) {
+                 gpu.upload(1, &ov);
+                 has_over = true;
+             }
+@@ -2740,5 +2759,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+ /// CPU/FFmpeg-only fallback: just the decoded base frame.
+ fn decode_only(base: &str) -> Option<Vec<u8>> {
+     let mut b = ffi::Decoder::open(base)?;
+-    b.decode_rgba(60, ffi::GVW, ffi::GVH)
++    b.decode_rgba(60, ffi::width(), ffi::height())
+ }

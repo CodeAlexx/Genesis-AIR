@@ -1,0 +1,73 @@
+# Control acceptance ledger
+
+The target is every control Genesis AIR currently exposes. All 31 video and 20 audio filter
+kinds have a media mapping, but a mapping alone is not control acceptance. A control is
+complete when its document edit, saved/reloaded state, preview, export, and failure behavior
+agree. The 749-click UI gate proves hit testing and command dispatch in its representative
+panel states;
+state-dependent controls also need focused checks. It does not by itself prove media output.
+
+## Verified Windows checkpoint (2026-10-01)
+
+Branch `windows-native`, SDK `7195757a63852aaa5ab99d8a4d3b09d509200411`, and the
+compositor revision/Windows patch recorded in `windows/source-pins.json` and
+`windows/gcompose-windows.patch` pass these measured gates:
+
+| Gate | Evidence |
+|---|---|
+| Project and control model | 152 saved application facts, three native file-drop checks, 749 dispatched clicks across four tabs, no enabled-control overlap |
+| Native media and project I/O | Eight cases / 65 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status |
+| Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
+| Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
+| Asynchronous preview | Generated red/blue pixels after rapid seek; newest request wins; rewind restores frame-zero pixels; unchanged source monitor reuses its decoded frame; visible timeline bitmaps and embedded audio waveforms publish independently |
+| Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
+| Sequence/export quality | Six-frame 3840x2160 ProRes preserving four-pixel detail at 30000/1001 with 24-bit PCM; portrait preview square stays square; 1080x1920 H.264/HEVC output; exact held multicam cuts at frames 30/60 |
+| Precision/color/audio duration | 1024 distinct narrow-band values survive filtered three-layer FFV1 16-bit composition; a supplied 4K AV1/PQ source round trips into a 16-bit PQ/BT.2020 master; SDR preview agrees with the floating-point reference within mean 0.97/255; 100-nit SDR title white is converted to PQ correctly; HEVC HDR is 10-bit PQ/BT.2020; audio remains audible after 181 seconds |
+
+A 30-sample worker timing check on the supplied 4K/59.94 AV1/PQ clip and RTX 5080
+measured 31.14 previews/second with D3D11 decode and the NVIDIA OpenCL device. It excludes
+canvas painting and audio, and does not establish sustained 60 fps or long-run sync.
+
+The native Windows window was also exercised with the supplied Costa Rica 4K clip:
+source/program images, visible transport controls, moving L/R meters, Mute silencing
+playback while video continues, and paused program-monitor seeking. This is focused
+interactive evidence; it is not a sustained throughput or long-timeline sync measurement.
+
+Use the Windows reproduction commands in [README](../README.md#tests). Historical Unix
+X11 tests remain in `tests/window_file_picker.py` and `tests/window_playback.py`.
+
+The highest-impact remaining work is continuous playback filter state across audio chunk
+boundaries, parameter/animation measurements for mapped effects, nested sequences,
+complex-script text, audio automation and measured sustained audio/video synchronization.
+
+## Video filters (31)
+
+| Status | Kinds | Remaining gate or implementation |
+|---|---|---|
+| Mapped to the worker wire | brightness, contrast, saturation, gamma, hue, sharpen, blur, glow, grain, levels, lift_gamma_gain, rotate, flip, mirror, denoise | Upper-clip brightness now has two- and three-lane preview/MP4 pixel gates proving lower clips stay unchanged. Pixel change and preview/export parity for the remaining parameter values and animation are still required. |
+| Mapped with limits | white_balance, vignette, sepia, mono, invert, crop, size_position, chroma_key, opacity, blend, mask, speed, lut3d, text, timer, stabilize | Base and overlay opacity have preview/MP4 pixel gates. White-balance temperature and tint have preview/MP4 color gates, including gain composition with Color Grading. LUT3D accepts a `.cube` path through the filter panel, stores it in revision 2 projects, validates the grid, and has a full-strength preview/MP4 channel-swap gate, a half-mix preview gate, and keyed Amount preview endpoints. Text renders stored content with keyed Size/X/Y, and Timer renders a clip-local timecode with Size; both use TrueType faces through AIR's `std.font` with fallbacks and have generated preview/MP4 gates, including a Latin/Cyrillic/CJK title. A character no installed face covers is refused with its code point. All 12 displayed blend modes have generated formula and preview/MP4 pixel checks. Four independent Crop margins have asymmetric preview/MP4 edge gates. Upper Crop and Mask clear alpha in a per-clip pass, with lower-layer visibility and preview/MP4 gates. Invert, Sepia, and Mono Amount have half-strength preview/MP4 mix gates. Vignette Softness has hard and broad edge preview/MP4 gates. Upper rotation has lower-layer corner and upper-layer center preview/MP4 gates. The centered base mask has feather/invert preview/MP4 center and edge gates. Speed multiplies clip Rate and has a generated 24-to-30 fps, 2x picture/audio/15-frame export gate; animated speed remains unsupported. Stabilize has measured preview/MP4 jump reduction, keyed Strength endpoints, an upper-lane gate, and flat-shot identity. Its local translation window is limited to 24 output pixels; rotation, perspective, and long camera-path smoothing are not implemented. Filter ordering and remaining parameter combinations need media gates. Existing unsupported values fail explicitly. |
+
+## Audio filters (20)
+
+Gain, pan, three-band EQ, ten-band EQ, compressor, gate, normalize, reverb, delay, pitch,
+low pass, high pass, tremolo, bass, treble, notch, chorus, flanger, phaser, and limiter
+have AIR-to-worker mappings. The real-media suite applies each and checks for audible
+output. Tremolo Depth now reaches the exposed 1.0 endpoint; a generated WAV gate
+distinguishes it from 0.95. A generated playback WAV gate checks that Pan's -1 and +1
+endpoints favor opposite output channels. Other parameter-specific signal measurements,
+animated parameters, and long-timeline playback timing remain acceptance work. The
+gate's stored `hold` is presented as release time because that is what the worker filter
+implements.
+
+## Other exposed controls
+
+| Area | Verified | Still required |
+|---|---|---|
+| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; X11 import, V1 placement, ruler scrub, and save at 1× and 4K 2×; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have midpoint crossfade gates; incoming and outgoing Text titles are checked through a crossfade | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, measured sustained interactive throughput. Incoming transition opacity, fade, and overlay-only effects currently fail explicitly. |
+| Inspector and keyframes | Representative controls are clicked; focused drag/undo/cancel checks pass; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
+| Subtitles and text | Two timed caption cues, one Latin/Cyrillic/CJK, appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Complex-script shaping, right-to-left text, richer typography, and subtitle placement. |
+| Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Precise long-timeline audio/video sync, continuous audio-filter state across playback chunks, live scrub sound. |
+| Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, a generated 24-to-30 fps preview/export/audio gate, and a 24 fps sequence preview/9-frame MP4/audio gate | More mixed fractional-rate cases and long-timeline audio sync. |
+
+Keep this ledger with the implementation. Add a measured output assertion when closing a
+row; a document mutation or successful worker reply alone is insufficient.

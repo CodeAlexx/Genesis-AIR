@@ -1,0 +1,78 @@
+module genesis.tests.preview_async
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.tasks as tasks
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/preview.ai" as preview
+
+fn publish(state: ref<app.App>, root: str, id: u64) -> bool effects {alloc, fs.write} {
+  let document: string = match editor_io.encode(struct.borrow(state, field=document)) { ok(value) => value, err(_) => { return false }, }
+  preview.request(root, str.view(document), id)
+  true
+}
+fn await_image(root: str, id: u64, blue: bool) -> bool effects {alloc, fs.read, time} {
+  let deadline: u64 = time.monotonic_ns() + 15000000000
+  loop {
+    if time.monotonic_ns() >= deadline { return false }
+    if preview.completed(root) >= id { break }
+    time.sleep_ms(10)
+  }
+  var images: array<draw.Surface> = preview.read_images(root, id)
+  var image: draw.Surface = match array.pop(images) { some(value) => value, none => { return false }, }
+  match draw.surface_pixel(image, 240, 135) {
+    none => false, some(color) => if blue { color.b > 200 and color.r < 30 } else { color.r > 200 and color.b < 30 },
+  }
+}
+pub fn main(args: view<str>) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, thread, time} {
+  if view.len(args) < 4 { return 2 }
+  let root: str = view.get(args, 3)
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App = app.app(provider.gcompose(view.get(args, 1), root))
+  var imported: commands.Result = commands.import_media(state, view.get(args, 2), "actual clip")
+  if not imported.ok { return 3 }
+  let track: u64 = app.default_video_track(state)
+  let _ = commands.append_clip(state, track, imported.value, 0, 60)
+  var source_first: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), view.get(args, 2), 0, 480, 270)
+  let first_calls: u64 = provider.calls(struct.borrow(state, field=provider))
+  var source_again: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), view.get(args, 2), 0, 480, 270)
+  if not source_first.ok or not source_again.ok or provider.calls(struct.borrow(state, field=provider)) != first_calls { return 6 }
+  let configured: preview.Config = preview.config(state, root)
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs, task.spawn(configured, fn=preview.run))
+    let _ = publish(state, root, 1)
+    let first: bool = await_image(root, 1, false)
+    let _ = editor.seek(struct.borrow(state, field=document), 2)
+    let _ = publish(state, root, 2)
+    let _ = editor.seek(struct.borrow(state, field=document), 30)
+    let _ = publish(state, root, 3)
+    let second: bool = await_image(root, 3, true)
+    let _ = editor.program_action(struct.borrow(state, field=document), editor.go_start())
+    let _ = publish(state, root, 4)
+    let rewound: bool = await_image(root, 4, false)
+    let deadline: u64 = time.monotonic_ns() + 15000000000
+    loop { if preview.waveforms_completed(root) >= 4 or time.monotonic_ns() >= deadline { break }
+      time.sleep_ms(10)
+    }
+    preview.read_waveforms(state, root)
+    let embedded: bool = app.waveform_count(state) > 0
+    loop { if preview.thumbnails_completed(root) >= 4 or time.monotonic_ns() >= deadline { break }
+      time.sleep_ms(10)
+    }
+    preview.read_thumbnails(state, root, 4)
+    let strip: bool = array.len(struct.borrow(state, field=thumbnails)) >= 1
+    preview.stop(root)
+    match tasks.join_next<bool>(jobs, 15000) { none => { return 4 }, some(_) => {}, }
+    provider.shutdown(struct.borrow(state, field=provider))
+    if not first or not second or not embedded or not rewound or not strip { io.write("asynchronous seek or embedded audio waveform failed\n")
+      return 5 }
+  }
+  io.write("Async preview: real red/blue pixels, newest scrub request, rewind, timeline bitmaps and graceful worker Stop passed\n")
+  0
+}

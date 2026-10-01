@@ -1,0 +1,141 @@
+// Typed AIR boundary for the optional native dialog provider. The package name
+// is host-neutral; each platform can supply its own small C ABI implementation.
+module genesis.native_dialogs
+
+import std.cabi as foreign
+import std.text as text
+import std.json as json
+
+// Decode the bounded provider response without delimiter-dependent path splitting.
+pub fn decode_paths(reply: str) -> result<option<array<string>>,Error> effects {alloc} {
+  if str.len(reply) == 0 { return result.ok(option.none()) }
+  if str.starts_with(reply, "error:") { return result.err(Error {message: text.copy(reply)}) }
+  var document: json.Document = match json.parse(reply) {
+    ok(value) => value, err(_) => { return result.err(Error {message: "Invalid native selection response"}) },
+  }
+  let kind = json.kind(document, json.root())
+  match kind { some(value) => match value {
+    Array => {}, Null => { return result.err(Error {message: "Expected selection array"}) },
+    Boolean => { return result.err(Error {message: "Expected selection array"}) },
+    Number => { return result.err(Error {message: "Expected selection array"}) },
+    String => { return result.err(Error {message: "Expected selection array"}) },
+    Object => { return result.err(Error {message: "Expected selection array"}) },
+  }, none => { return result.err(Error {message: "Expected selection array"}) }, }
+  let count: u64 = option.unwrap(json.len(document, json.root()))
+  var paths: array<string> = array.new()
+  var i: u64 = 0
+  loop { if i >= count { break }
+    let item: u64 = option.unwrap(json.at(document, json.root(), i))
+    let value: string = match json.as_string(document, item) {
+      some(value) => value, none => { return result.err(Error {message: "Expected selection path"}) },
+    }
+    if str.len(value) == 0 { return result.err(Error {message: "Empty selection path"}) }
+    array.push(paths, value)
+    i = i + 1
+  }
+  result.ok(option.some(paths))
+}
+
+fn call_multiple(library: ref<CAbiLibrary>, folder: str, title: str, filters: str)
+    -> result<string,cabi.error> effects {alloc,ffi} {
+  cabi.call(library, folder, title, filters, symbol="air_native_open_files", max_bytes=1048576)
+}
+
+pub fn open_multiple(folder: str, title: str, filters: str) -> result<option<array<string>>,Error> effects {alloc,ffi} {
+  var library: CAbiLibrary = match foreign.open_package("air-native-dialogs") {
+    ok(value) => value, err(problem) => { return result.err(Error {message: text.copy(problem.message)}) },
+  }
+  let called = call_multiple(library, folder, title, filters)
+  let _ = foreign.close(library)
+  let reply: string = match called {
+    ok(value) => value, err(problem) => { return result.err(Error {message: text.copy(problem.message)}) },
+  }
+  decode_paths(reply)
+}
+
+pub type Error = struct { message: string }
+
+pub fn message(problem: ref<Error>) -> string effects {alloc} {
+  text.copy(struct.borrow(problem, field=message))
+}
+
+fn call_folder(library: ref<CAbiLibrary>, initial: str)
+    -> result<string,cabi.error> effects {alloc,ffi} {
+  cabi.call(library, initial, symbol="air_native_choose_folder", max_bytes=32768)
+}
+
+fn call_save(library: ref<CAbiLibrary>, folder: str, name: str, title: str, filters: str, extension: str)
+    -> result<string,cabi.error> effects {alloc,ffi} {
+  cabi.call(library, folder, name, title, filters, extension, symbol="air_native_save_file", max_bytes=32768)
+}
+
+fn call_open(library: ref<CAbiLibrary>, folder: str, title: str, filters: str)
+    -> result<string,cabi.error> effects {alloc,ffi} {
+  cabi.call(library, folder, title, filters, symbol="air_native_open_file", max_bytes=32768)
+}
+
+pub fn folder(initial: str) -> result<option<string>,Error> effects {alloc,ffi} {
+  var library: CAbiLibrary = match foreign.open_package("air-native-dialogs") {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(Error {message: text.concat("Native folder picker unavailable: ", problem.message)})
+    },
+  }
+  let called: result<string,cabi.error> = call_folder(library, initial)
+  let _ = foreign.close(library)
+  let selected: string = match called {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(Error {message: text.concat("Native folder picker failed: ", problem.message)})
+    },
+  }
+  if str.starts_with(str.view(selected), "error:") {
+    return result.err(Error {message: text.copy(str.view(selected))})
+  }
+  if str.len(str.view(selected)) == 0 { return result.ok(option.none()) }
+  result.ok(option.some(selected))
+}
+
+pub fn save(folder: str, name: str, title: str, filters: str, extension: str) -> result<option<string>,Error> effects {alloc,ffi} {
+  var library: CAbiLibrary = match foreign.open_package("air-native-dialogs") {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(Error {message: text.concat("Native save dialog unavailable: ", problem.message)})
+    },
+  }
+  let called: result<string,cabi.error> = call_save(library, folder, name, title, filters, extension)
+  let _ = foreign.close(library)
+  let selected: string = match called {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(Error {message: text.concat("Native save dialog failed: ", problem.message)})
+    },
+  }
+  if str.starts_with(str.view(selected), "error:") {
+    return result.err(Error {message: text.copy(str.view(selected))})
+  }
+  if str.len(str.view(selected)) == 0 { return result.ok(option.none()) }
+  result.ok(option.some(selected))
+}
+
+pub fn open(folder: str, title: str, filters: str) -> result<option<string>,Error> effects {alloc,ffi} {
+  var library: CAbiLibrary = match foreign.open_package("air-native-dialogs") {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(Error {message: text.concat("Native open dialog unavailable: ", problem.message)})
+    },
+  }
+  let called: result<string,cabi.error> = call_open(library, folder, title, filters)
+  let _ = foreign.close(library)
+  let selected: string = match called {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(Error {message: text.concat("Native open dialog failed: ", problem.message)})
+    },
+  }
+  if str.starts_with(str.view(selected), "error:") {
+    return result.err(Error {message: text.copy(str.view(selected))})
+  }
+  if str.len(str.view(selected)) == 0 { return result.ok(option.none()) }
+  result.ok(option.some(selected))
+}

@@ -1,0 +1,6 @@
+{
+  "worker": "5e26dc2203540f3c2996dba7506f5da18d4065ac",
+  "opencl_headers": "30bc20a8e90468e231d7c639805ae61ad1fefa4f",
+  "opencl_loader": "5192c84f8059e5f703e5452929b613f9487f6e4c",
+  "rust": "1.98.1"
+}

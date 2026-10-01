@@ -8,13 +8,18 @@ module genesis.tests
 import std.draw as draw
 import std.editor as editor
 import std.files as files
+import std.path as path
 import std.timeline as timeline
+import std.text as text
 import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
 import "../src/input.ai" as input
 import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
+import "../src/transport_clock.ai" as transport_clock
+import "../src/timeline_media.ai" as timeline_media
+import "../src/typeface.ai" as typeface
 import "../src/view.ai" as painter
 
 fn emit(name: str, value: str) -> unit effects {io.write} {
@@ -183,6 +188,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var engine: provider.Provider = provider.fake(scratch)
   emit("provider", str.view(provider.describe(engine)))
   var state: app.App = app.app(engine)
+  app.set_fonts(state, typeface.search_paths())
   emit_u("tracks_at_start", editor.track_count(struct.borrow(state, field=document)))
   emit_u("clips_at_start", editor.clip_count(struct.borrow(state, field=document)))
   emit("status_at_start", str.view(app.status(state)))
@@ -292,6 +298,9 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var grain: commands.Result = commands.add_filter(state, second.value, "grain")
   emit_u("filters", editor.filter_count(struct.borrow(state, field=document), second.value))
   let _ = commands.set_filter_param(state, grade.value, "temperature", 0.4)
+  let stored_text: commands.Result = commands.set_filter_text_param(state,
+    grade.value, "caption", "AIR title")
+  emit_b("filter_text_set", stored_text.ok)
   emit("filter_param", str.view(math_text(editor.filter_param(
     struct.borrow(state, field=document), grade.value, "temperature", -1.0))))
   var toggled: commands.Result = commands.toggle_filter(state, grain.value)
@@ -529,11 +538,52 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var opened: commands.Result = commands.open_project(restored, project)
   emit_b("opened", opened.ok)
   emit_b("reload_exact", str.eq(str.view(digest(restored)), str.view(reference)))
+  emit("reload_filter_text", str.view(editor.filter_text_param(
+    struct.borrow(restored, field=document), grade.value, "caption", "")))
   emit_u("reload_sources", editor.source_count(struct.borrow(restored, field=document)))
   emit_u("reload_tracks", editor.track_count(struct.borrow(restored, field=document)))
   emit_u("reload_transitions", editor.transition_count(struct.borrow(restored, field=document)))
   emit_u("reload_markers", editor.marker_count(struct.borrow(restored, field=document)))
   emit_u("reload_subtitles", editor.subtitle_count(struct.borrow(restored, field=document)))
+  let _ = editor.select_only(struct.borrow(restored, field=document), second.value)
+  var title_filter: commands.Result = commands.add_filter(restored, second.value, "text")
+  app.set_dock_tab(restored, chrome.tab_filters())
+  app.set_selected_filter(restored, title_filter.value)
+  var title_controls: array<chrome.Control> = chrome.dock_panel(frame, restored)
+  var title_button: bool = false
+  var title_index: u64 = 0
+  loop {
+    if title_index >= array.len(title_controls) { break }
+    let control: ref<chrome.Control> = array.borrow(title_controls, title_index)
+    if struct.get(control, field=action) == chrome.act_filter_value() {
+      let _ = click_at(restored, struct.get(control, field=area))
+      title_button = app.prompt_active(restored)
+      break
+    }
+    title_index = title_index + 1
+  }
+  emit_b("title_text_prompt", title_button)
+  if title_button {
+    app.prompt_push(restored, "AIR title")
+    let _ = input.commit_prompt(restored)
+  }
+  emit("title_text_value", str.view(editor.filter_text_param(
+    struct.borrow(restored, field=document), title_filter.value, "content", "")))
+  let cube_file: string = path.normalize(str.view(text.concat(scratch, "/test.cube")))
+  let _ = files.write_text(str.view(cube_file), "LUT_3D_SIZE 2\n")
+  var lut_filter: commands.Result = commands.add_filter(restored, second.value, "lut3d")
+  app.set_selected_filter(restored, lut_filter.value)
+  app.begin_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "test.cube")
+  let _ = input.commit_prompt(restored)
+  let recorded_path: string = editor.filter_text_param(
+    struct.borrow(restored, field=document), lut_filter.value, "path", "")
+  emit_b("lut_relative_path", str.eq(str.view(recorded_path), str.view(cube_file)))
+  app.begin_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "missing.cube")
+  let missing_lut_note: string = input.commit_prompt(restored)
+  emit_b("lut_missing_refused", text.contains(str.view(missing_lut_note), "unavailable"))
+  emit_b("lut_path_preserved", str.eq(str.view(editor.filter_text_param(
+    struct.borrow(restored, field=document), lut_filter.value, "path", "")),
+    str.view(cube_file)))
   var missing: commands.Result = commands.open_project(restored, "/nonexistent/none.air")
   emit_b("missing_project_refused", not missing.ok)
 
@@ -560,6 +610,286 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     some(colour) => { emit_u("status_pixel_r", cast.wrap(colour.r)) },
     none => { emit("status_pixel_r", "-") },
   }
+  // A real window advances the document from elapsed monotonic time. Fractional frames
+  // accumulate; pausing clears that remainder and the last frame stops playback.
+  let _ = commands.seek(state, 0)
+  let _ = commands.program(state, editor.play())
+  var frame_clock: transport_clock.Clock = transport_clock.Clock {remainder: 0.0}
+  let first_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    50000000, frame_clock)
+  emit_b("clock_first_frame", first_tick and
+    editor.playhead(struct.borrow(state, field=document)) == 1)
+  let second_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    50000000, frame_clock)
+  emit_b("clock_fractional_frame", second_tick and
+    editor.playhead(struct.borrow(state, field=document)) == 3)
+  let _ = commands.program(state, editor.pause())
+  let paused_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    100000000, frame_clock)
+  emit_b("clock_paused", not paused_tick and
+    editor.playhead(struct.borrow(state, field=document)) == 3)
+  let last: i64 = editor.duration(struct.borrow(state, field=document)) - 1
+  let _ = commands.seek(state, last - 1)
+  let _ = commands.program(state, editor.play())
+  let final_tick: bool = transport_clock.advance(struct.borrow(state, field=document),
+    100000000, frame_clock)
+  emit_b("clock_stops_at_end", final_tick and
+    editor.playhead(struct.borrow(state, field=document)) == last and
+    not editor.playing(struct.borrow(state, field=document)))
+  // Reverse sampling must apply both clip speed and the source/sequence FPS ratio.
+  var rate_doc: editor.Document = editor.document(30.0, 320, 180)
+  let rate_source: u64 = editor.add_source(rate_doc, "rate.mp4", "rate", 60, 60.0)
+  let rate_track: u64 = editor.add_track(rate_doc, rate_doc.active, editor.track_video(), "V1")
+  let rate_clip: u64 = match editor.place(rate_doc, rate_track, rate_source, 0, 10, 0) {
+    some(id) => id, none => 0,
+  }
+  let _ = editor.set_clip_speed(rate_doc, rate_clip, 2.0)
+  let _ = editor.set_clip_reverse(rate_doc, rate_clip, true)
+  match timeline_media.frame_line(rate_doc, 0, "ENC", "") {
+    err(problem) => { emit_b("reverse_rate_start", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("reverse_rate_start", str.eq(str.view(array.borrow(fields, 3)), "36"))
+    },
+  }
+  match timeline_media.frame_line(rate_doc, 9, "ENC", "") {
+    err(problem) => { emit_b("reverse_rate_end", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("reverse_rate_end", str.eq(str.view(array.borrow(fields, 3)), "0"))
+    },
+  }
+  var mixed_doc: editor.Document = editor.document(30.0, 640, 360)
+  let mixed_owner: u64 = mixed_doc.active
+  let mixed_source: u64 = editor.add_source(mixed_doc, "/media/24fps.mp4", "24fps", 24, 24.0)
+  let mixed_track: u64 = editor.add_track(mixed_doc, mixed_owner, editor.track_video(), "V1")
+  let mixed_clip: u64 = match editor.place(mixed_doc, mixed_track, mixed_source, 0, 30, 0) {
+    none => 0, some(value) => value,
+  }
+  emit_b("mixed_full_source_placed", mixed_clip != 0)
+  match timeline_media.frame_line(mixed_doc, 29, "ENC", "") {
+    err(problem) => { emit_b("mixed_last_native", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("mixed_last_native", str.eq(str.view(array.borrow(fields, 3)), "23"))
+    },
+  }
+  var speed_doc: editor.Document = editor.document(30.0, 640, 360)
+  let speed_owner: u64 = speed_doc.active
+  let speed_source: u64 = editor.add_source(speed_doc, "/media/speed.mp4", "speed", 24, 24.0)
+  let speed_track: u64 = editor.add_track(speed_doc, speed_owner, editor.track_video(), "V1")
+  let speed_clip: u64 = match editor.place(speed_doc, speed_track, speed_source, 0, 15, 0) {
+    none => 0, some(value) => value,
+  }
+  let speed_filter: u64 = match editor.add_filter(speed_doc, speed_clip, "speed") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_param(speed_doc, speed_filter, "rate", 2.0)
+  match timeline_media.frame_line(speed_doc, 14, "ENC", "") {
+    err(problem) => { emit_b("speed_filter_native_frame", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("speed_filter_native_frame", str.eq(str.view(array.borrow(fields, 3)), "22"))
+    },
+  }
+  var title_doc: editor.Document = editor.document(30.0, 640, 360)
+  let title_source: u64 = editor.add_source(title_doc, "/media/title.mp4", "title", 30, 30.0)
+  let title_track: u64 = editor.add_track(title_doc, title_doc.active, editor.track_video(), "V1")
+  let title_clip: u64 = match editor.place(title_doc, title_track, title_source, 0, 30, 0) {
+    none => 0, some(value) => value,
+  }
+  let plan_text_filter: u64 = match editor.add_filter(title_doc, title_clip, "text") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "AIR")
+  let title_scratch: string = text.concat(scratch, "/title-plan")
+  var title_cache: timeline_media.RenderCache = timeline_media.render_cache(
+    struct.borrow(state, field=fonts))
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_plan_stages", false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("title_plan_stages", array.len(lines) == 3) },
+  }
+  timeline_media.cleanup_plan(str.view(title_scratch))
+  let title_grade: u64 = match editor.add_filter(title_doc, title_clip, "brightness") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_param(title_doc, title_grade, "level", 0.5)
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_grade_once", false) },
+    ok(value) => { var lines: array<string> = value
+      var pre_fields: array<string> = text.split(str.view(array.borrow(lines, 0)), " ")
+      var final_fields: array<string> = text.split(str.view(array.borrow(lines, 2)), " ")
+      let pre_level: f64 = match text.parse_f64(str.view(array.borrow(pre_fields, 22))) {
+        none => 100.0, some(number) => number,
+      }
+      let final_level: f64 = match text.parse_f64(str.view(array.borrow(final_fields, 22))) {
+        none => 100.0, some(number) => number,
+      }
+      emit_b("title_grade_once", pre_level == -0.5 and final_level == 0.0) },
+  }
+  timeline_media.cleanup_plan(str.view(title_scratch))
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "Café Привет 日本")
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_unicode_planned", false) },
+    ok(lines) => { emit_b("title_unicode_planned", true) },
+  }
+  timeline_media.cleanup_plan(str.view(title_scratch))
+  let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "A􏿽")
+  match timeline_media.frame_plan(title_doc, 0, "PREVIEW", "title.png",
+    str.view(title_scratch), title_cache) {
+    err(problem) => { emit_b("title_missing_glyph_refused",
+      text.contains(str.view(problem), "U+10FFFD")) },
+    ok(lines) => { emit_b("title_missing_glyph_refused", false) },
+  }
+  var transition_doc: editor.Document = editor.document(30.0, 640, 360)
+  let transition_owner: u64 = transition_doc.active
+  let transition_source: u64 = editor.add_source(transition_doc,
+    "/media/transition.mp4", "transition", 30, 30.0)
+  let transition_track: u64 = editor.add_track(transition_doc, transition_owner,
+    editor.track_video(), "V1")
+  let first_transition_clip: u64 = match editor.place(transition_doc, transition_track,
+    transition_source, 0, 12, 0) { none => 0, some(value) => value }
+  let second_transition_clip: u64 = match editor.place(transition_doc, transition_track,
+    transition_source, 12, 12, 12) { none => 0, some(value) => value }
+  let dissolve_id: u64 = editor.add_transition(transition_doc,
+    transition_track, 12, 6, "dissolve")
+  match timeline_media.frame_line(transition_doc, 12, "ENC", "") {
+    err(problem) => { emit_b("dissolve_wire_kind", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("dissolve_wire_kind", first_transition_clip != 0 and
+        second_transition_clip != 0 and dissolve_id != 0 and
+        str.eq(str.view(array.borrow(fields, 17)), "7"))
+    },
+  }
+  let outgoing_title: u64 = match editor.add_filter(transition_doc,
+    first_transition_clip, "text") { none => 0, some(value) => value }
+  let _ = editor.set_filter_text_param(transition_doc, outgoing_title, "content", "OUT")
+  let transition_scratch: string = text.concat(scratch, "/transition-title")
+  match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
+    str.view(transition_scratch), title_cache) {
+    err(problem) => { emit_b("outgoing_title_at_cut", false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("outgoing_title_at_cut", array.len(lines) == 3) },
+  }
+  timeline_media.cleanup_plan(str.view(transition_scratch))
+  let incoming_title: u64 = match editor.add_filter(transition_doc,
+    second_transition_clip, "text") { none => 0, some(value) => value }
+  let _ = editor.set_filter_text_param(transition_doc, incoming_title, "content", "IN")
+  match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
+    str.view(transition_scratch), title_cache) {
+    err(problem) => { emit_b("incoming_title_at_cut", false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("incoming_title_at_cut", array.len(lines) == 5 and
+        text.contains(str.view(array.borrow(lines, 4)), ".textclip3.rgba")) },
+  }
+  timeline_media.cleanup_plan(str.view(transition_scratch))
+  let _ = editor.set_key(transition_doc, second_transition_clip,
+    "opacity", 12, 0.5, 0)
+  match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
+    str.view(transition_scratch), title_cache) {
+    err(problem) => { emit_b("incoming_opacity_refused",
+      text.contains(str.view(problem), "incoming clip has an unsupported edit")) },
+    ok(value) => { emit_b("incoming_opacity_refused", false) },
+  }
+  var in_doc: editor.Document = editor.document(30.0, 640, 360)
+  let in_owner: u64 = in_doc.active
+  let in_source: u64 = editor.add_source(in_doc, "/media/24fps.mp4", "24fps", 24, 24.0)
+  let in_track: u64 = editor.add_track(in_doc, in_owner, editor.track_video(), "V1")
+  let in_clip: u64 = match editor.place(in_doc, in_track, in_source, 15, 15, 0) {
+    none => 0, some(value) => value,
+  }
+  match timeline_media.frame_line(in_doc, 0, "ENC", "") {
+    err(problem) => { emit_b("mixed_inpoint_native", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("mixed_inpoint_native", in_clip != 0 and
+        str.eq(str.view(array.borrow(fields, 3)), "12"))
+    },
+  }
+  var anim_doc: editor.Document = editor.document(30.0, 640, 360)
+  let anim_owner: u64 = anim_doc.active
+  let anim_source: u64 = editor.add_source(anim_doc, "/media/anim.mp4", "anim", 60, 30.0)
+  let base_track: u64 = editor.add_track(anim_doc, anim_owner, editor.track_video(), "V1")
+  let over_track: u64 = editor.add_track(anim_doc, anim_owner, editor.track_video(), "V2")
+  let base_clip: u64 = match editor.place(anim_doc, base_track, anim_source, 0, 60, 0) {
+    none => 0, some(value) => value,
+  }
+  let anim_clip: u64 = match editor.place(anim_doc, over_track, anim_source, 0, 30, 10) {
+    none => 0, some(value) => value,
+  }
+  let opacity_filter: u64 = match editor.add_filter(anim_doc, anim_clip, "opacity") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_filter_param(anim_doc, opacity_filter, "level", 1.0)
+  let _ = editor.set_key(anim_doc, anim_clip, "opacity.level", 0, 0.0, 0)
+  let _ = editor.set_key(anim_doc, anim_clip, "opacity.level", 20, 1.0, 0)
+  let bright_filter: u64 = match editor.add_filter(anim_doc, base_clip, "brightness") {
+    none => 0, some(value) => value,
+  }
+  let _ = editor.set_key(anim_doc, base_clip, "brightness.level", 10, 1.0, 0)
+  let _ = editor.set_key(anim_doc, base_clip, "brightness.level", 30, 2.0, 0)
+  let _ = editor.set_key(anim_doc, base_clip, "fade_in", 0, 20.0, 0)
+  let _ = editor.set_key(anim_doc, base_clip, "fade_in", 20, 20.0, 0)
+  match timeline_media.frame_line(anim_doc, 10, "ENC", "") {
+    err(problem) => { emit_b("keyframed_opacity_start", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("keyframed_opacity_start", str.eq(str.view(array.borrow(fields, 5)), "0"))
+      emit_b("keyframed_brightness_start", str.eq(str.view(array.borrow(fields, 22)), "0"))
+    },
+  }
+  match timeline_media.frame_line(anim_doc, 0, "ENC", "") {
+    err(problem) => { emit_b("keyframed_fade_start", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("keyframed_fade_start", str.eq(str.view(array.borrow(fields, 102)), "0"))
+    },
+  }
+  match timeline_media.frame_line(anim_doc, 10, "ENC", "") {
+    err(problem) => { emit_b("keyframed_fade_middle", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      // At local frame 10, a 20-frame fade yields half opacity. This exercises
+      // the base-lane worker field rather than merely checking stored keys.
+      emit_b("keyframed_fade_middle", str.eq(str.view(array.borrow(fields, 102)), "0.5"))
+    },
+  }
+  match timeline_media.frame_line(anim_doc, 30, "ENC", "") {
+    err(problem) => { emit_b("keyframed_opacity_end", false) },
+    ok(line) => {
+      var fields: array<string> = text.split(str.view(line), " ")
+      emit_b("keyframed_opacity_end", str.eq(str.view(array.borrow(fields, 5)), "1"))
+      emit_b("keyframed_brightness_end", str.eq(str.view(array.borrow(fields, 22)), "1"))
+    },
+  }
+  var key_state: app.App = app.app(provider.fake(scratch))
+  var key_source: commands.Result = commands.import_media(key_state, "media/key.mov", "key")
+  let key_track: u64 = app.default_video_track(key_state)
+  var key_clip: commands.Result = commands.insert_clip(key_state, key_track,
+    key_source.value, 0, 30, 10)
+  let _ = commands.select_only(key_state, key_clip.value)
+  let _ = commands.seek(key_state, 15)
+  var key_added: commands.Result = commands.keyframe_parameter(key_state,
+    chrome.domain_filter(), 0, "opacity", "level", 0.5)
+  let key_entry: editor.Key = array.get(struct.borrow(
+    struct.borrow(key_state, field=document), field=keys), 0)
+  emit_b("keyframe_uses_local_frame", key_added.ok and key_entry.frame == 5)
+  emit_b("keyframe_creates_filter", editor.filter_count(
+    struct.borrow(key_state, field=document), key_clip.value) == 1)
+  var rejected_key: commands.Result = commands.keyframe_parameter(key_state,
+    chrome.domain_clip(), key_clip.value, "", "gain", 0.5)
+  emit_b("unrendered_key_refused", not rejected_key.ok and
+    str.eq(str.view(rejected_key.message),
+      "this parameter has no keyframed media behavior yet"))
+  let _ = commands.undo(key_state)
+  emit_b("keyframe_filter_one_undo", editor.key_count(
+    struct.borrow(key_state, field=document), key_clip.value, "opacity.level") == 0 and
+    editor.filter_count(struct.borrow(key_state, field=document), key_clip.value) == 0)
   0
 }
 

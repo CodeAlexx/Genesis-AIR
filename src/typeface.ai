@@ -1,0 +1,133 @@
+// Titles, timers and captions are drawn with TrueType faces through AIR's std.font, so any script
+// the installed fonts cover renders, not only ASCII. Every face found is a fallback for scalars
+// the earlier ones lack. GENESIS_FONT (colon-separated .ttf paths) puts faces ahead of the
+// system ones. A size is a cap height in pixels, as the vector font's was, so titles keep their
+// size and placement.
+module genesis.typeface
+
+import std.draw as draw
+import std.font as font
+import std.geometry as geometry
+import std.math as math
+import std.text as text
+import std.path as path
+import std.system as platform
+
+/// Common system faces: a Latin/Greek/Cyrillic face first, then a CJK fallback.
+pub fn defaults() -> array<string> effects {alloc} {
+  var out: array<string> = array.new()
+  array.push(out, string.copy("C:/Windows/Fonts/segoeui.ttf"))
+  array.push(out, string.copy("C:/Windows/Fonts/arial.ttf"))
+  array.push(out, string.copy("C:/Windows/Fonts/seguisym.ttf"))
+  array.push(out, string.copy("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
+  array.push(out, string.copy("/usr/share/fonts/TTF/DejaVuSans.ttf"))
+  array.push(out, string.copy("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"))
+  array.push(out, string.copy("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"))
+  array.push(out, string.copy("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"))
+  array.push(out, string.copy("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"))
+  out
+}
+
+/// GENESIS_FONT's faces, then the system defaults.
+pub fn search_paths() -> array<string> effects {alloc, env, fs.read} {
+  var out: array<string> = array.new()
+  match env.get("GENESIS_FONT") {
+    some(value) => {
+      let separator: str = if text.contains(value, ";") or text.contains(value, "\\") { ";" }
+        else if str.starts_with(value, "C:") or str.starts_with(value, "D:") { ";" } else { ":" }
+      var named: array<string> = text.split(value, separator)
+      var i: u64 = 0
+      loop {
+        if i >= array.len(named) { break }
+        if str.len(str.view(array.borrow(named, i))) != 0 {
+          array.push(out, string.copy(str.view(array.borrow(named, i))))
+        }
+        i = i + 1
+      }
+    },
+    none => { },
+  }
+  var system: array<string> = defaults()
+  match platform.executable_path() {
+    err(_) => {}, ok(executable) => {
+      array.push(system, path.join(str.view(path.dirname(str.view(executable))), "fonts/NotoSansJP.ttf"))
+    },
+  }
+  var i: u64 = 0
+  loop {
+    if i >= array.len(system) { break }
+    array.push(out, string.copy(str.view(array.borrow(system, i))))
+    i = i + 1
+  }
+  out
+}
+
+/// Pixel size whose capitals are about `cap_height` tall (DejaVu Sans caps are 0.729 em).
+pub fn px_for(cap_height: f64) -> u64 effects {} {
+  let px: f64 = math.round(cap_height / 0.729)
+  if px < 4.0 { 4 } else { cast.sat(px) }
+}
+
+/// A font at `px` with every face that loads from `paths`.
+pub fn load(paths: ref<array<string>>, px: u64) -> result<font.Font, string> effects {alloc, fs.read, fs.meta} {
+  var out: font.Font = font.new(px)
+  var i: u64 = 0
+  loop {
+    if i >= array.len(paths) { break }
+    match font.load(str.view(array.borrow(paths, i))) {
+      ok(face) => { font.add_face(out, face) },
+      err(_) => { },
+    }
+    i = i + 1
+  }
+  if font.face_count(out) == 0 {
+    return result.err(string.copy("no TrueType font was found for text; set GENESIS_FONT to a .ttf file"))
+  }
+  result.ok(out)
+}
+
+fn hex(value: u64) -> string effects {alloc} {
+  let digits: str = "0123456789ABCDEF"
+  var out: string = string.new()
+  var shift: u64 = 20
+  var started: bool = false
+  loop {
+    let digit: u64 = and(shr(value, shift), 15)
+    if digit != 0 or started or shift <= 12 {
+      string.append(out, str.slice(digits, digit, digit + 1))
+      started = true
+    }
+    if shift == 0 { break }
+    shift = shift - 4
+  }
+  out
+}
+
+/// Refuse a line holding a scalar that no loaded face covers, naming it.
+pub fn covered(typeface: ref<font.Font>, line: str) -> result<unit, string> effects {alloc} {
+  var cursor: u64 = 0
+  loop {
+    if cursor >= str.len(line) { break }
+    let scalar: u32 = font.decode_at(line, cursor)
+    let before: u64 = font.missing_count(typeface)
+    let _ = font.glyph_slot(typeface, scalar)
+    if font.missing_count(typeface) != before {
+      let code: u64 = cast.wrap(scalar)
+      var detail: string = string.copy("no installed font has a glyph for U+")
+      string.append(detail, str.view(hex(code)))
+      string.append(detail, "; set GENESIS_FONT to a font that covers it")
+      return result.err(detail)
+    }
+  }
+  result.ok(())
+}
+
+/// A white line with a dark drop shadow whose capitals start at `top`, the vector font's
+/// convention, so existing placements are unchanged.
+pub fn draw_label(canvas: ref<draw.Canvas>, typeface: ref<font.Font>, x: f64, top: f64,
+                  line: str, cap_height: f64) -> unit effects {alloc} {
+  let baseline: f64 = top + cap_height
+  let _ = font.draw_text(canvas, typeface, geometry.vec2(x + 2.0, baseline + 2.0), line, draw.rgb(0, 0, 0))
+  let _ = font.draw_text(canvas, typeface, geometry.vec2(x, baseline), line, draw.rgb(255, 255, 255))
+  ()
+}

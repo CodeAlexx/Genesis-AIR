@@ -1,7 +1,7 @@
 // The application command layer.
 //
-// Every edit in Genesis AIR goes through a function here, and every function here does two
-// things: capture the document for undo, then call the reusable operation in `std.editor`.
+// Every edit in Genesis AIR goes through a function here. An undoable action captures
+// the document once, then calls the reusable operations in `std.editor`.
 // There is NO edit arithmetic in this file — no clip maths, no ripple, no source clamping.
 // If a command looks like it is computing an edit, that is a bug: the toolkit owns it.
 //
@@ -13,11 +13,12 @@ import std.editor as editor
 import std.editor_io as editor_io
 import std.curve as curve
 import std.files as files
-import std.codec as codec
 import std.path as path
+import std.codec as codec
 import std.text as text
 import "app.ai" as app
 import "provider.ai" as provider
+import "timeline_media.ai" as timeline_media
 
 pub type Result = struct { ok: bool, message: string, value: u64 }
 
@@ -53,15 +54,68 @@ pub fn new_project(state: ref<app.App>) -> Result effects {alloc} {
   done("new project", 0)
 }
 
+pub fn sequence_preset(state: ref<app.App>, preset: u64) -> Result effects {alloc} {
+  let width: u32 = if preset == 2 or preset == 3 { 3840 } else if preset == 4 or preset == 5 { 1080 }
+    else if preset == 6 { 2160 } else { 1920 }
+  let height: u32 = if preset == 2 or preset == 3 { 2160 } else if preset == 4 or preset == 5 { 1920 }
+    else if preset == 6 { 2160 } else { 1080 }
+  let fps: f64 = if preset == 1 or preset == 2 { 24.0 } else if preset == 5 { 60.0 }
+    else if preset == 7 { 25.0 } else if preset == 8 { 29.97002997003 } else { 30.0 }
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  if editor.duration(doc) > 0 and editor.sequence_fps(doc, doc.active) != fps {
+    return refused("[GA_SEQUENCE_RATE] Choose the frame rate before placing clips; resolution can change at any time")
+  }
+  editor.capture(struct.borrow(state, field=history), doc)
+  if not editor.set_sequence_format(doc, doc.active, width, height, fps) { return refused("[GA_SEQUENCE_FORMAT] Invalid format") }
+  app.mark_dirty(state, true)
+  done(text.concat(string.from_int(width), text.concat(" x ", string.from_int(height))), preset)
+}
+
+pub fn camera_cut(state: ref<app.App>, track: u64) -> Result effects {alloc} {
+  let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+  match editor.camera_clip(struct.borrow(state, field=document), track, frame) {
+    none => { return refused("[GA_CAMERA_EMPTY] The camera track has no visible video at the playhead") },
+    some(_) => {},
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let count: u64 = editor.cut_camera(struct.borrow(state, field=document), track, frame)
+  app.mark_dirty(state, true)
+  done("Camera cut recorded; audio mix unchanged", count)
+}
+pub fn camera_number(state: ref<app.App>, number: u64) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let active: u64 = doc.active
+  var i: u64 = 0
+  var camera: u64 = 0
+  var target: u64 = 0
+  loop { if i >= array.len(struct.borrow(doc, field=tracks)) { break }
+    let value: ref<editor.Track> = array.borrow(struct.borrow(doc, field=tracks), i)
+    if value.owner == active and value.kind == editor.track_video() {
+      camera = camera + 1
+      if camera == number { target = value.id
+        break }
+    }
+    i = i + 1
+  }
+  if target == 0 { return refused("[GA_CAMERA_NUMBER] No video track for that camera number") }
+  camera_cut(state, target)
+}
+
 pub fn save_project(state: ref<app.App>, target: str) -> Result effects {alloc, fs.write} {
   let text: string = match editor_io.encode(struct.borrow(state, field=document)) {
     ok(value) => value,
     err(problem) => { var failure: codec.Error = problem
       return refused(str.view(codec.describe(failure))) },
   }
-  match files.write_text(target, str.view(text)) {
+  let temporary: string = text.concat(target, ".genesis-save.tmp")
+  match files.write_text(str.view(temporary), str.view(text)) {
     ok(written) => { },
     err(problem) => { return refused("the project could not be written") },
+  }
+  match files.rename(str.view(temporary), target) {
+    ok(_) => {},
+    err(_) => { let _ = files.remove(str.view(temporary))
+      return refused("[GA_SAVE_PUBLISH] Could not replace the project; the previous save is preserved") },
   }
   app.set_project_path(state, target)
   app.mark_dirty(state, false)
@@ -87,10 +141,18 @@ pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
     err(problem) => { var failure: codec.Error = problem
       return refused(str.view(codec.describe(failure))) },
   }
+  // A one-clip project should open with its inspector ready to edit.
+  if editor.selection_count(loaded) == 0 and editor.clip_count(loaded) == 1 {
+    match editor.clip_at(loaded, 0) {
+      none => {}, some(value) => { let _ = editor.select_only(loaded, value.id) },
+    }
+  }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let _ = ref.swap(struct.borrow(state, field=document), loaded)
   app.set_project_path(state, target)
   app.mark_dirty(state, false)
+  app.set_selected_filter(state, 0)
+  app.end_parameter_drag(state)
   app.set_status(state, "Opened")
   done("opened", 0)
 }
@@ -98,14 +160,31 @@ pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
 // ---------------------------------------------------------------------------
 // Media
 
+fn media_path(state: ref<app.App>, chosen: str) -> option<string> effects {alloc, fs.read} {
+  // Fake-provider fixtures deliberately use synthetic names such as "audio:media/vo.wav".
+  if struct.get(struct.borrow(state, field=provider), field=kind) == provider.kind_fake() {
+    return option.some(string.copy(chosen))
+  }
+  if path.is_absolute(chosen) { return option.some(path.normalize(chosen)) }
+  let cwd: string = match files.cwd() {
+    ok(value) => value,
+    err(problem) => { return option.none() },
+  }
+  option.some(path.join(str.view(cwd), chosen))
+}
+
 // Import a source. The provider is asked how long it really is, and that length becomes the
 // pool's authoritative frame count — which is what lets the toolkit refuse a clip that would
 // read past the end of the media.
 pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  let absolute: string = match media_path(state, path) {
+    some(value) => value,
+    none => { return refused("the media path could not be resolved") },
+  }
+  var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   if not report.ok { return refused(str.view(struct.borrow(report, field=detail))) }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let id: u64 = editor.add_source(struct.borrow(state, field=document), path, name,
+  let id: u64 = editor.add_source(struct.borrow(state, field=document), str.view(absolute), name,
     report.frames, report.fps)
   let _ = editor.describe_source(struct.borrow(state, field=document), id, report.width,
     report.height, report.has_video, report.has_audio, 48000, 2)
@@ -149,11 +228,15 @@ pub fn add_bin(state: ref<app.App>, name: str) -> Result effects {alloc} {
 }
 
 pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  provider.invalidate(struct.borrow(state, field=provider))
-  var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  let absolute: string = match media_path(state, path) {
+    some(value) => value,
+    none => { return refused("the media path could not be resolved") },
+  }
+  provider.restart(struct.borrow(state, field=provider))
+  var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   if not report.ok { return refused(str.view(struct.borrow(report, field=detail))) }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, path,
+  let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, str.view(absolute),
     report.frames)
   app.mark_dirty(state, true)
   if corrected != 0 {
@@ -237,6 +320,11 @@ pub fn append_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
 }
 
 pub fn move_clip(state: ref<app.App>, clip: u64, track: u64, start: i64) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let current: editor.Clip = match editor.clip(doc, clip) { none => { return refused("no such clip") }, some(value) => value, }
+  if editor.track_kind(doc, current.track) != editor.track_kind(doc, track) {
+    return refused("[GA_TRACK_KIND] Keep video on a video lane and audio on an audio lane")
+  }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.move_clip(struct.borrow(state, field=document), clip, track, start) {
     return refused("that clip cannot move there")
@@ -498,6 +586,15 @@ pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64)
   done("parameter set", filter)
 }
 
+pub fn set_filter_text_param(state: ref<app.App>, filter: u64, name: str, value: str)
+                             -> Result effects {alloc} {
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not editor.set_filter_text_param(struct.borrow(state, field=document), filter,
+    name, value) { return refused("no such filter") }
+  app.mark_dirty(state, true)
+  done("text parameter set", filter)
+}
+
 // ---------------------------------------------------------------------------
 // Mixer. Solo-wins is the toolkit's policy and is not restated here.
 
@@ -567,6 +664,12 @@ pub fn open_source(state: ref<app.App>, source: u64) -> Result effects {alloc} {
     return refused("no such source")
   }
   done("source opened", source)
+}
+// Reload also restarts the media worker: a fresh one drops its cached decoders and LUTs,
+// so a file changed on disk is read again.
+pub fn reload_source(state: ref<app.App>, source: u64) -> Result effects {alloc, process, time} {
+  provider.restart(struct.borrow(state, field=provider))
+  open_source(state, source)
 }
 pub fn monitor(state: ref<app.App>, action: u32) -> Result effects {alloc} {
   let landed: editor.Transport = editor.monitor_action(struct.borrow(state, field=document), action)
@@ -638,6 +741,10 @@ fn chrome_filter_of_kind(state: ref<app.App>, clip: u64, kind: str) -> u64 effec
 
 pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  set_clip_field_live(state, clip, name, value)
+}
+
+fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
   let frames: i64 = cast.sat(value)
   let ok: bool = if str.eq(name, "fade_in") {
       editor.set_fade_in(struct.borrow(state, field=document), clip, frames)
@@ -645,6 +752,8 @@ pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> 
       editor.set_fade_out(struct.borrow(state, field=document), clip, frames)
     } else if str.eq(name, "gain") {
       editor.set_clip_gain(struct.borrow(state, field=document), clip, value)
+    } else if str.eq(name, "pan") {
+      editor.set_clip_pan(struct.borrow(state, field=document), clip, value)
     } else if str.eq(name, "speed") {
       editor.set_clip_speed(struct.borrow(state, field=document), clip, value)
     } else { false }
@@ -681,13 +790,32 @@ pub fn set_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str, n
   if domain == 3 { return set_track_field(state, target, name, value) }
   if domain != 2 { return refused("nothing to set") }
   var filter: u64 = target
+  let clip: u64 = app.current_clip(state)
+  if filter == 0 and clip == 0 { return refused("[GA_INSPECTOR_SELECTION] Select a timeline clip first") }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if filter == 0 {
-    let clip: u64 = app.current_clip(state)
-    var made: Result = ensure_filter(state, clip, kind)
-    if not made.ok { return made }
-    filter = made.value
+    filter = chrome_filter_of_kind(state, clip, kind)
+    if filter == 0 {
+      match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
+        none => { return refused("no such clip") }, some(id) => { filter = id },
+      }
+    }
   }
-  set_filter_param(state, filter, name, value)
+  update_parameter(state, domain, filter, name, value)
+}
+
+// Continuation of a pointer drag. The initial write owns the single undo snapshot.
+pub fn update_parameter(state: ref<app.App>, domain: u32, target: u64, name: str,
+                        value: f64) -> Result effects {alloc} {
+  if domain == 1 { return set_clip_field_live(state, target, name, value) }
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let changed: bool = if domain == 2 { editor.set_filter_param(doc, target, name, value) }
+    else if domain == 3 and str.eq(name, "gain") { editor.set_track_gain(doc, target, value) }
+    else if domain == 3 and str.eq(name, "pan") { editor.set_track_pan(doc, target, value) }
+    else { false }
+  if not changed { return refused("that parameter is not settable") }
+  app.mark_dirty(state, true)
+  done("parameter set", target)
 }
 
 // A keyframe on the parameter under the pointer, at the playhead. Clip-local frames are the
@@ -696,11 +824,36 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
                           name: str, value: f64) -> Result effects {alloc} {
   let clip: u64 = app.current_clip(state)
   if clip == 0 { return refused("no clip selected") }
-  let frame: i64 = editor.playhead(struct.borrow(state, field=document))
+  let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
+  let selected: editor.Clip = match editor.clip(struct.borrow(state, field=document), clip) {
+    none => { return refused("selected clip is missing") }, some(found) => found,
+  }
+  let frame: i64 = playhead - selected.start
+  if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
   var qualified: string = string.copy(kind)
   if str.len(kind) != 0 { string.append(qualified, ".") }
   string.append(qualified, name)
-  set_key(state, clip, str.view(qualified), frame, value, curve.linear())
+  if not timeline_media.key_supported(str.view(qualified)) or
+     editor.track_kind(struct.borrow(state, field=document), selected.track) !=
+       editor.track_video() or (domain == 1 and str.len(kind) != 0) or
+     (domain == 2 and str.len(kind) == 0) or (domain != 1 and domain != 2) {
+    return refused("this parameter has no keyframed media behavior yet")
+  }
+  // K on a parameter row can precede the first ordinary parameter edit. Create
+  // its filter along with the key so one Undo removes both changes.
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if domain == 2 and chrome_filter_of_kind(state, clip, kind) == 0 {
+    match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
+      none => { return refused("the filter could not be created") },
+      some(_) => { },
+    }
+  }
+  if not editor.set_key(struct.borrow(state, field=document), clip,
+                        str.view(qualified), frame, value, curve.linear()) {
+    return refused("that parameter could not be keyed")
+  }
+  app.mark_dirty(state, true)
+  done("keyframe set", clip)
 }
 
 // ---------------------------------------------------------------------------

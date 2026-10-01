@@ -11,10 +11,11 @@ module genesis.chrome
 
 import std.application_theme as themes
 import std.editor as editor
+import std.text as text
 import std.editor_view as editor_view
 import std.timeline as timeline
 import std.math as math
-import std.vector_font as font
+import "ui_text.ai" as ui_text
 import "app.ai" as app
 import "layout.ai" as layout
 
@@ -58,6 +59,8 @@ pub fn act_go_end() -> u32 effects {} { 12 }
 pub fn act_step_back() -> u32 effects {} { 13 }
 pub fn act_step_forward() -> u32 effects {} { 14 }
 pub fn act_quit() -> u32 effects {} { 15 }
+pub fn act_stop() -> u32 effects {} { 16 }
+pub fn act_fullscreen() -> u32 effects {} { 17 }
 
 pub fn act_split() -> u32 effects {} { 20 }
 pub fn act_lift() -> u32 effects {} { 21 }
@@ -100,6 +103,7 @@ pub fn act_filter_remove() -> u32 effects {} { 73 }
 pub fn act_filter_up() -> u32 effects {} { 74 }
 pub fn act_filter_down() -> u32 effects {} { 75 }
 pub fn act_filter_page() -> u32 effects {} { 76 }
+pub fn act_filter_value() -> u32 effects {} { 77 }
 
 pub fn act_param_dec() -> u32 effects {} { 80 }
 pub fn act_param_inc() -> u32 effects {} { 81 }
@@ -112,6 +116,9 @@ pub fn act_menu() -> u32 effects {} { 90 }
 pub fn act_about() -> u32 effects {} { 91 }
 pub fn act_theme() -> u32 effects {} { 92 }
 pub fn act_diagnostics() -> u32 effects {} { 93 }
+pub fn act_sequence_preset() -> u32 effects {} { 94 }
+pub fn act_camera_cut() -> u32 effects {} { 96 }
+pub fn act_recover() -> u32 effects {} { 95 }
 
 // ---------------------------------------------------------------------------
 
@@ -215,7 +222,7 @@ pub fn menu_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> effe
   loop {
     if which > menu_help() { break }
     let owned: string = menu_name(which)
-    let wide: f64 = font.text_vector_width(str.view(owned), size) + 18.0
+    let wide: f64 = ui_text.width(struct.borrow(state, field=typography), str.view(owned), size) + 18.0
     let target: u64 = cast.wrap(which)
     var made: Control = button(act_menu(), str.view(owned),
       layout.rect(left, area.top + 2.0, left + wide, area.bottom),
@@ -266,8 +273,15 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     top = menu_item(out, state, left, top, act_new(), 0, "New project", false)
     top = menu_item(out, state, left, top, act_open(), 0, "Open project...", false)
     top = menu_item(out, state, left, top, act_save(), 0, "Save project", app.dirty(state))
+    top = menu_item(out, state, left, top, act_save(), 1, "Save project as...", false)
+    top = menu_item(out, state, left, top, act_recover(), 0, "Recover autosave", false)
     top = menu_item(out, state, left, top, act_import(), 0, "Import media...", false)
-    top = menu_item(out, state, left, top, act_render(), 0, "Render still...", false)
+    top = menu_item(out, state, left, top, act_render(), 0, "Export H.264 quality...", false)
+    top = menu_item(out, state, left, top, act_render(), 1, "Export HEVC 10-bit...", false)
+    top = menu_item(out, state, left, top, act_render(), 2, "Export ProRes master...", false)
+    top = menu_item(out, state, left, top, act_render(), 3, "Export SDR 16-bit lossless master...", false)
+    top = menu_item(out, state, left, top, act_render(), 4, "Export HDR HEVC 10-bit...", false)
+    top = menu_item(out, state, left, top, act_render(), 5, "Export HDR 16-bit lossless master...", false)
     top = menu_item(out, state, left, top, act_quit(), 0, "Quit Genesis AIR", false)
     return out
   }
@@ -283,6 +297,7 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     return out
   }
   if which == menu_view() {
+    top = menu_item(out, state, left, top, act_fullscreen(), 0, "Fullscreen program (F11)", state.fullscreen != 0)
     top = menu_item(out, state, left, top, act_tab(), cast.wrap(tab_properties()),
       "Properties panel", chosen_tab == tab_properties())
     top = menu_item(out, state, left, top, act_tab(), cast.wrap(tab_filters()),
@@ -306,6 +321,16 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     return out
   }
   if which == menu_project() {
+    top = menu_item(out, state, left, top, act_sequence_preset(), 0, "1080p / 30", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 1, "1080p / 24", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 7, "1080p / 25", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 8, "1080p / 29.97", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 2, "4K UHD / 24", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 3, "4K UHD / 30", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 4, "Portrait 1080 / 30", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 5, "Portrait 1080 / 60", false)
+    top = menu_item(out, state, left, top, act_sequence_preset(), 6, "Square 2160 / 30", false)
+    top = menu_item(out, state, left, top, act_camera_cut(), 0, "Cut to selected camera", false)
     top = menu_item(out, state, left, top, act_add_video_track(), 0, "Add video track", false)
     top = menu_item(out, state, left, top, act_add_audio_track(), 0, "Add audio track", false)
     top = menu_item(out, state, left, top, act_marker(), 0, "Add marker", false)
@@ -325,13 +350,13 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
 // Toolbar type. The top toolbar has the whole window width and uses the title size. The
 // timeline toolbar carries fourteen buttons in the narrower column left of the dock and has
 // to come down a step to fit them; ten is the floor, below which the letterforms go.
-pub fn top_bar_type() -> f64 effects {} { 12.0 }
-pub fn timeline_bar_type() -> f64 effects {} { 10.0 }
+pub fn top_bar_type() -> f64 effects {} { 14.0 }
+pub fn timeline_bar_type() -> f64 effects {} { 12.0 }
 fn bar_pad() -> f64 effects {} { 8.0 }
 
-fn strip(out: ref<array<Control>>, left: f64, top: f64, height: f64, action: u32,
+fn strip(state: ref<app.App>, out: ref<array<Control>>, left: f64, top: f64, height: f64, action: u32,
          label: str, on: bool, toggling: bool, size: f64) -> f64 effects {alloc} {
-  let wide: f64 = font.text_vector_width(label, size) + bar_pad() * 2.0
+  let wide: f64 = ui_text.width(struct.borrow(state, field=typography), label, size) + bar_pad() * 2.0
   var made: Control = button(action, label, layout.rect(left, top, left + wide, top + height), on)
   struct.set(made, size, field=size)
   if toggling { struct.set(made, style_toggle(), field=style) }
@@ -346,25 +371,68 @@ pub fn toolbar(frame: layout.Frame, state: ref<app.App>) -> array<Control> effec
   let top: f64 = area.top + 4.0
   let height: f64 = layout.toolbar_height() - 8.0
   var x: f64 = 8.0
-  x = strip(out, x, top, height, act_import(), "Add", false, false, size)
-  x = strip(out, x, top, height, act_open(), "Open", false, false, size)
-  x = strip(out, x, top, height, act_save(), "Save", app.dirty(state), false, size)
-  x = strip(out, x, top, height, act_new(), "New", false, false, size)
-  x = strip(out, x, top, height, act_render(), "Render", false, false, size)
+  x = strip(state, out, x, top, height, act_import(), "Add", false, false, size)
+  x = strip(state, out, x, top, height, act_open(), "Open", false, false, size)
+  x = strip(state, out, x, top, height, act_save(), "Save", app.dirty(state), false, size)
+  x = strip(state, out, x, top, height, act_new(), "New", false, false, size)
+  x = strip(state, out, x, top, height, act_render(), "Render", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_undo(), "Undo", false, false, size)
-  x = strip(out, x, top, height, act_redo(), "Redo", false, false, size)
+  x = strip(state, out, x, top, height, act_undo(), "Undo", false, false, size)
+  x = strip(state, out, x, top, height, act_redo(), "Redo", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_razor_all(), "Razor all tracks", false, false, size)
+  x = strip(state, out, x, top, height, act_razor_all(), "Razor all tracks", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_go_start(), "Start", false, false, size)
-  x = strip(out, x, top, height, act_step_back(), "Prev", false, false, size)
+  x = strip(state, out, x, top, height, act_go_start(), "Start", false, false, size)
+  x = strip(state, out, x, top, height, act_step_back(), "Prev", false, false, size)
   let playing: bool = editor.playing(struct.borrow(state, field=document))
-  x = strip(out, x, top, height, act_play(), if playing { "Pause" } else { "Play" }, playing, true, size)
-  x = strip(out, x, top, height, act_step_forward(), "Next", false, false, size)
-  x = strip(out, x, top, height, act_go_end(), "End", false, false, size)
+  x = strip(state, out, x, top, height, act_play(), if playing { "Pause" } else { "Play" }, playing, true, size)
+  x = strip(state, out, x, top, height, act_stop(), "Stop", false, false, size)
+  x = strip(state, out, x, top, height, act_step_forward(), "Next", false, false, size)
+  x = strip(state, out, x, top, height, act_go_end(), "End", false, false, size)
   x = x + 10.0
-  x = strip(out, x, top, height, act_reload(), "Reload", false, false, size)
+  x = strip(state, out, x, top, height, act_reload(), "Reload", false, false, size)
+  out
+}
+
+pub fn monitor_area(frame: layout.Frame, state: ref<app.App>, source: bool) -> layout.Rect effects {} {
+  if state.fullscreen != 0 { return layout.fullscreen_monitor(frame.width, frame.height) }
+  if source { frame.source } else { frame.program }
+}
+
+// The same visible transport controls are used for painting and pointer dispatch.
+// target 1 denotes the source monitor; toolbar target 0 denotes the program.
+pub fn monitor_controls(frame: layout.Frame, state: ref<app.App>, source: bool)
+                       -> array<Control> effects {alloc} {
+  var out: array<Control> = array.new()
+  let area: layout.Rect = monitor_area(frame, state, source)
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let enabled: bool = if source { editor.source_frames(doc, doc.monitor_source) > 0 }
+    else { editor.duration(doc) > 0 }
+  let playing: bool = if source { struct.get(struct.borrow(doc, field=monitor), field=playing) }
+    else { editor.playing(doc) }
+  let width: f64 = (layout.width_of(area) - 16.0 - 15.0) / 6.0
+  var index: u64 = 0
+  loop {
+    if index == 6 { break }
+    let action: u32 = if index == 0 { act_go_start() } else if index == 1 { act_step_back() }
+      else if index == 2 { act_play() } else if index == 3 { act_stop() }
+      else if index == 4 { act_step_forward() } else { act_go_end() }
+    let label: str = if index == 0 { "|<" } else if index == 1 { "<" }
+      else if index == 2 { if playing { "Pause" } else { "Play" } }
+      else if index == 3 { "Stop" } else if index == 4 { ">" } else { ">|" }
+    let left: f64 = area.left + 8.0 + cast.float(index) * (width + 3.0)
+    var control: Control = button(action, label,
+      layout.rect(left, area.bottom - 29.0, left + width, area.bottom - 4.0), index == 2 and playing)
+    struct.set(control, if source { 1 } else { 0 }, field=target)
+    struct.set(control, enabled, field=enabled)
+    struct.set(control, if width < 43.0 { 10.0 } else { 12.0 }, field=size)
+    array.push(out, control)
+    index = index + 1
+  }
+  var full: Control = button(act_fullscreen(), if state.fullscreen == 0 { "Full" } else { "Exit full" },
+    layout.rect(area.right - 84.0, area.top + 3.0, area.right - 6.0, area.top + 27.0), state.fullscreen != 0)
+  struct.set(full, if source { 1 } else { 0 }, field=target)
+  array.push(out, full)
   out
 }
 
@@ -375,13 +443,13 @@ pub fn toolbar(frame: layout.Frame, state: ref<app.App>) -> array<Control> effec
 // each candidate size, and the largest size that fits is the one used. Laying out first and
 // hoping is how the Group and Snap buttons ended up underneath Zoom out, where a click on
 // either of them zoomed instead.
-fn run_width(labels: ref<array<string>>, size: f64) -> f64 effects {alloc} {
+fn run_width(state: ref<app.App>, labels: ref<array<string>>, size: f64) -> f64 effects {alloc} {
   var total: f64 = 0.0
   var index: u64 = 0
   loop {
     if index >= array.len(labels) { break }
     let owned: string = string.copy(str.view(array.borrow(labels, index)))
-    total = total + font.text_vector_width(str.view(owned), size) + bar_pad() * 2.0 + 3.0
+    total = total + ui_text.width(struct.borrow(state, field=typography), str.view(owned), size) + bar_pad() * 2.0 + 3.0
     index = index + 1
   }
   total
@@ -407,7 +475,7 @@ pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   var size: f64 = timeline_bar_type()
   loop {
     if size <= 8.0 { break }
-    let needed: f64 = run_width(labels, size) + run_width(zoom_labels, size) + 16.0
+    let needed: f64 = run_width(state, labels, size) + run_width(state, zoom_labels, size) + 16.0
     if needed <= layout.width_of(area) { break }
     size = size - 1.0
   }
@@ -416,7 +484,7 @@ pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   loop {
     if index >= array.len(zoom_labels) { break }
     let text: str = str.view(array.borrow(zoom_labels, index))
-    let wide: f64 = font.text_vector_width(text, size) + bar_pad() * 2.0
+    let wide: f64 = ui_text.width(struct.borrow(state, field=typography), text, size) + bar_pad() * 2.0
     var zoomer: Control = button(array.get(zoom_actions, index), text,
       layout.rect(right - wide, top, right, top + height), false)
     struct.set(zoomer, size, field=size)
@@ -431,7 +499,7 @@ pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   loop {
     if index >= array.len(labels) { break }
     let text: str = str.view(array.borrow(labels, index))
-    let wide: f64 = font.text_vector_width(text, size) + bar_pad() * 2.0
+    let wide: f64 = ui_text.width(struct.borrow(state, field=typography), text, size) + bar_pad() * 2.0
     // A button that will not fit is NOT built. An unbuilt button is not painted and cannot
     // be clicked, which is better than one drawn on top of another control's rectangle.
     if x + wide > limit { break }
@@ -509,7 +577,7 @@ pub fn dock_tabs(frame: layout.Frame, state: ref<app.App>) -> array<Control> eff
     if index >= 4 { break }
     let seat: u64 = cast.wrap(index)
     let text: str = str.view(array.borrow(names, seat))
-    let wide: f64 = font.text_vector_width(text, size) + padding * 2.0 + slack
+    let wide: f64 = ui_text.width(struct.borrow(state, field=typography), text, size) + padding * 2.0 + slack
     var made: Control = button(act_tab(), text,
       layout.rect(left, area.top, left + wide, area.bottom), index == chosen)
     struct.set(made, style_tab(), field=style)
@@ -685,16 +753,16 @@ pub fn params_for(kind: str) -> array<Spec> effects {alloc} {
   }
   else if str.eq(kind, "gate") {
     sp(out, "threshold", "Threshold", -80.0, 0.0, 1.0, -45.0)
-    sp(out, "hold", "Hold ms", 0.0, 500.0, 5.0, 50.0)
+    sp(out, "hold", "Release ms", 0.0, 500.0, 5.0, 50.0)
   }
-  else if str.eq(kind, "normalize") { sp(out, "target", "Target LUFS", -30.0, 0.0, 0.5, -14.0) }
+  else if str.eq(kind, "normalize") { sp(out, "target", "Target LUFS", -30.0, -5.0, 0.5, -14.0) }
   else if str.eq(kind, "reverb") {
     sp(out, "amount", "Amount", 0.0, 1.0, 0.02, 0.3)
     sp(out, "room", "Room", 0.0, 1.0, 0.02, 0.5)
   }
   else if str.eq(kind, "delay") {
     sp(out, "time", "Delay ms", 0.0, 2000.0, 10.0, 250.0)
-    sp(out, "decay", "Delay decay", 0.0, 1.0, 0.02, 0.4)
+    sp(out, "decay", "Delay decay", 0.0, 0.95, 0.02, 0.4)
   }
   else if str.eq(kind, "pitch") { sp(out, "semitones", "Pitch", -12.0, 12.0, 0.5, 0.0) }
   else if str.eq(kind, "low_pass") { sp(out, "cutoff", "Low pass Hz", 20.0, 20000.0, 100.0, 8000.0) }
@@ -719,7 +787,7 @@ pub fn params_for(kind: str) -> array<Spec> effects {alloc} {
   }
   else if str.eq(kind, "phaser") {
     sp(out, "depth", "Depth", 0.0, 1.0, 0.02, 0.5)
-    sp(out, "rate", "Rate Hz", 0.1, 10.0, 0.1, 0.8)
+    sp(out, "rate", "Rate Hz", 0.1, 2.0, 0.1, 0.8)
   }
   else if str.eq(kind, "limiter") { sp(out, "ceiling", "Ceiling dB", -12.0, 0.0, 0.1, -1.0) }
   else { sp(out, "amount", "Amount", 0.0, 1.0, 0.02, 1.0) }
@@ -746,8 +814,8 @@ pub fn blend_name(mode: f64) -> string effects {alloc} {
 // produced but marked disabled and clipped away by the painter, so a scroll position never
 // changes which row an action belongs to.
 
-pub fn row_height() -> f64 effects {} { 22.0 }
-pub fn head_height() -> f64 effects {} { 26.0 }
+pub fn row_height() -> f64 effects {} { 28.0 }
+pub fn head_height() -> f64 effects {} { 32.0 }
 
 fn heading(out: ref<array<Control>>, area: layout.Rect, top: f64,
            text: str) -> f64 effects {alloc} {
@@ -879,6 +947,22 @@ fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
   let id: u64 = filter_of_kind(doc, clip, kind)
   var specs: array<Spec> = params_for(kind)
   var cursor: f64 = top
+  if id != 0 and (str.eq(kind, "text") or str.eq(kind, "lut3d")) {
+    let field: str = if str.eq(kind, "text") { "content" } else { "path" }
+    let current: string = editor.filter_text_param(doc, id, field, "")
+    let label: str = if str.eq(kind, "text") { "Edit title text..." }
+      else { "Choose .cube file..." }
+    var edit: Control = button(act_filter_value(), label,
+      layout.rect(area.left + 4.0, cursor, area.right - 4.0,
+        cursor + row_height()), false)
+    struct.set(edit, domain_filter(), field=domain)
+    struct.set(edit, id, field=target)
+    let _ = ref.swap(struct.borrow(edit, field=kind), string.copy(kind))
+    let _ = ref.swap(struct.borrow(edit, field=name), string.copy(field))
+    array.push(out, edit)
+    cursor = cursor + row_height()
+    cursor = text_row(out, area, cursor, "Current", str.view(current))
+  }
   var index: u64 = 0
   loop {
     if index >= array.len(specs) { break }
@@ -939,7 +1023,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
 
   cursor = heading(out, area, cursor, "CLIP")
   match editor.clip(doc, clip) {
-    none => { text_row(out, area, cursor, "no clip selected", "select a clip in the timeline") },
+    none => { cursor = text_row(out, area, cursor, "no clip selected", "select a clip in the timeline") },
     some(value) => {
       let source_name: string = editor.source_name(doc, value.source)
       cursor = text_row(out, area, cursor, "Name", str.view(source_name))
@@ -956,6 +1040,8 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
       cursor = text_row(out, area, cursor, "Track", str.view(track_name))
     },
   }
+
+  if clip == 0 { return out }
 
   cursor = heading(out, area, cursor, "SIZE, POSITION & ROTATE")
   cursor = kind_section(out, area, cursor, doc, clip, "size_position")
@@ -1083,7 +1169,8 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
   cursor = heading(out, area, cursor, "STACK")
   let count: u64 = editor.filter_count(doc, clip)
   if clip == 0 {
-    cursor = text_row(out, area, cursor, "no clip selected", "")
+    cursor = text_row(out, area, cursor, "Select a timeline clip", "to edit its filters")
+    return out
   } else if count == 0 {
     cursor = text_row(out, area, cursor, "no filters", "pick one from the library below")
   } else {
@@ -1103,7 +1190,6 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
             id == picked)
           struct.set(name_button, domain_filter(), field=domain)
           struct.set(name_button, id, field=target)
-          struct.set(name_button, on, field=enabled)
           array.push(out, name_button)
           var eye: Control = toggle(act_filter_toggle(), if on { "on" } else { "off" },
             layout.rect(area.right - 116.0, top + 1.0, area.right - 88.0,
@@ -1151,34 +1237,83 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
 // ---------------------------------------------------------------------------
 // Audio: a strip per audio track, plus the mix controls the mixer used to hold.
 
+pub fn clip_has_audio(doc: ref<editor.Document>, clip: u64) -> bool effects {alloc} {
+  match editor.clip(doc, clip) {
+    none => false,
+    some(value) => match editor.source_slot(doc, value.source) {
+      none => false,
+      some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=has_audio),
+    },
+  }
+}
+
+pub fn track_has_audio(doc: ref<editor.Document>, track: u64) -> bool effects {alloc} {
+  var i: u64 = 0
+  loop { if i >= editor.clip_count(doc) { break }
+    match editor.clip_at(doc, i) {
+      none => {}, some(value) => {
+        if value.owner == doc.active and value.track == track and clip_has_audio(doc, value.id) { return true }
+      },
+    }
+    i = i + 1
+  }
+  false
+}
+
+pub fn audio_tracks(doc: ref<editor.Document>) -> array<u64> effects {alloc} {
+  var out: array<u64> = array.new()
+  var lanes: array<u64> = editor_view.lanes(doc, doc.active)
+  // Put tracks that contain sound first, including embedded audio on video lanes.
+  var pass: u64 = 0
+  loop { if pass == 2 { break }
+    var i: u64 = 0
+    loop { if i >= array.len(lanes) { break }
+      let id: u64 = array.get(lanes, i)
+      let has_sound: bool = track_has_audio(doc, id)
+      if (pass == 0 and has_sound) or (pass == 1 and not has_sound and editor.track_kind(doc, id) == editor.track_audio()) {
+        array.push(out, id)
+      }
+      i = i + 1
+    }
+    pass = pass + 1
+  }
+  out
+}
+
 pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.dock_body
   let scroll: f64 = app.dock_scroll(state)
   // The meters occupy the top of the panel; the strips scroll beneath them.
   var cursor: f64 = area.top + meter_height() + 6.0 - scroll
+  let clip: u64 = app.current_clip(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
-  let sequence: u64 = doc.active
-  var lanes: array<u64> = editor_view.lanes(doc, sequence)
+  var lanes: array<u64> = audio_tracks(doc)
   var index: u64 = 0
   var seen: u64 = 0
   loop {
     if index >= array.len(lanes) { break }
     let id: u64 = array.get(lanes, index)
-    if editor.track_kind(doc, id) == editor.track_audio() {
       let owned: string = editor.track_name(doc, id)
-      cursor = heading(out, area, cursor, str.view(owned))
+      let title: string = if editor.track_kind(doc, id) == editor.track_video() { text.concat(str.view(owned), " / embedded audio") } else { owned }
+      let available: bool = track_has_audio(doc, id)
+      if not available { index = index + 1
+        continue }
+      cursor = heading(out, area, cursor, str.view(title))
       cursor = param_row(out, area, cursor, domain_track(), id, "", "gain", "Gain",
-        editor.track_gain(doc, id), 0.0, 2.0, 0.05, true)
+        editor.track_gain(doc, id), 0.0, 2.0, 0.05, available)
       cursor = param_row(out, area, cursor, domain_track(), id, "", "pan", "Pan",
-        editor.track_pan(doc, id), -1.0, 1.0, 0.05, true)
+        editor.track_pan(doc, id), -1.0, 1.0, 0.05, available)
       let top: f64 = cursor
       let half: f64 = (area.left + area.right) * 0.5
       var mute: Control = toggle(act_track_mute(), "Mute",
         layout.rect(area.left + 4.0, top, half - 2.0, top + row_height()),
-        not editor.track_audible(doc, id))
+        match editor.track_slot(doc, id) {
+          none => false, some(slot) => struct.get(array.borrow(struct.borrow(doc, field=tracks), slot), field=muted),
+        })
       struct.set(mute, domain_track(), field=domain)
       struct.set(mute, id, field=target)
+      struct.set(mute, available, field=enabled)
       array.push(out, mute)
       var solo: Control = toggle(act_track_solo(), "Solo",
         layout.rect(half + 2.0, top, area.right - 4.0, top + row_height()), false)
@@ -1191,13 +1326,28 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
           struct.set(solo, struct.get(entry, field=solo), field=on)
         },
       }
+      struct.set(solo, available, field=enabled)
       array.push(out, solo)
       cursor = cursor + row_height() + 4.0
       seen = seen + 1
-    }
     index = index + 1
   }
-  if seen == 0 { text_row(out, area, cursor, "no audio tracks", "add one with +A") }
+  if seen == 0 { text_row(out, area, cursor, "No audio clips", "Import audio or a video with sound") }
+  if clip_has_audio(doc, clip) {
+    cursor = heading(out, area, cursor, "SELECTED CLIP AUDIO")
+    match editor.clip(doc, clip) { none => {}, some(value) => {
+      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "gain", "Clip gain", value.gain, 0.0, 4.0, 0.05, true)
+      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "pan", "Clip pan", value.pan, -1.0, 1.0, 0.05, true)
+    }, }
+    cursor = kind_section(out, area, cursor, doc, clip, "eq_3band")
+    var kinds: array<string> = audio_kinds()
+    var k: u64 = 0
+    loop { if k >= array.len(kinds) { break }
+      let kind: str = str.view(array.borrow(kinds, k))
+      if not str.eq(kind, "eq_3band") { cursor = effect_switch(out, area, cursor, doc, clip, kind, kind) }
+      k = k + 1
+    }
+  }
   out
 }
 
@@ -1212,7 +1362,7 @@ pub fn scopes_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   // The scopes are read from the program frame the monitor already fetched on this repaint,
   // so there is nothing to refresh; the only action here is exporting what is on screen.
   let top: f64 = area.bottom - row_height() - 6.0
-  var render: Control = button(act_render(), "Render still",
+  var render: Control = button(act_render(), "Export video",
     layout.rect(area.left + 6.0, top, area.right - 6.0, top + row_height()), false)
   struct.set(render, top_bar_type(), field=size)
   array.push(out, render)
@@ -1337,7 +1487,7 @@ pub fn pool_controls(frame: layout.Frame, state: ref<app.App>) -> array<Control>
   loop {
     if index2 >= 3 { break }
     let text: str = str.view(array.borrow(labels, index2))
-    let wide: f64 = font.text_vector_width(text, size) + padding * 2.0 + slack
+    let wide: f64 = ui_text.width(struct.borrow(state, field=typography), text, size) + padding * 2.0 + slack
     var made: Control = button(array.get(actions, index2), text,
       layout.rect(x, foot + 2.0, x + wide - 3.0, foot + 23.0), false)
     struct.set(made, domain_source(), field=domain)

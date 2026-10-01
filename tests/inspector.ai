@@ -1,0 +1,276 @@
+module genesis.inspector_tests
+import std.draw as draw
+import std.editor as editor
+import std.font as font
+import std.geometry as geometry
+import std.math as math
+import std.timeline as timeline
+import "../src/view.ai" as painter
+import std.path as path
+import std.testing as test
+import std.widgets as widgets
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/typeface.ai" as typeface
+import "../src/ui_text.ai" as ui_text
+import "../src/timeline_media.ai" as media
+
+fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var state: app.App = app.app(provider.fake(scratch))
+  var source: commands.Result = commands.import_media(state, "media/test.mov", "Inspector clip")
+  let track: u64 = app.default_video_track(state)
+  var clip: commands.Result = commands.append_clip(state, track, source.value, 0, 60)
+  let _ = commands.select_only(state, clip.value)
+  state
+}
+
+fn parameter(controls: ref<array<chrome.Control>>, kind: str, name: str) -> layout.Rect effects {alloc} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(controls) { break }
+    let control: ref<chrome.Control> = array.borrow(controls, i)
+    let named: string = chrome.name_of(control)
+    let family: string = chrome.kind_of(control)
+    if control.action == chrome.act_param_set() and str.eq(str.view(named), name) and
+        str.eq(str.view(family), kind) { return control.area }
+    i = i + 1
+  }
+  layout.rect(0.0, 0.0, 0.0, 0.0)
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 2 { return 2 }
+  let scratch: str = view.get(args, 1)
+  var suite: test.Suite = test.suite("Genesis inspector and TrueType UI", false)
+  let frame: layout.Frame = layout.frame(1600.0, 980.0)
+
+  let _ = test.start(suite, "Empty inspector and single-clip project open")
+  var state: app.App = fixture(scratch)
+  let clip: u64 = app.current_clip(state)
+  let _ = commands.clear_selection(state)
+  var empty: array<chrome.Control> = chrome.properties_panel(frame, state)
+  let _ = test.eq_u64(suite, array.len(empty), 2, "No misleading parameter controls without selection")
+  app.set_dock_tab(state, chrome.tab_filters())
+  var no_filters: array<chrome.Control> = chrome.filters_panel(frame, state)
+  let _ = test.eq_u64(suite, array.len(no_filters), 2, "No active filter library without a clip")
+  let project: string = path.join(scratch, "inspector-open.air")
+  var saved: commands.Result = commands.save_project(state, str.view(project))
+  var opened: commands.Result = commands.open_project(state, str.view(project))
+  let _ = test.check(suite, saved.ok and opened.ok, "Project round trip")
+  let _ = test.eq_u64(suite, app.current_clip(state), clip, "Single clip opens selected")
+  let _ = test.check(suite, not app.dirty(state), "Selecting the opened clip does not report a user edit")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Both monitors expose real transport buttons")
+  let source: u64 = struct.get(struct.borrow(state, field=document), field=monitor_source)
+  let source_id: u64 = struct.get(array.borrow(struct.borrow(struct.borrow(state, field=document), field=sources), 0), field=id)
+  let _ = commands.open_source(state, source_id)
+  var source_controls: array<chrome.Control> = chrome.monitor_controls(frame, state, true)
+  var program_controls: array<chrome.Control> = chrome.monitor_controls(frame, state, false)
+  let _ = test.eq_u64(suite, array.len(source_controls), 7, "Source has transport and fullscreen controls")
+  let _ = test.eq_u64(suite, array.len(program_controls), 7, "Program has transport and fullscreen controls")
+  var button: layout.Rect = struct.get(array.borrow(program_controls, 2), field=area)
+  let _ = input.pointer_down(state, 1600.0, 980.0, (button.left + button.right)*0.5, (button.top + button.bottom)*0.5)
+  let _ = test.check(suite, editor.playing(struct.borrow(state, field=document)), "Program Play starts playback")
+  button = struct.get(array.borrow(program_controls, 3), field=area)
+  let _ = input.pointer_down(state, 1600.0, 980.0, (button.left + button.right)*0.5, (button.top + button.bottom)*0.5)
+  let _ = test.check(suite, not editor.playing(struct.borrow(state, field=document)), "Program Stop stops playback")
+  button = struct.get(array.borrow(source_controls, 2), field=area)
+  let _ = input.pointer_down(state, 1600.0, 980.0, (button.left + button.right)*0.5, (button.top + button.bottom)*0.5)
+  let _ = test.check(suite, struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing), "Source Play starts its independent transport")
+  let _ = test.check(suite, not editor.playing(struct.borrow(state, field=document)), "Source playback pauses the program")
+  button = struct.get(array.borrow(source_controls, 3), field=area)
+  let _ = input.pointer_down(state, 1600.0, 980.0, (button.left + button.right)*0.5, (button.top + button.bottom)*0.5)
+  let _ = test.check(suite, not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing), "Source Stop stops playback")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Monitor scrub bars seek live and clamp outside release")
+  let bar_source: layout.Rect = layout.monitor_scrub(frame.source)
+  let source_frames: i64 = editor.source_frames(struct.borrow(state, field=document), source_id)
+  let _ = input.pointer_down(state, 1600.0, 980.0, bar_source.left, (bar_source.top + bar_source.bottom)*0.5)
+  let _ = input.pointer_move(state, 1600.0, 980.0, (bar_source.left + bar_source.right)*0.5, bar_source.top)
+  let _ = test.eq_i64(suite, struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=frame), cast.sat(math.round(cast.float(source_frames - 1)*0.5)), "Source drag uses native source frames")
+  let _ = input.pointer_up(state, 1600.0, 980.0, bar_source.right + 500.0, bar_source.top)
+  let _ = test.eq_i64(suite, struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=frame), source_frames - 1, "Source release outside clamps to last frame")
+  let bar_program: layout.Rect = layout.monitor_scrub(frame.program)
+  let _ = commands.program(state, editor.play())
+  let _ = input.pointer_down(state, 1600.0, 980.0, bar_program.left, bar_program.top + 5.0)
+  let _ = test.check(suite, not editor.playing(struct.borrow(state, field=document)), "Scrub pauses the advancing playback clock")
+  let _ = input.pointer_move(state, 1600.0, 980.0, (bar_program.left + bar_program.right)*0.5, bar_program.top)
+  let _ = test.eq_i64(suite, editor.playhead(struct.borrow(state, field=document)), 30, "Program drag updates the project playhead immediately")
+  let _ = input.pointer_up(state, 1600.0, 980.0, bar_program.right + 500.0, bar_program.top)
+  let _ = test.eq_i64(suite, editor.playhead(struct.borrow(state, field=document)), 59, "Program release outside clamps to last frame")
+  let _ = test.check(suite, app.gesture_kind(state) == app.drag_none(), "Release ends the seek gesture")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Timeline ruler drag pauses and follows its painted frame mapping")
+  let _ = commands.program(state, editor.play())
+  var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+  let x: f64 = timeline.frame_to_x(model, 20)
+  let _ = input.pointer_down(state, 1600.0, 980.0, frame.ruler.left + 1.0, frame.ruler.top + 5.0)
+  let _ = input.pointer_move(state, 1600.0, 980.0, x, frame.ruler.top + 5.0)
+  let _ = input.pointer_up(state, 1600.0, 980.0, x, frame.ruler.top + 5.0)
+  let _ = test.eq_i64(suite, editor.playhead(struct.borrow(state, field=document)), 20, "Ruler scrub lands on frame 20")
+  let _ = test.check(suite, not editor.playing(struct.borrow(state, field=document)), "The clock does not override ruler scrub")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Dragging the painted playhead preserves video lanes")
+  let original: editor.Clip = option.unwrap(editor.clip(struct.borrow(state, field=document), clip))
+  let handle_x: f64 = timeline.frame_to_x(model, 20)
+  let target_x: f64 = timeline.frame_to_x(model, 40)
+  let _ = input.pointer_down(state, 1600.0, 980.0, handle_x, frame.timeline.top + 70.0)
+  let _ = input.pointer_move(state, 1600.0, 980.0, target_x, frame.timeline.top + 125.0)
+  let _ = test.eq_i64(suite, editor.playhead(struct.borrow(state, field=document)), 40, "Lane-area handle updates time during the drag")
+  let _ = input.pointer_up(state, 1600.0, 980.0, target_x, frame.timeline.top + 125.0)
+  let after_drag: editor.Clip = option.unwrap(editor.clip(struct.borrow(state, field=document), clip))
+  let _ = test.eq_u64(suite, after_drag.track, original.track, "Dragging the playhead does not move video to A1")
+  let _ = test.eq_i64(suite, after_drag.length, original.length, "Dragging the playhead does not trim the clip")
+  var wrong_lane: commands.Result = commands.move_clip(state, clip, app.default_audio_track(state), 0)
+  let _ = test.check(suite, not wrong_lane.ok, "Crossing into an audio lane is refused")
+  let kept: editor.Clip = option.unwrap(editor.clip(struct.borrow(state, field=document), clip))
+  let _ = test.eq_u64(suite, kept.track, original.track, "Refused move keeps the picture on V1")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Fullscreen retains program transport and scrub controls")
+  app.set_focus(state, app.panel_program())
+  let _ = input.key(state, 65480, false, false)
+  let _ = test.eq_u64(suite, cast.wrap(state.fullscreen), 1, "F11 opens the program monitor")
+  let full_area: layout.Rect = chrome.monitor_area(frame, state, false)
+  var full_controls: array<chrome.Control> = chrome.monitor_controls(frame, state, false)
+  let _ = test.check(suite, layout.width_of(full_area) > 1500.0, "Fullscreen monitor uses the whole client")
+  var full_index: u64 = 0
+  loop { if full_index >= array.len(full_controls) { break }
+    let c: ref<chrome.Control> = array.borrow(full_controls, full_index)
+    if c.action == chrome.act_play() {
+      let _ = input.pointer_down(state, 1600.0, 980.0, (c.area.left + c.area.right)*0.5, (c.area.top + c.area.bottom)*0.5)
+      break
+    }
+    full_index = full_index + 1
+  }
+  let _ = test.check(suite, editor.playing(struct.borrow(state, field=document)), "Fullscreen Play drives the program")
+  let full_bar: layout.Rect = layout.monitor_scrub(full_area)
+  let _ = input.pointer_down(state, 1600.0, 980.0, full_bar.left, full_bar.top + 5.0)
+  let _ = input.pointer_move(state, 1600.0, 980.0, (full_bar.left+full_bar.right)*0.5, full_bar.top)
+  let _ = test.eq_i64(suite, editor.playhead(struct.borrow(state, field=document)), 30, "Fullscreen scrub updates time")
+  let _ = input.pointer_up(state, 1600.0, 980.0, full_bar.left, full_bar.top)
+  let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.eq_u64(suite, cast.wrap(state.fullscreen), 0, "Escape restores the editor")
+  let _ = test.check(suite, not editor.playing(struct.borrow(state, field=document)), "Seek remains paused after fullscreen exit")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Slider drag updates live, clamps and has one undo")
+  app.set_dock_tab(state, chrome.tab_properties())
+  var controls: array<chrome.Control> = chrome.properties_panel(frame, state)
+  let bar: layout.Rect = parameter(controls, "size_position", "x")
+  let y: f64 = (bar.top + bar.bottom) * 0.5
+  let _ = input.pointer_down(state, 1600.0, 980.0, bar.left + layout.width_of(bar) * 0.25, y)
+  let _ = test.check(suite, app.parameter_dragging(state), "Press begins a parameter drag")
+  let filter: u64 = chrome.filter_of_kind(struct.borrow(state, field=document), clip, "size_position")
+  let _ = test.check(suite, filter != 0, "First edit creates its filter")
+  let _ = input.pointer_move(state, 1600.0, 980.0, bar.left + layout.width_of(bar) * 0.75, y)
+  let _ = test.near_f64(suite, editor.filter_param(struct.borrow(state, field=document), filter, "x", -1.0), 0.5, 0.00001, "Live drag sets the actual project parameter")
+  let _ = input.pointer_up(state, 1600.0, 980.0, bar.right + 200.0, y)
+  let _ = test.near_f64(suite, editor.filter_param(struct.borrow(state, field=document), filter, "x", -1.0), 1.0, 0.00001, "Release outside the bar clamps to maximum")
+  let _ = test.check(suite, not app.parameter_dragging(state), "Release ends the drag")
+  var undone: commands.Result = commands.undo(state)
+  let _ = test.check(suite, undone.ok, "One undo succeeds")
+  let _ = test.eq_u64(suite, editor.filter_count(struct.borrow(state, field=document), clip), 0, "One undo removes the whole drag and new filter")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Escape cancels parameter drag")
+  let _ = input.pointer_down(state, 1600.0, 980.0, bar.right - 2.0, y)
+  let _ = input.pointer_move(state, 1600.0, 980.0, bar.left, y)
+  let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.check(suite, not app.parameter_dragging(state), "Escape ends drag")
+  let _ = test.eq_u64(suite, editor.filter_count(struct.borrow(state, field=document), clip), 0, "Escape restores original project")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Disabled filters remain selectable and editable")
+  var first: commands.Result = commands.add_filter(state, clip, "brightness")
+  let _ = commands.toggle_filter(state, first.value)
+  let _ = commands.add_filter(state, clip, "contrast")
+  app.set_dock_tab(state, chrome.tab_filters())
+  var stack: array<chrome.Control> = chrome.filters_panel(frame, state)
+  var i: u64 = 0
+  loop {
+    if i >= array.len(stack) { break }
+    let control: ref<chrome.Control> = array.borrow(stack, i)
+    if control.action == chrome.act_filter_pick() and control.target == first.value {
+      let area: layout.Rect = control.area
+      let _ = input.pointer_down(state, 1600.0, 980.0, (area.left + area.right) * 0.5, (area.top + area.bottom) * 0.5)
+      break
+    }
+    i = i + 1
+  }
+  let _ = test.eq_u64(suite, app.selected_filter(state), first.value, "Click can select a disabled filter")
+  let _ = test.check(suite, not editor.filter_enabled(struct.borrow(state, field=document), first.value), "Selection preserves disabled state")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Embedded video audio has active controls and invalidates the real mix")
+  let _ = editor.describe_source(struct.borrow(state, field=document), source_id, 640, 360, true, true, 48000, 2)
+  let track: u64 = app.default_video_track(state)
+  var audio_tracks: array<u64> = chrome.audio_tracks(struct.borrow(state, field=document))
+  let _ = test.eq_u64(suite, array.get(audio_tracks, 0), track, "Video with embedded audio is the first active strip")
+  let before_sound: string = media.audio_signature(struct.borrow(state, field=document))
+  app.set_dock_tab(state, chrome.tab_audio())
+  var audio_controls: array<chrome.Control> = chrome.audio_panel(frame, state)
+  var slot: u64 = 0
+  loop { if slot >= array.len(audio_controls) { break }
+    let control: ref<chrome.Control> = array.borrow(audio_controls, slot)
+    let name: string = chrome.name_of(control)
+    if control.action == chrome.act_param_set() and control.domain == chrome.domain_track() and control.target == track and str.eq(str.view(name), "gain") {
+      let box: layout.Rect = control.area
+      let _ = test.check(suite, control.enabled, "Embedded audio gain is enabled")
+      let _ = input.pointer_down(state, 1600.0, 980.0, box.left + layout.width_of(box)*0.25, (box.top + box.bottom)*0.5)
+      let _ = input.pointer_up(state, 1600.0, 980.0, box.left + layout.width_of(box)*0.25, (box.top + box.bottom)*0.5)
+      break
+    }
+    slot = slot + 1
+  }
+  let _ = test.near_f64(suite, editor.track_gain(struct.borrow(state, field=document), track), 0.5, 0.001, "Audio gain click edits the audible video track")
+  let _ = test.check(suite, not str.eq(str.view(before_sound), str.view(media.audio_signature(struct.borrow(state, field=document)))), "Fader changes invalidate queued PCM")
+  let gain_sound: string = media.audio_signature(struct.borrow(state, field=document))
+  let _ = commands.set_filter_param(state, first.value, "level", 1.1)
+  let _ = commands.seek(state, 15)
+  let _ = test.check(suite, str.eq(str.view(gain_sound), str.view(media.audio_signature(struct.borrow(state, field=document)))), "Picture-only edits and transport do not restart sound")
+  let _ = commands.set_parameter(state, chrome.domain_clip(), clip, "", "pan", -1.0)
+  let _ = test.check(suite, not str.eq(str.view(gain_sound), str.view(media.audio_signature(struct.borrow(state, field=document)))), "Clip pan is wired to the real mix")
+  let _ = commands.set_parameter(state, chrome.domain_clip(), clip, "", "pan", 4.0)
+  let value: editor.Clip = option.unwrap(editor.clip(struct.borrow(state, field=document), clip))
+  let _ = test.near_f64(suite, value.pan, 1.0, 0.001, "Clip pan clamps at the right channel")
+  let _ = test.check(suite, not editor.set_clip_pan(struct.borrow(state, field=document), 999999, 0.0), "Missing clip pan is refused")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "File shortcuts preserve clips and route to native prompts")
+  app.set_project_path(state, "")
+  let clips_before_save: u64 = editor.clip_count(struct.borrow(state, field=document))
+  let _ = commands.seek(state, 25)
+  let _ = input.key(state, 115, true, false)
+  let _ = test.check(suite, app.prompt_active(state) and app.prompt_action(state) == chrome.act_save(), "Ctrl+S opens Save for an untitled project")
+  let _ = test.eq_u64(suite, editor.clip_count(struct.borrow(state, field=document)), clips_before_save, "Ctrl+S never splits clips")
+  let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = input.key(state, 111, true, false)
+  let _ = test.check(suite, app.prompt_active(state) and app.prompt_action(state) == chrome.act_open(), "Ctrl+O opens the project picker")
+  let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "TrueType metrics, caching and display scale")
+  app.set_fonts(state, typeface.search_paths())
+  let book: ref<ui_text.Typography> = struct.borrow(state, field=typography)
+  let _ = test.check(suite, ui_text.available(book), "Native UI has real TrueType faces")
+  let wide: f64 = ui_text.width(book, "WWW", 12.0)
+  let narrow: f64 = ui_text.width(book, "iii", 12.0)
+  let _ = test.check(suite, wide > narrow * 2.0, "Proportional Segoe UI metrics replace the stroke font")
+  let cached: u64 = font.cached_glyphs(array.borrow(struct.borrow(book, field=faces), 2))
+  let repeated: f64 = ui_text.width(book, "WWWiii", 12.0)
+  let _ = test.eq_u64(suite, font.cached_glyphs(array.borrow(struct.borrow(book, field=faces), 2)), cached, "Repeated chrome labels reuse glyphs")
+  ui_text.set_scale(book, 2.0)
+  let _ = test.near_f64(suite, ui_text.width(book, "WWW", 12.0), wide, 2.0, "Logical widths remain stable at 2x scale")
+  let _ = test.check(suite, font.pixel_size(array.borrow(struct.borrow(book, field=faces), 2)) >= 32, "2x text rasterizes at physical resolution")
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(scratch, "inspector-tests.json"), 32)
+}

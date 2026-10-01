@@ -46,18 +46,31 @@ pub fn header_width() -> f64 effects {} { 196.0 }
 
 // The inspector dock is a fixed column: its controls are laid out in rows of a known width,
 // so they must not reflow as the window is resized.
-pub fn dock_width() -> f64 effects {} { 364.0 }
+pub fn dock_width() -> f64 effects {} { 420.0 }
 
-// Every one of these is sized around the type scale in `genesis.view` — a 5x7 stroke font
-// needs about nine pixels of cap height to stay readable, and a row has to be tall enough
-// to hold that plus its padding. Shrinking one without the other is what made the first
-// build unreadable.
-pub fn menu_height() -> f64 effects {} { 26.0 }
-pub fn toolbar_height() -> f64 effects {} { 34.0 }
-pub fn tbar_height() -> f64 effects {} { 30.0 }
+// Logical row sizes leave room for readable TrueType text and pointer targets.
+pub fn menu_height() -> f64 effects {} { 32.0 }
+pub fn toolbar_height() -> f64 effects {} { 42.0 }
+pub fn tbar_height() -> f64 effects {} { 36.0 }
 pub fn ruler_height() -> f64 effects {} { 24.0 }
-pub fn status_height() -> f64 effects {} { 26.0 }
-pub fn tab_height() -> f64 effects {} { 26.0 }
+pub fn status_height() -> f64 effects {} { 32.0 }
+pub fn tab_height() -> f64 effects {} { 34.0 }
+
+// Canvas pixels are physical pixels, while every panel and control below uses logical
+// coordinates. Keep the original 1x layout at ordinary window sizes and enlarge it
+// uniformly on dense, large desktops. Painting and input both use this one scale.
+pub fn ui_scale(width: f64, height: f64) -> f64 effects {} {
+  if width >= 3200.0 and height >= 1600.0 { return 2.0 }
+  if width >= 2400.0 and height >= 1250.0 { return 1.5 }
+  1.0
+}
+
+pub fn prompt_panel(width: f64, height: f64) -> Rect effects {} {
+  let span: f64 = if width < 680.0 { width - 32.0 } else { 648.0 }
+  let left: f64 = (width - span) * 0.5
+  let top: f64 = (height - 132.0) * 0.5
+  rect(left, top, left + span, top + 132.0)
+}
 
 pub fn frame(width: f64, height: f64) -> Frame effects {} {
   let menu_bottom: f64 = menu_height()
@@ -97,4 +110,13 @@ pub fn frame(width: f64, height: f64) -> Frame effects {} {
     timeline: rect(4.0 + header_width(), ruler_bottom, work_right, status_top - 4.0),
     status: rect(0.0, status_top, width, height),
     width: width, height: height}
+}
+
+pub fn fullscreen_monitor(width: f64, height: f64) -> Rect effects {} {
+  rect(4.0, 4.0, width - 4.0, height - 4.0)
+}
+
+// One rectangle shared by monitor painting and all seek/drag hit tests.
+pub fn monitor_scrub(area: Rect) -> Rect effects {} {
+  rect(area.left + 8.0, area.bottom - 64.0, area.right - 8.0, area.bottom - 46.0)
 }
