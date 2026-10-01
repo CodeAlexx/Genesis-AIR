@@ -425,7 +425,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
               string.append(said, str.view(export_target))
               app.set_status(state, str.view(said))
             },
-            err(problem) => { app.set_status(state, str.view(problem)) },
+            err(problem) => {
+              if str.starts_with(str.view(problem),"[GA_EXPORT_CANCELLED]") { app.set_status(state,"export cancelled") }
+              else { app.set_status(state,str.view(problem)) }
+            },
           }
           timeline_media.clear_export_signals(str.view(export_cancel), str.view(export_progress))
           dirty = true

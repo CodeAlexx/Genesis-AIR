@@ -1378,8 +1378,20 @@ pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
   ()
 }
 
-// Playback watches its committed request while process I/O waits. An empty root
-// keeps the normal preview/export command behavior and its existing deadlines.
+// Playback and export check their control files while process I/O waits.
+fn export_current(cancel: str) -> result<unit,string> effects {alloc, fs.meta} {
+  if str.len(cancel) == 0 { return result.ok(()) }
+  match files.exists(cancel) {
+    ok(found)=>{if found {return result.err("[GA_EXPORT_CANCELLED] export cancelled")}},
+    err(problem)=>{return result.err(text.concat("[GA_EXPORT_CONTROL] Cannot check cancellation: ",fs.error.message(problem)))},
+  }
+  result.ok(())
+}
+fn worker_request_current(root: str, id: u64, cancel: str) -> result<bool,string>
+    effects {alloc, fs.meta, fs.read} {
+  try export_current(cancel)
+  audio_request_current(root,id)
+}
 fn audio_request_current(root: str, id: u64) -> result<bool,string> effects {alloc, fs.meta, fs.read} {
   if str.len(root) == 0 { return result.ok(true) }
   if tasks.requested_at(path.join(root,"stop")) { return result.ok(false) }
@@ -1390,11 +1402,12 @@ fn audio_request_current(root: str, id: u64) -> result<bool,string> effects {all
     some(value)=>result.ok(value == id),none=>result.err("[GA_AUDIO_STREAM_CONTROL] Invalid playback request marker"),
   }
 }
-fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: str, root: str, id: u64)
+fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: str, root: str, id: u64, cancel: str)
            -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
   var request: string = string.copy(line)
   string.append(request, "\n")
-  if str.len(root) == 0 {
+  let cancellable: bool = str.len(root) != 0 or str.len(cancel) != 0
+  if not cancellable {
     match proc.write_all_stdin(child, str.bytes(str.view(request)), proc.deadline_in(30000)) {
       err(problem) => { return result.err(text.concat("worker write: ", fs.error.message(problem))) },
       ok(_) => { },
@@ -1403,10 +1416,11 @@ fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: st
     let deadline: u64 = proc.deadline_in(30000)
     var sent: u64 = 0
     loop {
-      let current: bool = try audio_request_current(root,id)
+      let current: bool = try worker_request_current(root,id,cancel)
       if not current { return result.err("[GA_AUDIO_STREAM_CANCELLED] Playback request was superseded") }
       if sent >= str.len(str.view(request)) { break }
-      if time.monotonic_ns() >= deadline { return result.err("[GA_AUDIO_STREAM_TIMEOUT] Worker write timed out") }
+      if time.monotonic_ns() >= deadline { return result.err(if str.len(cancel) != 0 {
+        "[GA_EXPORT_TIMEOUT] Worker write timed out" }else{"[GA_AUDIO_STREAM_TIMEOUT] Worker write timed out"}) }
       let step: u64 = proc.deadline_in(50)
       match proc.write_stdin(child,view.slice(str.bytes(str.view(request)),sent,str.len(str.view(request))),
           if step < deadline {step}else{deadline}) {
@@ -1419,13 +1433,14 @@ fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: st
   var detail: string = string.new()
   var count: u64 = 0
   loop {
-    let current: bool = try audio_request_current(root,id)
+    let current: bool = try worker_request_current(root,id,cancel)
     if not current { return result.err("[GA_AUDIO_STREAM_CANCELLED] Playback request was superseded") }
     if count >= 256 { return result.err("worker emitted too many diagnostic lines") }
-    let step: u64 = if str.len(root) == 0 {deadline}else{proc.deadline_in(50)}
+    let step: u64 = if cancellable {proc.deadline_in(50)}else{deadline}
     match proc.read_line(child, reader, if step < deadline {step}else{deadline}) {
       err(problem) => {
-        if problem.code == 10 and str.len(root) != 0 and time.monotonic_ns() < deadline {continue}
+        if problem.code == 10 and cancellable and time.monotonic_ns() < deadline {continue}
+        if problem.code == 10 and str.len(cancel) != 0 {return result.err("[GA_EXPORT_TIMEOUT] Worker reply timed out")}
         return result.err(text.concat("worker reply: ", fs.error.message(problem)))
       },
       ok(value) => {
@@ -1451,9 +1466,13 @@ fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: st
   }
   result.err("worker gave no reply")
 }
-fn command(child: ref<Child>, reader: ref<proc.LineReader>, line: str)
+fn export_command(child: ref<Child>, reader: ref<proc.LineReader>, line: str, cancel: str)
            -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
-  command_for_request(child,reader,line,"",0)
+  match command_for_request(child,reader,line,"",0,cancel) {
+    ok(_)=>result.ok(()),
+    err(problem)=>result.err(if str.starts_with(str.view(problem),"[GA_") {problem}
+      else{text.concat("[GA_EXPORT_WORKER] ",str.view(problem))}),
+  }
 }
 
 fn audio_session(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
@@ -1464,14 +1483,14 @@ fn audio_session(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
 fn audio_session_for_request(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
                  sounds: ref<array<string>>, closer: str, root: str, id: u64)
                  -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
-  try command_for_request(child, reader, opener, root, id)
+  try command_for_request(child, reader, opener, root, id, "")
   var at: u64 = 0
   loop {
     if at >= array.len(sounds) { break }
-    try command_for_request(child, reader, str.view(array.borrow(sounds, at)), root, id)
+    try command_for_request(child, reader, str.view(array.borrow(sounds, at)), root, id, "")
     at = at + 1
   }
-  try command_for_request(child, reader, closer, root, id)
+  try command_for_request(child, reader, closer, root, id, "")
   result.ok(())
 }
 
@@ -1981,26 +2000,49 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
                cancel: str, progress: str, profile: u32)
                -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let range: editor.Transport = editor.export_range(doc)
-  if range.mark_out <= range.mark_in { return result.err("the export range is empty") }
+  try export_current(cancel)
+  if range.mark_out <= range.mark_in { return result.err("[GA_EXPORT_RANGE] the export range is empty") }
   let sequence_slot: u64 = match editor.sequence_slot(doc, doc.active) {
-    none => { return result.err("the project has no active sequence") },
+    none => { return result.err("[GA_EXPORT_SEQUENCE] the project has no active sequence") },
     some(slot) => slot,
   }
   let sequence: ref<editor.Sequence> = array.borrow(struct.borrow(doc, field=sequences), sequence_slot)
   let fps: f64 = sequence.fps
   let width: u32 = sequence.width
   let height: u32 = sequence.height
-  if not (fps > 0.0) { return result.err("the sequence frame rate is invalid") }
+  if not (fps > 0.0) { return result.err("[GA_EXPORT_FPS] the sequence frame rate is invalid") }
   var argv: array<string> = [string.copy(worker), string.copy("--serve"), string.copy("--size"),
     string.from_int(width), string.from_int(height)]
   if profile == 4 or profile == 5 { array.push(argv, string.copy("--hdr")) }
   // Merge diagnostics into the bounded line reader so a chatty encoder cannot fill an
   // unread stderr pipe and stall a long export.
   var child: Child = match proc.spawn_piped_merged(argv) {
-    err(problem) => { return result.err(text.concat("start worker: ", fs.error.message(problem))) },
+    err(problem) => { return result.err(text.concat("[GA_EXPORT_START] start worker: ", fs.error.message(problem))) },
     ok(value) => value,
   }
   var reader: proc.LineReader = proc.line_reader(65536)
+  // This thread owns the child until the session finishes. Stop it before the
+  // caller removes partial output, including failures inside a borrowed helper.
+  match render_session(doc,child,reader,output,fonts,cancel,progress,profile,width,height,fps) {
+    err(problem)=>{
+      let _ = proc.terminate(child,100)
+      let _ = proc.close(child)
+      result.err(problem)
+    },
+    ok(_)=>{
+      match proc.close(child) {
+        err(problem)=>result.err(text.concat("[GA_EXPORT_EXIT] close worker: ",fs.error.message(problem))),
+        ok(status)=>if proc.success(status) {result.ok(())}else{result.err("[GA_EXPORT_EXIT] worker exited unsuccessfully")},
+      }
+    },
+  }
+}
+
+fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc.LineReader>,
+                  output: str, fonts: ref<array<string>>, cancel: str, progress: str,
+                  profile: u32, width: u32, height: u32, fps: f64)
+                  -> result<unit,string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let range: editor.Transport = editor.export_range(doc)
   let fractional: bool = math.abs(fps - 30000.0 / 1001.0) < 0.001 or
     math.abs(fps - 24000.0 / 1001.0) < 0.001 or math.abs(fps - 60000.0 / 1001.0) < 0.001
   let fps_denominator: i64 = if fractional { 1001 } else { 1000000 }
@@ -2016,7 +2058,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
     string.copy(if profile == 2 or profile == 3 or profile == 5 { "pcm_s24le" } else { "aac" }),
     string.from_float(fps)
   ]
-  let _ = try command(child, reader, str.view(text.join(open_fields, " ")))
+  try export_command(child, reader, str.view(text.join(open_fields, " ")), cancel)
   var cache: RenderCache = render_cache(fonts)
   struct.set(cache, width, field=width)
   struct.set(cache, height, field=height)
@@ -2024,10 +2066,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   var reported: i64 = -1
   loop {
     if frame >= range.mark_out { break }
-    if tasks.requested_at(cancel) {
-      let _ = proc.close(child)
-      return result.err("export cancelled")
-    }
+    try export_current(cancel)
     let percent: i64 = (frame - range.mark_in) * 100 / (range.mark_out - range.mark_in)
     if percent != reported and str.len(progress) != 0 {
       let _ = files.write_text(progress, str.view(string.from_int(percent)))
@@ -2037,7 +2076,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
     var step: u64 = 0
     loop {
       if step >= array.len(lines) { break }
-      let _ = try command(child, reader, str.view(array.borrow(lines, step)))
+      try export_command(child, reader, str.view(array.borrow(lines, step)), cancel)
       step = step + 1
     }
     frame = frame + 1
@@ -2046,24 +2085,28 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   var at: u64 = 0
   loop {
     if at >= array.len(sounds) { break }
-    let _ = try command(child, reader, str.view(array.borrow(sounds, at)))
+    try export_command(child, reader, str.view(array.borrow(sounds, at)), cancel)
     at = at + 1
   }
-  let _ = try command(child, reader, "CLOSE")
+  try export_command(child, reader, "CLOSE", cancel)
   match proc.close_stdin(child) {
     ok(_) => { },
-    err(problem) => { return result.err(text.concat("close worker input: ", fs.error.message(problem))) },
+    err(problem) => { return result.err(text.concat("[GA_EXPORT_EXIT] close worker input: ", fs.error.message(problem))) },
   }
-  let finished: process.status = match proc.wait(child, proc.deadline_in(30000)) {
-    ok(value) => value,
-    err(problem) => { return result.err(text.concat("wait for worker: ", fs.error.message(problem))) },
-  }
-  let status: process.status = match proc.close(child) {
-    ok(value) => value,
-    err(problem) => { return result.err(text.concat("close worker: ", fs.error.message(problem))) },
-  }
-  if not proc.success(finished) or not proc.success(status) {
-    return result.err("worker exited unsuccessfully")
+  let deadline: u64 = proc.deadline_in(30000)
+  loop {
+    try export_current(cancel)
+    let step: u64 = proc.deadline_in(50)
+    match proc.wait(child,if step < deadline {step}else{deadline}) {
+      ok(status)=>{
+        if not proc.success(status) {return result.err("[GA_EXPORT_EXIT] worker exited unsuccessfully")}
+        break
+      },
+      err(problem)=>{
+        if problem.code == 10 and time.monotonic_ns() < deadline {continue}
+        return result.err(text.concat("[GA_EXPORT_EXIT] wait for worker: ",fs.error.message(problem)))
+      },
+    }
   }
   result.ok(())
 }
@@ -2075,13 +2118,13 @@ pub fn render_profile(doc: ref<editor.Document>, worker: str, output: str, fonts
     return result.err("[GA_EXPORT_EXTENSION] Use .mkv for the 16-bit lossless master, .mov for ProRes or .mp4 for H.264/HEVC")
   }
   match files.exists(output) {
-    ok(found) => { if found { return result.err(string.copy("the output file already exists")) } },
-    err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
+    ok(found) => { if found { return result.err("[GA_EXPORT_EXISTS] the output file already exists") } },
+    err(problem) => { return result.err(text.concat("[GA_EXPORT_PATH] ",fs.error.message(problem))) },
   }
   var partial: string = text.concat(output, if profile == 3 or profile == 5 { ".genesis-air-part.mkv" } else if profile == 2 { ".genesis-air-part.mov" } else { ".genesis-air-part.mp4" })
   match files.exists(str.view(partial)) {
-    ok(found) => { if found { return result.err(string.copy("an unfinished output already exists")) } },
-    err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
+    ok(found) => { if found { return result.err("[GA_EXPORT_PARTIAL_EXISTS] an unfinished output already exists") } },
+    err(problem) => { return result.err(text.concat("[GA_EXPORT_PATH] ",fs.error.message(problem))) },
   }
   match render_into(doc, worker, str.view(partial), fonts, cancel, progress, profile) {
     err(problem) => {
@@ -2091,10 +2134,17 @@ pub fn render_profile(doc: ref<editor.Document>, worker: str, output: str, fonts
     },
     ok(_) => {
       cleanup_plan(str.view(partial))
+      match export_current(cancel) {
+        err(problem)=>{
+          let _ = files.remove(str.view(partial))
+          return result.err(problem)
+        },
+        ok(_)=>{},
+      }
       match files.rename(str.view(partial), output) {
         ok(_) => result.ok(()),
         err(problem) => {
-          let detail: string = string.copy(fs.error.message(problem))
+          let detail: string = text.concat("[GA_EXPORT_PUBLISH] ",fs.error.message(problem))
           let _ = files.remove(str.view(partial))
           result.err(detail)
         },

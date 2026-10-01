@@ -51,7 +51,9 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_stream.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-playback.exe') `
       --cancel-client (Join-Path $Bin 'genesis-audio-cancel.exe') --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Continuous audio and active cancellation acceptance failed.' }
-
+    & python (Join-Path $PSScriptRoot 'export_cancel.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --worker $worker --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Active export cancellation and retry acceptance failed.' }
   }
   Write-Host (Invoke-Native 'genesis-project-safety.exe' @($work)).TrimEnd()
   foreach ($artifact in @('project-safety-tests.json', 'project-decision.png', 'recovery-decision.png')) {

@@ -31,6 +31,34 @@ static int stall_audio(const wchar_t *marker) {
     return 3;
 }
 
+/* Stall one export phase, including exit after replying to CLOSE. The fake
+ * owns no child; its recorded PID must be gone before the CLI finishes. */
+static int stall_export(const wchar_t *marker) {
+    wchar_t phase[32], partial[32768];
+    if (!GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_PHASE", phase, 32) ||
+        !GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_PARTIAL", partial, 32768)) return 2;
+    char line[16384];
+    while (fgets(line, sizeof(line), stdin)) {
+        if (strncmp(line, "OPEN ", 5) == 0) {
+            FILE *output = _wfopen(partial, L"wb");
+            if (!output) return 2;
+            fputs("partial", output); fclose(output);
+        }
+        int block = (wcscmp(phase, L"open") == 0 && strncmp(line, "OPEN ", 5) == 0) ||
+            (wcscmp(phase, L"frame") == 0 && strncmp(line, "ENC ", 4) == 0) ||
+            (wcscmp(phase, L"audio") == 0 && strncmp(line, "AUDIO ", 6) == 0) ||
+            ((wcscmp(phase, L"close") == 0 || wcscmp(phase, L"exit") == 0) && strncmp(line, "CLOSE", 5) == 0);
+        if (!block || wcscmp(phase, L"exit") == 0) { fputs("DONE\n", stdout); fflush(stdout); }
+        if (!block) continue;
+        FILE *record = _wfopen(marker, L"wb");
+        if (!record) return 2;
+        fprintf(record, "%lu\n", GetCurrentProcessId()); fclose(record);
+        Sleep(INFINITE);
+        return 3;
+    }
+    return 3;
+}
+
 /* Exercise recovery through a real process, inheriting the AIR worker pipes. */
 int wmain(int argc, wchar_t **argv) {
     wchar_t starts[32768], crash[32768], worker[32768], command[32768];
@@ -42,6 +70,10 @@ int wmain(int argc, wchar_t **argv) {
     wchar_t audio_block[32768];
     if (GetEnvironmentVariableW(L"GENESIS_TEST_AUDIO_BLOCK", audio_block, 32768) &&
         GetFileAttributesW(audio_block) == INVALID_FILE_ATTRIBUTES) return stall_audio(audio_block);
+    wchar_t export_block[32768];
+    if (argc > 1 && wcscmp(argv[1], L"--serve") == 0 &&
+        GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_BLOCK", export_block, 32768) &&
+        GetFileAttributesW(export_block) == INVALID_FILE_ATTRIBUTES) return stall_export(export_block);
     if (GetEnvironmentVariableW(L"GENESIS_TEST_CRASH", crash, 32768) &&
         GetFileAttributesW(crash) == INVALID_FILE_ATTRIBUTES) {
         FILE *marker = _wfopen(crash, L"wb");

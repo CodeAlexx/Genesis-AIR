@@ -262,7 +262,11 @@ The headless `export` command selects H.264 for `.mp4`, ProRes for `.mov`, and t
 16-bit SDR master for `.mkv`. `--hevc` selects HEVC SDR and `--hdr` selects an HDR
 MP4 or MKV. The `render` command writes an editor-canvas PNG. Existing export files are
 refused. Export runs from a project snapshot in a background task; the status reports
-progress and Escape cancels between frames. Incomplete output is removed.
+progress and Escape cancels between frames, during worker pipe waits, and while
+waiting for the encoder to exit. Cancellation is checked in 50 ms I/O steps;
+the export owner stops its worker before removing incomplete output. A final
+cancellation check precedes publication. Worker, cancellation, path and publication
+failures have `GA_EXPORT_*` codes; ordinary UI cancellation shows `export cancelled`.
 `export.progress` and `export.cancel` in the scratch directory expose the same scriptable
 progress and cancellation path.
 
@@ -523,6 +527,24 @@ exercise fixed-size opaque/transparent frame transitions across three canvas sca
 in the editor and both fullscreen monitors.
 The generated-media suite covers effects, transitions, captions, Unicode, audio-only
 projects, worker crash recovery and export cancellation/cleanup.
+The Windows gate also stalls export opening, frame encoding, audio mixing, closing
+and final worker exit. Each case verifies cancellation, the old PID's exit, partial
+cleanup and a successful same-path retry with six video frames and audible audio.
+Existing final files and foreign partial files are preserved with coded refusals.
+The five stalled-process cancellations took 108–162 ms in the latest full Windows
+gate. Run the export gate separately with:
+
+```powershell
+python tests/export_cancel.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
+```
+
+Run the generated-media suite on Windows with its native worker wrapper configured:
+
+```powershell
+$env:GENESIS_WORKER_WRAPPER = (Resolve-Path .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe).Path
+python tests/real_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --stdlib .\build-windows\AIR-SDK\stdlib
+python tests/pro_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe
+```
 
 The pro-media suite measures 4K detail, fractional rate, ProRes/24-bit PCM, portrait
 preview/export aspect ratio and exact multicam cuts. The precision suite measures 1024

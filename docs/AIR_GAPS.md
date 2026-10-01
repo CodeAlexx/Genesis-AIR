@@ -295,3 +295,22 @@ baseline. Panel-band clearing alone measured 5.18/17.62 ms. Final serial medians
 varied between runs; the isolated paint reduction is 58%/69%. These measurements
 exclude native presentation, audio and asynchronous overlap and do not establish
 sustained interactive 4K60 or long-run A/V synchronization.
+
+## Export cancellation during process I/O
+
+Export previously checked cancellation between frames while individual worker replies
+could wait 120 seconds, writes 30 seconds, and the final child-exit wait 30 seconds.
+It now shares the playback command parser and partial-pipe handling, checking export
+cancellation in 50 ms I/O steps. Final process waiting also uses bounded steps, and
+publication checks cancellation after the worker exits. The creating thread retains
+the affine child and explicitly terminates/closes it on every session error before
+the caller removes its owned partial output. No SDK change was needed.
+
+The native CLI fault gate stalls OPEN, ENC, AUDIO, CLOSE and exit after a successful
+CLOSE reply. Each cancellation must complete within 2.5 seconds, leave the recorded
+PID exited, remove partial output and signals, and permit a same-path real export
+with six red frames and audible audio. Pre-existing final and foreign partial files
+are preserved with coded refusals. The latest full Windows gate measured 108–162 ms
+for the five cancellations. These checks exercise pipe and process waits;
+CPU-bound frame-plan work and encoder behavior under sustained load need separate
+latency measurements.
