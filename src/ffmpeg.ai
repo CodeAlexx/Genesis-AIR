@@ -1,0 +1,142 @@
+// Native argv processes behind the AIR media seam. No shell or Python runtime.
+module genesis.ffmpeg
+import std.decode as decode
+import std.files as files
+import std.json as json
+import std.math as math
+import std.process as proc
+import std.text as text
+
+pub type Info = struct { frames: i64, width: u32, height: u32, fps: f64, video: bool, audio: bool }
+
+pub fn invoke(argv: array<string> own) -> result<string, string> effects {alloc, process, time} {
+  var command: array<string> = argv
+  var captured: proc.Captured = match proc.output(command, 65536, 30000) {
+    ok(value) => value,
+    err(problem) => {
+      return result.err(text.concat(if problem.code == 10 { "[GA_PROCESS_TIMEOUT] " }
+        else { "[GA_PROCESS_START] " }, fs.error.message(problem)))
+    },
+  }
+  if not proc.success(captured.status) {
+    return result.err(text.concat("[GA_MEDIA_COMMAND] ", text.trim(
+      str.view(struct.borrow(captured, field=stderr)))))
+  }
+  result.ok(string.copy(str.view(struct.borrow(captured, field=stdout))))
+}
+
+fn field_text(document: ref<json.Document>, node: ref<decode.Node>, key: str) -> string effects {alloc} {
+  match decode.string_or(document, node, key, "") { ok(value) => value, err(_) => string.new(), }
+}
+fn field_number(document: ref<json.Document>, node: ref<decode.Node>, key: str) -> u32 effects {alloc} {
+  match decode.u64_or(document, node, key, 0) { ok(value) => cast.sat(value), err(_) => 0, }
+}
+fn decimal(value: str) -> f64 effects {alloc} {
+  match text.parse_f64(value) { some(found) => found, none => 0.0, }
+}
+fn rate(value: str) -> f64 effects {alloc} {
+  var parts: array<string> = text.split(value, "/")
+  if array.len(parts) != 2 { return decimal(value) }
+  let denominator: f64 = decimal(array.borrow(parts, 1))
+  if denominator <= 0.0 { return 0.0 }
+  decimal(array.borrow(parts, 0)) / denominator
+}
+
+pub fn probe(binary: str, source: str) -> result<Info, string> effects {alloc, process, time} {
+  let raw: string = try invoke([string.copy(binary), "-v", "error", "-show_entries",
+    "stream=codec_type,width,height,avg_frame_rate,nb_frames,duration:format=duration",
+    "-of", "json", string.copy(source)])
+  var document: json.Document = match json.parse(raw) {
+    ok(value) => value, err(_) => { return result.err("[GA_PROBE_REPLY] FFprobe returned invalid JSON") },
+  }
+  var root: decode.Node = decode.root()
+  var streams: decode.Node = match decode.field(document, root, "streams") {
+    ok(value) => value, err(_) => { return result.err("[GA_PROBE_REPLY] FFprobe returned no streams") },
+  }
+  let count: u64 = match decode.array_len(document, streams) { ok(value) => value, err(_) => 0, }
+  var info: Info = Info {frames: 0, width: 0, height: 0, fps: 30.0, video: false, audio: false}
+  var duration: f64 = 0.0
+  match decode.field(document, root, "format") {
+    ok(value) => { var format: decode.Node = value
+      duration = decimal(field_text(document, format, "duration")) },
+    err(_) => {},
+  }
+  var index: u64 = 0
+  loop {
+    if index >= count { break }
+    match decode.at(document, streams, index) {
+      ok(value) => {
+        var stream: decode.Node = value
+        let kind: string = field_text(document, stream, "codec_type")
+        if kind == "video" and not info.video {
+          struct.set(info, true, field=video)
+          struct.set(info, field_number(document, stream, "width"), field=width)
+          struct.set(info, field_number(document, stream, "height"), field=height)
+          let fps: f64 = rate(field_text(document, stream, "avg_frame_rate"))
+          if fps > 0.0 and fps < 1000.0 { struct.set(info, fps, field=fps) }
+          match text.parse_i64(field_text(document, stream, "nb_frames")) {
+            some(frames) => { if frames > 0 { struct.set(info, frames, field=frames) } }, none => {},
+          }
+        }
+        if kind == "audio" { struct.set(info, true, field=audio) }
+        let stream_duration: f64 = decimal(field_text(document, stream, "duration"))
+        if stream_duration > duration { duration = stream_duration }
+      }, err(_) => {},
+    }
+    index = index + 1
+  }
+  if not info.video and not info.audio { return result.err("[GA_MEDIA_STREAMS] The file has no audio or video") }
+  if info.frames == 0 and duration > 0.0 and duration < 1000000000.0 {
+    // The editor needs a positive integral bound, including fractional container durations.
+    struct.set(info, cast.sat(math.ceil(duration * info.fps)), field=frames)
+  }
+  result.ok(info)
+}
+
+pub fn frame(binary: str, source: str, at: i64, fps: f64, width: u32, height: u32,
+             output: str) -> result<unit, string> effects {alloc, process, time} {
+  let positive: i64 = if at < 0 { 0 } else { at }
+  let seconds: f64 = cast.float(positive) / fps
+  var filter: string = text.concat("scale=", string.from_int(width))
+  string.append(filter, text.concat(":", string.from_int(height)))
+  string.append(filter, ":force_original_aspect_ratio=decrease,pad=")
+  string.append(filter, text.concat(string.from_int(width), ":"))
+  string.append(filter, text.concat(string.from_int(height), ":(ow-iw)/2:(oh-ih)/2:black"))
+  let _ = try invoke([string.copy(binary), "-nostdin", "-y", "-v", "error", "-ss",
+    string.from_float(seconds), "-i", string.copy(source), "-map", "0:v:0", "-frames:v", "1",
+    "-vf", filter, "-pix_fmt", "rgba", "-f", "rawvideo", string.copy(output)])
+  result.ok(())
+}
+
+// A bounded mono envelope: at most two hours at 1 kHz, under 16 MiB of signed PCM.
+pub fn envelope(binary: str, source: str, output: str, buckets: u64)
+    -> result<array<f64>, string> effects {alloc, fs.read, process, time} {
+  let _ = try invoke([string.copy(binary), "-nostdin", "-y", "-v", "error", "-i",
+    string.copy(source), "-map", "0:a:0", "-t", "7200", "-ac", "1", "-ar", "1000",
+    "-c:a", "pcm_s16le", "-f", "s16le", string.copy(output)])
+  var raw: bytes = match files.read_limited(output, 16777216) {
+    ok(value) => value, err(_) => { return result.err("[GA_AUDIO_READ] The waveform could not be read") },
+  }
+  let data: view<byte> = bytes.view(raw)
+  let count: u64 = view.len(data) / 2
+  var peaks: array<f64> = array.new()
+  var index: u64 = 0
+  loop {
+    if index >= buckets { break }
+    array.push(peaks, 0.0)
+    index = index + 1
+  }
+  index = 0
+  loop {
+    if index >= count or buckets == 0 { break }
+    let low: u8 = cast.bits(view.get(data, index * 2))
+    let high: u8 = cast.bits(view.get(data, index * 2 + 1))
+    let unsigned: u64 = cast.wrap(low) + cast.wrap(high) * 256
+    let signed: i64 = if unsigned >= 32768 { cast.wrap(unsigned) - 65536 } else { cast.wrap(unsigned) }
+    let magnitude: f64 = math.abs(cast.float(signed)) / 32768.0
+    let slot: u64 = index * buckets / count
+    if magnitude > array.get(peaks, slot) { array.set(peaks, slot, magnitude) }
+    index = index + 1
+  }
+  result.ok(peaks)
+}

@@ -9,6 +9,11 @@
 // The flow is always:  input -> command -> document changes -> repaint.
 module genesis.app
 
+import std.application_theme as themes
+import std.files as files
+import std.path as path
+import std.math as math
+import std.text as text
 import std.editor as editor
 import std.editor_io as editor_io
 import "provider.ai" as provider
@@ -83,6 +88,7 @@ pub type App = struct {
   dock_scroll_drag_offset: f64,
   snap: bool,
   light: bool,
+  theme_id: u64,
   clipboard: Clipboard,
   gesture: Drag,
   prompt: Prompt,
@@ -112,7 +118,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     viewport: viewport(), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
     pool_row: 0, selected_filter: 0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
-    dock_scroll_drag_offset: 0.0, snap: true, light: false,
+    dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
     clipboard: Clipboard {source: 0, source_in: 0, length: 0, filled: false},
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
@@ -144,6 +150,62 @@ pub fn light(state: ref<App>) -> bool effects {} { state.light }
 pub fn set_light(state: ref<App>, value: bool) -> unit effects {} {
   struct.set(state, value, field=light)
   ()
+}
+pub fn theme_id(state: ref<App>) -> u64 effects {} { state.theme_id }
+
+pub type ProgramSample = struct { source: string, frame: i64 }
+// Resolve the visible video lane and its source position from the document.
+// Audio, hidden tracks and other sequences must never obscure the program monitor.
+pub fn program_sample(state: ref<App>) -> option<ProgramSample> effects {alloc} {
+  let document: ref<editor.Document> = struct.borrow(state, field=document)
+  let position: i64 = editor.playhead(document)
+  var selected: option<ProgramSample> = option.none()
+  var order: u32 = 0
+  var index: u64 = 0
+  loop {
+    if index >= editor.clip_count(document) { break }
+    match editor.clip_at(document, index) {
+      some(clip) => {
+        if clip.owner == document.active and clip.enabled and clip.start <= position
+          and editor.clip_end(clip) > position {
+          match editor.track_slot(document, clip.track) {
+            some(slot) => {
+              let track: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), slot)
+              if track.kind == editor.track_video() and not track.hidden and track.order >= order {
+                let track_order: u32 = track.order
+                match editor.source_slot(document, clip.source) {
+                  some(source_slot) => {
+                    let source: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), source_slot)
+                    let elapsed: i64 = if clip.reverse { clip.length - 1 - (position - clip.start) }
+                      else { position - clip.start }
+                    let offset: i64 = cast.sat(math.floor(cast.float(elapsed) * math.abs(clip.speed)))
+                    selected = option.some(ProgramSample {source: string.copy(str.view(struct.borrow(source, field=path))),
+                      frame: clip.source_in + offset})
+                    order = track_order
+                  }, none => {},
+                }
+              }
+            }, none => {},
+          }
+        }
+      }, none => {},
+    }
+    index = index + 1
+  }
+  selected
+}
+pub fn set_theme(state: ref<App>, value: u64) -> unit effects {} {
+  struct.set(state, if value < themes.count() { value } else { 0 }, field=theme_id)
+  struct.set(state, false, field=light)
+  ()
+}
+pub fn theme_name(state: ref<App>) -> string effects {alloc} {
+  if state.light { string.copy("Light") } else { themes.name(state.theme_id) }
+}
+pub fn persist_theme(state: ref<App>) -> bool effects {alloc, fs.write} {
+  let root: str = str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch))
+  let _ = files.mkdirs(root)
+  match files.write_text(path.join(root, "theme.txt"), theme_name(state)) { ok(_) => true, err(_) => false, }
 }
 pub fn stop(state: ref<App>) -> unit effects {} {
   struct.set(state, false, field=running)

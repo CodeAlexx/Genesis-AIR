@@ -1,0 +1,118 @@
+provider	fake
+tracks_at_start	4
+clips_at_start	0
+status_at_start	New project
+clean_at_start	true
+sources	3
+import_marks_dirty	true
+length_known	true
+bin_added	true
+clips_after_append	3
+duration	280
+oversize_admitted	true
+oversize_clamped	true
+selection_size	1
+selected_is_first	true
+selection_after_add	2
+selection_after_only	1
+split	split
+clips_after_split	4
+trim	trimmed tail
+ripple_trim	ripple trimmed
+slip	slipped
+nudge	nudged
+group	grouped
+group_members	2
+move_group	group moved
+ungroup	ungrouped
+transition	transition added
+transition_resize	transition resized
+fades	fades set
+keys	2
+marker	marker added
+subtitle	subtitle added
+zero_span_subtitle	false
+filters	3
+filter_param	0.40000000000000002
+filter_toggle	filter disabled
+grain_disabled	true
+grain_order	0
+filters_after_remove	2
+gain	0.59999999999999998
+pan	-0.5
+a1_audible_when_a2_solo	false
+a2_audible_when_a2_solo	true
+a1_muted	true
+program_frame	40
+source_frame	2
+transports_independent	true
+project_range	range set
+pool_click	Opened wide.mov
+focus_is_pool	true
+pool_row	0
+focus_is_dock	true
+ruler_scrubbed	true
+space_plays	true
+space_pauses	true
+home_rewinds	0
+edits_changed_state	true
+undo_1	true
+undo_1_exact	true
+undo_2_exact	true
+redo_1_exact	true
+redo_2_exact	true
+toolbar_built	true
+toolbar_has_undo	true
+menu_headings_built	true
+menu_opens_on_hover	true
+menu_switches_on_hover	true
+menu_item_hovers	true
+menu_first_click_opens	true
+menu_popup_has_about	true
+menu_item_reports	true
+menu_closes_after_item	true
+dock_scrollbar_present	true
+dock_wheel_uses_pointer	true
+dock_wheel_scrolls_up	true
+dock_thumb_press_starts_drag	true
+dock_thumb_drag_scrolls	true
+dock_thumb_release_stops_drag	true
+dock_track_click_pages	true
+tbar_has_split	true
+tbar_has_snap	true
+dock_tab_after_click	1
+library_added_filter	true
+properties_controls	172
+slider_materialised_filter	true
+slider_wrote_value	true
+copied	true
+clipboard_filled	true
+pasted	true
+paste_added_clip	true
+razor_all	true
+razor_cut_more_than_one	true
+header_has_eye	true
+header_has_add_video	true
+drag_moved_clip	true
+drag_is_one_undo_step	true
+prompt_open	true
+prompt_takes_text	true
+prompt_takes_unicode	true
+menu_access_opens_file	true
+prompt_escapes	true
+saved	true
+clean_after_save	true
+opened	true
+reload_exact	true
+reload_sources	3
+reload_tracks	4
+reload_transitions	1
+reload_markers	1
+reload_subtitles	1
+missing_project_refused	true
+provider_used	true
+provider_failures	0
+render_width	1600
+render_height	980
+paints	1
+status_pixel_r	36

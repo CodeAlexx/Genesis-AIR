@@ -50,19 +50,19 @@ fn found_action(controls: ref<array<chrome.Control>>, action: u32) -> bool effec
   false
 }
 
-fn click_at(state: ref<app.App>, area: layout.Rect) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn click_at(state: ref<app.App>, area: layout.Rect) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   input.pointer_down(state, 1600.0, 980.0, (area.left + area.right) * 0.5,
     (area.top + area.bottom) * 0.5)
 }
 
 fn click_action(state: ref<app.App>, controls: ref<array<chrome.Control>>,
-                slot: u64) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+                slot: u64) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if slot >= array.len(controls) { return string.new() }
   click_at(state, struct.get(array.borrow(controls, slot), field=area))
 }
 
 fn click_kind(state: ref<app.App>, controls: ref<array<chrome.Control>>,
-              kind: str) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+              kind: str) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var index: u64 = 0
   loop {
     if index >= array.len(controls) { break }
@@ -78,7 +78,7 @@ fn click_kind(state: ref<app.App>, controls: ref<array<chrome.Control>>,
 
 // Click a named parameter's bar a quarter of the way along it.
 fn click_param(state: ref<app.App>, controls: ref<array<chrome.Control>>,
-               name: str) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+               name: str) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var index: u64 = 0
   loop {
     if index >= array.len(controls) { break }
@@ -174,7 +174,7 @@ fn digest(state: ref<app.App>) -> string effects {alloc} {
   out
 }
 
-pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process} {
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
   let scratch: str = view.get(args, 1)
   let project: str = view.get(args, 2)
   let png: str = view.get(args, 3)

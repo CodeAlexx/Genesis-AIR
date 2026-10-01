@@ -17,6 +17,7 @@ import std.math as math
 import std.timeline as timeline
 import std.vector_font as font
 import std.application_theme as themes
+import std.desktop_styles as styles
 import std.widgets as widgets
 import "app.ai" as app
 import "chrome.ai" as chrome
@@ -47,35 +48,18 @@ pub type Theme = struct {
   scroll_track: draw.Color
 }
 
-fn dark_theme() -> Theme effects {} {
-  Theme {background: draw.rgb(16, 17, 21), panel: draw.rgb(26, 28, 34),
-    panel_head: draw.rgb(36, 39, 47), edge: draw.rgb(52, 56, 66),
-    text: draw.rgb(226, 230, 238), dim: draw.rgb(132, 140, 155),
-    accent: draw.rgb(250, 206, 100), warn: draw.rgb(232, 104, 112),
-    focus: draw.rgb(96, 150, 226), selected: draw.rgb(44, 60, 84),
-    row: draw.rgb(32, 35, 42), timeline: draw.rgb(20, 22, 27),
-    lane: draw.rgb(30, 32, 39), control: draw.rgb(20, 22, 27),
-    control_on: draw.rgb(62, 104, 160), control_hover: draw.rgb(52, 58, 70),
-    button_on: draw.rgb(52, 84, 128), button_hover: draw.rgb(38, 41, 50),
-    toolbar: draw.rgb(30, 33, 40), prompt: draw.rgb(46, 40, 22),
-    scroll_track: draw.rgb(19, 21, 26)}
-}
-
-fn light_theme() -> Theme effects {} {
-  let shared: widgets.Theme = themes.light()
+// Every structural color comes from the same std.* palette used by AIR apps.
+fn shared_theme(shared: widgets.Theme) -> Theme effects {} {
   Theme {background: shared.background, panel: shared.surface,
     panel_head: shared.shade, edge: shared.line, text: shared.ink, dim: shared.faint,
-    accent: shared.accent, warn: shared.danger, focus: shared.selection,
-    selected: draw.rgb(205, 220, 244), row: draw.rgb(242, 244, 248),
-    timeline: draw.rgb(226, 230, 237), lane: draw.rgb(239, 241, 246),
-    control: draw.rgb(234, 237, 242), control_on: draw.rgb(91, 139, 205),
-    control_hover: draw.rgb(190, 204, 224), button_on: draw.rgb(91, 139, 205),
-    button_hover: draw.rgb(213, 220, 231), toolbar: draw.rgb(226, 230, 237),
-    prompt: draw.rgb(255, 244, 194), scroll_track: draw.rgb(218, 222, 229)}
+    accent: shared.accent, warn: shared.danger, focus: shared.accent,
+    selected: shared.selection, row: shared.surface, timeline: shared.background,
+    lane: shared.surface, control: shared.background, control_on: shared.selection,
+    control_hover: shared.shade, button_on: shared.selection, button_hover: shared.shade,
+    toolbar: shared.surface, prompt: shared.shade, scroll_track: shared.background}
 }
-
 pub fn theme(state: ref<app.App>) -> Theme effects {} {
-  if app.light(state) { light_theme() } else { dark_theme() }
+  shared_theme(if app.light(state) { styles.light_modern() } else { themes.theme(app.theme_id(state)) })
 }
 
 fn fill(canvas: ref<draw.Canvas>, area: layout.Rect, value: draw.Color) -> unit effects {alloc} {

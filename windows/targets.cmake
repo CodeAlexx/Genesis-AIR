@@ -1,0 +1,6 @@
+foreach(name IN ITEMS headless controls native)
+  add_executable(genesis-${name} "${GENESIS_ROOT}/build-windows/generated/${name}.c")
+  target_include_directories(genesis-${name} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
+  target_link_libraries(genesis-${name} PRIVATE air_rt)
+  set_target_properties(genesis-${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endforeach()

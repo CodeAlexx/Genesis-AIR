@@ -101,8 +101,9 @@ pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
 // Import a source. The provider is asked how long it really is, and that length becomes the
 // pool's authoritative frame count — which is what lets the toolkit refuse a clip that would
 // read past the end of the media.
-pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
-  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  if not report.ok { return refused(str.view(struct.borrow(report, field=detail))) }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let id: u64 = editor.add_source(struct.borrow(state, field=document), path, name,
     report.frames, report.fps)
@@ -119,7 +120,7 @@ pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects
 
 // Import an ordered native file-drop payload through the same provider/document path as
 // Add. The host owns only newline-delimited path transfer; Genesis owns the policy.
-pub fn import_drop(state: ref<app.App>, listing: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
+pub fn import_drop(state: ref<app.App>, listing: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var paths: array<string> = text.lines(listing)
   var imported: u64 = 0
   var index: u64 = 0
@@ -147,8 +148,10 @@ pub fn add_bin(state: ref<app.App>, name: str) -> Result effects {alloc} {
   done("bin added", id)
 }
 
-pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process} {
-  let report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  provider.invalidate(struct.borrow(state, field=provider))
+  var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), path)
+  if not report.ok { return refused(str.view(struct.borrow(report, field=detail))) }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, path,
     report.frames)

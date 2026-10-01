@@ -1,76 +1,85 @@
 param(
   [string]$AirSdk = $env:AIR_HOME,
+  [string]$LinuxCompiler = '/root/AIR-win-port-build/bin/airc',
+  [string]$Distro = 'Ubuntu',
+  [string]$Destination = $PSScriptRoot,
   [switch]$Launch,
-  [switch]$SkipSmoke
+  [switch]$SkipSmoke,
+  [switch]$RunTests
 )
-
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-
 if (-not $AirSdk) {
-  $candidates = @(
-    (Join-Path $here '..\AIR-windows-native'),
-    (Join-Path $here '..\AIR'),
-    (Join-Path $here '..\air-sdk-nle')
-  )
-  $AirSdk = $candidates |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'tools\build-windows-app.ps1') } |
-    Select-Object -First 1
+  $AirSdk = @((Join-Path $here '..\AIR-windows-native'), (Join-Path $here '..\AIR'),
+    (Join-Path $here '..\air-sdk-nle')) |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'runtime') } | Select-Object -First 1
 }
-if (-not $AirSdk) {
-  throw 'AIR was not found. Pass -AirSdk C:\path\to\AIR or set AIR_HOME.'
+if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
+$sdk = (Resolve-Path -LiteralPath $AirSdk).Path
+$buildRoot = Join-Path $here 'build-windows'
+$generated = Join-Path $buildRoot 'generated'
+New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
+function WslPath([string]$Value) {
+  $mapped = (& wsl.exe -d $Distro -u root -- wslpath -a ($Value -replace '\\', '/')).Trim()
+  if ($LASTEXITCODE -ne 0) { throw "Cannot map $Value into WSL." }
+  $mapped
 }
-$AirSdk = (Resolve-Path -LiteralPath $AirSdk).Path
-$builder = Join-Path $AirSdk 'tools\build-windows-app.ps1'
-if (-not (Test-Path -LiteralPath $builder)) {
-  throw "This AIR checkout has no native Windows application builder: $builder"
+$sdkLinux = WslPath $sdk
+$sources = ,@('main', 'src/main.ai')
+if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai')) }
+foreach ($entry in $sources) {
+  $inputLinux = WslPath (Join-Path $here $entry[1])
+  $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
+  & wsl.exe -d $Distro -u root -- env "AIR_STDLIB=$sdkLinux/stdlib" $LinuxCompiler build $inputLinux `
+    -o "$outputLinux.bootstrap" --mode release --provider hash.sha256=portable --keep-c $outputLinux
+  if ($LASTEXITCODE -ne 0) { throw "AIR compilation failed: $($entry[1])" }
 }
-
-$source = Join-Path $here 'src\main.ai'
-& $builder -Source $source -Name 'Genesis-AIR'
-if ($LASTEXITCODE -ne 0) { throw 'The AIR native Windows build failed.' }
-$built = Join-Path $AirSdk 'build-win\bin\Release\Genesis-AIR.exe'
-if (-not (Test-Path -LiteralPath $built)) {
-  throw "AIR did not produce the expected executable: $built"
+$cmake = (Get-Command cmake.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (-not $cmake) {
+  $cmake = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe'
 }
-
-$output = Join-Path $here 'build-windows'
-New-Item -ItemType Directory -Force -Path $output | Out-Null
-$executable = Join-Path $output 'Genesis-AIR.exe'
-Copy-Item -LiteralPath $built -Destination $executable -Force
-
+if (-not (Test-Path -LiteralPath $cmake)) { throw 'Install Visual Studio C++ Build Tools with CMake.' }
+$build = Join-Path $buildRoot 'native'
+$projectCmake = $here -replace '\\', '/'
+$generatedCmake = $generated -replace '\\', '/'
+$includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
+& $cmake -S $sdk -B $build -G 'Visual Studio 17 2022' -A x64 "-DGENESIS_ROOT=$projectCmake" `
+  "-DCMAKE_PROJECT_air_INCLUDE=$includeCmake" "-DGENESIS_TESTS=$($RunTests.IsPresent)" `
+  "-DAIR_WINDOWS_APP_C=$generatedCmake/main.c" -DAIR_WINDOWS_APP_NAME=Genesis-AIR `
+  -DAIR_DESKTOP=OFF -DAIR_SAM3=OFF -DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE
+if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
+$targets = @('air_windows_app')
+if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native') }
+& $cmake --build $build --config Release --target @targets -- /m
+if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
+$bin = Join-Path $build 'bin/Release'
+foreach ($name in @('Genesis-AIR.exe', 'air-native-shell.dll', 'air-native-dialogs.dll', 'air-ui-host.dll')) {
+  Copy-Item -LiteralPath (Join-Path $bin $name) -Destination $Destination -Force
+}
+$executable = Join-Path (Resolve-Path -LiteralPath $Destination).Path 'Genesis-AIR.exe'
 if (-not $SkipSmoke) {
-  $smoke = Join-Path $output 'smoke'
+  $smoke = Join-Path $buildRoot 'smoke'
   New-Item -ItemType Directory -Force -Path $smoke | Out-Null
-  $env:GENESIS_FAKE_PROVIDER = '1'
-  $env:GENESIS_SCRATCH = $smoke
-  $frame = Join-Path $smoke 'genesis-demo.png'
-  $project = Join-Path $smoke 'genesis-demo.air'
+  # Test-only settings belong to this child, never the shell or the launched editor.
   $start = [System.Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $executable
   $start.UseShellExecute = $false
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
-  [void]$start.ArgumentList.Add('demo')
-  [void]$start.ArgumentList.Add($frame)
-  [void]$start.ArgumentList.Add($project)
+  $start.Environment['GENESIS_FAKE_PROVIDER'] = '1'
+  $start.Environment['GENESIS_SCRATCH'] = $smoke
+  foreach ($argument in @('demo', (Join-Path $smoke 'genesis-demo.png'), (Join-Path $smoke 'genesis-demo.air'))) {
+    [void]$start.ArgumentList.Add($argument)
+  }
   $process = [System.Diagnostics.Process]::Start($start)
   $stdout = $process.StandardOutput.ReadToEnd()
   $stderr = $process.StandardError.ReadToEnd()
   $process.WaitForExit()
-  if ($stdout) { Write-Host $stdout.TrimEnd() }
-  if ($stderr) { Write-Error $stderr.TrimEnd() }
-  if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $frame) -or
-      -not (Test-Path -LiteralPath $project)) {
-    throw 'Genesis AIR native render smoke failed.'
-  }
-  Write-Host "Genesis AIR smoke passed: $frame"
+  if ($process.ExitCode -ne 0) { throw "[GA_BUILD_SMOKE] $stderr $stdout" }
+  if (-not (Test-Path -LiteralPath (Join-Path $smoke 'genesis-demo.png')) -or
+      -not (Test-Path -LiteralPath (Join-Path $smoke 'genesis-demo.air'))) { throw '[GA_BUILD_SMOKE] Missing demo output.' }
+  Write-Host 'Genesis AIR native render smoke passed.'
 }
-
-Write-Output $executable
-if ($Launch) {
-  $env:GENESIS_FAKE_PROVIDER = '1'
-  $env:GENESIS_SCRATCH = Join-Path $output 'scratch'
-  New-Item -ItemType Directory -Force -Path $env:GENESIS_SCRATCH | Out-Null
-  Start-Process -FilePath $executable -ArgumentList 'new' -WindowStyle Normal
-}
+if ($RunTests) { & (Join-Path $here 'tests/windows.ps1') -Bin $bin }
+Write-Output "Genesis AIR: $executable"
+if ($Launch) { Start-Process -FilePath $executable -WorkingDirectory $Destination -WindowStyle Normal }

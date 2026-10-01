@@ -1,0 +1,139 @@
+module genesis.native_tests
+import std.application_theme as themes
+import std.desktop_styles as styles
+import std.draw as draw
+import std.editor as editor
+import std.files as files
+import std.path as path
+import std.testing as test
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/view.ai" as painter
+
+fn red_frame(frame: ref<provider.Frame>) -> bool effects {} {
+  match draw.surface_pixel(struct.borrow(frame, field=pixels), 80, 45) {
+    some(pixel) => pixel.r > 200 and pixel.b < 30, none => false,
+  }
+}
+fn blue_frame(frame: ref<provider.Frame>) -> bool effects {} {
+  match draw.surface_pixel(struct.borrow(frame, field=pixels), 80, 45) {
+    some(pixel) => pixel.b > 200 and pixel.r < 30, none => false,
+  }
+}
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 3 { return 2 }
+  let scratch: str = view.get(args, 1)
+  let source: str = view.get(args, 2)
+  var suite: test.Suite = test.suite("Genesis Windows real media", false)
+  var engine: provider.Provider = provider.native("ffmpeg", "ffprobe", scratch)
+
+  let _ = test.start(suite, "Real probe: dimensions, fps, streams and source bound")
+  var info: provider.Probe = provider.probe(engine, source)
+  let _ = test.check(suite, info.ok, "probe accepts an actual media file")
+  let _ = test.eq_u64(suite, cast.wrap(info.width), 640, "width")
+  let _ = test.eq_u64(suite, cast.wrap(info.height), 360, "height")
+  let _ = test.near_f64(suite, info.fps, 30.0, 0.001, "fps")
+  let _ = test.eq_i64(suite, info.frames, 60, "two seconds at 30 fps")
+  let _ = test.check(suite, info.has_video and info.has_audio, "both media streams")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Decode and seek actual red/blue frames through the two-slot cache")
+  var first: provider.Frame = provider.source_frame(engine, source, 0, 160, 90)
+  let _ = test.check(suite, first.ok and red_frame(first), "first second is red")
+  var second: provider.Frame = provider.source_frame(engine, source, 30, 160, 90)
+  let _ = test.check(suite, second.ok and blue_frame(second), "second second is blue")
+  var cached: provider.Frame = provider.source_frame(engine, source, 0, 160, 90)
+  let _ = test.check(suite, cached.ok and red_frame(cached), "cache never returns another frame's pixels")
+  provider.invalidate(engine)
+  var reloaded: provider.Frame = provider.source_frame(engine, source, 30, 160, 90)
+  let _ = test.check(suite, reloaded.ok and blue_frame(reloaded), "Reload invalidates cached frames")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Real audio envelope")
+  var peaks: array<f64> = provider.envelope(engine, source, 32)
+  let _ = test.eq_u64(suite, array.len(peaks), 32, "requested bucket count")
+  var peak: f64 = 0.0
+  var at: u64 = 0
+  loop { if at >= array.len(peaks) { break }
+    if array.get(peaks, at) > peak { peak = array.get(peaks, at) }
+    at = at + 1 }
+  let _ = test.check(suite, peak > 0.01 and peak <= 1.0, "sine waveform has finite audible peaks")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Past EOF is a coded failure, never stale preview pixels")
+  var ended: provider.Frame = provider.source_frame(engine, source, 90, 160, 90)
+  let _ = test.check(suite, not ended.ok, "refuse a frame outside the source")
+  let _ = test.contains(suite, provider.last_error(engine), "GA_FRAME_READ", "copyable frame error code")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Failed import preserves the project and records telemetry")
+  var real: provider.Provider = provider.native("ffmpeg", "ffprobe", scratch)
+  var state: app.App = app.app(real)
+  var imported: commands.Result = commands.import_media(state, path.join(scratch, "missing 日本語.mp4"), "missing")
+  let _ = test.check(suite, not imported.ok, "missing media fails import")
+  let _ = test.eq_u64(suite, editor.source_count(struct.borrow(state, field=document)), 0, "no fake/unknown source added")
+  let _ = test.check(suite, not app.dirty(state), "failed import does not dirty the document")
+  let _ = test.contains(suite, commands.message(imported), "GA_MEDIA_COMMAND", "FFprobe error reaches the user")
+  let log: string = match files.read_text(path.join(scratch, "errors.jsonl")) { ok(value) => value, err(_) => string.new(), }
+  let _ = test.contains(suite, log, "genesis.error", "local telemetry event")
+  let _ = test.contains(suite, log, "GA_MEDIA_COMMAND", "persisted error code")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Program preview respects source-in and hidden video tracks")
+  var preview_engine: provider.Provider = provider.native("ffmpeg", "ffprobe", scratch)
+  var preview: app.App = app.app(preview_engine)
+  var imported_video: commands.Result = commands.import_media(preview, source, "real clip")
+  let track: u64 = app.default_video_track(preview)
+  let _ = commands.append_clip(preview, track, imported_video.value, 30, 30)
+  let _ = commands.seek(preview, 0)
+  match app.program_sample(preview) {
+    some(sample) => {
+      var selected: app.ProgramSample = sample
+      let _ = test.eq_i64(suite, selected.frame, 30, "clip source-in determines the decoded frame")
+      var pixels: provider.Frame = provider.source_frame(struct.borrow(preview, field=provider),
+        str.view(struct.borrow(selected, field=source)), selected.frame, 160, 90)
+      let _ = test.check(suite, pixels.ok and blue_frame(pixels), "trimmed program starts in the blue second")
+    }, none => { let _ = test.check(suite, false, "a video clip is visible") },
+  }
+  let _ = commands.toggle_track_hidden(preview, track)
+  let hidden: bool = match app.program_sample(preview) { none => true, some(_) => false, }
+  let _ = test.check(suite, hidden, "hidden video is excluded from preview")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "All shared palettes are reachable and persist from the actual View menu")
+  var palette: u64 = 0
+  loop {
+    if palette > themes.count() { break }
+    app.set_open_menu(state, chrome.menu_view())
+    var controls: array<chrome.Control> = chrome.menu_popup(layout.frame(1600.0, 980.0), state)
+    var found: bool = false
+    var index: u64 = 0
+    loop {
+      if index >= array.len(controls) { break }
+      let control: ref<chrome.Control> = array.borrow(controls, index)
+      if control.action == chrome.act_theme() and control.target == palette {
+        let area: layout.Rect = control.area
+        let _ = input.pointer_down(state, 1600.0, 980.0,
+          (area.left + area.right) * 0.5, (area.top + area.bottom) * 0.5)
+        found = true
+        break
+      }
+      index = index + 1
+    }
+    let _ = test.check(suite, found, "palette menu item is clickable")
+    let expected: string = if palette == themes.count() { string.copy("Light") } else { themes.name(palette) }
+    let _ = test.eq_str(suite, app.theme_name(state), expected, "click changes the palette")
+    let saved: string = match files.read_text(path.join(scratch, "theme.txt")) { ok(value) => value, err(_) => string.new(), }
+    let _ = test.eq_str(suite, saved, expected, "preference persisted")
+    let colors: painter.Theme = painter.theme(state)
+    let shared: draw.Color = if palette == themes.count() { styles.light_modern().background } else { themes.theme(palette).background }
+    let _ = test.eq_u64(suite, cast.wrap(colors.background.r), cast.wrap(shared.r), "shared palette color")
+    palette = palette + 1
+  }
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(scratch, "native-tests.json"), 32)
+}

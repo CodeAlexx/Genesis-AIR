@@ -9,6 +9,7 @@
 // A control never edits the document. It names an action; `genesis.commands` performs it.
 module genesis.chrome
 
+import std.application_theme as themes
 import std.editor as editor
 import std.editor_view as editor_view
 import std.timeline as timeline
@@ -109,6 +110,8 @@ pub fn act_param_key() -> u32 effects {} { 85 }
 
 pub fn act_menu() -> u32 effects {} { 90 }
 pub fn act_about() -> u32 effects {} { 91 }
+pub fn act_theme() -> u32 effects {} { 92 }
+pub fn act_diagnostics() -> u32 effects {} { 93 }
 
 // ---------------------------------------------------------------------------
 
@@ -292,6 +295,14 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     top = menu_item(out, state, left, top, act_zoom_fit(), 0, "Fit timeline", false)
     top = menu_item(out, state, left, top, act_zoom_out(), 0, "Zoom out", false)
     top = menu_item(out, state, left, top, act_snap(), 0, "Snapping", app.snap(state))
+    var palette: u64 = 0
+    loop {
+      if palette >= themes.count() { break }
+      top = menu_item(out, state, left, top, act_theme(), palette, themes.name(palette),
+        not app.light(state) and app.theme_id(state) == palette)
+      palette = palette + 1
+    }
+    top = menu_item(out, state, left, top, act_theme(), themes.count(), "Light", app.light(state))
     return out
   }
   if which == menu_project() {
@@ -303,7 +314,8 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     top = menu_item(out, state, left, top, act_razor_all(), 0, "Razor all tracks", false)
     return out
   }
-  let _ = menu_item(out, state, left, top, act_about(), 0, "About Genesis AIR", false)
+  top = menu_item(out, state, left, top, act_about(), 0, "About Genesis AIR", false)
+  let _ = menu_item(out, state, left, top, act_diagnostics(), 0, "Show error details", false)
   out
 }
 

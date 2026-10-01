@@ -20,13 +20,23 @@ import std.image as image
 import std.path as path
 import std.process as proc
 import std.text as text
+import "ffmpeg.ai" as ffmpeg
+import "diagnostics.ai" as diagnostics
 
 pub fn kind_fake() -> u32 effects {} { 0 }
 pub fn kind_gcompose() -> u32 effects {} { 1 }
+pub fn kind_ffmpeg() -> u32 effects {} { 2 }
+pub type CachedFrame = struct { source: string, frame: i64, width: u32, height: u32, filename: string }
+pub type CachedProbe = struct { source: string, info: ffmpeg.Info }
+pub type CachedEnvelope = struct { source: string, buckets: u64, peaks: array<f64> }
 
 pub type Provider = struct {
   kind: u32,
   worker: string,
+  ffprobe: string,
+  probes: array<CachedProbe>,
+  frames: array<CachedFrame>,
+  envelopes: array<CachedEnvelope>,
   scratch: string,
   calls: u64,
   failures: u64,
@@ -51,6 +61,7 @@ pub type Frame = struct { ok: bool, width: u32, height: u32, pixels: draw.Surfac
 
 pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
+    ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true}
 }
 
@@ -59,9 +70,22 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
 pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} {
   let there: bool = match files.exists(worker) { ok(found) => found, err(problem) => false, }
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
+    ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there}
 }
 
+// FFmpeg is a real-media backend, selected only when gcompose is absent.
+pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effects {alloc} {
+  Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
+    scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
+    calls: 0, failures: 0, last_error: string.new(), available: true}
+}
+pub fn invalidate(state: ref<Provider>) -> unit effects {alloc} {
+  let _ = ref.swap(struct.borrow(state, field=probes), array.new())
+  let _ = ref.swap(struct.borrow(state, field=frames), array.new())
+  let _ = ref.swap(struct.borrow(state, field=envelopes), array.new())
+  ()
+}
 pub fn available(state: ref<Provider>) -> bool effects {} { state.available }
 pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
 pub fn failures(state: ref<Provider>) -> u64 effects {} { state.failures }
@@ -70,85 +94,110 @@ pub fn last_error(state: ref<Provider>) -> string effects {alloc} {
 }
 pub fn describe(state: ref<Provider>) -> string effects {alloc} {
   if state.kind == kind_fake() { return string.copy("fake") }
+  if state.kind == kind_ffmpeg() { return string.copy("FFmpeg") }
   var out: string = string.copy("gcompose")
   if not state.available { string.append(out, " (worker missing)") }
   out
 }
 
-fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc} {
+pub fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc, fs.write, time} {
   struct.set(state, state.failures + 1, field=failures)
-  let _ = ref.swap(struct.borrow(state, field=last_error), string.copy(detail))
+  var message: string = if str.starts_with(detail, "[GA_") { string.copy(detail) }
+    else { text.concat("[GA_PROVIDER] ", detail) }
+  let _ = ref.swap(struct.borrow(state, field=last_error), string.copy(message))
+  var parts: array<string> = text.split(message, "]")
+  let code: str = array.borrow(parts, 0)
+  diagnostics.record(str.view(struct.borrow(state, field=scratch)),
+    str.slice(code, 1, str.len(code)), message, "media")
   ()
 }
-
-// ---------------------------------------------------------------------------
-// The gcompose transport
-//
-// One bounded worker invocation per request: the command line is piped in, the reply line is
-// captured, and the worker exits. That keeps the compositor in its own process and needs no
-// long-lived pipe.
-//
-// A PERSISTENT worker would be better for a busy editor, and the donor runs one. AIR cannot
-// express it today: `process.exec` inherits stdio and waits, `process.run` redirects to a
-// file, and there is no primitive that hands back a writable stdin. That gap is recorded in
-// this project's README rather than worked around with a shell that pretends to be a pipe.
 
 fn scratch_file(state: ref<Provider>, name: str) -> string effects {alloc} {
   path.join(str.view(struct.borrow(state, field=scratch)), name)
 }
 
-// Run one command line through the worker and return its reply line, or none.
-fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {alloc, fs.meta, fs.read, fs.write, process} {
-  struct.set(state, state.calls + 1, field=calls)
-  if not state.available {
-    note_failure(state, "the gcompose worker is not present")
-    return option.none()
-  }
-  match files.mkdirs(str.view(struct.borrow(state, field=scratch))) {
-    ok(made) => { }, err(problem) => { },
-  }
-  var log: string = scratch_file(state, tag)
-  var argv: array<string> = array.new()
-  array.push(argv, string.copy("/bin/sh"))
-  array.push(argv, string.copy("-c"))
-  // The command text and the worker path are passed as ARGUMENTS, never spliced into the
-  // script, so nothing a caller supplies is ever interpreted as shell.
-  array.push(argv, string.copy("printf '%s\\n' \"$1\" | \"$2\" --serve"))
-  array.push(argv, string.copy("genesis-provider"))
-  array.push(argv, string.copy(command))
-  array.push(argv, string.copy(str.view(struct.borrow(state, field=worker))))
-  match proc.run(argv, ".", str.view(log), false) {
-    err(problem) => { note_failure(state, "the worker could not be started")
-      return option.none() },
-    ok(status) => {
-      if not proc.success(status) {
-        note_failure(state, "the worker exited with a failure")
-        return option.none()
-      }
-    },
-  }
-  let reply: string = match files.read_text(str.view(log)) {
-    ok(text_value) => text_value,
-    err(problem) => { note_failure(state, "the worker produced no reply")
-      return option.none() },
-  }
-  var lines: array<string> = text.split(str.view(reply), "\n")
-  var index: u64 = array.len(lines)
+// Native process pipes work on both Windows and Linux. Bound requests and replies;
+// close stdin and reap/terminate every child, including malformed and timed-out replies.
+fn reply(state: ref<Provider>, child: ref<Child>, deadline: u64)
+    -> option<string> effects {alloc, fs.write, process, time} {
+  var reader: proc.LineReader = proc.line_reader(65536)
+  var lines: u64 = 0
   loop {
-    if index == 0 { break }
-    index = index - 1
-    let line: str = str.view(array.borrow(lines, index))
-    if str.starts_with(line, "DONE") {
-      if str.len(line) <= 5 { return option.some(string.new()) }
-      return option.some(string.copy(str.slice(line, 5, str.len(line))))
+    if lines >= 512 { note_failure(state, "[GA_WORKER_REPLY] Too many worker reply lines")
+      return option.none() }
+    match proc.read_line(child, reader, deadline) {
+      err(problem) => { note_failure(state, text.concat(
+        if problem.code == 10 { "[GA_PROCESS_TIMEOUT] " } else { "[GA_WORKER_REPLY] " },
+        fs.error.message(problem)))
+        return option.none() },
+      ok(next) => {
+        match next {
+          none => { note_failure(state, "[GA_WORKER_REPLY] The worker closed stdout without a reply")
+            return option.none() },
+          some(value) => {
+            let line: str = value
+            if line == "DONE" { return option.some(string.new()) }
+            if str.starts_with(line, "DONE ") { return option.some(string.copy(str.slice(line, 5, str.len(line)))) }
+            if str.starts_with(line, "ERR") { note_failure(state, text.concat("[GA_WORKER_REQUEST] ", line))
+              return option.none() }
+          },
+        }
+      },
     }
-    if str.starts_with(line, "ERR") {
-      note_failure(state, "the worker refused the request")
-      return option.none()
-    }
+    lines = lines + 1
   }
-  note_failure(state, "the worker gave no DONE or ERR reply")
   option.none()
+}
+fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  struct.set(state, state.calls + 1, field=calls)
+  if not state.available { note_failure(state, "[GA_WORKER_MISSING] The gcompose worker is not present")
+    return option.none() }
+  let _ = files.mkdirs(str.view(struct.borrow(state, field=scratch)))
+  var argv: array<string> = [string.copy(str.view(struct.borrow(state, field=worker))), "--serve"]
+  var child: Child = match proc.spawn_piped_merged(argv) {
+    ok(value) => value,
+    err(problem) => { note_failure(state, text.concat("[GA_PROCESS_START] ", fs.error.message(problem)))
+      return option.none() },
+  }
+  let deadline: u64 = proc.deadline_in(30000)
+  var wire: string = text.concat(command, "\n")
+  match proc.write_all_stdin(child, str.bytes(wire), deadline) {
+    ok(_) => {},
+    err(problem) => { note_failure(state, text.concat("[GA_WORKER_WRITE] ", fs.error.message(problem)))
+      let _ = proc.terminate(child, 200)
+      let _ = proc.close(child)
+      return option.none() },
+  }
+  let _ = proc.close_stdin(child)
+  let answer: option<string> = reply(state, child, deadline)
+  match proc.wait(child, deadline) {
+    ok(status) => { if not proc.success(status) {
+      note_failure(state, "[GA_WORKER_EXIT] The worker exited unsuccessfully")
+      let _ = proc.close(child)
+      return option.none() } },
+    err(_) => { let _ = proc.terminate(child, 200)
+      let _ = proc.close(child)
+      note_failure(state, "[GA_PROCESS_TIMEOUT] The worker did not finish")
+      return option.none() },
+  }
+  let _ = proc.close(child)
+  answer
+}
+
+fn native_info(state: ref<Provider>, source: str) -> option<ffmpeg.Info> effects {alloc, fs.write, process, time} {
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(state, field=probes)) { break }
+    let cached: ref<CachedProbe> = array.borrow(struct.borrow(state, field=probes), index)
+    if str.view(struct.borrow(cached, field=source)) == source { return option.some(cached.info) }
+    index = index + 1
+  }
+  match ffmpeg.probe(str.view(struct.borrow(state, field=ffprobe)), source) {
+    err(problem) => { note_failure(state, problem)
+      option.none() },
+    ok(info) => { array.push(struct.borrow(state, field=probes), CachedProbe {source: string.copy(source), info: info})
+      option.some(info) },
+  }
 }
 
 fn parse_int(text_value: str) -> option<i64> effects {} {
@@ -188,7 +237,7 @@ fn fake_seed(source: str) -> u64 effects {} {
 
 // PROBE: what the source is. The frame count is what `std.editor` treats as authoritative,
 // so a provider that does not know must say 0 rather than guess.
-pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta, fs.read, fs.write, process} {
+pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if state.kind == kind_fake() {
     struct.set(state, state.calls + 1, field=calls)
     let seed: u64 = fake_seed(source)
@@ -198,6 +247,16 @@ pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta
       height: if audio_only { 0 } else { 1080 }, fps: 30.0, has_video: not audio_only,
       has_audio: true, detail: string.copy("fake source")}
   }
+  if state.kind == kind_ffmpeg() {
+    struct.set(state, state.calls + 1, field=calls)
+    match native_info(state, source) {
+      none => { return Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0,
+        has_video: false, has_audio: false, detail: last_error(state)} },
+      some(info) => { return Probe {ok: true, frames: info.frames, width: info.width,
+        height: info.height, fps: info.fps, has_video: info.video, has_audio: info.audio,
+        detail: string.copy("FFprobe") } },
+    }
+  }
   var command: string = string.copy("NFRAMES ")
   string.append(command, source)
   match ask(state, str.view(command), "probe.txt") {
@@ -205,8 +264,9 @@ pub fn probe(state: ref<Provider>, source: str) -> Probe effects {alloc, fs.meta
       has_audio: false, detail: last_error(state)},
     some(reply) => {
       match parse_int(str.view(text.trim(str.view(reply)))) {
-        none => Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0,
-          has_video: false, has_audio: false, detail: string.copy("unreadable frame count")},
+        none => { note_failure(state, "[GA_PROBE_REPLY] Unreadable worker frame count")
+          Probe {ok: false, frames: 0, width: 0, height: 0, fps: 30.0,
+            has_video: false, has_audio: false, detail: last_error(state)} },
         some(frames) => Probe {ok: true, frames: frames, width: 0, height: 0, fps: 30.0,
           has_video: true, has_audio: true, detail: string.copy("gcompose NFRAMES")},
       }
@@ -300,12 +360,13 @@ fn thumb_command(source: str, frame: i64, width: u32, height: u32, out: str) -> 
 // THUMBNAIL / SOURCE FRAME. One decode of one source at one frame; the media pool and the
 // source monitor both use it, which is why there is one operation rather than two.
 pub fn source_frame(state: ref<Provider>, source: str, frame: i64, width: u32,
-                    height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+                    height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if state.kind == kind_fake() {
     struct.set(state, state.calls + 1, field=calls)
     return Frame {ok: true, width: width, height: height,
       pixels: fake_image(source, frame, width, height), detail: string.copy("fake frame")}
   }
+  if state.kind == kind_ffmpeg() { return native_frame(state, source, frame, width, height) }
   var out: string = scratch_file(state, "frame.rgba")
   let command: string = thumb_command(source, frame, width, height, str.view(out))
   match ask(state, str.view(command), "frame.txt") {
@@ -313,8 +374,8 @@ pub fn source_frame(state: ref<Provider>, source: str, frame: i64, width: u32,
       detail: last_error(state)},
     some(reply) => {
       match read_rgba(str.view(out), width, height) {
-        none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
-          detail: string.copy("the worker's frame could not be read")},
+        none => { note_failure(state, "[GA_FRAME_READ] The worker frame could not be read")
+          failed_frame(state) },
         some(surface) => Frame {ok: true, width: width, height: height, pixels: surface,
           detail: string.copy("gcompose THUMB")},
       }
@@ -322,7 +383,51 @@ pub fn source_frame(state: ref<Provider>, source: str, frame: i64, width: u32,
   }
 }
 
-pub fn thumbnail(state: ref<Provider>, source: str, width: u32, height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn failed_frame(state: ref<Provider>) -> Frame effects {alloc} {
+  Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(), detail: last_error(state)}
+}
+fn native_frame(state: ref<Provider>, source: str, at: i64, width: u32, height: u32)
+    -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  struct.set(state, state.calls + 1, field=calls)
+  let info: ffmpeg.Info = match native_info(state, source) {
+    none => { return failed_frame(state) }, some(value) => value,
+  }
+  // Audio sources have no video monitor; the waveform is their visual representation.
+  if not info.video { return Frame {ok: true, width: 0, height: 0,
+    pixels: draw.empty_surface(), detail: string.copy("audio source")} }
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(state, field=frames)) { break }
+    let cached: ref<CachedFrame> = array.borrow(struct.borrow(state, field=frames), index)
+    if str.view(struct.borrow(cached, field=source)) == source and cached.frame == at
+      and cached.width == width and cached.height == height {
+      match read_rgba(str.view(struct.borrow(cached, field=filename)), width, height) {
+        some(surface) => { return Frame {ok: true, width: width, height: height,
+          pixels: surface, detail: string.copy("cached frame")} }, none => {},
+      }
+    }
+    index = index + 1
+  }
+  let _ = files.mkdirs(str.view(struct.borrow(state, field=scratch)))
+  let held: u64 = array.len(struct.borrow(state, field=frames))
+  let slot: u64 = if held < 2 { held } else { state.calls % 2 }
+  let out: string = scratch_file(state, text.concat(text.concat("preview-", string.from_int(slot)), ".rgba"))
+  match ffmpeg.frame(str.view(struct.borrow(state, field=worker)), source, at, info.fps, width, height, out) {
+    err(problem) => { note_failure(state, problem)
+      return failed_frame(state) }, ok(_) => {},
+  }
+  let entry: CachedFrame = CachedFrame {source: string.copy(source), frame: at, width: width,
+    height: height, filename: string.copy(out)}
+  if array.len(struct.borrow(state, field=frames)) < 2 { array.push(struct.borrow(state, field=frames), entry) }
+  else { array.set(struct.borrow(state, field=frames), slot, entry) }
+  match read_rgba(out, width, height) {
+    some(surface) => Frame {ok: true, width: width, height: height, pixels: surface, detail: string.copy("FFmpeg frame")},
+    none => { note_failure(state, "[GA_FRAME_READ] FFmpeg returned no complete frame")
+      failed_frame(state) },
+  }
+}
+
+pub fn thumbnail(state: ref<Provider>, source: str, width: u32, height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   source_frame(state, source, 0, width, height)
 }
 
@@ -330,7 +435,7 @@ pub fn thumbnail(state: ref<Provider>, source: str, width: u32, height: u32) -> 
 // visible at that frame; a provider that cannot composite returns the topmost one, which is
 // honest and keeps the monitor useful rather than blank.
 pub fn program_frame(state: ref<Provider>, sources: ref<array<string>>, frame: i64, width: u32,
-                     height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process} {
+                     height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if array.len(sources) == 0 {
     return Frame {ok: true, width: width, height: height,
       pixels: match draw.surface(width, height) {
@@ -346,7 +451,7 @@ pub fn program_frame(state: ref<Provider>, sources: ref<array<string>>, frame: i
 
 // ENVELOPE: peak magnitudes for a waveform lane. The fake provider synthesises a stable
 // shape; gcompose exposes `ENV`, which this asks for and reads back as text.
-pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> effects {alloc, fs.meta, fs.read, fs.write, process} {
+pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var out: array<f64> = array.new()
   if buckets == 0 { return out }
   if state.kind == kind_fake() {
@@ -358,6 +463,43 @@ pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> e
       let mixed: u64 = (seed + index * 2654435761) % 1000
       array.push(out, 0.15 + 0.8 * cast.float(mixed) / 1000.0)
       index = index + 1
+    }
+    return out
+  }
+  if state.kind == kind_ffmpeg() {
+    struct.set(state, state.calls + 1, field=calls)
+    var index: u64 = 0
+    loop {
+      if index >= array.len(struct.borrow(state, field=envelopes)) { break }
+      let cached: ref<CachedEnvelope> = array.borrow(struct.borrow(state, field=envelopes), index)
+      if str.view(struct.borrow(cached, field=source)) == source and cached.buckets == buckets {
+        var copy: array<f64> = array.new()
+        var peak: u64 = 0
+        loop { if peak >= array.len(struct.borrow(cached, field=peaks)) { break }
+          array.push(copy, array.get(struct.borrow(cached, field=peaks), peak))
+          peak = peak + 1 }
+        return copy
+      }
+      index = index + 1
+    }
+    let info: ffmpeg.Info = match native_info(state, source) {
+      none => { return out }, some(value) => value,
+    }
+    if not info.audio { return out }
+    let _ = files.mkdirs(str.view(struct.borrow(state, field=scratch)))
+    let binary: string = string.copy(str.view(struct.borrow(state, field=worker)))
+    match ffmpeg.envelope(binary, source,
+      scratch_file(state, "waveform.pcm"), buckets) {
+      err(problem) => { note_failure(state, problem) },
+      ok(peaks) => {
+        var cached: array<f64> = peaks
+        var at: u64 = 0
+        loop { if at >= array.len(cached) { break }
+          array.push(out, array.get(cached, at))
+          at = at + 1 }
+        array.push(struct.borrow(state, field=envelopes), CachedEnvelope {
+          source: string.copy(source), buckets: buckets, peaks: cached})
+      },
     }
     return out
   }

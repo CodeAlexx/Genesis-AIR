@@ -8,6 +8,8 @@
 // the pointer. Nothing here recomputes a rectangle.
 module genesis.input
 
+import std.application_theme as themes
+import std.path as path
 import std.editor as editor
 import std.math as math
 import std.editor_view as editor_view
@@ -15,6 +17,7 @@ import std.timeline as timeline
 import std.unicode as unicode
 import std.widgets as widgets
 import "app.ai" as app
+import "provider.ai" as provider
 import "chrome.ai" as chrome
 import "commands.ai" as commands
 import "layout.ai" as layout
@@ -58,7 +61,7 @@ fn snapped(state: ref<app.App>, model: ref<timeline.Timeline>, frame: i64) -> i6
 // Dispatch: one control, one command.
 
 fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
-           height: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+           height: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let action: u32 = struct.get(control, field=action)
   let domain: u32 = struct.get(control, field=domain)
   let target: u64 = struct.get(control, field=target)
@@ -123,10 +126,24 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_reload() {
     let source: u64 = app.current_source(state)
     if source == 0 { return note("no media selected to reload") }
+    provider.invalidate(struct.borrow(state, field=provider))
     var landed: commands.Result = commands.open_source(state, source)
     return commands.message(landed)
   }
 
+  if action == chrome.act_theme() {
+    if target == themes.count() { app.set_light(state, true) } else { app.set_theme(state, target) }
+    if not app.persist_theme(state) { return note("[GA_THEME_WRITE] The theme preference could not be saved") }
+    return note(app.theme_name(state))
+  }
+  if action == chrome.act_diagnostics() {
+    let engine: ref<provider.Provider> = struct.borrow(state, field=provider)
+    var details: string = provider.last_error(engine)
+    if details == "" { details = string.copy("No errors recorded") }
+    string.append(details, " | Log: ")
+    string.append(details, path.join(str.view(struct.borrow(engine, field=scratch)), "errors.jsonl"))
+    return details
+  }
   // ---- transport ----
   if action == chrome.act_play() {
     let playing: bool = editor.playing(struct.borrow(state, field=document))
@@ -442,7 +459,7 @@ pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
 }
 
 pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
-                    y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+                    y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let frame: layout.Frame = layout.frame(width, height)
   app.set_focus(state, panel_at(width, height, x, y))
 
@@ -696,7 +713,7 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
 // status line. The prompt remembers WHICH action it is collecting for, so a committed line
 // cannot be routed to a different command than the one that opened it.
 
-pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if not app.prompt_active(state) { return note("") }
   let action: u32 = app.prompt_action(state)
   let typed: string = app.prompt_text(state)
@@ -735,7 +752,7 @@ pub fn prompt_is_render(state: ref<app.App>) -> bool effects {} {
 // A key press. The set is the conventional editor one; while the prompt is open the
 // printable keys belong to it instead.
 pub fn key(state: ref<app.App>, code: u32, control: bool,
-           shift: bool) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
+           shift: bool) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if app.prompt_active(state) {
     if code == widgets.key_escape() {
       app.end_prompt(state)

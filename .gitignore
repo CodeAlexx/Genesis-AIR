@@ -4,3 +4,8 @@ build-win-test/
 __pycache__/
 *.py
 *.py[cod]
+/Genesis-AIR.exe
+/air-native-shell.dll
+/air-native-dialogs.dll
+/air-ui-host.dll
+/genesis-state/

@@ -23,7 +23,7 @@ fn width() -> f64 effects {} { 1600.0 }
 fn height() -> f64 effects {} { 980.0 }
 
 // A project with enough in it that every control has something to act on.
-fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var engine: provider.Provider = provider.fake(scratch)
   var state: app.App = app.app(engine)
   var wide: commands.Result = commands.import_media(state, "media/wide.mov", "wide.mov")
@@ -204,7 +204,7 @@ fn panel_name(which: u64) -> string effects {alloc} {
   string.copy("menu-help")
 }
 
-pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process} {
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
   if view.len(args) < 2 {
     say("controls SCRATCH [DOCK_TAB]\n")
     return 2

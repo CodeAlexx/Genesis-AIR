@@ -9,6 +9,9 @@
 // use and what makes this application checkable without a screen.
 module genesis.main
 
+import std.application_theme as themes
+import std.path as path
+import std.text as text
 import std.draw as draw
 import std.editor as editor
 import std.files as files
@@ -36,13 +39,14 @@ fn worker_path() -> string effects {alloc, env} {
   }
 }
 
-// Choose a provider: gcompose when its worker is present, otherwise the deterministic fake.
-// The application above this line cannot tell which it got.
+// Use the compositor when configured, otherwise real FFmpeg media. Fake is explicit/test-only.
 fn choose_provider(scratch: str, force_fake: bool) -> provider.Provider effects {alloc, env, fs.meta} {
   if force_fake { return provider.fake(scratch) }
   var real: provider.Provider = provider.gcompose(str.view(worker_path()), scratch)
   if provider.available(real) { return real }
-  provider.fake(scratch)
+  let ffmpeg_path: string = match env.get("GENESIS_FFMPEG") { some(value) => value, none => string.copy("ffmpeg"), }
+  let probe_path: string = match env.get("GENESIS_FFPROBE") { some(value) => value, none => string.copy("ffprobe"), }
+  provider.native(ffmpeg_path, probe_path, scratch)
 }
 
 // Dark is the default. GENESIS_APPEARANCE and the final --appearance option accept
@@ -63,9 +67,40 @@ fn wants_light(args: view<str>) -> bool effects {alloc, env, ui} {
   false
 }
 
+fn settings_root() -> string effects {alloc, env} {
+  match env.get("GENESIS_SCRATCH") { some(value) => { return value }, none => {}, }
+  match env.get("LOCALAPPDATA") { some(value) => { return path.join(value, "GenesisAIR") }, none => {}, }
+  match env.get("XDG_STATE_HOME") { some(value) => { return path.join(value, "genesis-air") }, none => {}, }
+  match env.get("HOME") { some(value) => { return path.join(value, ".local/state/genesis-air") }, none => {}, }
+  string.copy("genesis-state")
+}
+fn load_theme(state: ref<app.App>, args: view<str>, scratch: str) -> unit effects {alloc, env, fs.read, ui} {
+  var choice: string = match files.read_text(path.join(scratch, "theme.txt")) {
+    ok(value) => value, err(_) => string.copy("Serenity"),
+  }
+  match env.get("GENESIS_THEME") { some(value) => { choice = value }, none => {}, }
+  var explicit_appearance: bool = match env.get("GENESIS_APPEARANCE") { some(_) => true, none => false, }
+  var index: u64 = 1
+  loop {
+    if index + 1 >= view.len(args) { break }
+    if view.get(args, index) == "--appearance" { explicit_appearance = true }
+    if view.get(args, index) == "--theme" { choice = string.copy(view.get(args, index + 1))
+      explicit_appearance = false }
+    index = index + 1
+  }
+  let named: string = text.lower_ascii(text.trim(choice))
+  var palette: u64 = 0
+  loop { if palette >= themes.count() { break }
+    if named == text.lower_ascii(themes.name(palette)) { app.set_theme(state, palette) }
+    palette = palette + 1 }
+  if named == "light" { app.set_light(state, true) }
+  if explicit_appearance { app.set_light(state, wants_light(args)) }
+  ()
+}
+
 // Ask the provider for the two monitor images the next repaint needs. The view never does
 // this itself, so painting stays free of media work.
-fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface> effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var out: array<draw.Surface> = array.new()
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let monitor_source: u64 = document.monitor_source
@@ -79,24 +114,14 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
       none => { },
     }
   }
-  // Which sources are under the playhead, bottom lane first.
   var visible: array<string> = array.new()
-  var index: u64 = 0
-  loop {
-    if index >= editor.clip_count(document) { break }
-    match editor.clip_at(document, index) {
-      none => { },
-      some(value) => {
-        if value.enabled and value.start <= program_frame and editor.clip_end(value) > program_frame {
-          match editor.source_slot(document, value.source) {
-            some(slot) => { array.push(visible, string.copy(str.view(struct.borrow(
-              array.borrow(struct.borrow(document, field=sources), slot), field=path)))) },
-            none => { },
-          }
-        }
-      },
-    }
-    index = index + 1
+  var sample_frame: i64 = program_frame
+  match app.program_sample(state) {
+    some(sample) => {
+      var chosen: app.ProgramSample = sample
+      sample_frame = chosen.frame
+      array.push(visible, string.copy(str.view(struct.borrow(chosen, field=source))))
+    }, none => {},
   }
   if str.len(str.view(source_path)) != 0 {
     var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
@@ -106,14 +131,14 @@ fn monitor_images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Su
     array.push(out, draw.empty_surface())
   }
   var program: provider.Frame = provider.program_frame(struct.borrow(state, field=provider),
-    visible, program_frame, width, height)
+    visible, sample_frame, width, height)
   array.push(out, provider.take_pixels(program))
   out
 }
 
 // Fill the waveform cache for every audio clip. This is the only place the application asks
 // the provider for envelopes, so painting never does media work.
-fn refresh_waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn refresh_waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var wanted: array<u64> = array.new()
   var paths: array<string> = array.new()
   var widths: array<u64> = array.new()
@@ -157,7 +182,7 @@ fn refresh_waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.rea
   filled
 }
 
-fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let _ = refresh_waveforms(state)
   var images: array<draw.Surface> = monitor_images(state, 320, 180)
   var program_image: draw.Surface = match array.pop(images) {
@@ -192,7 +217,7 @@ fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool 
 // A small but genuine project: media, four tracks, real edits, a transition, keyframes,
 // markers, a subtitle, a filter stack and a mixer change. Every step goes through the
 // command layer, so this is the same path the UI takes.
-fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var wide: commands.Result = commands.import_media(state, "media/wide.mov", "wide_shot.mov")
   var close: commands.Result = commands.import_media(state, "media/close.mov", "close_up.mov")
   var voice: commands.Result = commands.import_media(state, "audio:media/vo.wav", "narration.wav")
@@ -220,7 +245,7 @@ fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.
 
 // The windowed application. One repaint per input burst; the document is the only state,
 // so a repaint always shows exactly what the last command did.
-fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, ui} {
+fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
     err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
@@ -237,8 +262,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
     let width: u32 = if box.width < 640 { 640 } else { box.width }
     let height: u32 = if box.height < 480 { 480 } else { box.height }
     if dirty {
+      let failures_before: u64 = provider.failures(struct.borrow(state, field=provider))
       let _ = refresh_waveforms(state)
-      var images: array<draw.Surface> = monitor_images(state, 320, 180)
+      var images: array<draw.Surface> = monitor_images(state, 640, 360)
+      if provider.failures(struct.borrow(state, field=provider)) > failures_before {
+        app.set_status(state, provider.last_error(struct.borrow(state, field=provider)))
+      }
       var program_image: draw.Surface = match array.pop(images) { some(v) => v, none => draw.empty_surface(), }
       var source_image: draw.Surface = match array.pop(images) { some(v) => v, none => draw.empty_surface(), }
       match draw.surface(width, height) {
@@ -380,21 +409,15 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   0
 }
 
-pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, ui} {
-  if view.len(args) < 2 {
-    say("genesis-air render OUT.png [PROJECT]")
-    say("genesis-air demo   OUT.png [PROJECT.air]")
-    say("genesis-air open   PROJECT.air")
-    say("genesis-air new [--appearance dark|light|system]")
-    return 2
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time, ui} {
+  let verb: string = if view.len(args) < 2 { string.copy("new") } else { string.copy(view.get(args, 1)) }
+  let force_fake: bool = verb == "demo" or match env.get("GENESIS_FAKE_PROVIDER") {
+    some(value) => value == "1", none => false,
   }
-  let verb: str = view.get(args, 1)
-  let force_fake: bool = match env.get("GENESIS_FAKE_PROVIDER") { some(value) => true, none => false, }
-  var scratch: string = string.copy("/tmp/genesis-air")
-  match env.get("GENESIS_SCRATCH") { some(value) => { scratch = value }, none => { }, }
-  var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
+  var scratch: string = settings_root()
+  var engine: provider.Provider = choose_provider(scratch, force_fake)
   var state: app.App = app.app(engine)
-  app.set_light(state, wants_light(args))
+  load_theme(state, args, scratch)
   // Which inspector tab a headless render shows, so every panel is checkable without a
   // screen. The window path starts on Properties like any other launch.
   match env.get("GENESIS_TAB") {
@@ -410,7 +433,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   if str.eq(verb, "render") {
     if view.len(args) < 3 { say("render needs an output path")
       return 2 }
-    if view.len(args) >= 4 {
+    if view.len(args) >= 4 and not str.starts_with(view.get(args, 3), "--") {
       var opened: commands.Result = commands.open_project(state, view.get(args, 3))
       if not opened.ok { say(str.view(commands.message(opened)))
         return 1 }
@@ -427,7 +450,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     if view.len(args) < 3 { say("demo needs an output path")
       return 2 }
     build_demo(state)
-    if view.len(args) >= 4 {
+    if view.len(args) >= 4 and not str.starts_with(view.get(args, 3), "--") {
       var saved: commands.Result = commands.save_project(state, view.get(args, 3))
       if not saved.ok { say(str.view(commands.message(saved)))
         return 1 }
@@ -483,6 +506,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     io.write(str.view(string.from_int(failed)))
     io.write("\n")
     say("Genesis AIR probe complete")
+    if not provider.frame_ok(shot) or failed != 0 { return 1 }
     return 0
   }
 
@@ -496,10 +520,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   }
 
   if str.eq(verb, "new") {
-    build_demo(state)
     return run_window(state, "Genesis AIR")
   }
 
-  say("unknown command")
+  say("Usage: Genesis-AIR [new | open PROJECT.air | demo OUT.png [PROJECT.air] | render OUT.png [PROJECT.air] | probe MEDIA OUT.png]")
+  say("Options: --theme Serenity|Moonlight|Monochrome|Nord|Cinder|Blender|Cyberpunk|Light; --appearance dark|light|system")
   2
 }

@@ -1,0 +1,19 @@
+// Local, versioned AIR telemetry; no network sink.
+module genesis.diagnostics
+import std.files as files
+import std.path as path
+import std.telemetry as telemetry
+
+pub fn record(root: str, code: str, message: str, operation: str) -> unit effects {alloc, fs.write, time} {
+  let _ = files.mkdirs(root)
+  var context: telemetry.Context = telemetry.empty_context()
+  var fields: array<telemetry.Attribute> = [
+    telemetry.attr_text("error.code", code), telemetry.attr_text("message", message),
+    telemetry.attr_text("operation", operation)
+  ]
+  match telemetry.event(context, "genesis.error", telemetry.Level.Error, fields) {
+    ok(event) => { let _ = telemetry.append(path.join(root, "errors.jsonl"), event) },
+    err(_) => {},
+  }
+  ()
+}
