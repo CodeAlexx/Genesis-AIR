@@ -1,4 +1,4 @@
-foreach(name IN ITEMS headless controls native audio-device preview-async inspector live-paint project-safety)
+foreach(name IN ITEMS headless controls native audio-device audio-playback preview-async inspector live-paint project-safety)
   add_executable(genesis-${name} "${GENESIS_ROOT}/build-windows/generated/${name}.c")
   target_include_directories(genesis-${name} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
   target_link_libraries(genesis-${name} PRIVATE air_rt)

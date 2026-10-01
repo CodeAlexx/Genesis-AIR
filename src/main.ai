@@ -27,6 +27,7 @@ import std.time as clock
 import std.widgets as widgets
 import "native_dialogs.ai" as dialogs
 import "native_audio.ai" as native_audio
+import "audio_playback.ai" as audio_playback
 import "diagnostics.ai" as diagnostics
 import "app.ai" as app
 import "typeface.ai" as typeface
@@ -215,12 +216,6 @@ fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.
 
 // The windowed application. One repaint per input burst; the document is the only state,
 // so a repaint always shows exactly what the last command did.
-fn mix_audio(plan: timeline_media.AudioPlan own) -> result<bool, string>
-             effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  var owned: timeline_media.AudioPlan = plan
-  timeline_media.execute_audio_plan(owned)
-}
-
 // The native picker preserves Unicode paths and returns an empty path on Cancel.
 fn choose_file(title: str, save: bool, suggested: str) -> option<string> effects {alloc, ffi} {
   let project: bool = str.eq(title, "Open project") or str.eq(title, "Save project") or str.eq(title, "Recover project")
@@ -312,18 +307,35 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   var previous_playing: bool = false
   var previous_frame: i64 = editor.playhead(struct.borrow(state, field=document))
   var audio_preparing: bool = false
+  var audio_pending: bool = false
+  var audio_request: u64 = 0
   task.scope {
-  var audio_jobs: array<task<result<bool, string>>> = array.new()
+  var audio_jobs: array<task<bool>> = array.new()
   var preview_jobs: array<task<bool>> = array.new()
+  let audio_root: string = path.join(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)),"audio-playback")
+  audio_playback.reset(str.view(audio_root))
+  var audio_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
+    return 1},}
+  let audio_config: audio_playback.Config = audio_playback.Config {root:string.copy(str.view(audio_root)),
+    worker:provider.worker_path(struct.borrow(state,field=provider)),events:preview_link.ticket(audio_transport)}
+  array.push(audio_jobs,task.spawn(audio_config,fn=audio_playback.run))
+  match preview_link.connect(audio_transport) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))
+    audio_playback.stop(str.view(audio_root))
+    return 1},}
+
   let preview_root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "preview")
   let _ = files.mkdirs(str.view(preview_root))
   preview.reset(str.view(preview_root))
   var preview_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
+    audio_playback.stop(str.view(audio_root))
+    let _ = preview_link.wake(audio_transport,true)
     return 1},}
   let config: preview.Config = preview.config(state, str.view(preview_root), preview_link.ticket(preview_transport))
   array.push(preview_jobs, task.spawn(config, fn=preview.run))
   match preview_link.connect(preview_transport) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))
     preview.stop(str.view(preview_root))
+    audio_playback.stop(str.view(audio_root))
+    let _ = preview_link.wake(audio_transport,true)
     return 1},}
   var preview_signature: string = string.new()
   var preview_requested: u64 = 0
@@ -446,12 +458,17 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           let _ = native_audio.request(library, "stop", "")
           audio_active = false
           audio_generation = audio_generation + 1
+          audio_request=audio_request+1
+          audio_pending=false
+          let _ = audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
+          let _ = preview_link.wake(audio_transport,false)
         }
         let next_sound: string = if source_playing { string.from_int(struct.get(struct.borrow(state, field=document), field=monitor_source)) }
           else { timeline_media.audio_signature(struct.borrow(state, field=document)) }
         let mix_changed: bool = not str.eq(str.view(next_sound), str.view(sound_signature))
         sound_signature = next_sound
         if playing_now and (not previous_playing or source_playing != previous_source or frame_now != previous_frame or mix_changed) {
+          audio_pending=false
           audio_generation = audio_generation + 1
           audio_origin = frame_now
           audio_next = frame_now
@@ -463,35 +480,30 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
             pause_transport(state, source_playing)
           }
         }
-        if array.len(audio_jobs) > 0 {
-          match tasks.join_next<result<bool,string>>(audio_jobs, tasks.now()) {
-            none => {},
-            some(answer) => {
-              if audio_task_generation == audio_generation and playing_now and audio_active {
-                match answer {
-                  err(problem) => {
-                    app.set_status(state, str.view(problem))
-                    pause_transport(state, source_playing)
-                    let _ = native_audio.request(library, "stop", "")
-                    audio_active = false
-                  },
-                  ok(_) => {
-                    let queued: string = native_audio.request(library, "queue", str.view(audio_task_output))
-                    if not str.eq(str.view(queued), "ok") {
-                      app.set_status(state, str.view(queued))
-                      pause_transport(state, source_playing)
-                      let _ = native_audio.request(library, "stop", "")
-                      audio_active = false
-                    } else {
-                      audio_next = audio_task_end
-                      audio_preparing = false
-                    }
-                  },
-                }
+        preview_link.poll(audio_transport)
+        if audio_pending and (audio_transport.ready == audio_request or audio_transport.error_generation == audio_request or audio_transport.closed) {
+          audio_pending=false
+          if audio_task_generation == audio_generation and playing_now and audio_active {
+            if audio_transport.ready != audio_request {
+              if audio_transport.closed {app.set_status(state,"[GA_AUDIO_TASK_CLOSED] Playback worker ended")}
+              else {app.set_status(state,str.view(struct.borrow(audio_transport,field=error)))}
+              pause_transport(state,source_playing)
+              let _ = native_audio.request(library,"stop","")
+              audio_active=false
+            } else {
+              let queued: string = native_audio.request(library,"queue",str.view(audio_task_output))
+              if not str.eq(str.view(queued),"ok") {
+                app.set_status(state,str.view(queued))
+                pause_transport(state,source_playing)
+                let _ = native_audio.request(library,"stop","")
+                audio_active=false
+              } else {
+                audio_next=audio_task_end
+                audio_preparing=false
               }
-              let _ = files.remove(str.view(audio_task_output))
-            },
+            }
           }
+          let _ = files.remove(str.view(audio_task_output))
         }
         if audio_active and playing_now {
           var device: native_audio.Clock = native_audio.clock(library)
@@ -525,7 +537,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
                 audio_active = false
               }
             }
-            if audio_active and device.queued < 2 and array.len(audio_jobs) == 0 and audio_next < finish {
+            if audio_active and device.queued < 2 and not audio_pending and audio_next < finish {
               let chunk: i64 = cast.sat(fps * 5.0)
               audio_task_end = if audio_next + chunk > finish { finish } else { audio_next + chunk }
               let worker: string = provider.worker_path(struct.borrow(state, field=provider))
@@ -543,11 +555,26 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
                 },
                 ok(plan) => {
                   audio_task_generation = audio_generation
-                  array.push(audio_jobs, task.spawn(plan, fn=mix_audio))
+                  var prepared_plan: timeline_media.AudioPlan = plan
+                  audio_request=audio_request+1
+                  if audio_playback.request(str.view(audio_root),audio_request,audio_generation,prepared_plan) {
+                    audio_pending=true
+                    match preview_link.wake(audio_transport,false) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))
+                      pause_transport(state,source_playing)},}
+                  } else {
+                    app.set_status(state,"[GA_AUDIO_TASK_WRITE] Cannot publish playback request")
+                    pause_transport(state,source_playing)
+                  }
                 },
               }
             }
           }
+        }
+        if not audio_active and (audio_pending or playing_now) {
+          audio_pending=false
+          audio_request=audio_request+1
+          let _ = audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
+          let _ = preview_link.wake(audio_transport,false)
         }
         if audio_active and playing_now {
           var levels: native_audio.Levels = native_audio.levels(library)
@@ -792,6 +819,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   // Leaving the scope joins every task; stop an export at its next frame instead of
   // holding the closed window open until it finishes.
   if array.len(export_jobs) > 0 { timeline_media.request_export_cancel(str.view(export_cancel)) }
+  match ref.swap(audio_library,option.none()) {none=>{},some(value)=>{var library: CAbiLibrary = value
+    let _ = native_audio.request(library,"stop","")
+    audio_library=option.some(library)},}
+  audio_playback.stop(str.view(audio_root))
+  let _ = preview_link.wake(audio_transport,true)
+  let _ = tasks.join_next<bool>(audio_jobs,30000)
+  preview_link.close_commands(audio_transport)
   preview.stop(str.view(preview_root))
   let _ = preview_link.wake(preview_transport,true)
   let _ = tasks.join_next<bool>(preview_jobs, 30000)

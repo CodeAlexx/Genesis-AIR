@@ -184,8 +184,9 @@ frame planning, program monitor and pixel publication. Final empty draining is
 about 0.03 ms median. At the nonblocking checkpoint (`8203d66`), the editor serial diagnostic was
 37.21 ms; fullscreen
 is 60.54 ms, of which painting alone is 27.48 ms. These samples exclude audio,
-native present and asynchronous overlap. Smooth sustained 4K60 and continuous
-playback audio-filter state remain acceptance work.
+native present and asynchronous overlap. Smooth sustained 4K60 remains acceptance
+work. The continuous audio work described below supersedes this checkpoint's
+per-chunk filter-state limitation.
 
 
 ## Bounded span copies and opaque row reuse
@@ -226,3 +227,32 @@ The supplied clip's 20-sample headless profile, after three warmups at 2560x1440
 measures 6.00/21.82 ms editor/fullscreen painting and 36.34/55.32 ms serial. These
 results exclude native presentation, audio and asynchronous overlap; they do not
 establish sustained interactive 4K60 or long-run audio/video synchronization.
+
+
+## Continuous native playback audio
+
+The previous playback task started a new compositor process for every five-second
+WAV. That recreated the decoder, resampler and audio filter graph at each boundary,
+resetting delay, modulation and dynamics history. One background owner now retains
+the compositor pipe and per-clip graphs across requests. Affine process handles stay
+on their creating thread; the window sends atomic snapshots and receives completion
+events through a separate `std.channel` link. Seek, source and mix generations reset
+the session and refuse stale results. Persisted Stop also closes an idle owner without
+a wake. No SDK change was needed for this path.
+
+`PLAYWAVE` specifies an exact 48 kHz output sample count; `AUDIOSTREAM` pulls from a
+retained clip graph. Absolute sequence-frame endpoints determine chunk lengths instead
+of rounding each chunk's duration independently. EOF pads the requested output range
+with silence. Output windows are bounded to thirty seconds, normally five; FFmpeg's
+`areverse` still buffers the remaining clip range internally, so long reverse startup
+and memory are open work.
+
+The Windows gate compares four direct-worker cases and seventeen editor/source/rate
+cases against whole-range WAV output. The generated 48 kHz PCM fixture has zero sample
+differences across boundaries, including eleven effects, reverse, 2x speed, seek reset,
+source audition and fractional rates. Coded filter failure recovers on a later request,
+and idle Stop joins within the bounded test deadline. The supplied 4K clip's AAC track
+produced nonzero audio in all seventeen cases; its seek-start comparison had a maximum
+892 PCM-unit difference and a mean 3.05 units in signed 16-bit samples. These checks
+establish retained processing history, not sample-identical seeking for every codec,
+sustained interactive 4K60 or measured long-run A/V synchronization.

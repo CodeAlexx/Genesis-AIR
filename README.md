@@ -117,6 +117,7 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/recovery.ai` | independent autosave timer, separate recovery snapshots, legacy recovery reader and managed-file cleanup. |
 | `src/provider.ai` | the media seam: source probe, frame and waveform retrieval, and the worker transport. |
 | `src/timeline_media.ai` | resolves AIR editor clips into the worker's preview, encode, and audio commands. |
+| `src/audio_playback.ai` | background audio owner; retains native clip graphs, resets transport generations and publishes coded failures. |
 | `src/transport_clock.ai` | elapsed-time transport fallback; native Windows playback uses the audio device sample clock. |
 | `src/native_audio.ai`, `windows/native_audio.cpp` | typed C ABI adapter for Windows audio queues, sample clock and stereo output levels. |
 | `src/preview.ai` | atomic latest-request snapshots, generation-checked RGBA frames, waveforms and timeline bitmaps. |
@@ -265,8 +266,12 @@ progress and Escape cancels between frames. Incomplete output is removed.
 `export.progress` and `export.cancel` in the scratch directory expose the same scriptable
 progress and cancellation path.
 
-Windows playback prepares bounded five-second WAV chunks in the background and queues
-native audio buffers. The device's sample clock drives the source/program playhead.
+Windows playback prepares bounded five-second WAV chunks on one background thread and
+queues native audio buffers. One retained compositor session keeps each active clip's
+decoder, resampler and effect graph alive across those chunks, preserving delay,
+compressor and other filter history. Absolute 48 kHz sample boundaries prevent chunk
+rounding from accumulating at fractional frame rates. The device's sample clock drives
+the source/program playhead.
 Pause, Stop and seek immediately reset output; gain, pan, mute, solo and audio-effect
 edits invalidate queued sound. Picture-only edits preserve it. The meters read the PCM
 at the device cursor after mixing. Preview decoding runs on a separate thread; rapid
@@ -470,7 +475,17 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 The Windows gate verifies 152 saved application facts, three native file-drop facts,
 749 control clicks with overlap checks, 78 native media/project checks and 58 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
-clock, stereo output levels and immediate Stop. The asynchronous preview test measures
+clock, stereo output levels and immediate Stop. Continuous audio checks compare four
+worker cases and seventeen editor/source/rate cases against whole-range WAV output;
+the generated PCM fixture matches exactly across chunk boundaries. Cases cover eleven
+effects, reverse, 2x speed, fractional rates, seek reset and source audition, plus coded
+filter failure, recovery and idle Stop. Run that gate separately with:
+
+```powershell
+python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe
+```
+
+The asynchronous preview test measures
 red/blue pixels after a 32-request playhead drag, time changes during the drag,
 unchanged source caching, rewind to frame zero, painted timeline bitmaps and embedded
 audio waveform delivery. It also verifies coded malformed-request/publication
@@ -567,9 +582,10 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
-- Audio filter state is recreated for each playback chunk. Stateful effects and clip-wide
-  normalization need continuous processing and boundary measurements before their live
-  playback can be treated as equivalent to a whole-clip export.
+- Reversed audio buffers the remaining clip range before playback; large reversed clips
+  still need startup and memory improvements. Compressed-source seek startup can differ
+  slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
+  sample-identical seeking for every codec.
 - Nested sequence rendering, audio automation, animated speed and some filter combinations
   remain unsupported and are refused explicitly. The library has mappings for 31 video and
   20 audio effects; representative output checks do not establish every parameter value,

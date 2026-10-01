@@ -1644,7 +1644,7 @@ fn tempo_stages(stages: ref<array<string>>, speed: f64) -> unit effects {alloc} 
   ()
 }
 
-fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
+fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
                -> result<array<string>, string> effects {alloc} {
   var lines: array<string> = array.new()
   var at: u64 = 0
@@ -1675,7 +1675,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     if not math.is_finite(speed) or speed < 0.05 or speed > 16.0 {
       return result.err("audible clip speed must be between 0.05 and 16")
     }
-    let local_start: i64 = if clip.reverse { clip.length - (end - clip.start) }
+    let local_start: i64 = if clip.reverse { if streaming { 0 } else { clip.length - (end - clip.start) } }
       else { begin - clip.start }
     let source_s: f64 = cast.float(clip.source_in) / fps +
       cast.float(local_start) * speed / fps
@@ -1685,7 +1685,9 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
       if duration_s > remaining_s { duration_s = remaining_s }
     }
     if duration_s <= 0.0 { continue }
-    let destination_s: f64 = cast.float(begin - start) / fps
+    let destination_s: f64 = if streaming {
+      cast.float(audio_sample_frame(begin, fps) - audio_sample_frame(start, fps)) / 48000.0
+    } else { cast.float(begin - start) / fps }
     var stages: array<string> = array.new()
     if clip.reverse { array.push(stages, string.copy("areverse")) }
     tempo_stages(stages, speed)
@@ -1724,7 +1726,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
     let chain: string = if array.len(stages) == 0 { string.copy("-") }
       else { text.join(stages, ",") }
     var fields: array<string> = [
-      string.copy("AUDIO"),
+      string.copy(if streaming { "AUDIOSTREAM" } else { "AUDIO" }),
       provider.wire_path(str.view(struct.borrow(source, field=path))),
       string.from_float(source_s), string.from_float(duration_s),
       string.from_float(destination_s),
@@ -1735,20 +1737,36 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64)
       string.from_float(cast.float(begin - clip.start) / fps),
       chain
     ]
+    if streaming {
+      var remaining_source: f64 = cast.float(editor.clip_end(clip) - begin) * speed / fps
+      if source.frames > 0 and source.fps > 0.0 {
+        let available: f64 = cast.float(source.frames) / source.fps - source_s
+        if remaining_source > available { remaining_source = available }
+      }
+      array.push(fields, string.from_int(clip.id))
+      array.push(fields, string.from_float(remaining_source))
+      array.push(fields, string.from_int(audio_sample_frame(end, fps) - audio_sample_frame(begin, fps)))
+    }
     array.push(lines, text.join(fields, " "))
   }
   result.ok(lines)
 }
 
+// Absolute sample boundaries keep fractional-rate chunk lengths from accumulating
+// an extra rounded sample on every device buffer.
+pub fn audio_sample_frame(frame: i64, fps: f64) -> i64 effects {} {
+  cast.sat(math.floor(cast.float(frame) * 48000.0 / fps + 0.5))
+}
+
 pub type AudioPlan = struct {
-  worker: string, output: string, duration: f64, sounds: array<string>
+  worker: string, output: string, duration: f64, frames: u64, sounds: array<string>
 }
 
 // Transport and picture-only edits do not invalidate queued sound. Actual mix edits do.
 pub fn audio_signature(doc: ref<editor.Document>) -> string effects {alloc} {
   let fps: f64 = editor.sequence_fps(doc, doc.active)
   let finish: i64 = editor.duration(doc)
-  var lines: array<string> = match audio_lines(doc, 0, finish, fps) {
+  var lines: array<string> = match audio_lines(doc, 0, finish, fps, false) {
     ok(value) => value, err(problem) => { return problem },
   }
   array.push(lines, string.from_float(fps))
@@ -1764,20 +1782,20 @@ pub fn audio_plan(doc: ref<editor.Document>, worker: str, start: i64, output: st
   if start >= finish { return result.ok(option.none()) }
   let fps: f64 = editor.sequence_fps(doc, doc.active)
   if fps <= 0.0 { return result.err("sequence frame rate is invalid") }
-  var sounds: array<string> = try audio_lines(doc, start, finish, fps)
+  var sounds: array<string> = try audio_lines(doc, start, finish, fps, false)
   if array.len(sounds) == 0 { return result.ok(option.none()) }
   result.ok(option.some(AudioPlan {worker: string.copy(worker), output: string.copy(output),
-    duration: cast.float(finish - start) / fps, sounds: sounds}))
+    duration: cast.float(finish - start) / fps, frames: cast.sat(audio_sample_frame(finish,fps)-audio_sample_frame(start,fps)), sounds: sounds}))
 }
 
-// Playback prepares five seconds and queues the next chunk while the device plays it.
+// Playback prepares bounded chunks using one continuous decoder/filter graph per clip.
 pub fn audio_plan_range(doc: ref<editor.Document>, worker: str, start: i64, finish: i64, output: str)
                         -> result<AudioPlan,string> effects {alloc} {
   let fps: f64 = editor.sequence_fps(doc, doc.active)
-  if fps <= 0.0 or finish <= start { return result.err("[GA_AUDIO_RANGE] Invalid playback range") }
-  var sounds: array<string> = try audio_lines(doc, start, finish, fps)
+  if not math.is_finite(fps) or fps <= 0.0 or start < 0 or finish <= start { return result.err("[GA_AUDIO_RANGE] Invalid playback range") }
+  var sounds: array<string> = try audio_lines(doc, start, finish, fps, true)
   result.ok(AudioPlan {worker: string.copy(worker), output: string.copy(output),
-    duration: cast.float(finish - start) / fps, sounds: sounds})
+    duration: cast.float(finish - start) / fps, frames: cast.sat(audio_sample_frame(finish,fps)-audio_sample_frame(start,fps)), sounds: sounds})
 }
 
 pub fn monitor_fps(doc: ref<editor.Document>) -> f64 effects {} {
@@ -1801,6 +1819,58 @@ pub fn source_audio_range(doc: ref<editor.Document>, worker: str, start: i64, fi
   let track: u64 = editor.add_track(audition, owner, editor.track_audio(), "Source")
   let _ = editor.append(audition, track, source_id, 0, frames)
   audio_plan_range(audition, worker, start, finish, output)
+}
+
+// One background owner retains the pipe/reader between requests. These resource
+// handles stay on that thread; seeks and actual mix edits discard the old session.
+pub type AudioSession = struct {child: option<Child>, reader: proc.LineReader}
+pub type AudioJob = struct {plan: AudioPlan, session: option<AudioSession>}
+pub fn audio_job(plan: AudioPlan own, session: option<AudioSession> own) -> AudioJob effects {} {
+  AudioJob {plan: plan, session: session}
+}
+pub fn shutdown_audio(session: AudioSession own) -> unit effects {process, time} {
+  var owned: AudioSession = session
+  match struct.replace(owned,option.none(),field=child) {
+    none=>{},some(value)=>{ var child: Child = value
+      let _ = proc.terminate(child,100)
+      let _ = proc.close(child) },
+  }
+  ()
+}
+pub fn execute_playback_audio(job: ref<AudioJob>) -> result<AudioSession,string>
+    effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let plan: ref<AudioPlan> = struct.borrow(job,field=plan)
+  var session: AudioSession = match ref.swap(struct.borrow(job,field=session),option.none()) {
+    some(value) => value,
+    none => {
+      var argv: array<string> = [string.copy(str.view(plan.worker)),string.copy("--serve")]
+      let child: Child = match proc.spawn_piped_merged(argv) {
+        ok(value) => value,
+        err(problem) => { return result.err(text.concat("[GA_AUDIO_STREAM_START] ",fs.error.message(problem))) },
+      }
+      AudioSession {child: option.some(child), reader: proc.line_reader(65536)}
+    },
+  }
+  match files.mkdirs(str.view(path.dirname(str.view(plan.output)))) {
+    err(problem) => { shutdown_audio(session)
+      return result.err("[GA_AUDIO_STREAM_PATH] Audio scratch directory could not be created") },
+    ok(_) => {},
+  }
+  let target: string = provider.wire_path(str.view(plan.output))
+  var opener: string = text.concat("PLAYWAVE ",str.view(target))
+  string.append(opener," ")
+  string.append(opener,str.view(string.from_int(plan.frames)))
+  let closer: string = text.concat("WAVECLOSE ",str.view(target))
+  var child: Child = option.unwrap(struct.replace(session,option.none(),field=child))
+  var reader: proc.LineReader = struct.replace(session,proc.line_reader(65536),field=reader)
+  let answer: result<unit,string> = audio_session(child,reader,str.view(opener),struct.borrow(plan,field=sounds),str.view(closer))
+  let _ = struct.replace(session,option.some(child),field=child)
+  let _ = struct.replace(session,reader,field=reader)
+  match answer {
+    err(problem) => { shutdown_audio(session)
+      return result.err(problem) },
+    ok(_) => result.ok(session),
+  }
 }
 
 // Assemble the plan as a WAV through the worker. The document is no longer involved.
@@ -1922,7 +1992,7 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
     }
     frame = frame + 1
   }
-  var sounds: array<string> = try audio_lines(doc, range.mark_in, range.mark_out, fps)
+  var sounds: array<string> = try audio_lines(doc, range.mark_in, range.mark_out, fps, false)
   var at: u64 = 0
   loop {
     if at >= array.len(sounds) { break }

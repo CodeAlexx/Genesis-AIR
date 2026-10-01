@@ -48,6 +48,9 @@ try {
   if (Test-Path -LiteralPath $worker) {
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
     Copy-Item -LiteralPath (Join-Path $work 'async/timeline-scrub.png') -Destination (Join-Path $root 'timeline-scrub.png') -Force
+    & python (Join-Path $PSScriptRoot 'audio_stream.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-playback.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Continuous audio decoder/filter history acceptance failed.' }
+
   }
   Write-Host (Invoke-Native 'genesis-project-safety.exe' @($work)).TrimEnd()
   foreach ($artifact in @('project-safety-tests.json', 'project-decision.png', 'recovery-decision.png')) {

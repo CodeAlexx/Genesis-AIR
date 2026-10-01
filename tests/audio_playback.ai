@@ -1,0 +1,129 @@
+// Headless editor-to-audio-worker acceptance; Python compares the published PCM.
+module genesis.tests.audio_playback
+import std.editor as editor
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+import "../src/provider.ai" as provider
+
+fn pull(peer: ref<link.Link>, root: str, id: u64, generation: u64, plan: ref<media.AudioPlan>) -> bool
+    effects {alloc,fs.write,io.write,net,time} {
+  if not playback.request(root,id,generation,plan) {io.write("[GA_TEST_AUDIO_REQUEST] Publication failed\n")
+    return false}
+  match link.wake(peer,false) {err(problem)=>{io.write(str.view(problem))
+    return false},ok(_)=>{},}
+  match link.await_ready(peer,id,time.monotonic_ns()+30000000000) {
+    err(problem)=>{io.write(str.view(problem))
+      return false},ok(_)=>true,
+  }
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) < 4 {return 2}
+  let worker: str = view.get(args,1)
+  let source_path: str = view.get(args,2)
+  let root: str = view.get(args,3)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var failure: bool = false
+  var request: u64 = 0
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(config,fn=playback.run))
+    match link.connect(peer) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+      failure=true},}
+    var variant: u64 = 0
+    loop {if variant >= 17 or failure {break}
+      let fps: f64 = if variant == 6 {60000.0/1001.0}else{30.0}
+      let length: i64 = if variant == 6 {719}else if variant == 5 {180}else{360}
+      var doc: editor.Document = editor.document(fps,1920,1080)
+      let source: u64 = editor.add_source(doc,source_path,"Continuous audio",if variant == 6 {719}else{360},fps)
+      let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
+      let _ = editor.open_source(doc,source)
+      let owner: u64 = doc.active
+      let track: u64 = editor.add_track(doc,owner,editor.track_audio(),"Audio")
+      let clip: u64 = option.unwrap(editor.append(doc,track,source,0,length))
+      let kind: str = if variant == 9 {"normalize"}else if variant == 10 {"reverb"}else if variant == 11 {"chorus"}else if variant == 12 {"flanger"}else if variant == 13 {"pitch"}else if variant == 14 {"tremolo"}else if variant == 15 {"gate"}else if variant == 16 {"limiter"}else if variant == 1 {"compressor"}else if variant == 2 {"phaser"}else if variant == 3 or variant == 6 or variant == 8 {""}else{"delay"}
+      if str.len(kind) != 0 {
+        let filter: u64 = option.unwrap(editor.add_filter(doc,clip,kind))
+        if str.eq(kind,"pitch") {let _ = editor.set_filter_param(doc,filter,"semitones",3.0)}
+        if str.eq(kind,"delay") {let _ = editor.set_filter_param(doc,filter,"time",240.0)
+          let _ = editor.set_filter_param(doc,filter,"decay",0.5)}
+      }
+      if variant == 4 {let _ = editor.set_clip_reverse(doc,clip,true)}
+      if variant == 5 {let _ = editor.set_clip_speed(doc,clip,2.0)}
+      let start: i64 = if variant == 7 {150}else{0}
+      let prefix: string = text.concat("case-",str.view(string.from_int(variant)))
+      let whole: string = path.join(root,str.view(text.concat(str.view(prefix),"-whole.wav")))
+      match media.prepare_audio(doc,worker,start,str.view(whole)) {
+        err(problem)=>{io.write(str.view(problem))
+          failure=true
+          break},ok(_)=>{},
+      }
+      var at: i64 = start
+      var chunk: u64 = 0
+      loop {if at >= length or failure {break}
+        let end: i64 = if at + cast.sat(fps*5.0) > length {length}else{at+cast.sat(fps*5.0)}
+        let filename: string = path.join(root,str.view(text.concat(str.view(prefix),text.concat("-",text.concat(str.view(string.from_int(chunk)),".wav")))))
+        var plan: media.AudioPlan = match if variant == 8 {media.source_audio_range(doc,worker,at,end,str.view(filename))}
+          else {media.audio_plan_range(doc,worker,at,end,str.view(filename))} {
+          ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+            failure=true
+            break},
+        }
+        request=request+1
+        if not pull(peer,root,request,variant+1,plan) {failure=true
+          break}
+        at=end
+        chunk=chunk+1
+      }
+      io.write(text.concat(str.view(prefix),text.concat(" ",text.concat(str.view(string.from_int(chunk)),"\n"))))
+      variant=variant+1
+    }
+    if not failure {
+      let encoded: string = provider.wire_path(source_path)
+      var sounds: array<string> = [text.concat("AUDIOSTREAM ",text.concat(str.view(encoded)," 0 5 0 1 0 0 12 0 missing_audio_filter 900 12 240000"))]
+      var broken: media.AudioPlan = media.AudioPlan {worker:string.copy(worker),output:path.join(root,"broken.wav"),
+        duration:5.0,frames:240000,sounds:sounds}
+      request=request+1
+      let _ = playback.request(root,request,200,broken)
+      let _ = link.wake(peer,false)
+      match link.await_ready(peer,request,time.monotonic_ns()+30000000000) {
+        ok(_)=>{failure=true},err(problem)=>{if not text.contains(str.view(problem),"GA_AUDIO_STREAM_FILTER") {io.write(str.view(problem))
+          failure=true}},
+      }
+      var doc: editor.Document = editor.document(30.0,1920,1080)
+      let source: u64 = editor.add_source(doc,source_path,"Recovery",360,30.0)
+      let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
+      let owner: u64 = doc.active
+      let track: u64 = editor.add_track(doc,owner,editor.track_audio(),"Audio")
+      let _ = editor.append(doc,track,source,0,360)
+      match media.audio_plan_range(doc,worker,0,150,str.view(path.join(root,"recovered.wav"))) {
+        ok(value)=>{var plan: media.AudioPlan = value
+          request=request+1
+          if not pull(peer,root,request,200,plan) {failure=true}},
+        err(problem)=>{io.write(str.view(problem))
+          failure=true},
+      }
+    }
+    // A reset with no active range must close the retained worker. The next
+    // request can reuse the same clip IDs without inheriting its filter state.
+    request=request+1
+    let _ = playback.discard(root,request,100)
+    let _ = link.wake(peer,false)
+    match link.await_ready(peer,request,time.monotonic_ns()+30000000000) {err(problem)=>{io.write(str.view(problem))
+      failure=true},ok(_)=>{},}
+    playback.stop(root)
+    // Persisted Stop alone must also release an idle worker after its bounded wait.
+    let stopping: u64 = time.monotonic_ns()
+    match tasks.join_next<bool>(jobs,2500) {none=>{failure=true},some(answer)=>{if not answer {failure=true}},}
+    if time.monotonic_ns()-stopping > 2500000000 {failure=true}
+    link.close_commands(peer)
+  }
+  if failure {1}else{io.write("Continuous audio task: seventeen edit/source/rate/reset cases, coded filter failure/recovery and idle Stop passed\n")
+    0}
+}

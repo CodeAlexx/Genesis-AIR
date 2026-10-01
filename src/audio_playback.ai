@@ -1,0 +1,111 @@
+// One background owner keeps native decoder/filter handles on their creating thread.
+// Requests are atomic snapshots; generation checks refuse stale seek/mix results.
+module genesis.audio_playback
+import std.channel as channel
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "preview_link.ai" as link
+import "timeline_media.ai" as media
+import "provider.ai" as provider
+
+pub type Config = struct {root: string, worker: string, events: channel.Ticket}
+fn publish(root: str, name: str, value: str) -> bool effects {alloc,fs.write} {
+  let target: string = path.join(root,name)
+  match files.write_atomic(str.view(target),str.view(text.concat(str.view(target),".tmp")),value) {ok(_)=>true,err(_)=>false,}
+}
+pub fn reset(root: str) -> unit effects {alloc,fs.meta,fs.write} {
+  let _ = files.mkdirs(root)
+  let _ = files.remove(path.join(root,"stop"))
+  let _ = publish(root,"request.id","0")
+}
+fn u64_or(value: str, fallback: u64) -> u64 effects {alloc} {
+  match text.parse_u64(str.view(text.trim(value))) {some(value)=>value,none=>fallback,}
+}
+fn number(root: str, name: str) -> u64 effects {alloc,fs.read} {
+  match files.read_text(path.join(root,name)) {err(_)=>0,ok(value)=>u64_or(str.view(value),0),}
+}
+fn decoded(value: str) -> string effects {alloc} {
+  var path: string = text.replace(value,"%20"," ")
+  path=text.replace(str.view(path),"%09","\t")
+  path=text.replace(str.view(path),"%0A","\n")
+  path=text.replace(str.view(path),"%0D","\r")
+  text.replace(str.view(path),"%25","%")
+}
+pub fn request(root: str, id: u64, generation: u64, plan: ref<media.AudioPlan>) -> bool effects {alloc,fs.write} {
+  var header: string = text.concat(str.view(string.from_int(id))," ")
+  string.append(header,str.view(string.from_int(generation)))
+  string.append(header," ")
+  string.append(header,str.view(string.from_int(plan.frames)))
+  string.append(header,"\n")
+  string.append(header,str.view(provider.wire_path(str.view(plan.output))))
+  string.append(header,"\n")
+  string.append(header,str.view(text.join(struct.borrow(plan,field=sounds),"\n")))
+  publish(root,"request.air",str.view(header)) and publish(root,"request.id",str.view(string.from_int(id)))
+}
+pub fn discard(root: str, id: u64, generation: u64) -> bool effects {alloc,fs.write} {
+  let header: string = text.concat(str.view(string.from_int(id)),text.concat(" ",text.concat(str.view(string.from_int(generation))," 0\n-\n")))
+  publish(root,"request.air",str.view(header)) and publish(root,"request.id",str.view(string.from_int(id)))
+}
+pub fn stop(root: str) -> unit effects {alloc,fs.write} {let _ = files.write_text(path.join(root,"stop"),"stop")
+  ()}
+pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,net,process,time} {
+  var owned: Config = config
+  var peer: link.Peer = match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}
+  var session: option<media.AudioSession> = option.none()
+  var transport: u64 = 0
+  var seen: u64 = 0
+  loop {
+    if tasks.requested_at(path.join(str.view(owned.root),"stop")) {break}
+    if not link.next(peer) {break}
+    if tasks.requested_at(path.join(str.view(owned.root),"stop")) {break}
+    let id: u64 = number(str.view(owned.root),"request.id")
+    if id == 0 or id == seen {continue}
+    seen=id
+    var data: bytes = match files.read_limited(path.join(str.view(owned.root),"request.air"),1048576) {
+      ok(value)=>value,err(_)=>{link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Cannot read playback snapshot")
+        continue},
+    }
+    let text_value: string = match str.from_bytes(bytes.view(data)) {
+      some(value)=>string.copy(value),none=>{link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid playback UTF-8")
+        continue},
+    }
+    var lines: array<string> = text.split(str.view(text_value),"\n")
+    if array.len(lines) < 2 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Missing playback fields")
+      continue}
+    var header: array<string> = text.split(str.view(array.borrow(lines,0))," ")
+    if array.len(header) != 3 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid playback header")
+      continue}
+    let snapshot: u64 = u64_or(str.view(array.borrow(header,0)),0)
+    let generation: u64 = u64_or(str.view(array.borrow(header,1)),0)
+    let frames: u64 = u64_or(str.view(array.borrow(header,2)),18446744073709551615)
+    if snapshot != id or number(str.view(owned.root),"request.id") != id {continue}
+    if generation != transport or frames == 0 {
+      match ref.swap(session,option.none()) {none=>{},some(value)=>media.shutdown_audio(value),}
+      transport=generation
+    }
+    if frames == 0 {let _ = link.notify(peer,1,id)
+      continue}
+    if frames > 1440000 {link.fail(peer,id,"[GA_AUDIO_TASK_RANGE] Playback window exceeds 30 seconds")
+      continue}
+    var sounds: array<string> = array.new()
+    var at: u64 = 2
+    loop {if at >= array.len(lines) {break}
+      let line: str = str.view(array.borrow(lines,at))
+      if str.len(line) != 0 {array.push(sounds,string.copy(line))}
+      at=at+1
+    }
+    var plan: media.AudioPlan = media.AudioPlan {worker:string.copy(str.view(owned.worker)),
+      output:decoded(str.view(array.borrow(lines,1))),duration:cast.float(frames)/48000.0,frames:frames,sounds:sounds}
+    var job: media.AudioJob = media.audio_job(plan,ref.swap(session,option.none()))
+    match media.execute_playback_audio(job) {
+      err(problem)=>link.fail(peer,id,str.view(problem)),
+      ok(value)=>{session=option.some(value)
+        let _ = link.notify(peer,1,id)},
+    }
+  }
+  match ref.swap(session,option.none()) {none=>{},some(value)=>media.shutdown_audio(value),}
+  link.finish(peer,seen)
+  true
+}

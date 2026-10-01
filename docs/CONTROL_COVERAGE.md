@@ -20,6 +20,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
 | Project safety and recovery | Fifteen cases / 84 checks. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
+| Continuous playback audio | Four direct-worker and seventeen editor/source/rate cases compare concatenated playback chunks against whole-range WAVs, with zero PCM differences in the generated fixture; delay, compressor, phaser, normalize, reverb, chorus, flanger, pitch, tremolo, gate and limiter retain history; reverse, 2x speed, fractional sample endpoints, seek reset and source audition; coded filter failure/recovery and idle Stop without a wake |
 | Retained playback painter | Twenty-four cases / 444 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation; nine cases keep image dimensions fixed while transitioning between opaque, zero-alpha and mixed-alpha frames in the editor and both fullscreen monitors at three scales |
 | Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
 | Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; the final picture matches a 32-request drag; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue; coded malformed-request and blocked-pixel-publication failures recover on the same worker; a reused image slot refuses its old generation; persisted Stop cancels an idle worker without a wake |
@@ -83,8 +84,8 @@ The new Save/Discard/Cancel and recovery dialogs have headless rendered-image ch
 use the same geometry for painting and pointer dispatch. Their native picker and close
 interaction has not received a new interactive Windows check in this checkpoint.
 
-The highest-impact remaining work is continuous playback filter state across audio chunk
-boundaries, parameter/animation measurements for mapped effects, nested sequences,
+The highest-impact remaining work is sustained playback and long reversed-audio startup,
+parameter/animation measurements for mapped effects, nested sequences,
 complex-script text, audio automation and measured sustained audio/video synchronization.
 
 ## Video filters (31)
@@ -106,6 +107,15 @@ animated parameters, and long-timeline playback timing remain acceptance work. T
 gate's stored `hold` is presented as release time because that is what the worker filter
 implements.
 
+Playback now retains each clip's native decoder, resampler and effect graph across
+five-second device buffers. The continuous-audio gate compares eleven representative
+effects with whole-range output and checks reverse, speed, seek/reset, source audition
+and fractional-rate sample counts. Generated PCM samples match exactly; this is
+headless processing evidence, not a new interactive playback or long-run A/V sync check.
+The supplied 4K clip's AAC audio also produced nonzero output in all seventeen cases;
+its seek-start decoder output differs slightly from the whole-range reference. Long
+reversed clips still buffer their remaining audio range and need memory/startup work.
+
 ## Other exposed controls
 
 | Area | Verified | Still required |
@@ -114,7 +124,7 @@ implements.
 | Project lifecycle | Save/Discard/Cancel for New/Open/Recover/Close, failed-save retry and preservation, isolated history/clipboard, independent paused autosave, separate snapshots, newest-valid and legacy recovery, Save as copy and atomic temporary collision checks | Native picker/modal interaction under an interactive Windows session; recovery ownership across simultaneous running processes. |
 | Inspector and keyframes | Representative controls are clicked; focused drag/undo/cancel checks pass; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed caption cues, one Latin/Cyrillic/CJK, appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Complex-script shaping, right-to-left text, richer typography, and subtitle placement. |
-| Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Precise long-timeline audio/video sync, continuous audio-filter state across playback chunks, live scrub sound. |
+| Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, X11 audio start/stop and continuous native playback decoder/filter history across chunk boundaries | Precise long-timeline audio/video sync, long reversed-audio startup/memory, live scrub sound. |
 | Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, a generated 24-to-30 fps preview/export/audio gate, and a 24 fps sequence preview/9-frame MP4/audio gate | More mixed fractional-rate cases and long-timeline audio sync. |
 
 Keep this ledger with the implementation. Add a measured output assertion when closing a
