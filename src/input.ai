@@ -19,6 +19,8 @@ import std.timeline as timeline
 import std.unicode as unicode
 import std.widgets as widgets
 import "app.ai" as app
+import "project_session.ai" as session
+import "recovery.ai" as recovery
 import "provider.ai" as provider
 import "chrome.ai" as chrome
 import "commands.ai" as commands
@@ -74,6 +76,8 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   let name: string = chrome.name_of(control)
   let kind: string = chrome.kind_of(control)
 
+  if action == chrome.act_project_choice() { return session.choose(state, cast.sat(target)) }
+  if session.pending(state) { return note("Finish or cancel the current project decision") }
   if action == chrome.act_menu() {
     let which: u32 = cast.sat(target)
     app.set_open_menu(state, which)
@@ -84,8 +88,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   }
   app.close_menu(state)
   if action == chrome.act_quit() {
-    app.stop(state)
-    return note("Closing Genesis AIR")
+    return session.request(state, app.ProjectAction.Close, "")
   }
   if action == chrome.act_about() {
     return note("Genesis AIR — native nonlinear editor written in AIR")
@@ -105,8 +108,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     return commands.message(changed)
   }
   if action == chrome.act_new() {
-    var landed: commands.Result = commands.new_project(state)
-    return commands.message(landed)
+    return session.request(state, app.ProjectAction.New, "")
   }
   if action == chrome.act_open() {
     app.begin_prompt(state, action, "Open project", "")
@@ -131,17 +133,11 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     return commands.message(landed)
   }
   if action == chrome.act_recover() {
-    let scratch: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)))
-    let saved: string = path.join(str.view(scratch), "autosave.air")
-    var recovered: commands.Result = commands.open_project(state, str.view(saved))
-    if recovered.ok {
-      app.set_project_path(state, "")
-      app.mark_dirty(state, true)
-      let _ = commands.program(state, editor.pause())
-      let _ = commands.monitor(state, editor.pause())
-      return note("Autosave recovered; use Save as to keep it")
+    let saved: string = match recovery.latest(state, true) {
+      none => { return note("[GA_RECOVERY_MISSING] No readable recovery snapshot is available") }, some(value) => value,
     }
-    return note("[GA_RECOVERY_MISSING] No readable autosave is available")
+    app.begin_prompt(state, action, "Recover project", str.view(saved))
+    return note("Choose a recovery snapshot")
   }
   if action == chrome.act_undo() {
     var landed: commands.Result = commands.undo(state)
@@ -502,6 +498,7 @@ fn edge_zone() -> f64 effects {} { 7.0 }
 // The bool lets the window repaint only when visible hover state actually changed.
 pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
                      y: f64) -> bool effects {alloc} {
+  if session.pending(state) { return false }
   let frame: layout.Frame = layout.frame(width, height)
   var menus: array<chrome.Control> = chrome.menu_bar(frame, state)
   match chrome.hit(menus, x, y) {
@@ -530,6 +527,14 @@ pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  if session.modal(state) {
+    var controls: array<chrome.Control> = chrome.project_choices(width, height, state)
+    match chrome.hit(controls, x, y) {
+      some(index) => { return perform(state, array.borrow(controls, index), width, height) },
+      none => { return note("") },
+    }
+  }
+  if session.saving(state) { return note("") }
   // A fresh press ends any previous drag whose release was lost during focus changes.
   app.end_parameter_drag(state)
   app.end_gesture(state)
@@ -735,6 +740,7 @@ fn seek_monitor_bar(state: ref<app.App>, frame: layout.Frame, source: bool, x: f
 // so the whole gesture becomes ONE undo step.
 pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc} {
+  if session.pending(state) { return note("") }
   if app.parameter_dragging(state) { return continue_parameter_drag(state, x) }
   if app.dock_scroll_dragging(state) {
     let frame: layout.Frame = layout.frame(width, height)
@@ -840,6 +846,7 @@ pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
 // held and scrolls otherwise.
 pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
              down: bool, lines: u32, zooming: bool) -> string effects {alloc} {
+  if session.pending(state) { return note("") }
   let frame: layout.Frame = layout.frame(width, height)
   if layout.contains(frame.dock, x, y) {
     app.set_focus(state, app.panel_dock())
@@ -919,16 +926,15 @@ pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.
     }
     return note("selected filter has no text value")
   }
-  if str.len(str.view(typed)) == 0 { return note("cancelled") }
+  if str.len(str.view(typed)) == 0 { if session.saving(state) { return session.cancel(state) }
+    return note("cancelled") }
 
+  if action == chrome.act_recover() { return session.request(state, app.ProjectAction.Recover, str.view(typed)) }
   if action == chrome.act_open() {
-    var landed: commands.Result = commands.open_project(state, str.view(typed))
-    if landed.ok { app.set_project_path(state, str.view(typed)) }
-    return commands.message(landed)
+    return session.request(state, app.ProjectAction.Open, str.view(typed))
   }
   if action == chrome.act_save() {
-    var landed: commands.Result = commands.save_project(state, str.view(typed))
-    return commands.message(landed)
+    return session.save_path(state, str.view(typed))
   }
   if action == chrome.act_import() {
     var landed: commands.Result = commands.import_media(state, str.view(typed),
@@ -946,6 +952,15 @@ pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.
 
 // True when the committed line is a path the window should write a still to; the window
 // owns the canvas, so it performs that one itself.
+pub fn close_request(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write} {
+  session.request(state, app.ProjectAction.Close, "")
+}
+pub fn cancel_prompt(state: ref<app.App>) -> string effects {alloc} {
+  if session.saving(state) { return session.cancel(state) }
+  app.end_prompt(state)
+  note("cancelled")
+}
+
 pub fn prompt_is_render(state: ref<app.App>) -> bool effects {} {
   app.prompt_active(state) and app.prompt_action(state) == chrome.act_render()
 }
@@ -954,6 +969,18 @@ pub fn prompt_is_render(state: ref<app.App>) -> bool effects {} {
 // printable keys belong to it instead.
 pub fn key(state: ref<app.App>, code: u32, control: bool,
            shift: bool) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  if session.modal(state) {
+    if code == widgets.key_escape() { return session.cancel(state) }
+    if code == widgets.key_tab() or code == widgets.key_left() or code == widgets.key_right() {
+      session.advance_choice(state, shift or code == widgets.key_left())
+      return note("")
+    }
+    if code == widgets.key_return() {
+      let choice: u32 = struct.get(struct.borrow(state, field=pending_project), field=choice)
+      return session.choose(state, choice)
+    }
+    return note("")
+  }
   if state.fullscreen != 0 and code == widgets.key_escape() {
     struct.set(state, 0, field=fullscreen)
     app.end_gesture(state)
@@ -973,6 +1000,7 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
   }
   if app.prompt_active(state) {
     if code == widgets.key_escape() {
+      if session.saving(state) { return session.cancel(state) }
       app.end_prompt(state)
       return note("cancelled")
     }
@@ -1127,6 +1155,7 @@ pub fn text(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
 // Open a custom menu from the host's Alt+letter access event. The same operation is used
 // on Linux and Windows; only the adapter that produces MenuAccess differs.
 pub fn menu_access(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
+  if session.pending(state) { return note("") }
   var which: u32 = chrome.menu_none()
   if scalar == 70 or scalar == 102 { which = chrome.menu_file() }
   else if scalar == 69 or scalar == 101 { which = chrome.menu_edit() }

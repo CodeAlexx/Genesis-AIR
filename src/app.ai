@@ -78,6 +78,17 @@ pub type Clipboard = struct { source: u64, source_in: i64, length: i64, filled: 
 // will run when the line is committed, so a keystroke cannot be misrouted.
 pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string }
 
+// A deferred project replacement belongs to the session, never to the document.
+pub type ProjectAction = enum { None, New, Open, Recover, Close }
+pub type ProjectStage = enum { None, Confirm, SavePath, OfferRecovery }
+pub type PendingProject = struct {
+  action: ProjectAction, stage: ProjectStage, target: string, label: string, error: string, choice: u32
+}
+pub fn no_project_request() -> PendingProject effects {alloc} {
+  PendingProject {action: ProjectAction.None, stage: ProjectStage.None,
+    target: string.new(), label: string.new(), error: string.new(), choice: 0}
+}
+
 pub type ParameterDrag = struct {
   active: bool, domain: u32, target: u64, name: string, label: string,
   left: f64, width: f64, low: f64, high: f64, step: f64, value: f64
@@ -109,6 +120,9 @@ pub type App = struct {
   clipboard: Clipboard,
   gesture: Drag,
   prompt: Prompt,
+  pending_project: PendingProject,
+  recovery_file: string,
+  recovered_file: string,
   project_path: string,
   status: string,
   dirty: bool,
@@ -117,6 +131,7 @@ pub type App = struct {
   frames_painted: u64,
   fullscreen: u32,
   media_revision: u64,
+  project_epoch: u64,
   waveforms: array<Waveform>,
   thumbnails: array<Thumbnail>,
   audio_left: f64,
@@ -149,8 +164,9 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     clipboard: Clipboard {source: 0, source_in: 0, length: 0, filled: false},
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
+    pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, waveforms: array.new(), thumbnails: array.new(),
+    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, waveforms: array.new(), thumbnails: array.new(),
     audio_left: 0.0, audio_right: 0.0,
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }

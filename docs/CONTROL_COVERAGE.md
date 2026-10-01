@@ -18,8 +18,9 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Project and control model | 152 saved application facts, three native file-drop checks, 749 dispatched clicks across four tabs, no enabled-control overlap |
 | Native media and project I/O | Eight cases / 65 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status |
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
+| Project safety and recovery | Fifteen cases / 84 checks. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
-| Retained playback painter | Fourteen cases / 273 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts and keyed inspector values |
+| Retained playback painter | Fifteen cases / 282 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation |
 | Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
 | Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; newest request wins; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
@@ -31,7 +32,8 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The current headless serial preview diagnostic at 2560x1440 measured 7.39 ms median
+The retained-painter checkpoint (`77ea56a`) headless serial preview diagnostic at
+2560x1440 measured 7.39 ms median
 retained painting versus 42.23 ms for a complete paint on the supplied 4K source
 (20 samples after three warmups). Fullscreen retained painting measured 28.08 ms.
 Serial mailbox/paint totals were 49.94 ms and 68.07 ms respectively; native
@@ -45,6 +47,10 @@ interactive evidence; it is not a sustained throughput or long-timeline sync mea
 
 Use the Windows reproduction commands in [README](../README.md#tests). Historical Unix
 X11 tests remain in `tests/window_file_picker.py` and `tests/window_playback.py`.
+
+The new Save/Discard/Cancel and recovery dialogs have headless rendered-image checks and
+use the same geometry for painting and pointer dispatch. Their native picker and close
+interaction has not received a new interactive Windows check in this checkpoint.
 
 The highest-impact remaining work is continuous playback filter state across audio chunk
 boundaries, parameter/animation measurements for mapped effects, nested sequences,
@@ -74,6 +80,7 @@ implements.
 | Area | Verified | Still required |
 |---|---|---|
 | Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; X11 import, V1 placement, ruler scrub, and save at 1× and 4K 2×; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have midpoint crossfade gates; incoming and outgoing Text titles are checked through a crossfade | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, measured sustained interactive throughput. Incoming transition opacity, fade, and overlay-only effects currently fail explicitly. |
+| Project lifecycle | Save/Discard/Cancel for New/Open/Recover/Close, failed-save retry and preservation, isolated history/clipboard, independent paused autosave, separate snapshots, newest-valid and legacy recovery, Save as copy and atomic temporary collision checks | Native picker/modal interaction under an interactive Windows session; recovery ownership across simultaneous running processes. |
 | Inspector and keyframes | Representative controls are clicked; focused drag/undo/cancel checks pass; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed caption cues, one Latin/Cyrillic/CJK, appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Complex-script shaping, right-to-left text, richer typography, and subtitle placement. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, and X11 audio start/stop | Precise long-timeline audio/video sync, continuous audio-filter state across playback chunks, live scrub sound. |

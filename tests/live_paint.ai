@@ -11,6 +11,7 @@ import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
 import "../src/provider.ai" as provider
+import "../src/project_session.ai" as session
 import "../src/typeface.ai" as typeface
 import "../src/view.ai" as painter
 
@@ -150,6 +151,14 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = editor.set_key(struct.borrow(state, field=document), clip, "opacity", 100, 0.2, 1)
   compare(suite, state, cache, 2560, 1440, true, source, program, scratch)
   let _ = editor.seek(struct.borrow(state, field=document), 50)
+  compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+  let _ = test.done(suite)
+  let _ = test.start(suite, "Project decisions and cancellation clear the retained modal pixels")
+  let _ = session.request(state, app.ProjectAction.Close, "")
+  compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+  let _ = session.choose(state, 0)
+  compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+  let _ = session.cancel(state)
   compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
   let _ = test.done(suite)
   test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 24)

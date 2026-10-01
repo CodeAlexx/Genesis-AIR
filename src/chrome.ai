@@ -61,6 +61,31 @@ pub fn act_step_forward() -> u32 effects {} { 14 }
 pub fn act_quit() -> u32 effects {} { 15 }
 pub fn act_stop() -> u32 effects {} { 16 }
 pub fn act_fullscreen() -> u32 effects {} { 17 }
+pub fn act_project_choice() -> u32 effects {} { 18 }
+
+// Modal project decisions share their geometry with painting and hit testing.
+pub fn project_choices(width: f64, height: f64, state: ref<app.App>) -> array<Control> effects {alloc} {
+  var controls: array<Control> = array.new()
+  let pending: ref<app.PendingProject> = struct.borrow(state, field=pending_project)
+  if pending.stage != app.ProjectStage.Confirm and pending.stage != app.ProjectStage.OfferRecovery { return controls }
+  let area: layout.Rect = layout.project_decision(width, height)
+  let offered: bool = pending.stage == app.ProjectStage.OfferRecovery
+  let count: u32 = if offered { 2 } else { 3 }
+  let width_each: f64 = (layout.width_of(area) - 48.0 - cast.float(count - 1) * 12.0) / cast.float(count)
+  var index: u32 = 0
+  loop { if index >= count { break }
+    let choice: u32 = if offered and index == 1 { 2 } else { index }
+    let label: str = if choice == 2 { if offered { "Keep current" } else { "Cancel" } }
+      else if choice == 1 { "Discard changes" } else if offered { "Recover" } else { "Save" }
+    let left: f64 = area.left + 24.0 + cast.float(index) * (width_each + 12.0)
+    var control: Control = button(act_project_choice(), label,
+      layout.rect(left, area.bottom - 58.0, left + width_each, area.bottom - 22.0), choice == pending.choice)
+    struct.set(control, cast.wrap(choice), field=target)
+    array.push(controls, control)
+    index = index + 1
+  }
+  controls
+}
 
 pub fn act_split() -> u32 effects {} { 20 }
 pub fn act_lift() -> u32 effects {} { 21 }

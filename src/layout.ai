@@ -72,6 +72,13 @@ pub fn prompt_panel(width: f64, height: f64) -> Rect effects {} {
   rect(left, top, left + span, top + 132.0)
 }
 
+pub fn project_decision(width: f64, height: f64) -> Rect effects {} {
+  let span: f64 = if width < 680.0 { width - 32.0 } else { 648.0 }
+  let left: f64 = (width - span) * 0.5
+  let top: f64 = (height - 196.0) * 0.5
+  rect(left, top, left + span, top + 196.0)
+}
+
 pub fn frame(width: f64, height: f64) -> Frame effects {} {
   let menu_bottom: f64 = menu_height()
   let toolbar_bottom: f64 = menu_bottom + toolbar_height()

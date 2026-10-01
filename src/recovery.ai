@@ -1,0 +1,219 @@
+// Recovery snapshots are application session data around the existing project schema.
+module genesis.recovery
+import std.codec as codec
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.json as json
+import std.path as path
+import std.text as text
+import "app.ai" as app
+
+pub type Snapshot = struct {document: editor.Document, original: string, autosave: bool}
+pub type Timer = struct {started: bool, last_ns: u64, revision: u64}
+pub fn timer() -> Timer effects {} { Timer {started: false, last_ns: 0, revision: 0} }
+// The clock is supplied by the event loop; no input or preview event is required.
+pub fn tick(state: ref<app.App>, timer: ref<Timer>, now_ns: u64) -> result<bool, string>
+    effects {alloc, fs.meta, fs.read, fs.write, time} {
+  if not app.dirty(state) { return result.ok(false) }
+  // The selected snapshot is the version the user asked to recover. No editing
+  // is allowed while this decision is open, so keep that version until resolved.
+  if struct.get(struct.borrow(state, field=pending_project), field=action) == app.ProjectAction.Recover {
+    let target: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=pending_project), field=target)))
+    let active_file: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+    if str.len(str.view(active_file)) != 0 and same_path(str.view(target), str.view(active_file)) {
+      return result.ok(false)
+    }
+  }
+  if timer.started and timer.revision == state.project_epoch {
+    if now_ns >= timer.last_ns {
+      if now_ns - timer.last_ns < 30000000000 { return result.ok(false) }
+    }
+  }
+  struct.set(timer, true, field=started)
+  struct.set(timer, now_ns, field=last_ns)
+  struct.set(timer, state.project_epoch, field=revision)
+  match record(state) {ok(_) => result.ok(true), err(problem) => result.err(problem),}
+}
+pub fn root(state: ref<app.App>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "recovery")
+}
+fn legacy(state: ref<app.App>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "autosave.air")
+}
+pub fn read(file: str) -> result<Snapshot, string> effects {alloc, fs.read} {
+  let source: string = match files.read_text(file) {
+    ok(value) => value, err(_) => { return result.err(string.copy("[GA_RECOVERY_READ] The recovery file could not be read")) },
+  }
+  var parsed: json.Document = match json.parse(str.view(source)) {
+    ok(value) => value, err(_) => { return result.err(string.copy("[GA_RECOVERY_FORMAT] The recovery file is not valid JSON")) },
+  }
+  let schema: string = match json.get(parsed, 0, "schema") {
+    none => string.new(), some(index) => match json.as_string(parsed, index) {
+      none => string.new(), some(value) => value,
+    },
+  }
+  var document_text: string = string.new()
+  var original: string = string.new()
+  if str.eq(str.view(schema), "air.editor.project") {
+    // The previous Windows version wrote a plain project as autosave.air.
+    document_text = string.copy(str.view(source))
+  } else if str.eq(str.view(schema), "genesis.autosave") {
+    var reader: codec.Reader = codec.root_reader(codec.strict())
+    let checked_schema: string = match codec.text_field(parsed, reader, "schema") {
+      ok(value) => value, err(_) => { return result.err(string.copy("[GA_RECOVERY_FORMAT] Missing recovery schema")) },
+    }
+    let revision: u64 = match codec.u64_field(parsed, reader, "version") {
+      ok(value) => value, err(_) => { return result.err(string.copy("[GA_RECOVERY_VERSION] Missing recovery version")) },
+    }
+    if revision != 1 { return result.err(string.copy("[GA_RECOVERY_VERSION] This recovery version is unsupported")) }
+    original = match codec.text_field(parsed, reader, "original") {
+      ok(value) => value, err(_) => { return result.err(string.copy("[GA_RECOVERY_FORMAT] Missing original project path")) },
+    }
+    var project: codec.Reader = match codec.object_field(parsed, reader, "document", codec.strict()) {
+      ok(value) => value, err(_) => { return result.err(string.copy("[GA_RECOVERY_FORMAT] Missing project document")) },
+    }
+    document_text = match json.raw(parsed, codec.node_index(project)) {
+      some(value) => value, none => { return result.err(string.copy("[GA_RECOVERY_FORMAT] Invalid project document")) },
+    }
+    match codec.reader_finish(parsed, reader) {
+      ok(_) => {}, err(_) => { return result.err(string.copy("[GA_RECOVERY_FORMAT] Unexpected recovery fields")) },
+    }
+  } else { return result.err(string.copy("[GA_RECOVERY_FORMAT] Unrecognized recovery schema")) }
+  var document: editor.Document = match editor_io.decode(str.view(document_text)) {
+    ok(value) => value, err(problem) => { return result.err(text.concat("[GA_RECOVERY_DOCUMENT] ", str.view(codec.describe(problem)))) },
+  }
+  let _ = editor.program_action(document, editor.pause())
+  let _ = editor.monitor_action(document, editor.pause())
+  result.ok(Snapshot {document: document, original: original, autosave: str.eq(str.view(schema), "genesis.autosave")})
+}
+
+fn same_path(first: str, second: str) -> bool effects {alloc} {
+  str.eq(str.view(text.lower_ascii(str.view(path.normalize(first)))),
+    str.view(text.lower_ascii(str.view(path.normalize(second)))))
+}
+fn managed(state: ref<app.App>, file: str) -> bool effects {alloc} {
+  let normalized: string = text.lower_ascii(str.view(path.normalize(file)))
+  let directory: string = text.lower_ascii(str.view(path.normalize(str.view(root(state)))))
+  let old: string = text.lower_ascii(str.view(path.normalize(str.view(legacy(state)))))
+  str.eq(str.view(normalized), str.view(old)) or
+    str.eq(str.view(path.dirname(str.view(normalized))), str.view(directory))
+}
+// A plain project inside the recovery directory is still a user's project.
+pub fn managed_snapshot(state: ref<app.App>, file: str, autosave: bool) -> bool effects {alloc} {
+  if autosave { return managed(state, file) }
+  str.eq(str.view(text.lower_ascii(str.view(path.normalize(file)))),
+    str.view(text.lower_ascii(str.view(path.normalize(str.view(legacy(state)))))))
+}
+// A selected recovery file stays available until a pending Recover has loaded it.
+// Only application-managed files can be removed; ordinary project files are preserved.
+pub fn clear_owned(state: ref<app.App>) -> bool effects {alloc, fs.write} {
+  let keep: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=pending_project), field=target)))
+  var paths: array<string> = [struct.replace(state, string.new(), field=recovery_file),
+    struct.replace(state, string.new(), field=recovered_file)]
+  var good: bool = true
+  var i: u64 = 0
+  loop { if i >= array.len(paths) { break }
+    let file: str = str.view(array.borrow(paths, i))
+    if str.len(file) != 0 and not same_path(file, str.view(keep)) and managed(state, file) {
+      match files.remove(file) {ok(_) => {}, err(error) => { if error.code != 1 { good = false } },}
+    }
+    i = i + 1
+  }
+  good
+}
+fn short_name(name: str) -> string effects {alloc} {
+  var end: u64 = if str.len(name) > 48 { 48 } else { str.len(name) }
+  loop {
+    match str.from_bytes(view.slice(str.bytes(name), 0, end)) {
+      some(value) => { return string.copy(value) }, none => {},
+    }
+    if end == 0 { break }
+    end = end - 1
+  }
+  string.copy("Project")
+}
+pub fn record(state: ref<app.App>) -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, time} {
+  if not app.dirty(state) { return result.ok(()) }
+  let document: string = match editor_io.encode(struct.borrow(state, field=document)) {
+    ok(value) => value, err(_) => { return result.err(string.copy("[GA_AUTOSAVE_DOCUMENT] Project could not be encoded")) },
+  }
+  var writer: codec.Writer = codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer, "schema", "genesis.autosave")
+  codec.field_u64(writer, "version", 1)
+  codec.field_text(writer, "original", str.view(app.project_path(state)))
+  codec.field_json(writer, "document", str.view(document))
+  codec.end_object(writer)
+  let data: string = match codec.finish(writer) {
+    ok(value) => value, err(_) => { return result.err(string.copy("[GA_AUTOSAVE_DOCUMENT] Recovery record could not be encoded")) },
+  }
+  var file: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  var fresh: bool = false
+  if str.len(str.view(file)) == 0 {
+    let directory: string = root(state)
+    match files.mkdirs(str.view(directory)) {
+      ok(_) => {}, err(_) => { return result.err(string.copy("[GA_AUTOSAVE_DIRECTORY] Recovery directory could not be created")) },
+    }
+    let project: string = app.project_path(state)
+    let name: string = if str.len(str.view(project)) == 0 { string.copy("Untitled") }
+      else { short_name(str.view(path.basename(str.view(project)))) }
+    let stamp: string = string.from_int(time.monotonic_ns())
+    var attempt: u64 = 0
+    loop {
+      if attempt >= 32 { return result.err(string.copy("[GA_AUTOSAVE_NAME] A unique recovery name could not be reserved")) }
+      let candidate: string = path.join(str.view(directory), str.view(text.concat(str.view(name), text.concat("-",
+        text.concat(str.view(stamp), text.concat("-", text.concat(str.view(string.from_int(attempt)), ".air")))))))
+      match files.write_new_text(str.view(candidate), "") {
+        ok(_) => { file = candidate
+          fresh = true
+          break },
+        err(error) => { if error.code != 3 { return result.err(string.copy("[GA_AUTOSAVE_RESERVE] Recovery file could not be reserved")) } },
+      }
+      attempt = attempt + 1
+    }
+  }
+  let temporary: string = text.concat(str.view(file), ".tmp")
+  match files.write_atomic(str.view(file), str.view(temporary), str.view(data)) {
+    ok(_) => { let _ = struct.replace(state, file, field=recovery_file)
+      result.ok(()) },
+    err(_) => { if fresh { let _ = files.remove(str.view(file)) }
+      result.err(string.copy("[GA_AUTOSAVE_PUBLISH] Recovery could not be updated; the previous snapshot is preserved")) },
+  }
+}
+
+// Newest valid snapshot wins. Corrupt/incomplete records are kept, never deleted.
+pub fn latest(state: ref<app.App>, include_active: bool) -> option<string> effects {alloc, fs.meta, fs.read} {
+  let directory: string = root(state)
+  var files_here: array<string> = match files.list_dir(str.view(directory)) {
+    ok(value) => value, err(_) => array.new(),
+  }
+  var candidates: array<string> = [legacy(state)]
+  var i: u64 = 0
+  loop { if i >= array.len(files_here) { break }
+    let name: str = str.view(array.borrow(files_here, i))
+    if text.ends_with(name, ".air") { array.push(candidates, path.join(str.view(directory), name)) }
+    i = i + 1
+  }
+  var newest: string = string.new()
+  var modified: i64 = -1
+  i = 0
+  loop { if i >= array.len(candidates) { break }
+    let file: str = str.view(array.borrow(candidates, i))
+    let active_file: str = str.view(struct.borrow(state, field=recovery_file))
+    if include_active or not same_path(file, active_file) {
+      match files.metadata(file) {
+        err(_) => {}, ok(info) => {
+          if info.is_file and info.size > 0 and info.size <= 67108864 and info.mtime_ns >= modified {
+            match read(file) {
+              err(_) => {}, ok(_) => { newest = string.copy(file)
+                modified = info.mtime_ns },
+            }
+          }
+        },
+      }
+    }
+    i = i + 1
+  }
+  if str.len(str.view(newest)) == 0 { option.none() } else { option.some(newest) }
+}

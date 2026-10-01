@@ -15,11 +15,13 @@ import std.editor_view as editor_view
 import std.geometry as geometry
 import std.math as math
 import std.timeline as timeline
+import std.text as text
 import "ui_text.ai" as ui_text
 import std.application_theme as themes
 import std.desktop_styles as styles
 import std.widgets as widgets
 import "app.ai" as app
+import "project_session.ai" as session
 import "chrome.ai" as chrome
 import "layout.ai" as layout
 import "provider.ai" as provider
@@ -507,6 +509,42 @@ fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   ()
 }
 
+fn paint_project_decision(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
+    width: f64, height: f64) -> unit effects {alloc} {
+  if not session.modal(state) { return () }
+  let deferred: ref<app.PendingProject> = struct.borrow(state, field=pending_project)
+  let offered: bool = deferred.stage == app.ProjectStage.OfferRecovery
+  let reason: string = string.copy(str.view(struct.borrow(deferred, field=label)))
+  let error: string = string.copy(str.view(struct.borrow(deferred, field=error)))
+  let box: layout.Rect = layout.project_decision(width, height)
+  fill_at(canvas, 0.0, 0.0, width, height, draw.color(0, 0, 0, 144))
+  fill_at(canvas, box.left + 7.0, box.top + 7.0, box.right + 7.0, box.bottom + 7.0, draw.rgb(8, 9, 12))
+  fill(canvas, box, colors.panel_head)
+  outline(canvas, box, colors.focus)
+  let saved: draw.State = draw.state(canvas)
+  match geometry.rect(box.left + 18.0, box.top + 14.0, box.right - 18.0, box.bottom - 66.0) {
+    none => {}, some(area) => { let _ = draw.clip_rect(canvas, area) },
+  }
+  label(canvas, struct.borrow(state, field=typography), box.left + 24.0, box.top + 22.0,
+    if offered { "Recover an unsaved project?" } else { "Save changes before continuing?" }, type_title(), colors.text)
+  var message: string = if offered { string.copy(str.view(reason)) } else { text.concat("Before ", str.view(reason)) }
+  label(canvas, struct.borrow(state, field=typography), box.left + 24.0, box.top + 56.0,
+    str.view(message), type_body(), colors.text)
+  if str.len(str.view(error)) != 0 {
+    label(canvas, struct.borrow(state, field=typography), box.left + 24.0, box.top + 88.0,
+      str.view(error), type_small(), colors.warn)
+  }
+  if str.len(str.view(error)) == 0 {
+    label(canvas, struct.borrow(state, field=typography), box.left + 24.0, box.top + 88.0,
+      if offered { "Recovery opens a copy. Keep current leaves the snapshot available." }
+        else { "Your current edits stay in place until you choose an action." }, type_small(), colors.dim)
+  }
+  draw.restore(canvas, saved)
+  var controls: array<chrome.Control> = chrome.project_choices(width, height, state)
+  paint_controls(canvas, struct.borrow(state, field=typography), colors, controls)
+  ()
+}
+
 // ---------------------------------------------------------------------------
 // Controls
 //
@@ -949,6 +987,7 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   var menu: array<chrome.Control> = chrome.menu_popup(frame, state)
   paint_controls(canvas, struct.borrow(state, field=typography), colors, menu)
   paint_prompt(canvas, colors, state, width, height)
+  paint_project_decision(canvas, colors, state, width, height)
   app.count_paint(state)
   ()
 }
@@ -958,11 +997,11 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
 pub type Renderer = struct {
   surface: draw.Surface, frame: i64, source_width: u32, source_height: u32,
   program_width: u32, program_height: u32, fullscreen: u32,
-  source_playing: bool, program_playing: bool
+  source_playing: bool, program_playing: bool, overlay: bool
 }
 pub fn renderer() -> Renderer effects {alloc} {
   Renderer {surface: draw.empty_surface(), frame: 0, source_width: 0, source_height: 0,
-    program_width: 0, program_height: 0, fullscreen: 0, source_playing: false, program_playing: false}
+    program_width: 0, program_height: 0, fullscreen: 0, source_playing: false, program_playing: false, overlay: false}
 }
 fn opaque(image: ref<draw.Surface>) -> bool effects {} {
   let pixels: ref<array<byte>> = struct.borrow(image, field=pixels)
@@ -1077,7 +1116,8 @@ pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32
   let program_frame: i64 = editor.playhead(doc)
   let previous: ref<draw.Surface> = struct.borrow(cache, field=surface)
   let resized: bool = previous.width != width or previous.height != height
-  let repaint: bool = full or resized or app.open_menu(state) != 0 or app.prompt_active(state) or cache.source_width != source.width or cache.source_height != source.height or
+  let overlay: bool = session.modal(state) or app.open_menu(state) != 0 or app.prompt_active(state)
+  let repaint: bool = full or resized or overlay or cache.overlay != overlay or cache.source_width != source.width or cache.source_height != source.height or
     cache.program_width != program.width or cache.program_height != program.height or
     cache.fullscreen != state.fullscreen or cache.source_playing != source_playing or
     cache.program_playing != program_playing or not opaque(source) or not opaque(program)
@@ -1097,5 +1137,6 @@ pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32
   struct.set(cache, state.fullscreen, field=fullscreen)
   struct.set(cache, source_playing, field=source_playing)
   struct.set(cache, program_playing, field=program_playing)
+  struct.set(cache, overlay, field=overlay)
   true
 }

@@ -1,0 +1,137 @@
+// User-facing Save/Discard/Cancel policy; commands remain the project mutation path.
+module genesis.project_session
+import std.editor as editor
+import std.path as path
+import std.text as text
+import "app.ai" as app
+import "chrome.ai" as chrome
+import "commands.ai" as commands
+import "recovery.ai" as recovery
+
+pub fn pending(state: ref<app.App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=pending_project), field=action) != app.ProjectAction.None
+}
+pub fn modal(state: ref<app.App>) -> bool effects {} {
+  let stage: app.ProjectStage = struct.get(struct.borrow(state, field=pending_project), field=stage)
+  stage == app.ProjectStage.Confirm or stage == app.ProjectStage.OfferRecovery
+}
+pub fn saving(state: ref<app.App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=pending_project), field=stage) == app.ProjectStage.SavePath
+}
+pub fn cancel(state: ref<app.App>) -> string effects {alloc} {
+  let _ = struct.replace(state, app.no_project_request(), field=pending_project)
+  app.end_prompt(state)
+  string.copy("Cancelled; current project kept")
+}
+fn apply(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write} {
+  let action: app.ProjectAction = struct.get(struct.borrow(state, field=pending_project), field=action)
+  let target: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=pending_project), field=target)))
+  var result: string = string.new()
+  if action == app.ProjectAction.Close {
+    let _ = recovery.clear_owned(state)
+    app.stop(state)
+    result = string.copy("Closing Genesis AIR")
+  } else if action == app.ProjectAction.New {
+    var changed: commands.Result = commands.new_project(state)
+    result = commands.message(changed)
+  } else if action == app.ProjectAction.Open {
+    var changed: commands.Result = commands.open_project(state, str.view(target))
+    result = commands.message(changed)
+  } else if action == app.ProjectAction.Recover {
+    match recovery.read(str.view(target)) {
+      err(problem) => { result = problem },
+      ok(snapshot) => {
+        var restored: recovery.Snapshot = snapshot
+        let _ = recovery.clear_owned(state)
+        commands.replace_project(state, struct.replace(restored, editor.document(30.0, 1920, 1080), field=document))
+        app.set_project_path(state, "")
+        let tracked: string = if recovery.managed_snapshot(state, str.view(target), restored.autosave) {
+          string.copy(str.view(target)) } else { string.new() }
+        let _ = struct.replace(state, tracked, field=recovered_file)
+        app.mark_dirty(state, true)
+        result = string.copy("Recovered project; use Save as to keep the edits")
+      },
+    }
+  }
+  let _ = struct.replace(state, app.no_project_request(), field=pending_project)
+  result
+}
+fn defer(state: ref<app.App>, action: app.ProjectAction, target: str, label: str,
+    stage: app.ProjectStage) -> unit effects {alloc} {
+  let _ = editor.program_action(struct.borrow(state, field=document), editor.pause())
+  let _ = editor.monitor_action(struct.borrow(state, field=document), editor.pause())
+  app.close_menu(state)
+  app.end_prompt(state)
+  app.end_parameter_drag(state)
+  app.end_gesture(state)
+  app.end_dock_scroll_drag(state)
+  struct.set(state, 0, field=fullscreen)
+  let _ = struct.replace(state, app.PendingProject {action: action, stage: stage,
+    target: string.copy(target), label: string.copy(label), error: string.new(), choice: 0}, field=pending_project)
+  ()
+}
+pub fn request(state: ref<app.App>, action: app.ProjectAction, target: str) -> string
+    effects {alloc, fs.meta, fs.read, fs.write} {
+  if pending(state) { return string.copy("Finish or cancel the current project decision") }
+  let label: str = if action == app.ProjectAction.New { "creating a new project" }
+    else if action == app.ProjectAction.Open { "opening another project" }
+    else if action == app.ProjectAction.Recover { "recovering a project" } else { "closing Genesis AIR" }
+  if app.dirty(state) {
+    defer(state, action, target, label, app.ProjectStage.Confirm)
+    return string.copy("Save changes before continuing?")
+  }
+  defer(state, action, target, label, app.ProjectStage.None)
+  apply(state)
+}
+pub fn choose(state: ref<app.App>, choice: u32) -> string effects {alloc, fs.meta, fs.read, fs.write} {
+  if not modal(state) { return string.new() }
+  if choice == 2 { return cancel(state) }
+  let stage: app.ProjectStage = struct.get(struct.borrow(state, field=pending_project), field=stage)
+  if stage == app.ProjectStage.OfferRecovery {
+    if choice == 0 { return apply(state) }
+    return string.new()
+  }
+  if choice == 1 { return apply(state) }
+  if choice != 0 { return string.new() }
+  let project: string = app.project_path(state)
+  if str.len(str.view(project)) == 0 {
+    struct.set(struct.borrow(state, field=pending_project), app.ProjectStage.SavePath, field=stage)
+    app.begin_prompt(state, chrome.act_save(), "Save project as", "project.air")
+    return string.copy("Choose where to save before continuing")
+  }
+  var saved: commands.Result = commands.save(state)
+  if saved.ok { return apply(state) }
+  let message: string = commands.message(saved)
+  let _ = struct.replace(struct.borrow(state, field=pending_project), string.copy(str.view(message)), field=error)
+  message
+}
+pub fn save_path(state: ref<app.App>, file: str) -> string effects {alloc, fs.meta, fs.read, fs.write} {
+  if str.len(file) == 0 { return cancel(state) }
+  var saved: commands.Result = commands.save_project(state, file)
+  if not saving(state) { return commands.message(saved) }
+  if saved.ok { return apply(state) }
+  struct.set(struct.borrow(state, field=pending_project), app.ProjectStage.Confirm, field=stage)
+  let message: string = commands.message(saved)
+  let _ = struct.replace(struct.borrow(state, field=pending_project), string.copy(str.view(message)), field=error)
+  message
+}
+pub fn advance_choice(state: ref<app.App>, backwards: bool) -> unit effects {} {
+  let deferred: ref<app.PendingProject> = struct.borrow(state, field=pending_project)
+  let now: u32 = deferred.choice
+  if deferred.stage == app.ProjectStage.OfferRecovery {
+    struct.set(deferred, if now == 0 { 2 } else { 0 }, field=choice)
+  } else {
+    struct.set(deferred, if backwards { if now == 0 { 2 } else { now - 1 } }
+      else { if now >= 2 { 0 } else { now + 1 } }, field=choice)
+  }
+  ()
+}
+pub fn offer_recovery(state: ref<app.App>) -> bool effects {alloc, fs.meta, fs.read} {
+  if pending(state) or app.dirty(state) { return false }
+  let file: string = match recovery.latest(state, false) {none => { return false }, some(value) => value,}
+  var snapshot: recovery.Snapshot = match recovery.read(str.view(file)) {err(_) => { return false }, ok(value) => value,}
+  let original: string = string.copy(str.view(struct.borrow(snapshot, field=original)))
+  let label: string = if str.len(str.view(original)) == 0 { string.copy("Untitled project") } else { path.basename(str.view(original)) }
+  defer(state, app.ProjectAction.Recover, str.view(file), str.view(label), app.ProjectStage.OfferRecovery)
+  true
+}

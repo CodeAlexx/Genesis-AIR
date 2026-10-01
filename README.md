@@ -112,7 +112,9 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/chrome.ai` | every clickable control, built once as a list carrying its own rectangle, label and state — plus the filter library and its parameter schemas. The view paints this list; the input layer hit-tests the same list. Neither computes a rectangle. |
 | `src/view.ai` | painting. Reads project state and caches TrueType glyphs; media work stays outside paint. |
 | `src/input.ai` | which command a click, drag or key means. Never edits the document. |
-| `src/commands.ai` | the only path to a mutation: capture once for undo, then apply toolkit operations. No edit arithmetic. |
+| `src/commands.ai` | the only path to a mutation: capture once for undo, then apply toolkit operations. Installing another project starts a fresh history and clears project-specific media caches and clipboard. |
+| `src/project_session.ai` | Save/Discard/Cancel before New, Open, Recover or Close; replacement waits for a successful save and cancelling Save as cancels the deferred action. |
+| `src/recovery.ai` | independent autosave timer, separate recovery snapshots, legacy recovery reader and managed-file cleanup. |
 | `src/provider.ai` | the media seam: source probe, frame and waveform retrieval, and the worker transport. |
 | `src/timeline_media.ai` | resolves AIR editor clips into the worker's preview, encode, and audio commands. |
 | `src/transport_clock.ai` | elapsed-time transport fallback; native Windows playback uses the audio device sample clock. |
@@ -202,9 +204,32 @@ sibling source builds and PATH. `GENESIS_GCOMPOSE` overrides worker discovery. F
 FFprobe are also discovered beside the executable. `GENESIS_FAKE_PROVIDER=1` selects the
 deterministic test provider; real preview and export require the compositor.
 `GENESIS_SCRATCH` overrides state storage, which defaults to `%LOCALAPPDATA%/GenesisAIR`
-on Windows. This holds autosave, preview mailboxes, export progress and `errors.jsonl`.
+on Windows. This holds recovery snapshots, preview mailboxes, export progress and `errors.jsonl`.
 Coded `[GA_*]` errors appear in the status line and local structured diagnostics;
 Help > Show error details reports the diagnostics path.
+
+New, Open, Recover and closing the window ask **Save / Discard changes / Cancel** when
+there are unsaved edits. Save must publish successfully before the requested action runs.
+A failed save leaves the project and decision open with a `GA_SAVE_PUBLISH` error;
+cancelling Save as cancels the pending action. Tab or the arrow keys choose a button,
+Enter activates it, and Escape cancels. Opening a missing or invalid project preserves
+the current document. A successful New/Open/Recover starts a fresh undo history and
+clears the prior project's clipboard and timeline media caches.
+
+Project saves use an exclusive sibling temporary and atomic replacement. Autosave has
+its own 30-second timer, including while playback is paused with no further input.
+Media/effect edits keep this interval; replacing the project allows its first snapshot
+immediately. Each editing session creates a separate `.air` snapshot in `recovery` below the scratch
+directory, retaining the original project path. Startup offers the newest readable
+snapshot; corrupt or incomplete records are skipped and kept. **Recover** opens a paused
+copy for Save as, and **Keep current** leaves the snapshot available. File > Recover autosave
+opens the recovery picker, including this session's current snapshot. When Recover is
+pending, the autosave timer preserves the selected snapshot until the decision is
+resolved, including a picker path with different separators or ASCII letter case.
+The previous plain-project `autosave.air` is still readable.
+Successful Save or an accepted Discard clears this session's managed snapshots; an
+ordinary project selected through Recover is never deleted. A failed autosave preserves
+the previous complete snapshot and reports a `GA_AUTOSAVE_*` error.
 
 The UI uses system Segoe UI through `std.font`, with proportional metrics and cached
 antialiased glyphs. Colors come from `std.application_theme` and `std.desktop_styles`;
@@ -358,12 +383,13 @@ Windows swizzle. The monitor resampler also uses integer source indices.
 
 Playback retains the window canvas and repaints the monitor pictures/timecodes,
 old/new playhead strips, status, and live scopes/audio or animated inspector values.
-Input and project/layout changes request a complete paint; open menus/prompts,
+Input and project/layout changes request a complete paint; project dialogs, open menus/prompts,
 changed picture dimensions and transparent pictures also use a complete paint.
-Physical pixel damage boundaries preserve fractional-DPI edges. The preview mailbox
-writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
+Closing an overlay also repaints its former pixels. Physical pixel damage boundaries
+preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
 
-On the supplied 4K clip in a 2560x1440 editor, 20 samples after three warmups measured
+At the retained-painter checkpoint (`77ea56a`), 20 samples after three warmups on the
+supplied 4K clip in a 2560x1440 editor measured
 7.39 ms median retained painting versus 42.23 ms for a complete paint in the same build.
 Fullscreen painting measured 28.08 ms. The serial CPU/mailbox diagnostic measured
 49.94 ms in the editor and 68.07 ms in fullscreen. These totals exclude native
@@ -400,10 +426,17 @@ The Windows gate verifies 152 saved application facts, three native file-drop fa
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo output levels and immediate Stop. The asynchronous preview test measures
 red/blue pixels after rapid seeking, unchanged source caching, rewind to frame zero,
-timeline bitmaps and embedded audio waveform delivery. An additional 14-case / 273-check
-pixel gate compares retained playback against the complete painter byte for byte:
+timeline bitmaps and embedded audio waveform delivery. Project safety has 15 cases /
+84 checks for Save/Discard/Cancel, native close-request dispatch, failed-save retry,
+separate snapshots, paused final-edit autosave, atomic failure preservation, legacy
+recovery and selecting the active snapshot without replacing it while the decision is
+open. It verifies original files stay intact, including a normal project inside the
+recovery directory. Dialog images are rendered headlessly; the new picker/modal flow
+still needs an interactive Windows check. An additional 15-case / 282-check pixel gate
+compares retained playback against the complete painter byte for byte:
 all four docks at 1x/1.5x/2x, changing images, forward seeks and rewind, fullscreen,
-resize, transport changes, alpha, themes, menus, prompts and keyed inspector values.
+resize, transport changes, alpha, themes, menus, prompts, keyed inspector values and
+project-decision/Save as cancellation without stale overlay pixels.
 The generated-media suite covers effects, transitions, captions, Unicode, audio-only
 projects, worker crash recovery and export cancellation/cleanup.
 

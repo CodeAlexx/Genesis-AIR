@@ -18,6 +18,7 @@ import std.codec as codec
 import std.text as text
 import "app.ai" as app
 import "provider.ai" as provider
+import "recovery.ai" as recovery
 import "timeline_media.ai" as timeline_media
 
 pub type Result = struct { ok: bool, message: string, value: u64 }
@@ -39,15 +40,40 @@ pub fn message(value: ref<Result>) -> string effects {alloc} {
 // ---------------------------------------------------------------------------
 // Project
 
-pub fn new_project(state: ref<app.App>) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+// Installing a different project begins a new undo/session context.
+pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> unit effects {alloc} {
+  var loaded: editor.Document = document
+  let _ = editor.program_action(loaded, editor.pause())
+  let _ = editor.monitor_action(loaded, editor.pause())
+  if editor.selection_count(loaded) == 0 and editor.clip_count(loaded) == 1 {
+    match editor.clip_at(loaded, 0) {none => {}, some(value) => { let _ = editor.select_only(loaded, value.id) },}
+  }
+  let depth: u64 = struct.get(struct.borrow(state, field=history), field=depth)
+  let _ = struct.replace(state, loaded, field=document)
+  let _ = struct.replace(state, editor.history(depth), field=history)
+  let _ = struct.replace(state, array.new(), field=waveforms)
+  let _ = struct.replace(state, array.new(), field=thumbnails)
+  struct.set(state, app.Clipboard {source: 0, source_in: 0, length: 0, filled: false}, field=clipboard)
+  struct.set(state, app.viewport(), field=viewport)
+  app.set_pool_row(state, 0)
+  app.set_selected_filter(state, 0)
+  let _ = app.set_dock_scroll(state, 0.0)
+  app.end_parameter_drag(state)
+  app.end_gesture(state)
+  struct.set(state, state.project_epoch + 1, field=project_epoch)
+  app.mark_media_changed(state)
+  ()
+}
+
+pub fn new_project(state: ref<app.App>) -> Result effects {alloc, fs.write} {
   var fresh: editor.Document = editor.document(30.0, 1920, 1080)
   let sequence: u64 = fresh.active
   let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A2")
   let _ = editor.add_track(fresh, sequence, editor.track_audio(), "A1")
   let _ = editor.add_track(fresh, sequence, editor.track_video(), "V1")
   let _ = editor.add_track(fresh, sequence, editor.track_video(), "V2")
-  let _ = ref.swap(struct.borrow(state, field=document), fresh)
+  let _ = recovery.clear_owned(state)
+  replace_project(state, fresh)
   app.set_project_path(state, "")
   app.mark_dirty(state, false)
   app.set_status(state, "New project")
@@ -105,22 +131,27 @@ pub fn save_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
   let text: string = match editor_io.encode(struct.borrow(state, field=document)) {
     ok(value) => value,
     err(problem) => { var failure: codec.Error = problem
-      return refused(str.view(codec.describe(failure))) },
+      return refused(str.view(text.concat("[GA_PROJECT_FORMAT] ", str.view(codec.describe(failure))))) },
   }
-  let temporary: string = text.concat(target, ".genesis-save.tmp")
-  match files.write_text(str.view(temporary), str.view(text)) {
-    ok(written) => { },
-    err(problem) => { return refused("the project could not be written") },
-  }
-  match files.rename(str.view(temporary), target) {
-    ok(_) => {},
-    err(_) => { let _ = files.remove(str.view(temporary))
-      return refused("[GA_SAVE_PUBLISH] Could not replace the project; the previous save is preserved") },
+  // Reserve an unused sibling; a stale or concurrent temporary is never overwritten.
+  var slot: u64 = 0
+  loop {
+    let temporary: string = text.concat(target, text.concat(".genesis-save-", text.concat(str.view(string.from_int(slot)), ".tmp")))
+    match files.write_atomic(target, str.view(temporary), str.view(text)) {
+      ok(_) => { break },
+      err(problem) => {
+        if problem.code != 3 or slot >= 31 {
+          return refused("[GA_SAVE_PUBLISH] The project could not be saved; current edits and the previous save are preserved")
+        }
+      },
+    }
+    slot = slot + 1
   }
   app.set_project_path(state, target)
   app.mark_dirty(state, false)
+  let cleared: bool = recovery.clear_owned(state)
   app.set_status(state, "Saved")
-  done("saved", cast.sat(str.len(str.view(text))))
+  done(if cleared { "saved" } else { "[GA_RECOVERY_CLEAR] Project saved; a recovery file could not be cleared" }, cast.sat(str.len(str.view(text))))
 }
 
 pub fn save(state: ref<app.App>) -> Result effects {alloc, fs.write} {
@@ -131,29 +162,20 @@ pub fn save(state: ref<app.App>) -> Result effects {alloc, fs.write} {
 
 // Open a project. The stored schema and revision are the toolkit's; a revision this build
 // does not implement is refused by `std.editor_io` and reported here rather than guessed at.
-pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, fs.read} {
+pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, fs.read, fs.write} {
   let text: string = match files.read_text(target) {
     ok(value) => value,
-    err(problem) => { return refused("the project could not be read") },
+    err(problem) => { return refused("[GA_PROJECT_READ] The project could not be read; current edits are preserved") },
   }
   var loaded: editor.Document = match editor_io.decode(str.view(text)) {
     ok(value) => value,
     err(problem) => { var failure: codec.Error = problem
-      return refused(str.view(codec.describe(failure))) },
+      return refused(str.view(text.concat("[GA_PROJECT_FORMAT] ", str.view(codec.describe(failure))))) },
   }
-  // A one-clip project should open with its inspector ready to edit.
-  if editor.selection_count(loaded) == 0 and editor.clip_count(loaded) == 1 {
-    match editor.clip_at(loaded, 0) {
-      none => {}, some(value) => { let _ = editor.select_only(loaded, value.id) },
-    }
-  }
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let _ = ref.swap(struct.borrow(state, field=document), loaded)
+  let _ = recovery.clear_owned(state)
+  replace_project(state, loaded)
   app.set_project_path(state, target)
   app.mark_dirty(state, false)
-  app.set_selected_filter(state, 0)
-  app.end_parameter_drag(state)
-  app.mark_media_changed(state)
   app.set_status(state, "Opened")
   done("opened", 0)
 }

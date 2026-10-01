@@ -1,0 +1,411 @@
+module genesis.tests.project_safety
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.image as image
+import std.path as path
+import std.testing as test
+import std.text as text
+import std.widgets as widgets
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/project_session.ai" as session
+import "../src/recovery.ai" as recovery
+import "../src/typeface.ai" as typeface
+import "../src/view.ai" as painter
+
+fn fixture(root: str, name: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.write, process, time} {
+  let scratch: string = path.join(root, name)
+  let _ = files.mkdirs(str.view(scratch))
+  var state: app.App = app.app(provider.fake(str.view(scratch)))
+  app.set_fonts(state, typeface.search_paths())
+  var source: commands.Result = commands.import_media(state, "clip.mov", "Project source")
+  let _ = commands.open_source(state, source.value)
+  let added: commands.Result = commands.append_clip(state, app.default_video_track(state), source.value, 0, 60)
+  let _ = commands.select_only(state, added.value)
+  state
+}
+fn document(state: ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state, field=document)) {ok(value) => value, err(_) => string.copy("encode failed"),}
+}
+fn encoded(document: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(document) {ok(value) => value, err(_) => string.copy("encode failed"),}
+}
+fn contents(file: str) -> string effects {alloc, fs.read} {
+  match files.read_text(file) {ok(value) => value, err(_) => string.copy("read failed"),}
+}
+fn exists(file: str) -> bool effects {fs.meta} {
+  match files.exists(file) {ok(value) => value, err(_) => false,}
+}
+fn unchanged(suite: ref<test.Suite>, state: ref<app.App>, expected: str) -> unit effects {alloc} {
+  let actual: string = document(state)
+  let _ = test.check(suite, str.eq(str.view(actual), expected), "Current project bytes stay intact")
+  let _ = test.check(suite, app.running(state) and app.dirty(state), "Current dirty project remains open")
+  ()
+}
+fn click(suite: ref<test.Suite>, state: ref<app.App>, action: u32) -> unit
+    effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var controls: array<chrome.Control> = chrome.toolbar(layout.frame(1600.0, 980.0), state)
+  var i: u64 = 0
+  loop { if i >= array.len(controls) { break }
+    let control: ref<chrome.Control> = array.borrow(controls, i)
+    if control.action == action {
+      let area: layout.Rect = control.area
+      let _ = input.pointer_down(state, 1600.0, 980.0, (area.left + area.right)*0.5, (area.top + area.bottom)*0.5)
+      return ()
+    }
+    i = i + 1
+  }
+  let _ = test.check(suite, false, "Requested toolbar button exists")
+  ()
+}
+fn file_menu(state: ref<app.App>, action: u32) -> string
+    effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  app.set_open_menu(state, chrome.menu_file())
+  var controls: array<chrome.Control> = chrome.menu_popup(layout.frame(1600.0, 980.0), state)
+  var i: u64 = 0
+  loop { if i >= array.len(controls) { break }
+    let control: ref<chrome.Control> = array.borrow(controls, i)
+    if control.action == action {
+      let area: layout.Rect = control.area
+      return input.pointer_down(state, 1600.0, 980.0, (area.left + area.right)*0.5, (area.top + area.bottom)*0.5)
+    }
+    i = i + 1
+  }
+  string.copy("no menu action")
+}
+fn choice(state: ref<app.App>, target: u32) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var controls: array<chrome.Control> = chrome.project_choices(1600.0, 980.0, state)
+  var i: u64 = 0
+  loop { if i >= array.len(controls) { break }
+    let control: ref<chrome.Control> = array.borrow(controls, i)
+    if control.target == cast.wrap(target) {
+      let area: layout.Rect = control.area
+      return input.pointer_down(state, 1600.0, 980.0, (area.left + area.right)*0.5, (area.top + area.bottom)*0.5)
+    }
+    i = i + 1
+  }
+  string.copy("no choice")
+}
+fn shot(state: ref<app.App>, root: str, name: str) -> unit effects {alloc, fs.read, fs.write} {
+  var source: draw.Surface = draw.empty_surface()
+  var program: draw.Surface = draw.empty_surface()
+  var renderer: painter.Renderer = painter.renderer()
+  let _ = painter.render(state, renderer, 1600, 980, true, source, program)
+  var png: bytes = image.encode_png(struct.borrow(renderer, field=surface))
+  let _ = image.write_file(str.view(path.join(root, name)), bytes.view(png))
+  ()
+}
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 2 { return 2 }
+  let root: string = path.join(view.get(args, 1), "project-safety")
+  let _ = files.mkdirs(str.view(root))
+  var suite: test.Suite = test.suite("Genesis project safety and recovery", false)
+
+  let _ = test.start(suite, "New and Close cancellation trap input and preserve edits")
+  var state: app.App = fixture(str.view(root), "cancel")
+  let before: string = document(state)
+  let history: u64 = editor.undo_depth(struct.borrow(state, field=history))
+  click(suite, state, chrome.act_new())
+  let _ = test.check(suite, session.modal(state), "New shows Save/Discard/Cancel")
+  let _ = input.key(state, widgets.key_space(), false, false)
+  let _ = input.key(state, widgets.key_z(), true, false)
+  let _ = input.pointer_down(state, 1600.0, 980.0, 400.0, 600.0)
+  let _ = input.wheel(state, 1600.0, 980.0, 400.0, 600.0, true, 3, true)
+  unchanged(suite, state, str.view(before))
+  let _ = test.eq_u64(suite, editor.undo_depth(struct.borrow(state, field=history)), history, "Modal blocks edits and undo")
+  shot(state, str.view(root), "project-decision.png")
+  let _ = choice(state, 2)
+  let _ = test.check(suite, not session.pending(state), "Cancel clears deferred New")
+  unchanged(suite, state, str.view(before))
+  let _ = input.close_request(state)
+  let _ = test.check(suite, session.modal(state) and app.running(state), "Native close request keeps the window open")
+  let _ = input.key(state, widgets.key_escape(), false, false)
+  unchanged(suite, state, str.view(before))
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Unsaved Save as completes Close only after successful publication")
+  state = fixture(str.view(root), "save-close")
+  let expected: string = document(state)
+  let _ = recovery.record(state)
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let _ = input.close_request(state)
+  let _ = choice(state, 0)
+  let _ = test.check(suite, session.saving(state) and app.prompt_active(state) and app.running(state), "Save waits for its path")
+  let saved: string = path.join(str.view(root), "closed 日本語.air")
+  app.begin_prompt(state, chrome.act_save(), "Save project as", str.view(saved))
+  let _ = input.commit_prompt(state)
+  let _ = test.check(suite, not app.running(state) and not app.dirty(state), "Only successful Save completes Close")
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(saved))), str.view(expected)), "Published file contains all current edits")
+  let _ = test.check(suite, not exists(str.view(backup)), "Successful save clears its own recovery snapshot")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Cancelling Save as cancels the deferred replacement")
+  state = fixture(str.view(root), "cancel-picker")
+  let expected: string = document(state)
+  click(suite, state, chrome.act_new())
+  let _ = choice(state, 0)
+  let _ = input.cancel_prompt(state)
+  let _ = test.check(suite, not session.pending(state), "Native picker Cancel cancels New")
+  unchanged(suite, state, str.view(expected))
+  let _ = input.close_request(state)
+  let _ = choice(state, 0)
+  let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.check(suite, not session.pending(state), "Prompt Escape cancels Close")
+  unchanged(suite, state, str.view(expected))
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Failed Save and Save as preserve edits and report a code")
+  state = fixture(str.view(root), "failed-save")
+  let expected: string = document(state)
+  let missing: string = path.join(str.view(root), "missing-parent/project.air")
+  app.set_project_path(state, str.view(missing))
+  let _ = input.close_request(state)
+  let failure: string = choice(state, 0)
+  let _ = test.check(suite, text.contains(str.view(failure), "GA_SAVE_PUBLISH") and session.modal(state), "Failed Save leaves the decision open")
+  unchanged(suite, state, str.view(expected))
+  let _ = choice(state, 2)
+  app.set_project_path(state, "")
+  click(suite, state, chrome.act_new())
+  let _ = choice(state, 0)
+  app.begin_prompt(state, chrome.act_save(), "Save project as", str.view(missing))
+  let failure: string = input.commit_prompt(state)
+  let _ = test.check(suite, text.contains(str.view(failure), "GA_SAVE_PUBLISH") and session.modal(state), "Failed Save as returns to the decision")
+  unchanged(suite, state, str.view(expected))
+  let _ = choice(state, 2)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Saved edits survive New; session undo and clipboard do not cross projects")
+  state = fixture(str.view(root), "save-new")
+  let saved: string = path.join(str.view(root), "before-new.air")
+  let _ = commands.save_project(state, str.view(saved))
+  let clip: u64 = app.current_clip(state)
+  let _ = commands.rename_track(state, app.default_video_track(state), "Save these edits")
+  let _ = commands.copy_clip(state, clip)
+  let expected: string = document(state)
+  click(suite, state, chrome.act_new())
+  let _ = choice(state, 0)
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(saved))), str.view(expected)), "Save precedes New")
+  let _ = test.eq_u64(suite, editor.clip_count(struct.borrow(state, field=document)), 0, "New installs an empty project")
+  let _ = test.check(suite, not app.has_clipboard(state) and not editor.can_undo(struct.borrow(state, field=history)), "New has no prior project clipboard or undo")
+  let _ = test.check(suite, not app.dirty(state) and str.len(str.view(app.project_path(state))) == 0, "New has its own clean untitled identity")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Open waits for a decision; unreadable and malformed files leave current edits")
+  state = fixture(str.view(root), "open")
+  let before: string = document(state)
+  let _ = recovery.record(state)
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let _ = input.key(state, 111, true, false)
+  app.prompt_push(state, str.view(path.join(str.view(root), "missing.air")))
+  let _ = input.commit_prompt(state)
+  let _ = test.check(suite, session.modal(state), "Ctrl+O does not replace a dirty project")
+  let failure: string = choice(state, 1)
+  let _ = test.check(suite, text.contains(str.view(failure), "GA_PROJECT_READ") and exists(str.view(backup)), "Failed Open preserves the recovery file")
+  unchanged(suite, state, str.view(before))
+  let bad: string = path.join(str.view(root), "broken.air")
+  let _ = files.write_text(str.view(bad), "invalid JSON")
+  let _ = session.request(state, app.ProjectAction.Open, str.view(bad))
+  let failure: string = choice(state, 1)
+  let _ = test.check(suite, text.contains(str.view(failure), "GA_PROJECT_FORMAT"), "Malformed project has a coded refusal")
+  unchanged(suite, state, str.view(before))
+  let _ = session.request(state, app.ProjectAction.Open, str.view(saved))
+  let _ = choice(state, 1)
+  let _ = test.check(suite, str.eq(str.view(document(state)), str.view(expected)), "Discard then Open loads the chosen project")
+  let _ = test.check(suite, not editor.can_undo(struct.borrow(state, field=history)) and not app.has_clipboard(state), "Open resets the session history")
+  let _ = test.check(suite, not exists(str.view(backup)), "Successful Open clears only the prior project's owned backup")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "A paused final edit is autosaved without another preview or input event")
+  state = fixture(str.view(root), "timer")
+  var timer: recovery.Timer = recovery.timer()
+  let first: bool = match recovery.tick(state, timer, 1) {ok(value) => value, err(_) => false,}
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let before: string = contents(str.view(backup))
+  let _ = commands.rename_track(state, app.default_video_track(state), "Final paused edit")
+  let revision: u64 = state.media_revision
+  var brightness: commands.Result = commands.add_filter(state, app.current_clip(state), "brightness")
+  let _ = commands.set_filter_param(state, brightness.value, "level", 1.2)
+  let linked: commands.Result = commands.relink(state, app.current_source(state), "replacement.mov")
+  let early: bool = match recovery.tick(state, timer, 10000000000) {ok(value) => value, err(_) => true,}
+  let later: bool = match recovery.tick(state, timer, 30000000001) {ok(value) => value, err(_) => false,}
+  let _ = test.check(suite, first and not early and later and linked.ok and state.media_revision > revision, "Independent 30-second timer also throttles relink/effect edits")
+  let _ = test.check(suite, not str.eq(str.view(before), str.view(contents(str.view(backup)))), "Final edit reaches the snapshot")
+  var restored: recovery.Snapshot = match recovery.read(str.view(backup)) {ok(value) => value, err(_) => { return 3 },}
+  let _ = test.check(suite, str.eq(str.view(document(state)), str.view(encoded(struct.borrow(restored, field=document)))), "Snapshot contains the final paused document")
+  let _ = session.request(state, app.ProjectAction.New, "")
+  let _ = choice(state, 1)
+  var source: commands.Result = commands.import_media(state, "new-project.mov", "New project source")
+  let _ = commands.append_clip(state, app.default_video_track(state), source.value, 0, 30)
+  let fresh: bool = match recovery.tick(state, timer, 30000000002) {ok(value) => value, err(_) => false,}
+  let _ = test.check(suite, fresh and not str.eq(str.view(struct.borrow(state, field=recovery_file)), str.view(backup)), "The replacement project's first edit autosaves immediately in its own file")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Atomic failures and stale temporaries preserve their previous bytes")
+  let saved: string = path.join(str.view(root), "atomic.air")
+  let foreign: string = text.concat(str.view(saved), ".genesis-save-0.tmp")
+  let _ = files.write_text(str.view(foreign), "foreign temporary")
+  let saved_result: commands.Result = commands.save_project(state, str.view(saved))
+  let _ = test.check(suite, saved_result.ok and str.eq(str.view(contents(str.view(foreign))), "foreign temporary"), "Save skips an existing sibling temporary")
+  let _ = commands.rename_track(state, app.default_video_track(state), "More edits")
+  let _ = recovery.record(state)
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let before: string = contents(str.view(backup))
+  let temporary: string = text.concat(str.view(backup), ".tmp")
+  let _ = files.write_text(str.view(temporary), "foreign recovery temporary")
+  let _ = commands.rename_track(state, app.default_video_track(state), "Must not erase backup")
+  let failure: bool = match recovery.record(state) {ok(_) => false, err(problem) => text.contains(str.view(problem), "GA_AUTOSAVE_PUBLISH"),}
+  let _ = test.check(suite, failure and str.eq(str.view(before), str.view(contents(str.view(backup)))), "Failed autosave keeps the last complete snapshot")
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(temporary))), "foreign recovery temporary"), "Collision file is not overwritten or deleted")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Independent projects retain separate snapshots and original Unicode paths")
+  state = fixture(str.view(root), "separate")
+  var other: app.App = fixture(str.view(root), "separate")
+  app.set_project_path(state, "C:/Projects/日本語 one.air")
+  let _ = recovery.record(state)
+  let one: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  time.sleep_ms(2)
+  let _ = commands.rename_track(other, app.default_video_track(other), "Second project")
+  let _ = recovery.record(other)
+  let two: string = string.copy(str.view(struct.borrow(other, field=recovery_file)))
+  let _ = test.check(suite, not str.eq(str.view(one), str.view(two)) and exists(str.view(one)) and exists(str.view(two)), "Separate app states do not replace each other's snapshots")
+  var restored: recovery.Snapshot = match recovery.read(str.view(one)) {ok(value) => value, err(_) => { return 4 },}
+  let _ = test.check(suite, str.eq(str.view(struct.borrow(restored, field=original)), "C:/Projects/日本語 one.air"), "Recovery remembers the original project identity")
+  let _ = commands.save_project(state, str.view(path.join(str.view(root), "separate-saved.air")))
+  let _ = test.check(suite, not exists(str.view(one)) and exists(str.view(two)), "Save clears its own snapshot only")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Startup recovery skips corrupt records; Keep current retains the snapshot")
+  let scratch: string = path.join(str.view(root), "separate")
+  var startup: app.App = app.app(provider.fake(str.view(scratch)))
+  app.set_fonts(startup, typeface.search_paths())
+  time.sleep_ms(2)
+  let _ = files.write_text(str.view(path.join(str.view(recovery.root(startup)), "corrupt.air")), "broken JSON")
+  let _ = test.check(suite, session.offer_recovery(startup), "Valid prior snapshot is offered")
+  let selected: string = string.copy(str.view(struct.borrow(struct.borrow(startup, field=pending_project), field=target)))
+  let _ = test.check(suite, str.eq(str.view(selected), str.view(two)), "Newest corrupt record is skipped without deletion")
+  shot(startup, str.view(root), "recovery-decision.png")
+  let _ = choice(startup, 2)
+  let _ = test.check(suite, not session.pending(startup) and exists(str.view(two)) and not app.dirty(startup), "Keep current leaves recoverable edits available")
+  let _ = test.check(suite, session.offer_recovery(startup), "Recovery remains available")
+  let _ = choice(startup, 0)
+  let _ = test.check(suite, app.dirty(startup) and str.len(str.view(app.project_path(startup))) == 0, "Recovery opens a dirty copy for Save as")
+  let _ = test.eq_u64(suite, editor.clip_count(struct.borrow(startup, field=document)), 1, "Recovered timeline has its clip")
+  let _ = test.check(suite, not editor.playing(struct.borrow(startup, field=document)) and not editor.can_undo(struct.borrow(startup, field=history)), "Recovered transport is paused and history starts clean")
+  let _ = commands.save_project(startup, str.view(path.join(str.view(root), "recovered-copy.air")))
+  let _ = test.check(suite, not exists(str.view(two)), "Saving the recovered copy clears its managed recovery source")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Legacy recovery and ordinary project files are preserved correctly")
+  state = fixture(str.view(root), "legacy")
+  let expected: string = document(state)
+  let scratch: string = path.join(str.view(root), "legacy")
+  let old: string = path.join(str.view(scratch), "autosave.air")
+  let _ = files.write_text(str.view(old), str.view(expected))
+  var startup: app.App = app.app(provider.fake(str.view(scratch)))
+  let _ = test.check(suite, session.offer_recovery(startup), "Previous plain-project autosave still loads")
+  let _ = session.choose(startup, 0)
+  let _ = test.check(suite, str.eq(str.view(document(startup)), str.view(expected)), "Legacy project contents recovered exactly")
+  let _ = commands.save_project(startup, str.view(path.join(str.view(root), "legacy-copy.air")))
+  let _ = test.check(suite, not exists(str.view(old)), "Managed legacy file is cleared after saving")
+  let ordinary: string = path.join(str.view(root), "ordinary-project.air")
+  let _ = files.write_text(str.view(ordinary), str.view(expected))
+  let _ = session.request(startup, app.ProjectAction.Recover, str.view(ordinary))
+  let _ = commands.save_project(startup, str.view(path.join(str.view(root), "ordinary-copy.air")))
+  let _ = test.check(suite, exists(str.view(ordinary)) and str.eq(str.view(contents(str.view(ordinary))), str.view(expected)), "Recovery never deletes an ordinary project file")
+  let ordinary_inside: string = path.join(str.view(recovery.root(startup)), "ordinary-project.air")
+  let _ = files.mkdirs(str.view(recovery.root(startup)))
+  let _ = files.write_text(str.view(ordinary_inside), str.view(expected))
+  let _ = session.request(startup, app.ProjectAction.Recover, str.view(ordinary_inside))
+  let _ = commands.save_project(startup, str.view(path.join(str.view(root), "ordinary-inside-copy.air")))
+  let _ = test.check(suite, exists(str.view(ordinary_inside)) and str.eq(str.view(contents(str.view(ordinary_inside))), str.view(expected)), "An ordinary project remains intact even inside the recovery directory")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Save before Recover retains the chosen snapshot until it is loaded")
+  state = fixture(str.view(root), "save-recover")
+  let saved: string = path.join(str.view(root), "recover-original.air")
+  let _ = commands.save_project(state, str.view(saved))
+  let _ = commands.rename_track(state, app.default_video_track(state), "Recovered version")
+  let expected: string = document(state)
+  let _ = recovery.record(state)
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let _ = commands.rename_track(state, app.default_video_track(state), "Latest saved version")
+  let latest: string = document(state)
+  // Native picker spelling can use backslashes and different ASCII case.
+  let selected: string = text.upper_ascii(str.view(text.replace(str.view(backup), "/", "\\")))
+  let _ = session.request(state, app.ProjectAction.Recover, str.view(selected))
+  let snapshot_bytes: string = contents(str.view(backup))
+  var waiting_timer: recovery.Timer = recovery.timer()
+  let wrote: bool = match recovery.tick(state, waiting_timer, 30000000001) {ok(value) => value, err(_) => true,}
+  let _ = test.check(suite, not wrote and str.eq(str.view(contents(str.view(backup))), str.view(snapshot_bytes)), "Autosave keeps the selected older snapshot while the Recover decision is pending")
+  let _ = choice(state, 0)
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(saved))), str.view(latest)), "Current changes saved before recovery")
+  let _ = test.check(suite, str.eq(str.view(document(state)), str.view(expected)) and exists(str.view(backup)), "Chosen snapshot survives Save and loads successfully")
+  let _ = commands.save_project(state, str.view(path.join(str.view(root), "recovered-second-copy.air")))
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(saved))), str.view(latest)), "Recovered copy does not overwrite original project")
+  let _ = test.done(suite)
+  let _ = test.start(suite, "Keyboard cancellation and Discard Close leave the original saved file intact")
+  state = fixture(str.view(root), "discard-close")
+  let saved: string = path.join(str.view(root), "discard-original.air")
+  let _ = commands.save_project(state, str.view(saved))
+  let original: string = contents(str.view(saved))
+  let _ = commands.rename_track(state, app.default_video_track(state), "Unsaved changes")
+  let expected: string = document(state)
+  let _ = recovery.record(state)
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let _ = input.close_request(state)
+  let _ = input.key(state, widgets.key_tab(), false, true)
+  let _ = input.key(state, widgets.key_return(), false, false)
+  let _ = test.check(suite, not session.pending(state) and exists(str.view(backup)), "Shift+Tab and Enter cancel Close without clearing the snapshot")
+  unchanged(suite, state, str.view(expected))
+  let _ = input.close_request(state)
+  let _ = input.key(state, widgets.key_tab(), false, false)
+  let _ = input.key(state, widgets.key_return(), false, false)
+  let _ = test.check(suite, not app.running(state) and not exists(str.view(backup)), "Tab and Enter choose Discard and close")
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(saved))), str.view(original)), "Discard does not write unsaved edits into the original")
+  var clean: app.App = app.app(provider.fake(str.view(path.join(str.view(root), "clean-close"))))
+  let _ = input.close_request(clean)
+  let _ = test.check(suite, not app.running(clean) and not session.pending(clean), "A clean project closes directly")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Retrying failed Save as completes its original deferred New action")
+  state = fixture(str.view(root), "retry-save")
+  let expected: string = document(state)
+  click(suite, state, chrome.act_new())
+  let _ = choice(state, 0)
+  app.begin_prompt(state, chrome.act_save(), "Save project as", str.view(path.join(str.view(root), "missing-parent/retry.air")))
+  let failure: string = input.commit_prompt(state)
+  let _ = test.check(suite, text.contains(str.view(failure), "GA_SAVE_PUBLISH") and session.modal(state), "First Save as fails without replacing the project")
+  unchanged(suite, state, str.view(expected))
+  let _ = choice(state, 0)
+  let saved: string = path.join(str.view(root), "retry-saved.air")
+  app.begin_prompt(state, chrome.act_save(), "Save project as", str.view(saved))
+  let _ = input.commit_prompt(state)
+  let _ = test.check(suite, str.eq(str.view(contents(str.view(saved))), str.view(expected)), "Retried Save as publishes all original edits")
+  let _ = test.check(suite, not session.pending(state) and not app.dirty(state) and editor.clip_count(struct.borrow(state, field=document)) == 0, "Deferred New runs only after the retry succeeds")
+  let _ = test.done(suite)
+  let _ = test.start(suite, "File Recover offers the active session snapshot and restores the selected version")
+  state = fixture(str.view(root), "recover-menu")
+  let snapshot: string = document(state)
+  let _ = recovery.record(state)
+  let backup: string = string.copy(str.view(struct.borrow(state, field=recovery_file)))
+  let _ = commands.rename_track(state, app.default_video_track(state), "Edits after the snapshot")
+  let current: string = document(state)
+  let _ = file_menu(state, chrome.act_recover())
+  let _ = test.check(suite, app.prompt_active(state) and app.prompt_action(state) == chrome.act_recover() and str.eq(str.view(app.prompt_text(state)), str.view(backup)), "The recovery picker includes this session's own snapshot")
+  let _ = input.commit_prompt(state)
+  let _ = test.check(suite, session.modal(state), "Recover asks before replacing current edits")
+  unchanged(suite, state, str.view(current))
+  let _ = choice(state, 1)
+  let _ = test.check(suite, str.eq(str.view(document(state)), str.view(snapshot)) and exists(str.view(backup)), "Discard current changes restores the chosen snapshot")
+  let _ = commands.save_project(state, str.view(path.join(str.view(root), "menu-recovered-copy.air")))
+  let _ = test.check(suite, not exists(str.view(backup)), "Saving the recovered copy clears its managed source")
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(str.view(root), "project-safety-tests.json"), 24)
+}
