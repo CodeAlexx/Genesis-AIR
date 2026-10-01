@@ -205,8 +205,24 @@ cases. Genesis's resampler reserves its byte length once, copies RGB spans and
 preserves existing exact-RGBA versus resized-opaque behavior; Windows quadrant
 fixtures cover up/down sampling, aspect bars, alpha and refused short/zero inputs.
 
-The supplied 4K clip's final 20-sample profile at 2560x1440 measured 6.12 ms editor
-painting and 22.54 ms fullscreen painting, against 7.10/27.48 ms before this change.
+The opaque-row/span-copy checkpoint (`d5a7d25`) 20-sample profile of the supplied
+4K clip at 2560x1440 measured 6.12 ms editor painting and 22.54 ms fullscreen
+painting, against 7.10/27.48 ms before this change.
 Serial medians are 35.80/56.11 ms. These headless results exclude native presentation,
 audio and asynchronous overlap; sustained smooth 4K60 and long-run audio/video
 synchronization remain open.
+
+
+## Retained monitor backgrounds and alpha
+
+Each retained monitor paint restores the panel and picture backgrounds before
+compositing its new image. Scanning both input images for alpha, and forcing a
+complete window paint when either image is transparent, was therefore redundant.
+Genesis now uses the retained path for fixed-size alpha transitions. The pixel
+oracle passes 24 cases / 444 checks, including opaque, zero-alpha and mixed-alpha
+frame transitions in the editor and both fullscreen monitors at three scales.
+
+The supplied clip's 20-sample headless profile, after three warmups at 2560x1440,
+measures 6.00/21.82 ms editor/fullscreen painting and 36.34/55.32 ms serial. These
+results exclude native presentation, audio and asynchronous overlap; they do not
+establish sustained interactive 4K60 or long-run audio/video synchronization.

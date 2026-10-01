@@ -161,5 +161,37 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = session.cancel(state)
   compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
   let _ = test.done(suite)
+  // Each transition keeps the image dimensions fixed and requests a retained
+  // paint. A complete paint remains the independent canvas oracle.
+  let alphas: array<u8> = [128,0,32,255,96]
+  size=0
+  loop {if size == 3 {break}
+    var mode: u32 = 0
+    loop {if mode == 3 {break}
+      let _ = test.start(suite,text.concat("Transparent retained frames at scale/monitor ",text.concat(str.view(string.from_int(size)),str.view(string.from_int(mode)))))
+      struct.set(state,mode,field=fullscreen)
+      app.set_light(state,false)
+      app.set_dock_tab(state,cast.sat((size+cast.wrap(mode))%4))
+      source=picture(1280,720,false,255)
+      program=picture(1280,720,true,255)
+      let _ = editor.seek(struct.borrow(state,field=document),0)
+      let _ = editor.seek_monitor(struct.borrow(state,field=document),0)
+      var transparent_cache: painter.Renderer = painter.renderer()
+      compare(suite,state,transparent_cache,array.get(widths,size),array.get(heights,size),true,source,program,scratch)
+      var step: u64 = 0
+      loop {if step == array.len(alphas) {break}
+        source=picture(1280,720,step%2 == 0,array.get(alphas,(step+1)%array.len(alphas)))
+        program=picture(1280,720,step%2 != 0,array.get(alphas,step))
+        let _ = editor.seek(struct.borrow(state,field=document),array.get(positions,step))
+        let _ = editor.seek_monitor(struct.borrow(state,field=document),array.get(positions,step))
+        compare(suite,state,transparent_cache,array.get(widths,size),array.get(heights,size),false,source,program,scratch)
+        step=step+1
+      }
+      let _ = test.done(suite)
+      if test.failed(suite) != 0 {return test.conclude(suite,path.join(scratch,"live-paint-tests.json"),24)}
+      mode=mode+1
+    }
+    size=size+1
+  }
   test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 24)
 }

@@ -404,9 +404,10 @@ outside the image; transparent rows blend independently against their background
 Playback retains the window canvas and repaints the monitor pictures/timecodes,
 old/new playhead strips, status, and live scopes/audio or animated inspector values.
 Input and project/layout changes request a complete paint; project dialogs, open menus/prompts,
-changed picture dimensions and transparent pictures also use a complete paint.
-Closing an overlay also repaints its former pixels. Physical pixel damage boundaries
-preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
+changed picture dimensions also use a complete paint. Each retained monitor paint
+clears its destination before compositing, including transparent frames, so neither
+image needs a separate alpha scan. Closing an overlay also repaints its former pixels.
+Physical pixel damage boundaries preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
 
 At the retained-painter checkpoint (`77ea56a`), retained painting took 7.39 ms
 median versus 42.23 ms for a complete paint. AIR now provides true nonblocking
@@ -416,19 +417,21 @@ actually delayed an empty wake-coalescing pass by 11.55 ms on Windows. The final
 build drains that queue in 0.03 ms median, without changing blocking
 channel delivery or discarding partial greetings/frames.
 
-The opaque-row/span-copy checkpoint was measured with 20 samples after three
+The retained-alpha checkpoint was measured with 20 samples after three
 warmups on the supplied 4K/59.94 AV1/PQ clip and RTX 5080 in a 2560x1440 canvas:
 
 | Median phase (ms) | Editor | Fullscreen |
 |---|---:|---:|
-| Request to ready notification | 27.24 | 30.56 |
-| Load generation-checked images | 2.24 | 3.10 |
-| Retained canvas paint | 6.12 | 22.54 |
-| Complete serial diagnostic | 35.80 | 56.11 |
+| Request to ready notification | 27.96 | 30.32 |
+| Load generation-checked images | 2.12 | 3.12 |
+| Retained canvas paint | 6.00 | 21.82 |
+| Complete serial diagnostic | 36.34 | 55.32 |
 
-The preceding checkpoint (`8203d66`) measured 7.10/27.48 ms painting and
-37.21/60.54 ms serial in editor/fullscreen respectively. Opaque-row reuse lowers
-fullscreen painting by about 18% in this sample. The earlier channel-wake checkpoint
+The opaque-row/span-copy checkpoint (`d5a7d25`) measured 6.12/22.54 ms painting
+and 35.80/56.11 ms serial in editor/fullscreen. Removing the redundant alpha scans
+reduces fullscreen painting to 21.82 ms in this sample; the serial editor result is
+slightly slower. Before opaque-row reuse, `8203d66` measured 7.10/27.48 ms painting
+and 37.21/60.54 ms serial. The earlier channel-wake checkpoint
 (`25178c9`) measured 37.87/35.72 ms request-to-ready and 46.95/66.54 ms serial.
 These short headless samples exclude native presentation, audio and pipeline
 overlap; they are not an interactive frame-rate claim. Fullscreen CPU painting
@@ -478,11 +481,13 @@ separate snapshots, paused final-edit autosave, atomic failure preservation, leg
 recovery and selecting the active snapshot without replacing it while the decision is
 open. It verifies original files stay intact, including a normal project inside the
 recovery directory. Dialog images are rendered headlessly; the new picker/modal flow
-still needs an interactive Windows check. An additional 15-case / 282-check pixel gate
+still needs an interactive Windows check. An additional 24-case / 444-check pixel gate
 compares retained playback against the complete painter byte for byte:
 all four docks at 1x/1.5x/2x, changing images, forward seeks and rewind, fullscreen,
 resize, transport changes, alpha, themes, menus, prompts, keyed inspector values and
-project-decision/Save as cancellation without stale overlay pixels.
+project-decision/Save as cancellation without stale overlay pixels. Nine cases
+exercise fixed-size opaque/transparent frame transitions across three canvas scales
+in the editor and both fullscreen monitors.
 The generated-media suite covers effects, transitions, captions, Unicode, audio-only
 projects, worker crash recovery and export cancellation/cleanup.
 

@@ -20,7 +20,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
 | Project safety and recovery | Fifteen cases / 84 checks. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
-| Retained playback painter | Fifteen cases / 282 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation |
+| Retained playback painter | Twenty-four cases / 444 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation; nine cases keep image dimensions fixed while transitioning between opaque, zero-alpha and mixed-alpha frames in the editor and both fullscreen monitors at three scales |
 | Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
 | Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; the final picture matches a 32-request drag; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue; coded malformed-request and blocked-pixel-publication failures recover on the same worker; a reused image slot refuses its old generation; persisted Stop cancels an idle worker without a wake |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
@@ -32,11 +32,15 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The current opaque-row/span-copy checkpoint headless diagnostic uses 20 samples
+The current retained-alpha checkpoint headless diagnostic uses 20 samples
 after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440. Editor
-medians are 27.24 ms request-to-ready, 2.24 ms image loading,
-6.12 ms retained paint and 35.80 ms serial. Fullscreen medians are
-30.56 ms, 3.10 ms, 22.54 ms and 56.11 ms respectively.
+medians are 27.96 ms request-to-ready, 2.12 ms image loading,
+6.00 ms retained paint and 36.34 ms serial. Fullscreen medians are
+30.32 ms, 3.12 ms, 21.82 ms and 55.32 ms respectively.
+The opaque-row/span-copy checkpoint (`d5a7d25`) measured 6.12/22.54 ms painting
+and 35.80/56.11 ms serial. The retained painter now clears monitor backgrounds
+before composition without scanning either image for alpha or forcing transparent
+frames through a complete paint.
 The preceding checkpoint (`8203d66`) measured 7.10/27.48 ms painting and
 37.21/60.54 ms serial in editor/fullscreen. The earlier checkpoint (`25178c9`)
 measured 46.95/66.54 ms serial. Native presentation, audio and overlap are excluded;

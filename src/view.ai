@@ -1003,16 +1003,6 @@ pub fn renderer() -> Renderer effects {alloc} {
   Renderer {surface: draw.empty_surface(), frame: 0, source_width: 0, source_height: 0,
     program_width: 0, program_height: 0, fullscreen: 0, source_playing: false, program_playing: false, overlay: false}
 }
-fn opaque(image: ref<draw.Surface>) -> bool effects {} {
-  let pixels: ref<array<byte>> = struct.borrow(image, field=pixels)
-  let alpha: u8 = 255
-  var at: u64 = 3
-  loop { if at >= array.len(pixels) { break }
-    if array.get(pixels, at) != cast.bits(alpha) { return false }
-    at = at + 4
-  }
-  true
-}
 
 fn repaint_head(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: Theme,
     frame: layout.Frame, model: ref<timeline.Timeline>, position: i64) -> unit effects {alloc} {
@@ -1107,7 +1097,9 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
 }
 
 // Input/layout/project edits request full=true. Playback and new preview pixels can
-// reuse the canvas. Dimension, transport and alpha changes conservatively repaint all.
+// reuse the canvas. Monitor regions clear their destination before compositing,
+// so transparent frames do not require scanning either image or a complete paint.
+// Dimension and transport changes conservatively repaint all.
 pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
     full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>) -> bool effects {alloc} {
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
@@ -1120,7 +1112,7 @@ pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32
   let repaint: bool = full or resized or overlay or cache.overlay != overlay or cache.source_width != source.width or cache.source_height != source.height or
     cache.program_width != program.width or cache.program_height != program.height or
     cache.fullscreen != state.fullscreen or cache.source_playing != source_playing or
-    cache.program_playing != program_playing or not opaque(source) or not opaque(program)
+    cache.program_playing != program_playing
   var surface: draw.Surface = struct.replace(cache, draw.empty_surface(), field=surface)
   if resized { surface = match draw.surface(width, height) {none => { return false }, some(value) => value,} }
   var canvas: draw.Canvas = draw.canvas(surface)
