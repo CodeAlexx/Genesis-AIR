@@ -137,21 +137,27 @@ cd ../Genesis-AIR
 ```
 
 On Windows, use PowerShell 7, Visual Studio 2022 C++ Build Tools (including CMake),
-Git, and WSL Ubuntu with a compatible AIR compiler. The compiler emits C in WSL;
+Git, and WSL Ubuntu with CMake 3.24+, Ninja and a C++20 compiler. Build AIR from the
+pinned SDK with the script below. AIR emits C in WSL;
 MSVC builds the Windows application. The installed editor runs directly as a Windows GUI
 executable, and its redirected media subprocesses do not open console windows.
 
 ```powershell
 .\setup-windows.ps1
-.\build-windows.ps1 -RunTests -LinuxCompiler /path/to/airc
+.\build-compiler-wsl.ps1
+.\build-windows.ps1 -RunTests
 .\Genesis-AIR.exe open .\project.air
 ```
 
 Both setup and build default to the repository root. The output includes
 `Genesis-AIR.exe`, the native host/audio DLLs, `genesis-gcompose.exe`, FFmpeg DLLs and
 executables, `OpenCL.dll`, `fonts/` and dependency `licenses/`. Keep these together.
-The default compiler path is `/root/AIR-win-port-build/bin/airc`; override it with
-`-LinuxCompiler` and the distribution with `-Distro` when needed.
+The compiler builder defaults to `/root/Genesis-AIR-compiler`, a separate build tree
+attached to this SDK checkout. It preserves unrelated compiler trees. Override its
+`-BuildDirectory` and pass the resulting `bin/airc` to `build-windows.ps1 -LinuxCompiler`
+when needed; both scripts accept `-Distro`. Rebuild the matching compiler when updating
+the SDK pin, because this version uses the generic `array.copy` and `array.repeat`
+operations for bulk RGBA imports and surface allocation.
 
 Setup creates isolated SDK and compositor checkouts under `build-windows/`, applies the
 tracked compositor patch, and builds the native media dependencies. Existing checkouts
@@ -350,21 +356,29 @@ Genesis borrows its RGBA window surface through `std.gui.present_surface`; the n
 host performs format conversion once, avoiding an AIR RGB24 allocation and a repeated
 Windows swizzle. The monitor resampler also uses integer source indices.
 
-The headless CPU/mailbox diagnostic exercises the same background preview and full-window
-painter. On the supplied 4K clip at a 2560x1440 editor size, 20 samples after three warmups
-reduced median CPU painting from 214.42 ms to 54.39 ms. Removing the intermediate RGB24
-buffer also removes a separately measured 23.82 ms packing step. The serial diagnostic
-measured 100.53 ms in the editor and 131.41 ms in fullscreen. These serial totals include
-mailbox decoding and painting, and exclude native presentation, audio and pipeline overlap;
-they are not an interactive frame-rate claim. Sustained smooth 4K60 remains unfinished.
+Playback retains the window canvas and repaints the monitor pictures/timecodes,
+old/new playhead strips, status, and live scopes/audio or animated inspector values.
+Input and project/layout changes request a complete paint; open menus/prompts,
+changed picture dimensions and transparent pictures also use a complete paint.
+Physical pixel damage boundaries preserve fractional-DPI edges. The preview mailbox
+writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
+
+On the supplied 4K clip in a 2560x1440 editor, 20 samples after three warmups measured
+7.39 ms median retained painting versus 42.23 ms for a complete paint in the same build.
+Fullscreen painting measured 28.08 ms. The serial CPU/mailbox diagnostic measured
+49.94 ms in the editor and 68.07 ms in fullscreen. These totals exclude native
+presentation, audio and pipeline overlap; they are not an interactive frame-rate
+claim. Sustained smooth 4K60 remains unfinished.
 
 ```powershell
 .\Genesis-AIR.exe profile-preview .\preview-profile.json .\project.air 2560 1440 20
 .\Genesis-AIR.exe profile-preview .\fullscreen-profile.json .\project.air 2560 1440 20 --fullscreen
+.\Genesis-AIR.exe profile-preview .\full-paint-profile.json .\project.air 2560 1440 20 --full-paint
 ```
 
 This command opens no window. Its `std.bench` JSON separates request-to-ready, mailbox
-image loading, painting, borrowed presenter handoff and the serial pipeline. It validates
+image loading, retained painting, borrowed presenter handoff and the serial pipeline.
+`--full-paint` measures a complete paint for comparison; it combines with `--fullscreen`. It validates
 published image dimensions and a painted panel pixel so an empty frame cannot pass.
 `GA_PROFILE_ARGS` identifies invalid dimensions/sample counts; `GA_PROFILE_PREVIEW`
 identifies a missing frame; `GA_UI_PRESENT` reports a native presentation failure in the editor.
@@ -386,7 +400,10 @@ The Windows gate verifies 152 saved application facts, three native file-drop fa
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo output levels and immediate Stop. The asynchronous preview test measures
 red/blue pixels after rapid seeking, unchanged source caching, rewind to frame zero,
-timeline bitmaps and embedded audio waveform delivery.
+timeline bitmaps and embedded audio waveform delivery. An additional 14-case / 273-check
+pixel gate compares retained playback against the complete painter byte for byte:
+all four docks at 1x/1.5x/2x, changing images, forward seeks and rewind, fullscreen,
+resize, transport changes, alpha, themes, menus, prompts and keyed inspector values.
 The generated-media suite covers effects, transitions, captions, Unicode, audio-only
 projects, worker crash recovery and export cancellation/cleanup.
 

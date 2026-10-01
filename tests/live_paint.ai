@@ -1,0 +1,156 @@
+// The complete painter is the pixel oracle for retained playback paints.
+module genesis.tests.live_paint
+import std.draw as draw
+import std.geometry as geometry
+import std.editor as editor
+import std.image as image
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/typeface.ai" as typeface
+import "../src/view.ai" as painter
+
+fn picture(width: u32, height: u32, blue: bool, alpha: u8) -> draw.Surface effects {alloc} {
+  var canvas: draw.Canvas = draw.canvas(option.unwrap(draw.surface(width, height)))
+  draw.clear(canvas, draw.Color {r: if blue { 12 } else { 238 }, g: 40, b: if blue { 238 } else { 12 }, a: alpha})
+  draw.fill_rect(canvas, option.unwrap(geometry.rect(8.0, 8.0, 24.0, 24.0)), draw.rgb(20, 240, 30))
+  draw.finish(canvas)
+}
+fn fixture(scratch: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.write, process, time} {
+  var state: app.App = app.app(provider.fake(scratch))
+  app.set_fonts(state, typeface.search_paths())
+  var source: commands.Result = commands.import_media(state, "live.mov", "Retained preview clip")
+  let _ = commands.open_source(state, source.value)
+  let added: commands.Result = commands.append_clip(state, app.default_video_track(state), source.value, 0, 900)
+  let _ = commands.select_only(state, added.value)
+  var peaks: array<f64> = [0.1, 0.8, 0.2, 0.5, 0.3, 0.9]
+  array.push(struct.borrow(state, field=waveforms), app.Waveform {clip: added.value, peaks: peaks})
+  var frame: i64 = 0
+  loop { if frame >= 900 { break }
+    array.push(struct.borrow(state, field=thumbnails), app.Thumbnail {clip: added.value, frame: frame,
+      pixels: picture(80, 45, frame >= 30, 255)})
+    frame = frame + 20
+  }
+  state
+}
+fn compare(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.Renderer>, width: u32,
+    height: u32, full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, scratch: str) -> unit effects {alloc, fs.read, fs.write, io.write} {
+  let _ = test.check(suite, painter.render(state, cache, width, height, full, source, program), "Retained paint succeeds")
+  var oracle: painter.Renderer = painter.renderer()
+  let _ = test.check(suite, painter.render(state, oracle, width, height, true, source, program), "Complete paint succeeds")
+  let actual: ref<array<byte>> = struct.borrow(struct.borrow(cache, field=surface), field=pixels)
+  let expected: ref<array<byte>> = struct.borrow(struct.borrow(oracle, field=surface), field=pixels)
+  var at: u64 = 0
+  var differences: u64 = 0
+  loop { if at >= array.len(expected) { break }
+    if array.get(actual, at) != array.get(expected, at) {
+      if differences == 0 {
+        io.write(text.concat("First changed byte: ", text.concat(str.view(string.from_int(cast.sat(at))), "\n")))
+      }
+      differences = differences + 1
+    }
+    at = at + 1
+  }
+  let _ = test.eq_u64(suite, differences, 0, "Every RGBA byte matches the complete painter")
+  if differences != 0 {
+    var actual_png: bytes = image.encode_png(struct.borrow(cache, field=surface))
+    var expected_png: bytes = image.encode_png(struct.borrow(oracle, field=surface))
+    let _ = image.write_file(str.view(path.join(scratch, "retained-actual.png")), bytes.view(actual_png))
+    let _ = image.write_file(str.view(path.join(scratch, "retained-expected.png")), bytes.view(expected_png))
+  }
+  ()
+}
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 2 { return 2 }
+  let scratch: str = view.get(args, 1)
+  var suite: test.Suite = test.suite("Genesis retained preview pixel equivalence", true)
+  var state: app.App = fixture(scratch)
+  var source: draw.Surface = picture(480, 270, false, 255)
+  var program: draw.Surface = picture(480, 270, false, 255)
+  let widths: array<u32> = [1600, 2560, 3200]
+  let heights: array<u32> = [980, 1440, 1800]
+  let positions: array<i64> = [1, 17, 0, 85, 600]
+  var size: u64 = 0
+  loop { if size >= array.len(widths) { break }
+    let width: u32 = array.get(widths, size)
+    let height: u32 = array.get(heights, size)
+    var tab: u32 = 0
+    loop { if tab >= 4 { break }
+      let _ = test.start(suite, text.concat("Playback pixels at scale/dock ", text.concat(str.view(string.from_int(cast.sat(size))), str.view(string.from_int(cast.sat(tab))))))
+      app.set_dock_tab(state, tab)
+      let _ = editor.seek(struct.borrow(state, field=document), 0)
+      var cache: painter.Renderer = painter.renderer()
+      compare(suite, state, cache, width, height, true, source, program, scratch)
+      var i: u64 = 0
+      loop { if i >= array.len(positions) { break }
+        let _ = editor.seek(struct.borrow(state, field=document), array.get(positions, i))
+        let _ = editor.seek_monitor(struct.borrow(state, field=document), array.get(positions, i))
+        source = picture(480, 270, i == 1, 255)
+        program = picture(480, 270, i != 0, 255)
+        struct.set(state, cast.float(i) / 5.0, field=audio_left)
+        struct.set(state, cast.float(i) / 6.0, field=audio_right)
+        compare(suite, state, cache, width, height, false, source, program, scratch)
+        i = i + 1
+      }
+      let _ = test.done(suite)
+      if test.failed(suite) != 0 { return test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 24) }
+      tab = tab + 1
+    }
+    size = size + 1
+  }
+  let _ = test.start(suite, "Fullscreen monitors, resize, transparency and playing controls")
+  var cache: painter.Renderer = painter.renderer()
+  compare(suite, state, cache, 1600, 980, true, source, program, scratch)
+  var full: u32 = 1
+  loop { if full > 2 { break }
+    struct.set(state, full, field=fullscreen)
+    compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+    let _ = editor.seek(struct.borrow(state, field=document), 15)
+    let _ = editor.seek_monitor(struct.borrow(state, field=document), 15)
+    program = picture(1280, 720, false, 255)
+    source = picture(1280, 720, false, 255)
+    compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+    program = picture(1280, 720, true, 255)
+    source = picture(1280, 720, true, 255)
+    let _ = editor.seek(struct.borrow(state, field=document), 0)
+    compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+    full = full + 1
+  }
+  struct.set(state, 0, field=fullscreen)
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  let _ = commands.program(state, editor.play())
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  let _ = commands.program(state, editor.pause())
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  program = picture(1280, 720, false, 128)
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  program = picture(320, 180, true, 255)
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  app.set_light(state, true)
+  compare(suite, state, cache, 1600, 980, true, source, program, scratch)
+  let _ = test.done(suite)
+  let _ = test.start(suite, "Menus, prompts and keyed inspector values remain complete")
+  app.set_open_menu(state, 1)
+  compare(suite, state, cache, 1600, 980, true, source, program, scratch)
+  program = picture(320, 180, false, 255)
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  app.close_menu(state)
+  app.begin_prompt(state, chrome.act_save(), "Save project", "test.air")
+  compare(suite, state, cache, 1600, 980, true, source, program, scratch)
+  program = picture(320, 180, true, 255)
+  compare(suite, state, cache, 1600, 980, false, source, program, scratch)
+  app.end_prompt(state)
+  app.set_dock_tab(state, chrome.tab_properties())
+  let clip: u64 = app.current_clip(state)
+  let _ = editor.set_key(struct.borrow(state, field=document), clip, "opacity", 0, 1.0, 1)
+  let _ = editor.set_key(struct.borrow(state, field=document), clip, "opacity", 100, 0.2, 1)
+  compare(suite, state, cache, 2560, 1440, true, source, program, scratch)
+  let _ = editor.seek(struct.borrow(state, field=document), 50)
+  compare(suite, state, cache, 2560, 1440, false, source, program, scratch)
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 24)
+}

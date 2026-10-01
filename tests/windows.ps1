@@ -49,6 +49,8 @@ try {
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
     Copy-Item -LiteralPath (Join-Path $work 'async/timeline-scrub.png') -Destination (Join-Path $root 'timeline-scrub.png') -Force
   }
+  Write-Host (Invoke-Native 'genesis-live-paint.exe' @($work)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'live-paint-tests.json') -Destination (Join-Path $root 'live-paint-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'inspector-tests.json') -Destination (Join-Path $root 'inspector-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'native-tests.json') -Destination (Join-Path $root 'native-tests.json') -Force

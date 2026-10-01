@@ -1,7 +1,7 @@
 // Painting Genesis AIR.
 //
-// Every pixel is derived from the document at paint time. This module holds no project
-// state and mutates nothing: hand it an `App` and it draws what is currently true. That is
+// Every pixel is derived from the document at paint time. Retained pixels and glyphs
+// cache the presentation; hand this module an `App` and it draws what is currently true. That is
 // what keeps the visual timeline from becoming a second, disagreeing model.
 //
 // The timeline lanes, clips, fades, markers and playhead come from `std.editor_view`, which
@@ -182,6 +182,16 @@ fn paint_monitor(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, 
   let view_top: f64 = area.top + 30.0
   let view_bottom: f64 = area.bottom - 72.0
   fill_at(canvas, area.left + 6.0, view_top, area.right - 6.0, view_bottom, draw.rgb(8, 9, 11))
+  paint_monitor_image(canvas, area, image)
+  paint_monitor_time(canvas, typography, colors, area, frame, last, mark_in, mark_out, fps, playing)
+  ()
+}
+
+// The provider supplies the monitor picture; body painting preserves the surrounding
+// controls while applying the same letterbox geometry as a complete paint.
+fn paint_monitor_image(canvas: ref<draw.Canvas>, area: layout.Rect, image: ref<draw.Surface>) -> unit effects {alloc} {
+  let view_top: f64 = area.top + 30.0
+  let view_bottom: f64 = area.bottom - 72.0
   // The provider's frame, letterboxed into the monitor.
   let source_w: u32 = draw.surface_width(image)
   let source_h: u32 = draw.surface_height(image)
@@ -202,6 +212,11 @@ fn paint_monitor(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, 
       none => { },
     }
   }
+  ()
+}
+fn paint_monitor_time(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, colors: Theme,
+    area: layout.Rect, frame: i64, last: i64, mark_in: i64, mark_out: i64, fps: f64,
+    playing: bool) -> unit effects {alloc} {
   let bar_top: f64 = area.bottom - 61.0
   fill_at(canvas, area.left + 8.0, bar_top, area.right - 8.0, bar_top + 7.0, draw.rgb(22, 24, 29))
   let span: f64 = if last > 0 { cast.float(last) } else { 1.0 }
@@ -936,4 +951,151 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   paint_prompt(canvas, colors, state, width, height)
   app.count_paint(state)
   ()
+}
+
+
+// Derived paint state only. The document remains the authority for every UI fact.
+pub type Renderer = struct {
+  surface: draw.Surface, frame: i64, source_width: u32, source_height: u32,
+  program_width: u32, program_height: u32, fullscreen: u32,
+  source_playing: bool, program_playing: bool
+}
+pub fn renderer() -> Renderer effects {alloc} {
+  Renderer {surface: draw.empty_surface(), frame: 0, source_width: 0, source_height: 0,
+    program_width: 0, program_height: 0, fullscreen: 0, source_playing: false, program_playing: false}
+}
+fn opaque(image: ref<draw.Surface>) -> bool effects {} {
+  let pixels: ref<array<byte>> = struct.borrow(image, field=pixels)
+  let alpha: u8 = 255
+  var at: u64 = 3
+  loop { if at >= array.len(pixels) { break }
+    if array.get(pixels, at) != cast.bits(alpha) { return false }
+    at = at + 4
+  }
+  true
+}
+
+fn repaint_head(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: Theme,
+    frame: layout.Frame, model: ref<timeline.Timeline>, position: i64) -> unit effects {alloc} {
+  let area: layout.Rect = frame.timeline
+  let head: f64 = timeline.frame_to_x(model, position)
+  if head < area.left - 3.0 or head > area.right + 3.0 { return () }
+  let scale: f64 = draw.transform(canvas).a
+  let saved: draw.State = draw.state(canvas)
+  // Align the damage clip to physical pixels: fractional clips would alter coverage.
+  let left: f64 = math.floor((head - 2.0) * scale) / scale
+  let right: f64 = math.ceil((head + 3.0) * scale) / scale
+  let top: f64 = (math.floor(area.top * scale) - 1.0) / scale
+  let bottom: f64 = (math.ceil(area.bottom * scale) + 1.0) / scale
+  match geometry.rect(left, top, right, bottom) {
+    none => {}, some(box) => { let _ = draw.clip_rect(canvas, box)
+      draw.fill_device_rect(canvas, cast.sat(left * scale), cast.sat(top * scale),
+        cast.sat(right * scale), cast.sat(bottom * scale), colors.background)
+      let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
+      let fps: f64 = editor.sequence_fps(struct.borrow(state, field=document), sequence)
+      paint_ruler(canvas, colors, state, frame.ruler, model, fps)
+      paint_timeline(canvas, colors, state, area, model)
+      paint_headers(canvas, colors, state, frame.headers, model)
+      var buttons: array<chrome.Control> = chrome.track_controls(frame, state, model)
+      let timeline_clip: draw.State = draw.state(canvas)
+      match geometry.rect(frame.headers.left, frame.headers.top, frame.headers.right, frame.headers.bottom) {
+        none => {}, some(header_box) => { let _ = draw.clip_rect(canvas, header_box) },
+      }
+      paint_controls(canvas, struct.borrow(state, field=typography), colors, buttons)
+      draw.restore(canvas, timeline_clip) },
+  }
+  draw.restore(canvas, saved)
+  ()
+}
+fn erase_section(canvas: ref<draw.Canvas>, area: layout.Rect, background: draw.Color) -> unit effects {} {
+  let scale: f64 = draw.transform(canvas).a
+  draw.fill_device_rect(canvas, cast.sat(math.floor(area.left * scale) - 2.0),
+    cast.sat(math.floor(area.top * scale) - 2.0), cast.sat(math.ceil(area.right * scale) + 2.0),
+    cast.sat(math.ceil(area.bottom * scale) + 2.0), background)
+}
+fn paint_live_monitor(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: Theme,
+    frame: layout.Frame, source: bool, image: ref<draw.Surface>) -> unit effects {alloc} {
+  let area: layout.Rect = chrome.monitor_area(frame, state, source)
+  // Clear on physical pixel boundaries before reapplying fractional video edges.
+  // Header, buttons and focus borders stay intact; transport changes repaint all.
+  let scale: f64 = draw.transform(canvas).a
+  draw.fill_device_rect(canvas, cast.sat(math.floor((area.left + 4.0) * scale)),
+    cast.sat(math.floor((area.top + 30.0) * scale)), cast.sat(math.ceil((area.right - 4.0) * scale)),
+    cast.sat(math.ceil((area.bottom - 31.0) * scale)), colors.panel)
+  fill_at(canvas, area.left + 6.0, area.top + 30.0, area.right - 6.0, area.bottom - 72.0,
+    draw.rgb(8, 9, 11))
+  paint_monitor_image(canvas, area, image)
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let transport: editor.Transport = if source { doc.monitor } else { doc.program }
+  let last: i64 = if source { editor.source_frames(doc, doc.monitor_source) } else { editor.duration(doc) }
+  let fps: f64 = if source { match editor.source_slot(doc, doc.monitor_source) {
+      none => editor.sequence_fps(doc, doc.active),
+      some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=fps),
+    } } else { editor.sequence_fps(doc, doc.active) }
+  paint_monitor_time(canvas, struct.borrow(state, field=typography), colors, area, transport.frame,
+    if last > 0 { last - 1 } else { 0 }, transport.mark_in, transport.mark_out, fps, transport.playing)
+}
+fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
+    previous_frame: i64, source: ref<draw.Surface>, program: ref<draw.Surface>) -> unit effects {alloc} {
+  ui_text.set_scale(struct.borrow(state, field=typography), draw.transform(canvas).a)
+  let colors: Theme = theme(state)
+  let frame: layout.Frame = layout.frame(width, height)
+  if state.fullscreen != 0 {
+    let source_full: bool = state.fullscreen == 2
+    if source_full { paint_live_monitor(canvas, state, colors, frame, true, source) }
+    else { paint_live_monitor(canvas, state, colors, frame, false, program) }
+    return ()
+  }
+  paint_live_monitor(canvas, state, colors, frame, true, source)
+  paint_live_monitor(canvas, state, colors, frame, false, program)
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let current: i64 = editor.playhead(doc)
+  let animated: bool = array.len(struct.borrow(doc, field=keys)) != 0
+  if current != previous_frame {
+    var model: timeline.Timeline = timeline_model(state, frame.timeline)
+    repaint_head(canvas, state, colors, frame, model, previous_frame)
+    repaint_head(canvas, state, colors, frame, model, current)
+  }
+  if app.dock_tab(state) == chrome.tab_scopes() or app.dock_tab(state) == chrome.tab_audio() or
+      animated {
+    erase_section(canvas, frame.dock, colors.background)
+    paint_dock(canvas, colors, state, frame, program)
+  }
+  erase_section(canvas, frame.status, colors.background)
+  paint_status(canvas, colors, state, frame.status)
+  app.count_paint(state)
+  ()
+}
+
+// Input/layout/project edits request full=true. Playback and new preview pixels can
+// reuse the canvas. Dimension, transport and alpha changes conservatively repaint all.
+pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
+    full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>) -> bool effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let source_playing: bool = struct.get(struct.borrow(doc, field=monitor), field=playing)
+  let program_playing: bool = editor.playing(doc)
+  let program_frame: i64 = editor.playhead(doc)
+  let previous: ref<draw.Surface> = struct.borrow(cache, field=surface)
+  let resized: bool = previous.width != width or previous.height != height
+  let repaint: bool = full or resized or app.open_menu(state) != 0 or app.prompt_active(state) or cache.source_width != source.width or cache.source_height != source.height or
+    cache.program_width != program.width or cache.program_height != program.height or
+    cache.fullscreen != state.fullscreen or cache.source_playing != source_playing or
+    cache.program_playing != program_playing or not opaque(source) or not opaque(program)
+  var surface: draw.Surface = struct.replace(cache, draw.empty_surface(), field=surface)
+  if resized { surface = match draw.surface(width, height) {none => { return false }, some(value) => value,} }
+  var canvas: draw.Canvas = draw.canvas(surface)
+  let scale: f64 = layout.ui_scale(cast.float(width), cast.float(height))
+  draw.set_transform(canvas, draw.scale(scale, scale))
+  if repaint { paint(state, canvas, cast.float(width) / scale, cast.float(height) / scale, source, program) }
+  else { paint_live(state, canvas, cast.float(width) / scale, cast.float(height) / scale, cache.frame, source, program) }
+  let _ = struct.replace(cache, draw.finish(canvas), field=surface)
+  struct.set(cache, program_frame, field=frame)
+  struct.set(cache, source.width, field=source_width)
+  struct.set(cache, source.height, field=source_height)
+  struct.set(cache, program.width, field=program_width)
+  struct.set(cache, program.height, field=program_height)
+  struct.set(cache, state.fullscreen, field=fullscreen)
+  struct.set(cache, source_playing, field=source_playing)
+  struct.set(cache, program_playing, field=program_playing)
+  true
 }

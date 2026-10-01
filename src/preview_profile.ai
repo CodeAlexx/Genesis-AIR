@@ -19,7 +19,7 @@ fn same_color(a: draw.Color, b: draw.Color) -> bool effects {} {
 }
 
 pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
-    fullscreen: bool, samples: u64) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, thread, time} {
+    fullscreen: bool, samples: u64, full_paint: bool) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, thread, time} {
   if width < 640 or height < 480 or width > 3840 or height > 2160 or samples == 0 or samples > 120 {
     io.write("[GA_PROFILE_ARGS] Use a 640x480..3840x2160 window and 1..120 samples\n")
     return 2
@@ -35,8 +35,8 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   let monitor_height: u32 = if fullscreen { 720 } else { 270 }
   let monitor_pixels: u64 = cast.wrap(monitor_width) * cast.wrap(monitor_height)
   var ready: bench.Bench = bench.new("request_to_ready", "serialized document, worker decode/composite, monitor conversion and mailbox publication", monitor_pixels, "pixels", 3, samples)
-  var read: bench.Bench = bench.new("read_images", "RGB mailbox images into AIR surfaces", monitor_pixels, "pixels", 3, samples)
-  var paint: bench.Bench = bench.new("paint", "allocate and paint the editor at physical window dimensions", pixels, "pixels", 3, samples)
+  var read: bench.Bench = bench.new("read_images", "RGBA mailbox images into AIR surfaces by bulk copy", monitor_pixels, "pixels", 3, samples)
+  var paint: bench.Bench = bench.new("paint", if full_paint { "complete editor paint at physical window dimensions" } else { "retained playback paint at physical window dimensions" }, pixels, "pixels", 3, samples)
   var pack: bench.Bench = bench.new("present_handoff", "borrow the RGBA canvas bytes consumed by the native presenter", pixels, "pixels", 3, samples)
   var total: bench.Bench = bench.new("serial_pipeline", "preview mailbox plus CPU paint and the borrowed presenter handoff, without audio or native present", pixels, "pixels", 3, samples)
   bench.expect(ready, 1)
@@ -44,6 +44,7 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   bench.expect(paint, 1)
   bench.expect(pack, pixels * 4)
   bench.expect(total, 1)
+  var renderer: painter.Renderer = painter.renderer()
   var iteration: u64 = 0
   var failure: bool = false
   task.scope {
@@ -81,13 +82,9 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
       if actual_pixels != monitor_pixels { failure = true
         break }
       let paint_begin: u64 = bench.mark()
-      var surface: draw.Surface = match draw.surface(width, height) {some(value) => value, none => { failure = true
-        break },}
-      var canvas: draw.Canvas = draw.canvas(surface)
-      let scale: f64 = layout.ui_scale(cast.float(width), cast.float(height))
-      draw.set_transform(canvas, draw.scale(scale, scale))
-      painter.paint(state, canvas, cast.float(width) / scale, cast.float(height) / scale, source, program)
-      var finished: draw.Surface = draw.finish(canvas)
+      if not painter.render(state, renderer, width, height, full_paint, source, program) { failure = true
+        break }
+      let finished: ref<draw.Surface> = struct.borrow(renderer, field=surface)
       // A blank allocation cannot pass as an executed paint. Check a panel pixel
       // away from text and outlines as well as the published program dimensions.
       let colors: painter.Theme = painter.theme(state)

@@ -523,21 +523,11 @@ fn read_rgba(file: str, width: u32, height: u32) -> option<draw.Surface> effects
   rgba_surface(bytes.view(raw), width, height)
 }
 fn rgba_surface(data: view<byte>, width: u32, height: u32) -> option<draw.Surface> effects {alloc} {
-  let wanted: u64 = cast.wrap(width) * cast.wrap(height) * 4
-  if view.len(data) < wanted { return option.none() }
   let total: u64 = cast.wrap(width) * cast.wrap(height)
   if total > draw.max_pixels() { return option.none() }
-  var pixels: array<byte> = array.new()
-  let opaque: u8 = 255
-  var i: u64 = 0
-  loop { if i >= total { break }
-    array.push(pixels, view.get(data, i * 4))
-    array.push(pixels, view.get(data, i * 4 + 1))
-    array.push(pixels, view.get(data, i * 4 + 2))
-    array.push(pixels, cast.bits(opaque))
-    i = i + 1
-  }
-  option.some(draw.Surface {width: width, height: height, pixels: pixels})
+  let wanted: u64 = total * 4
+  if view.len(data) < wanted { return option.none() }
+  draw.surface_from_rgba(width, height, view.slice(data, 0, wanted))
 }
 
 // PREVIEW writes the provider's working canvas. Sample that canvas into the

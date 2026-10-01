@@ -279,6 +279,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   }
   var native_fullscreen: bool = false
   var dirty: bool = true
+  var repaint_all: bool = true
+  var renderer: painter.Renderer = painter.renderer()
   var handled_prompt: u32 = 0
   var last_recorded_error: string = string.new()
   var autosave_ns: u64 = 0
@@ -350,12 +352,14 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     if wave_ready > waveform_seen {
       preview.read_waveforms(state, str.view(preview_root))
       waveform_seen = wave_ready
+      repaint_all = true
       dirty = true
     }
     let thumb_ready: u64 = preview.thumbnails_completed(str.view(preview_root))
     if thumb_ready > thumbnail_seen {
       preview.read_thumbnails(state, str.view(preview_root), thumb_ready)
       thumbnail_seen = thumb_ready
+      repaint_all = true
       dirty = true
     }
     let now_ns: u64 = clock.start()
@@ -535,11 +539,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     if str.len(dropped) != 0 {
       var imported: commands.Result = commands.import_drop(state, dropped)
       app.set_status(state, commands.message(imported))
+      repaint_all = true
       dirty = true
     }
     if (state.fullscreen != 0) != native_fullscreen {
       native_fullscreen = state.fullscreen != 0
       ui.fullscreen(window, native_fullscreen)
+      repaint_all = true
       dirty = true
     }
     let box: gui.Rect = gui.window_size(window)
@@ -578,20 +584,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
         }
         preview_signature = signature
       }
-      match draw.surface(width, height) {
-        none => { },
-        some(target) => {
-          var canvas: draw.Canvas = draw.canvas(target)
-          draw.set_transform(canvas, draw.scale(ui_scale, ui_scale))
-          painter.paint(state, canvas, logical_width, logical_height,
-            source_image, program_image)
-          var finished: draw.Surface = draw.finish(canvas)
-          match gui.present_surface(window, finished) {
-            ok(shown) => { },
-            err(problem) => { app.set_status(state, "[GA_UI_PRESENT] Native presenter could not display the window frame") },
-          }
-        },
-      }
+      if painter.render(state, renderer, width, height, repaint_all, source_image, program_image) {
+        match gui.present_surface(window, struct.borrow(renderer, field=surface)) {
+          ok(_) => {},
+          err(_) => { app.set_status(state, "[GA_UI_PRESENT] Native presenter could not display the window frame") },
+        }
+      } else { app.set_status(state, "[GA_UI_SURFACE] The window canvas could not be allocated") }
+      repaint_all = false
       dirty = false
     }
     var drained: u64 = 0
@@ -614,6 +613,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
               var note: string = input.pointer_down(state, logical_width, logical_height,
                 pointer_x, pointer_y)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              repaint_all = true
               dirty = true
             },
             PointerMove(point) => {
@@ -622,6 +622,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
               pointer_x = cast.float(mx) / ui_scale
               pointer_y = cast.float(my) / ui_scale
               if input.pointer_hover(state, logical_width, logical_height, pointer_x, pointer_y) {
+                repaint_all = true
                 dirty = true
               }
               if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) {
@@ -629,6 +630,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
                   pointer_x, pointer_y)
                 if str.len(str.view(moving)) != 0 {
                   app.set_status(state, str.view(moving))
+                  repaint_all = true
                   dirty = true
                 }
               }
@@ -640,6 +642,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
                 cast.float(wheel_x) / ui_scale, cast.float(wheel_y) / ui_scale,
                 wheel.down, wheel.lines, control)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              repaint_all = true
               dirty = true
             },
             Key(press) => {
@@ -664,9 +667,11 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
                 var note: string = input.key(state, press.code, press.control, press.shift)
                 if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               }
+              repaint_all = true
               dirty = true
             },
-            Resize(extent) => { dirty = true },
+            Resize(extent) => { repaint_all = true
+              dirty = true },
             Tick => { },
             PointerUp(point) => {
               let ux: u64 = cast.wrap(point.x)
@@ -679,6 +684,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
                 if str.len(str.view(released)) != 0 {
                   app.set_status(state, str.view(released))
                 }
+                repaint_all = true
                 dirty = true
               }
             },
@@ -687,6 +693,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
             MenuAccess(code) => {
               var note: string = input.menu_access(state, code)
               if str.len(note) != 0 { app.set_status(state, note) }
+              repaint_all = true
               dirty = true
             },
           }
@@ -737,6 +744,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           }
         },
       }
+      repaint_all = true
       dirty = true
     }
     let status: string = app.status(state)
@@ -792,8 +800,18 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
     let width: u32 = if view.len(args) > 4 { match text.parse_u64(view.get(args, 4)) {some(value) => cast.sat(value), none => 0,} } else { 2560 }
     let height: u32 = if view.len(args) > 5 { match text.parse_u64(view.get(args, 5)) {some(value) => cast.sat(value), none => 0,} } else { 1440 }
     let samples: u64 = if view.len(args) > 6 { match text.parse_u64(view.get(args, 6)) {some(value) => value, none => 0,} } else { 20 }
-    return preview_profile.run(state, view.get(args, 2), width, height,
-      if view.len(args) > 7 { str.eq(view.get(args, 7), "--fullscreen") } else { false }, samples)
+    var full_monitor: bool = false
+    var full_paint: bool = false
+    var flag: u64 = 7
+    loop { if flag >= view.len(args) { break }
+      let argument: str = view.get(args, flag)
+      if str.eq(argument, "--fullscreen") { full_monitor = true }
+      else if str.eq(argument, "--full-paint") { full_paint = true }
+      else { say("[GA_PROFILE_ARGS] Unknown profile-preview option")
+        return 2 }
+      flag = flag + 1
+    }
+    return preview_profile.run(state, view.get(args, 2), width, height, full_monitor, samples, full_paint)
   }
 
   if str.eq(verb, "render") {

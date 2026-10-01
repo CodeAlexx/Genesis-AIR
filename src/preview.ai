@@ -231,13 +231,13 @@ pub fn error(root: str) -> string effects {alloc, fs.read} {
   match files.read_text(str.view(path.join(root, "error.txt"))) { ok(value) => value, err(_) => string.new(), }
 }
 fn image_file(root: str, id: u64, which: str) -> string effects {alloc} {
-  path.join(root, str.view(text.concat(which, text.concat(str.view(string.from_int(id % 2)), ".rgb"))))
+  path.join(root, str.view(text.concat(which, text.concat(str.view(string.from_int(id % 2)), ".rgba"))))
 }
 fn write_image(root: str, id: u64, which: str, image: ref<draw.Surface>) -> unit effects {alloc, fs.write} {
   let output: string = image_file(root, id, which)
   let temp: string = text.concat(str.view(output), ".tmp")
-  var pixels: bytes = draw.surface_rgb24(image, draw.rgb(0, 0, 0))
-  match files.write_bytes(str.view(temp), bytes.view(pixels)) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
+  let pixels: view<byte> = array.view(struct.borrow(image, field=pixels))
+  match files.write_bytes(str.view(temp), pixels) { err(_) => {}, ok(_) => { let _ = files.rename(str.view(temp), str.view(output)) }, }
   ()
 }
 fn image_size(root: str, id: u64) -> array<u32> effects {alloc, fs.read} {
@@ -257,7 +257,7 @@ pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs
     let name: str = if i == 0 { "source" } else { "program" }
     var image: draw.Surface = match files.read_bytes(str.view(image_file(root, id, name))) {
       err(_) => draw.empty_surface(),
-      ok(raw) => match draw.surface_from_rgb24(array.get(size, 0), array.get(size, 1), bytes.view(raw)) { none => draw.empty_surface(), some(value) => value, },
+      ok(raw) => match draw.surface_from_rgba(array.get(size, 0), array.get(size, 1), bytes.view(raw)) { none => draw.empty_surface(), some(value) => value, },
     }
     array.push(out, image)
  i = i + 1
@@ -366,7 +366,7 @@ pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects 
     let frame: i64 = match text.parse_i64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 0,}
     let filename: string = image_file(root, id, str.view(array.borrow(fields, 2)))
     let raw: bytes = match files.read_bytes(str.view(filename)) {ok(value) => value, err(_) => { continue },}
-    var pixels: draw.Surface = match draw.surface_from_rgb24(80, 45, bytes.view(raw)) {some(value) => value, none => { continue },}
+    var pixels: draw.Surface = match draw.surface_from_rgba(80, 45, bytes.view(raw)) {some(value) => value, none => { continue },}
     array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, pixels: pixels})
   }
   let _ = struct.replace(state, thumbs, field=thumbnails)

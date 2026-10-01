@@ -9,7 +9,7 @@ state-dependent controls also need focused checks. It does not by itself prove m
 
 ## Verified Windows checkpoint (2026-10-01)
 
-Branch `windows-native`, SDK `65bc08d575375e458c4d822511374527aab3ee88`, and the
+Branch `windows-native`, SDK `de41096998dbb79415089887a19a36255a192f5a`, and the
 compositor revision/Windows patch recorded in `windows/source-pins.json` and
 `windows/gcompose-windows.patch` pass these measured gates:
 
@@ -19,6 +19,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Native media and project I/O | Eight cases / 65 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status |
 | Inspector and transport | Twelve cases / 58 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan and stable mix signature |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, immediate Stop |
+| Retained playback painter | Fourteen cases / 273 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts and keyed inspector values |
 | Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
 | Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; newest request wins; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
@@ -29,6 +30,13 @@ A 120-sample worker timing check on consecutive frames of the supplied 4K/59.94 
 clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDIA OpenCL
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
+
+The current headless serial preview diagnostic at 2560x1440 measured 7.39 ms median
+retained painting versus 42.23 ms for a complete paint on the supplied 4K source
+(20 samples after three warmups). Fullscreen retained painting measured 28.08 ms.
+Serial mailbox/paint totals were 49.94 ms and 68.07 ms respectively; native
+presentation, audio and overlap are excluded. These measurements establish a CPU
+improvement and leave sustained smooth 4K60 open.
 
 The native Windows window was also exercised with the supplied Costa Rica 4K clip:
 source/program images, visible transport controls, moving L/R meters, Mute silencing
