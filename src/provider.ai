@@ -47,6 +47,7 @@ pub type Provider = struct {
   session: option<Child>,
   reader: proc.LineReader,
   canvas_width: u32, canvas_height: u32,
+  program_width: u32, program_height: u32,
   program_signature: string,
   starts: u64
 }
@@ -70,7 +71,7 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
     ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_signature: string.new()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new()}
 }
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
@@ -82,7 +83,7 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} 
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_signature: string.new()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new()}
 }
 
 // FFmpeg is a real-media backend, selected only when gcompose is absent.
@@ -90,10 +91,12 @@ pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effec
   Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
     scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_signature: string.new()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new()}
 }
 pub fn invalidate(state: ref<Provider>) -> unit effects {alloc} {
   let _ = struct.replace(state, string.new(), field=program_signature)
+  struct.set(state,0,field=program_width)
+  struct.set(state,0,field=program_height)
   let _ = ref.swap(struct.borrow(state, field=probes), array.new())
   let _ = ref.swap(struct.borrow(state, field=frames), array.new())
   let _ = ref.swap(struct.borrow(state, field=envelopes), array.new())
@@ -593,7 +596,12 @@ pub fn cached_program(state: ref<Provider>, signature: str, width: u32, height: 
   if str.len(signature) == 0 or not str.eq(signature, str.view(struct.borrow(state, field=program_signature))) {
     return option.none()
   }
-  match read_program(str.view(preview_path(state)), width, height, state.canvas_width, state.canvas_height) {
+  // A fitted file belongs to its display geometry. A larger monitor must render
+  // again from the composition rather than enlarge an older small preview.
+  if state.program_width != 0 and (state.program_width != width or state.program_height != height) {return option.none()}
+  let stored_width: u32 = if state.program_width == 0 {state.canvas_width}else{state.program_width}
+  let stored_height: u32 = if state.program_height == 0 {state.canvas_height}else{state.program_height}
+  match read_program(str.view(preview_path(state)), width, height, stored_width, stored_height) {
     none => option.none(),
     some(pixels) => option.some(Frame {ok: true, width: width, height: height, pixels: pixels,
       detail: string.copy("cached program monitor")}),
@@ -606,16 +614,32 @@ pub fn hold_program(state: ref<Provider>, signature: str) -> unit effects {alloc
 
 pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32) -> Frame
                        effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let total: u64 = cast.wrap(width)*cast.wrap(height)
+  if width == 0 or height == 0 or total > draw.max_pixels() {
+    note_failure(state,"[GA_PREVIEW_SIZE] Invalid monitor dimensions")
+    return failed_frame(state)
+  }
+  var command: string = string.copy("PREVIEWFIT ")
+  string.append(command,str.view(string.from_int(width)))
+  string.append(command," ")
+  string.append(command,str.view(string.from_int(height)))
+  string.append(command," ")
+  if str.starts_with(line,"PREVIEW ") {string.append(command,str.slice(line,8,str.len(line)))}
+  else {string.append(command,line)}
   let output: string = preview_path(state)
-  match ask(state, line, "program.txt") {
+  match ask(state, str.view(command), "program.txt") {
     none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
       detail: last_error(state)},
     some(reply) => {
-      match read_program(str.view(output), width, height, state.canvas_width, state.canvas_height) {
+      match read_program(str.view(output), width, height, width, height) {
         none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
           detail: string.copy("the worker's program frame could not be read")},
-        some(pixels) => Frame {ok: true, width: width, height: height, pixels: pixels,
-          detail: string.copy("gcompose PREVIEW")},
+        some(pixels) => {
+          struct.set(state,width,field=program_width)
+          struct.set(state,height,field=program_height)
+          Frame {ok: true, width: width, height: height, pixels: pixels,
+            detail: string.copy("gcompose PREVIEWFIT")}
+        },
       }
     },
   }

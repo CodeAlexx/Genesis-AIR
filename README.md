@@ -409,6 +409,20 @@ a discrete OpenCL GPU on hybrid PCs. Software decoding remains available with
 `GENESIS_SOFTWARE_DECODE=1`; `GENESIS_OPENCL_DEVICE` selects a GPU by name substring.
 `GENESIS_MEDIA_PROFILE=1` emits colour, RGB conversion and preview phase timings.
 
+The native provider uses `PREVIEWFIT` to fit and pack the completed program picture
+on the GPU before downloading it. The composition keeps its existing resolution, so
+spatial effects and export precision retain their meaning. Ordinary 480x270 monitors
+receive 518,400 RGBA bytes instead of a 3,686,400-byte 1280x720 canvas followed by a
+CPU resize. A monitor-size change renders from the composition again; it cannot
+enlarge a cached smaller preview. Legacy `PREVIEW`, intermediate `FLOAT` and export
+`ENC` retain their original dimensions and formats.
+
+Three paired headless editor runs on the supplied 4K/59.94 AV1/PQ clip use 120
+samples after three warmups at 2560x1440. The median of the per-run medians changes
+from 23.75 to 21.98 ms for program preparation and from 28.83 to 27.10 ms for the
+serial preview path, about 6% overall. These samples exclude native presentation,
+audio and asynchronous overlap; sustained smooth 4K60 remains unverified.
+
 A 120-sample measurement of consecutive frames on the supplied 4K/59.94 AV1/PQ clip
 and RTX 5080 reached 59.49 worker previews per second at a 1280x720 working canvas,
 with identical frame-zero pixels after rewind. This excludes Windows canvas painting,
@@ -532,7 +546,7 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 ```
 
 The Windows gate verifies 152 saved application facts, three native file-drop facts,
-749 control clicks with overlap checks, 78 native media/project checks and 81 focused
+749 control clicks with overlap checks, 81 native media/project checks and 81 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo, panned and silent output levels and immediate Stop. Continuous audio checks compare four
 worker cases and thirty-three editor/source/rate/mixer cases against whole-range WAV output;
@@ -558,6 +572,14 @@ scene as well as a wrong scene. Run the check separately with:
 
 ```powershell
 python tests/frame_identity.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-preview-stream.exe
+```
+
+GPU display fitting has forty exact RGBA comparisons against independently fitted
+full-canvas frames, including all alpha levels, portrait/odd sizes, blur and final
+looks. It also checks size refusal/recovery and unchanged full-precision output:
+
+```powershell
+python tests/preview_fit.py --worker .\genesis-gcompose.exe
 ```
 
 The Windows gate also compares sixty-second and ten-minute reversed PCM sources,

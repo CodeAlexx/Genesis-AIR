@@ -201,6 +201,13 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   }
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",0,4) {none=>true,some(_)=>false,},"zero width refused")
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,0) {none=>true,some(_)=>false,},"zero height refused")
+  struct.set(monitor,2,field=program_width)
+  struct.set(monitor,2,field=program_height)
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",2,2) {some(value)=>fitted_quadrants(value,0),none=>false,},"fitted cache preserves every alpha byte")
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,4) {none=>true,some(_)=>false,},"larger monitor refuses enlargement of a smaller fitted cache")
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",1,1) {none=>true,some(_)=>false,},"smaller monitor requests its own fitted geometry")
+  struct.set(monitor,0,field=program_width)
+  struct.set(monitor,0,field=program_height)
   let _ = files.write_bytes(str.view(fixture),b"short")
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,4) {none=>true,some(_)=>false,},"incomplete canvas refused")
   let _ = test.done(suite)

@@ -343,6 +343,31 @@ delivery for the serial diagnostic, about 19%. Publication falls from 3.10 to
 are excluded; sustained smooth 4K60 remains unfinished. Current performance work
 targets ordinary editor playback; fullscreen 4K work is deferred at the user's request.
 
+## GPU fitting of completed preview pixels
+
+The program provider previously downloaded the full 1280x720 composition and used
+an AIR per-pixel loop to fit it to the ordinary 480x270 monitor. `PREVIEWFIT` now
+samples and packs the final GPU buffer to the requested display size before the
+download. Composition resolution, spatial effects, final looks, full-precision
+`FLOAT` intermediates and `ENC` output keep their existing semantics. The ordinary
+program RGBA file falls from 3,686,400 bytes to 518,400 bytes. Each command carries
+its own dimensions, so retries and worker restarts need no retained size negotiation.
+Cached program files record their actual display size; another size renders again.
+Allocation, kernel and read failures report `GA_PREVIEW_GPU_DOWNLOAD`.
+
+`tests/preview_fit.py` compares forty fitted outputs byte-for-byte against the previous
+sampling rule using independently fitted legacy full-canvas frames. Landscape,
+portrait, odd dimensions, all alpha levels, black bars, a spatial blur and the final
+look buffer are covered. Invalid/oversized dimensions are refused, the next valid
+command recovers, and `FLOAT` bytes and legacy `PREVIEW` remain unchanged. Native
+provider checks refuse enlarging or shrinking a file cached at another display size.
+
+Three paired 120-sample headless editor runs after three warmups on the supplied
+4K/59.94 AV1/PQ clip at 2560x1440 have median-of-run-medians of 23.75/21.98 ms
+program preparation and 28.83/27.10 ms serial preview before/after GPU fitting,
+about 6% overall. Native presentation, audio and overlap are excluded. This does
+not establish sustained interactive 4K60 or long-timeline A/V synchronization.
+
 ## Audio, scopes and timeline frame identity
 
 Monitor pixel headers now carry the decoded source/program frame positions and media
