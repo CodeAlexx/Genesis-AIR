@@ -58,6 +58,8 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_stream.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-playback.exe') `
       --cancel-client (Join-Path $Bin 'genesis-audio-cancel.exe') --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Continuous audio and active cancellation acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_reverse.py') --worker $worker --report (Join-Path $root 'reverse-audio-profile.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Long reverse audio and resampling acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'export_cancel.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --worker $worker --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Active export cancellation and retry acceptance failed.' }

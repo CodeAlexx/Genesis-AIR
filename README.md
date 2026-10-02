@@ -276,6 +276,10 @@ decoder, resampler and effect graph alive across those chunks, preserving delay,
 compressor and other filter history. Absolute 48 kHz sample boundaries prevent chunk
 rounding from accumulating at fractional frame rates. The device's sample clock drives
 the source/program playhead.
+Reverse playback decodes two-second source windows from the end of the clip and feeds
+the reversed PCM into the retained effect graph. Decoder/resampler preroll protects
+window boundaries, and native sample counting preserves fractional source trims. This
+keeps source buffering independent of clip duration while preserving delay and speed history.
 Pause, Stop and seek immediately reset output; gain, pan, mute, solo and audio-effect
 edits invalidate queued sound. Picture-only edits preserve it. The meters read the PCM
 at the device cursor after mixing. Preview decoding runs on a separate thread; rapid
@@ -545,6 +549,19 @@ sync measurements. Run that gate separately with:
 python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe --cancel-client .\build-windows\native-pro\bin\Release\genesis-audio-cancel.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
 ```
 
+The Windows gate also compares sixty-second and ten-minute reversed PCM sources,
+unequal output pulls, continuous reverse/delay/2x output, fractional 44.1 kHz trims and
+a complete twelve-second AAC reversal against independent samples or a whole pass.
+Its native process memory check rejects growth proportional to clip duration. In one
+paired run, the ten-minute fixture used 160.10 MiB peak worker memory versus 388.60 MiB
+before; first-buffer preparation, including process startup, took 172.00/246.48 ms.
+These are headless source/filter measurements. Reproduce it or also check supplied media with:
+
+```powershell
+python tests/audio_reverse.py --worker .\genesis-gcompose.exe --report .\build-windows\reverse-audio-profile.json
+python tests/audio_reverse.py --worker .\genesis-gcompose.exe --media "C:\path\to\video.mp4"
+```
+
 The asynchronous preview test measures
 red/blue pixels after a 32-request playhead drag, time changes during the drag,
 unchanged source caching, rewind to frame zero, painted timeline bitmaps and embedded
@@ -668,8 +685,7 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
-- Reversed audio buffers the remaining clip range before playback; large reversed clips
-  still need startup and memory improvements. Compressed-source seek startup can differ
+- Compressed-source seek startup can differ
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.
 - Nested sequence rendering, audio automation, animated speed and some filter combinations

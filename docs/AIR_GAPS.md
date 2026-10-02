@@ -253,14 +253,15 @@ Stop, seek and a missing-marker fault. They confirm the blocked PID has exited, 
 partial WAV remains, and recovered samples equal the normal compositor mix. The
 latest run measured 166–169 ms active Stop joins, 315–317 ms seek recovery and
 152–169 ms coded marker failure. The full Windows gate passes. This proves active
-pipe cancellation; large reverse startup/memory and long-run A/V sync remain open.
+pipe cancellation; long-run A/V sync remains open. The later bounded reverse checkpoint
+below supersedes this checkpoint's source-buffering limit.
 
 `PLAYWAVE` specifies an exact 48 kHz output sample count; `AUDIOSTREAM` pulls from a
 retained clip graph. Absolute sequence-frame endpoints determine chunk lengths instead
 of rounding each chunk's duration independently. EOF pads the requested output range
 with silence. Output windows are bounded to thirty seconds, normally five; FFmpeg's
-`areverse` still buffers the remaining clip range internally, so long reverse startup
-and memory are open work.
+`areverse` buffered the remaining clip range internally at this checkpoint. The bounded
+reverse source path described below replaces it for playback.
 
 The Windows gate compares four direct-worker cases and seventeen editor/source/rate
 cases against whole-range WAV output. The generated 48 kHz PCM fixture has zero sample
@@ -369,3 +370,30 @@ whole-range output. Additional independent signal checks cover clip/track gain p
 opposite-channel pan silence, mute, solo isolation and embedded video audio. Native
 device checks verify stereo, panned and silent meters at its sample cursor. This is
 headless processing/device evidence; interactive long-timeline A/V sync remains open.
+
+## Bounded reverse audio source reads
+
+The Windows compositor now reads reverse source PCM in two-second windows, reverses
+stereo frames and feeds them to a persistent post-reverse effect graph. It no longer
+puts the remaining source range through a buffering `areverse` filter during playback.
+Forward playback and the whole-range export path retain their existing decoder graphs.
+
+Each source window includes decoder preroll and resampler overlap. Anchoring those reads
+to whole seconds from the clip's first native sample preserves the original resampler
+phase. The native duration count follows the pinned [FFmpeg atrim implementation](https://github.com/FFmpeg/FFmpeg/blob/2a571b6068/libavfilter/trim.c),
+then accounts for the flushed resampler count. Rounding directly at 48 kHz had shifted
+every reversed sample of a fractional 44.1 kHz trim by one sample; the native count fixes it.
+Seeking before the window also avoids a compressed packet starting after its trim boundary.
+
+`tests/audio_reverse.py` is part of the Windows gate. Sixty-second and ten-minute PCM
+ranges use three unequal pulls and match independent reversed samples exactly. Delay
+and 2x/delay retain graph history and match whole-pass output exactly. Three fractional
+44.1 kHz trims differ from independent FFmpeg references by at most one signed-16 unit;
+a complete twelve-second AAC reversal differs by at most two, mean 0.083449. The supplied
+Costa Rica video's twelve-second AAC reversal differs by at most one, mean 0.000013.
+
+One paired ten-minute fixture run measured 160.10 MiB peak worker memory and 172.00 ms
+to the first completed PCM file, including process startup. The earlier worker measured
+388.60 MiB and 246.48 ms; its sixty-second fixture used 181.70 MiB, while the new worker
+used 160.11 MiB. This verifies bounded source buffering on these headless native ranges;
+sustained device playback, interactive preview throughput and long-run A/V sync remain open.

@@ -33,21 +33,23 @@ index 5e20142..a712431 100644
  
  // ---- timeline primitives (kept in C so they stay OUT of the Mojo compile unit) ----
 diff --git a/gcompose/csrc/fpx_audio.c b/gcompose/csrc/fpx_audio.c
-index 4b33e4a..3ff3445 100644
+index 4b33e4a..bd4a1c6 100644
 --- a/gcompose/csrc/fpx_audio.c
 +++ b/gcompose/csrc/fpx_audio.c
-@@ -16,6 +16,10 @@
+@@ -16,6 +16,12 @@
  #include <string.h>
  #include <stdlib.h>
  #include <stdio.h>
 +#include <errno.h>
 +#include <math.h>
++#include <stdint.h>
 +#include <libavutil/mem.h>
++#include <libavutil/mathematics.h>
 +#include <libavutil/avstring.h>
  
  // One-shot: apply `chain` to `in` (nb samples/ch, interleaved float, stereo `ch` channels),
  // write up to out_cap floats into `out`. Returns output samples-per-channel, or negative on error.
-@@ -164,3 +168,87 @@ int main(int argc, char** argv) {
+@@ -164,3 +170,205 @@ int main(int argc, char** argv) {
      free(in); free(out); return 0;
  }
  #endif
@@ -58,7 +60,15 @@ index 4b33e4a..3ff3445 100644
 +typedef struct {
 +    AVFilterGraph* graph;
 +    AVFilterContext* sink;
++    AVFilterContext* feed;
 +    AVFrame* frame;
++    char* reverse_path;
++    double reverse_start;
++    double reverse_end;
++    int64_t reverse_remaining;
++    int64_t reverse_fed;
++    int reverse_input_ended;
++    int native_rate;
 +    int offset;
 +    int ended;
 +} FpxAudioStream;
@@ -68,10 +78,25 @@ index 4b33e4a..3ff3445 100644
 +    if (!s) return;
 +    av_frame_free(&s->frame);
 +    avfilter_graph_free(&s->graph);
++    av_free(s->reverse_path);
 +    av_free(s);
 +}
 +
-+void* fpx_au_stream_open(const char* path, double start, double duration, const char* chain) {
++static int fpx_au_stream_connect(FpxAudioStream* s, AVFilterContext* source, const char* full) {
++    AVFilterInOut* outputs = avfilter_inout_alloc();
++    AVFilterInOut* inputs = avfilter_inout_alloc();
++    if (!outputs || !inputs) {
++        avfilter_inout_free(&outputs); avfilter_inout_free(&inputs); return -1;
++    }
++    outputs->name = av_strdup("in"); outputs->filter_ctx = source; outputs->pad_idx = 0;
++    inputs->name = av_strdup("out"); inputs->filter_ctx = s->sink; inputs->pad_idx = 0;
++    int rc = avfilter_graph_parse_ptr(s->graph, full, &inputs, &outputs, NULL);
++    avfilter_inout_free(&inputs); avfilter_inout_free(&outputs);
++    return rc < 0 ? rc : avfilter_graph_config(s->graph, NULL);
++}
++
++static void* fpx_au_stream_open_range(const char* path, double start, double duration,
++                                    const char* chain, double anchor, double range_end) {
 +    if (!path || !chain || !isfinite(start) || !isfinite(duration) || start < 0 || duration <= 0)
 +        return NULL;
 +    FpxAudioStream* s = av_mallocz(sizeof(*s));
@@ -80,34 +105,125 @@ index 4b33e4a..3ff3445 100644
 +    s->frame = av_frame_alloc();
 +    if (!s->graph || !s->frame) goto fail;
 +    s->graph->nb_threads = 1;
++    // Reverse source PCM in bounded windows before the persistent effect graph.
++    // libavfilter's areverse buffers its entire input, delaying a long clip's
++    // first audible sample and retaining memory proportional to its length.
++    if (!strcmp(chain, "areverse") || !strncmp(chain, "areverse,", 9)) {
++        if (!isfinite(start + duration) || duration >= (double)INT64_MAX / 48000.0) goto fail;
++        FpxAudioStream* probe = fpx_au_stream_open_range(path, start, 0.01, "-", 0, 0);
++        if (!probe) goto fail;
++        int rate = probe->native_rate;
++        fpx_au_stream_close(probe);
++        if (rate <= 0 || duration >= (double)INT64_MAX / rate ||
++            start + duration >= (double)INT64_MAX / 1000000.0) goto fail;
++        // Match atrim's microsecond-to-native-sample rounding, then the
++        // resampler's complete flushed output count. Rounding duration directly
++        // at 48 kHz can shift every reversed sample of a fractional 44.1 kHz trim.
++        AVRational native_time = {1, rate};
++        AVRational microseconds = {1, 1000000};
++        int64_t native_start = av_rescale_q((int64_t)floor(start * 1000000.0 + 0.5), microseconds, native_time);
++        int64_t native_count = av_rescale_q((int64_t)floor(duration * 1000000.0 + 0.5), microseconds, native_time);
++        s->reverse_path = av_strdup(path);
++        s->reverse_start = (double)native_start / rate;
++        s->reverse_end = s->reverse_start + (double)native_count / rate;
++        s->reverse_remaining = av_rescale_rnd(native_count, 48000, rate, AV_ROUND_UP);
++        if (!s->reverse_path || s->reverse_remaining <= 0) goto fail;
++        if (avfilter_graph_create_filter(&s->feed, avfilter_get_by_name("abuffer"), "source",
++                "time_base=1/48000:sample_rate=48000:sample_fmt=flt:channel_layout=stereo", NULL, s->graph) < 0 ||
++            avfilter_graph_create_filter(&s->sink, avfilter_get_by_name("abuffersink"),
++                "sink", NULL, NULL, s->graph) < 0) goto fail;
++        const char* effects = chain[8] ? chain + 9 : "anull";
++        char* full = av_asprintf("%s,aformat=sample_fmts=flt:sample_rates=48000:channel_layouts=stereo", effects);
++        if (!full) goto fail;
++        int rc = fpx_au_stream_connect(s, s->feed, full);
++        av_free(full);
++        if (rc < 0) goto fail;
++        return s;
++    }
 +    const AVFilter* movie = avfilter_get_by_name("amovie");
 +    if (!movie) goto fail;
++    // Pre/postroll protects compressed-decoder and resampler history at reverse
++    // window seams. An anchor plus whole seconds preserves the resampling phase
++    // of the clip's original input, including a fractional source trim.
++    int guarded = range_end > anchor;
++    double decode_start = guarded ? fmax(anchor, anchor + floor(start - anchor - 0.1)) : start;
++    double decode_end = guarded ? fmin(range_end, start + duration + 0.1) : start + duration;
 +    AVFilterContext* source = avfilter_graph_alloc_filter(s->graph, movie, "source");
 +    // Set filename as an option value, never as filter-expression syntax. This
 +    // preserves Windows drive letters, spaces, quotes and Unicode paths.
 +    if (!source || av_opt_set(source, "filename", path, AV_OPT_SEARCH_CHILDREN) < 0 ||
-+        av_opt_set_double(source, "seek_point", start, AV_OPT_SEARCH_CHILDREN) < 0 ||
++        av_opt_set_double(source, "seek_point", guarded ? fmax(0.0, decode_start - 1.0) : decode_start, AV_OPT_SEARCH_CHILDREN) < 0 ||
 +        avfilter_init_dict(source, NULL) < 0) goto fail;
 +    if (avfilter_graph_create_filter(&s->sink, avfilter_get_by_name("abuffersink"),
 +                                    "sink", NULL, NULL, s->graph) < 0) goto fail;
++    char* trimmed = guarded ? av_asprintf("atrim=start_sample=%lld:end_sample=%lld,asetpts=PTS-STARTPTS,",
++        (long long)floor((start - decode_start) * 48000.0 + 0.5),
++        (long long)floor((start - decode_start + duration) * 48000.0 + 0.5)) : av_strdup("");
++    if (!trimmed) goto fail;
 +    char* full = av_asprintf("atrim=start=%.17g:duration=%.17g,asetpts=PTS-STARTPTS,"
 +        "aresample=48000,aformat=sample_fmts=flt:sample_rates=48000:channel_layouts=stereo,"
-+        "%s%s aformat=sample_fmts=flt:sample_rates=48000:channel_layouts=stereo",
-+        start, duration, strcmp(chain, "-") ? chain : "", strcmp(chain, "-") ? "," : "");
++        "%s%s%s aformat=sample_fmts=flt:sample_rates=48000:channel_layouts=stereo",
++        decode_start, decode_end - decode_start, trimmed, strcmp(chain, "-") ? chain : "", strcmp(chain, "-") ? "," : "");
++    av_free(trimmed);
 +    if (!full) goto fail;
-+    AVFilterInOut* outputs = avfilter_inout_alloc();
-+    AVFilterInOut* inputs = avfilter_inout_alloc();
-+    if (!outputs || !inputs) {
-+        avfilter_inout_free(&outputs); avfilter_inout_free(&inputs); av_free(full); goto fail;
-+    }
-+    outputs->name = av_strdup("in"); outputs->filter_ctx = source; outputs->pad_idx = 0;
-+    inputs->name = av_strdup("out"); inputs->filter_ctx = s->sink; inputs->pad_idx = 0;
-+    int rc = avfilter_graph_parse_ptr(s->graph, full, &inputs, &outputs, NULL);
-+    avfilter_inout_free(&inputs); avfilter_inout_free(&outputs); av_free(full);
-+    if (rc < 0 || avfilter_graph_config(s->graph, NULL) < 0) goto fail;
++    int rc = fpx_au_stream_connect(s, source, full);
++    av_free(full);
++    if (rc < 0) goto fail;
++    s->native_rate = source->outputs[0]->sample_rate;
 +    return s;
 +fail:
 +    fpx_au_stream_close(s); return NULL;
++}
++
++void* fpx_au_stream_open(const char* path, double start, double duration, const char* chain) {
++    return fpx_au_stream_open_range(path, start, duration, chain, 0, 0);
++}
++
++int fpx_au_stream_read(void* handle, float* out, int frames);
++
++static int fpx_au_reverse_feed(FpxAudioStream* s) {
++    if (s->reverse_input_ended) return -1;
++    if (s->reverse_remaining == 0) {
++        s->reverse_input_ended = 1;
++        return av_buffersrc_add_frame(s->feed, NULL);
++    }
++    const int count = s->reverse_remaining > 96000 ? 96000 : (int)s->reverse_remaining;
++    const int64_t begin = s->reverse_remaining - count;
++    FpxAudioStream* part = fpx_au_stream_open_range(s->reverse_path,
++        s->reverse_start + (double)begin / 48000.0, (double)count / 48000.0, "-",
++        s->reverse_start, s->reverse_end);
++    if (!part) return -2;
++    AVFrame* input = av_frame_alloc();
++    if (!input) { fpx_au_stream_close(part); return -3; }
++    input->format = AV_SAMPLE_FMT_FLT;
++    input->sample_rate = 48000;
++    input->nb_samples = count;
++    input->pts = s->reverse_fed;
++    av_channel_layout_default(&input->ch_layout, 2);
++    int rc = av_frame_get_buffer(input, 0);
++    if (rc >= 0) {
++        float* pcm = (float*)input->data[0];
++        memset(pcm, 0, (size_t)count * 2 * sizeof(float));
++        int got = fpx_au_stream_read(part, pcm, count);
++        if (got < 0) rc = got;
++        else {
++            for (int at = 0; at < count / 2; ++at) {
++                for (int ch = 0; ch < 2; ++ch) {
++                    float value = pcm[at * 2 + ch];
++                    pcm[at * 2 + ch] = pcm[(count - at - 1) * 2 + ch];
++                    pcm[(count - at - 1) * 2 + ch] = value;
++                }
++            }
++            rc = av_buffersrc_add_frame(s->feed, input);
++        }
++    }
++    av_frame_free(&input);
++    fpx_au_stream_close(part);
++    if (rc >= 0) {
++        s->reverse_remaining = begin;
++        s->reverse_fed += count;
++    }
++    return rc;
 +}
 +
 +// Returns stereo frames actually copied (short only at EOF), or negative on error.
@@ -122,6 +238,10 @@ index 4b33e4a..3ff3445 100644
 +            if (s->ended) break;
 +            int rc = av_buffersink_get_frame(s->sink, s->frame);
 +            if (rc == AVERROR_EOF) { s->ended = 1; break; }
++            if (rc == AVERROR(EAGAIN) && s->feed) {
++                if (fpx_au_reverse_feed(s) < 0) return -5;
++                continue;
++            }
 +            if (rc < 0) return -2;
 +            if (s->frame->format != AV_SAMPLE_FMT_FLT || s->frame->ch_layout.nb_channels != 2 ||
 +                s->frame->sample_rate != 48000) return -3;

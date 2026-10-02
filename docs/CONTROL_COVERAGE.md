@@ -21,6 +21,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Project safety and recovery | Fifteen cases / 84 checks. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, a panned file with a zero opposite meter, silent PCM with zero meters, immediate Stop |
 | Continuous playback audio | Four direct-worker and thirty-three editor/source/rate/mixer cases compare concatenated playback chunks against whole-range WAVs. All twenty audio effects, reverse, 2x speed, fractional sample endpoints, seek reset, source audition and embedded video audio are covered. Independent PCM checks verify the clip/track gain product, left/right pan, zero muted output and solo isolation; coded filter failure/recovery and idle Stop without a wake |
+| Bounded reverse audio | Sixty-second and ten-minute PCM ranges use unequal output pulls and match independent reversed samples exactly. Peak worker memory stays within a 64 MiB growth allowance as duration increases tenfold. Reverse/delay and reverse/2x/delay retain history and match a whole pass exactly. Three fractional 44.1 kHz trims and a complete twelve-second AAC reversal match independent FFmpeg output within two PCM units and mean below 0.1. A separate supplied Costa Rica AAC check passes the same bound. |
 | Active audio cancellation | Six headless native cases: Stop, seek and a missing request marker while a worker stalls a reply or blocks a 512 KiB stdin write; Stop joins without a wake, the old PID is confirmed exited, partial WAVs are removed, recovery matches the normal compositor PCM, and control faults report `GA_AUDIO_STREAM_CONTROL` without poisoning the next request |
 | Active export cancellation | Five native CLI cases stall OPEN, ENC, AUDIO, CLOSE and the final child-exit wait; cancellation joins within a 2.5-second test bound, confirms the old PID exited, removes owned partials/signals and permits the same output to export six red frames with audible audio; existing final and foreign partial files are preserved with `GA_EXPORT_EXISTS` / `GA_EXPORT_PARTIAL_EXISTS` |
 | Retained playback painter | Twenty-four cases / 444 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation; nine cases keep image dimensions fixed while transitioning between opaque, zero-alpha and mixed-alpha frames in the editor and both fullscreen monitors at three scales |
@@ -102,7 +103,7 @@ The new Save/Discard/Cancel and recovery dialogs have headless rendered-image ch
 use the same geometry for painting and pointer dispatch. Their native picker and close
 interaction has not received a new interactive Windows check in this checkpoint.
 
-The highest-impact remaining work is sustained playback and long reversed-audio startup,
+The highest-impact remaining work is sustained playback,
 parameter/animation measurements for mapped effects, nested sequences,
 complex-script text, audio automation and measured sustained audio/video synchronization.
 
@@ -135,8 +136,13 @@ cases passed with active Stop joins at 166–169 ms and seek recovery at 315–3
 missing-marker failures appeared at 152–169 ms and then recovered. These timings
 include actual process shutdown and recovery, without GUI/device output.
 The earlier supplied 4K clip check produced nonzero AAC output in seventeen cases;
-its seek-start decoder output differs slightly from the whole-range reference. Long
-reversed clips still buffer their remaining audio range and need memory/startup work.
+its seek-start decoder output differs slightly from the whole-range reference.
+Reverse source PCM now uses two-second decode windows with preroll around seams;
+post-reverse effect graphs remain continuous. Native sample-rate rounding and whole-second
+resampler anchors preserve fractional trim alignment. The ten-minute generated fixture
+used 160.10 MiB peak worker memory and 172.00 ms first-buffer preparation versus
+388.60 MiB and 246.48 ms in the earlier worker, in one paired headless run. Long interactive
+playback and A/V synchronization remain unmeasured.
 
 ## Other exposed controls
 
@@ -146,7 +152,7 @@ reversed clips still buffer their remaining audio range and need memory/startup 
 | Project lifecycle | Save/Discard/Cancel for New/Open/Recover/Close, failed-save retry and preservation, isolated history/clipboard, independent paused autosave, separate snapshots, newest-valid and legacy recovery, Save as copy and atomic temporary collision checks | Native picker/modal interaction under an interactive Windows session; recovery ownership across simultaneous running processes. |
 | Inspector and keyframes | Representative controls are clicked; focused drag/undo/cancel checks pass; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step and refuses known unsupported automation | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and audio automation. Per-layer filter support still needs to be reflected at the K action. |
 | Subtitles and text | Two timed caption cues, one Latin/Cyrillic/CJK, appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Complex-script shaping, right-to-left text, richer typography, and subtitle placement. |
-| Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, X11 audio start/stop and continuous native playback decoder/filter history across chunk boundaries | Precise long-timeline audio/video sync, long reversed-audio startup/memory, live scrub sound. |
+| Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, X11 audio start/stop, continuous native playback decoder/filter history and bounded long reverse buffering with fractional-resample/AAC reference checks | Precise long-timeline audio/video sync, sustained device playback of larger reversed projects, live scrub sound. |
 | Frame rates | AIR editor native-to-sequence bounds, pure-AIR wire sampling, a generated 24-to-30 fps preview/export/audio gate, and a 24 fps sequence preview/9-frame MP4/audio gate | More mixed fractional-rate cases and long-timeline audio sync. |
 
 Keep this ledger with the implementation. Add a measured output assertion when closing a
