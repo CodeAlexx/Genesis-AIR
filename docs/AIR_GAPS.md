@@ -341,3 +341,31 @@ delivery for the serial diagnostic, about 19%. Publication falls from 3.10 to
 23.53/23.52 ms and painting 2.50/2.47 ms. Native presentation, audio and overlap
 are excluded; sustained smooth 4K60 remains unfinished. Current performance work
 targets ordinary editor playback; fullscreen 4K work is deferred at the user's request.
+
+## Audio, scopes and timeline frame identity
+
+Monitor pixel headers now carry the decoded source/program frame positions and media
+revision. Monitor timecodes use those completed positions, and the playing timeline
+uses the displayed program frame rather than labeling an older picture with a newer
+decode request. Paused scrubbing still updates the requested timeline position immediately.
+Reload also invalidates queued audio when the document/path has not changed.
+
+Timeline strips have a separate task, channel and provider. Their request signature
+ignores transport and selection changes, so thumbnails and waveforms can finish during
+playback without interrupting its decoder. Viewport/media/clip changes still invalidate
+the request. Bitmap manifests record native source frames; waveform manifests record
+source endpoints and length. Both readers and painting reject obsolete mappings after
+editing, and a strip slot is reserved before reuse. Native generated-media checks cover
+publication during playback, reverse/trim/2x mappings and incomplete-slot preservation.
+
+The RGB histogram previously painted green and blue bars up to the previous channel's
+height, hiding equal-height bins. Independent bars now share one baseline. Native pixel
+checks cover all three channels in white/black pictures, a blue program with a red source
+and clearing old bins during retained repaint. Frame-stamp checks separate a completed
+frame from a newer transport request.
+
+Thirty-three editor audio cases cover all twenty effects and compare chunked PCM with
+whole-range output. Additional independent signal checks cover clip/track gain products,
+opposite-channel pan silence, mute, solo isolation and embedded video audio. Native
+device checks verify stereo, panned and silent meters at its sample cursor. This is
+headless processing/device evidence; interactive long-timeline A/V sync remains open.

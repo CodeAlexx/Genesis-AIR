@@ -29,10 +29,10 @@ fn fixture(scratch: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.wr
   let added: commands.Result = commands.append_clip(state, app.default_video_track(state), source.value, 0, 900)
   let _ = commands.select_only(state, added.value)
   var peaks: array<f64> = [0.1, 0.8, 0.2, 0.5, 0.3, 0.9]
-  array.push(struct.borrow(state, field=waveforms), app.Waveform {clip: added.value, peaks: peaks})
+  app.set_waveform(state,added.value,peaks,0,899,0)
   var frame: i64 = 0
   loop { if frame >= 900 { break }
-    array.push(struct.borrow(state, field=thumbnails), app.Thumbnail {clip: added.value, frame: frame,
+    array.push(struct.borrow(state, field=thumbnails), app.Thumbnail {clip: added.value, frame: frame, source:source.value,source_frame:frame,revision:0,
       pixels: picture(80, 45, frame >= 30, 255)})
     frame = frame + 20
   }

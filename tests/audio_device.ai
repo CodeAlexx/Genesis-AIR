@@ -42,7 +42,25 @@ pub fn main(args: view<str>) -> i32 effects {alloc, ffi, io.write, time} {
   var silent: audio.Levels = audio.levels(library)
   if silent.ok { audio.close(library)
     return 10 }
+  if view.len(args) >= 4 {
+    var variant: u64 = 2
+    loop {if variant >= 4 {break}
+      let _ = audio.request(library,"start","")
+      let queued: string = audio.request(library,"queue",view.get(args,variant))
+      if not str.eq(str.view(queued),"ok") {io.write(queued)
+        audio.close(library)
+        return 11}
+      time.sleep_ms(150)
+      var measured: audio.Levels = audio.levels(library)
+      if not measured.ok or measured.right != 0.0 or (variant == 2 and measured.left < 0.01) or (variant == 3 and measured.left != 0.0) {
+        io.write("Device meters did not follow panned/silent output PCM\n")
+        audio.close(library)
+        return 12}
+      let _ = audio.request(library,"stop","")
+      variant=variant+1
+    }
+  }
   audio.close(library)
-  io.write("Native audio: two queued WAV chunks, advancing device clock, post-mix stereo levels and immediate Stop passed\n")
+  io.write("Native audio: two queued WAV chunks, advancing device clock, stereo/panned/silent post-mix levels and immediate Stop passed\n")
   0
 }

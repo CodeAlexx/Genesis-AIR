@@ -12,6 +12,7 @@ import "../src/commands.ai" as commands
 import "../src/provider.ai" as provider
 import "../src/preview.ai" as preview
 import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media_mapping
 
 type Producer = struct {ticket:channel.Ticket,root:string,mode:u64}
 fn pattern(seed: u64) -> draw.Surface effects {alloc} {
@@ -39,6 +40,9 @@ fn exact(surface: ref<draw.Surface>, seed: u64) -> bool effects {} {
 fn timing(id: u64) -> link.FrameTiming effects {} {
   link.FrameTiming {generation:id,request_ns:11,source_ns:12,plan_ns:13,program_ns:14,publish_ns:0,coalesce_ns:15}
 }
+fn position(id: u64) -> link.FramePosition effects {} {
+  link.FramePosition {source_frame:cast.sat(id*2),program_frame:cast.sat(id*3),revision:7}
+}
 fn raw(peer: ref<link.Peer>, kind: u64, data: view<byte>) -> bool effects {alloc,net,time} {
   match channel.send(struct.borrow(peer,field=events),kind,data,time.monotonic_ns()+1000000000) {
     ok(_)=>true,err(_)=>false,
@@ -53,10 +57,10 @@ fn produce(config: Producer own) -> bool effects {alloc,fs.meta,fs.read,fs.write
   let _ = files.write_text(path.join(str.view(root),"started"),"yes")
   var id: u64 = 1
   if owned.mode == 1 or owned.mode == 2 or owned.mode == 5 or owned.mode == 6 or owned.mode == 7 {
-    let header: str = if owned.mode == 1 {"1\t99999\t720\t0\t0\t287997120\t0\t0\t0"}
-      else if owned.mode == 5 {"1\t0\t0\t0\t0\t0\t0\t0\t1"}
-      else if owned.mode == 6 {"1\t0\t0\t1\t1\t0\t4\t0\t0"}
-      else {"1\t0\t0\t2\t2\t0\t16\t0\t0"}
+    let header: str = if owned.mode == 1 {"1\t99999\t720\t0\t0\t287997120\t0\t0\t0\t0\t0\t0"}
+      else if owned.mode == 5 {"1\t0\t0\t0\t0\t0\t0\t0\t1\t0\t0\t0"}
+      else if owned.mode == 6 {"1\t0\t0\t1\t1\t0\t4\t0\t0\t0\t0\t0"}
+      else {"1\t0\t0\t2\t2\t0\t16\t0\t0\t0\t0\t0"}
     if not raw(peer,5,str.bytes(header)) {return false}
     if owned.mode == 2 {
       if not raw(peer,6,b"abcd") or not link.notify(peer,1,1) {return false}
@@ -68,7 +72,7 @@ fn produce(config: Producer own) -> bool effects {alloc,fs.meta,fs.read,fs.write
     if not link.next(peer) {return false}
     id=if owned.mode == 7 {3}else{2}
   }
-  let sent: bool = match link.notify_pixels(peer,str.view(root),source,program,"fixture 日本",false,timing(id),time.monotonic_ns()) {
+  let sent: bool = match link.notify_pixels(peer,str.view(root),source,program,"fixture 日本",false,timing(id),position(id),time.monotonic_ns()) {
     ok(value)=>value,err(problem)=>{io.write(str.view(problem))
       return false},
   }
@@ -77,16 +81,16 @@ fn produce(config: Producer own) -> bool effects {alloc,fs.meta,fs.read,fs.write
     let _ = files.write_text(path.join(str.view(root),"cancelled"),"yes")
     if owned.mode == 4 {return true}
     id=2
-    if not match link.notify_pixels(peer,str.view(root),source,program,"",false,timing(id),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
+    if not match link.notify_pixels(peer,str.view(root),source,program,"",false,timing(id),position(id),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
   } else if not sent {return false}
   if owned.mode == 0 or owned.mode == 8 {
     if not link.next(peer) {return false}
     var empty: draw.Surface = draw.empty_surface()
-    if not match link.notify_pixels(peer,str.view(root),empty,program,"",true,timing(2),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
+    if not match link.notify_pixels(peer,str.view(root),empty,program,"",true,timing(2),position(2),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
     if owned.mode == 0 {
       if not link.next(peer) {return false}
       var empty_program: draw.Surface = draw.empty_surface()
-      if not match link.notify_pixels(peer,str.view(root),empty,empty_program,"",false,timing(3),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
+      if not match link.notify_pixels(peer,str.view(root),empty,empty_program,"",false,timing(3),position(3),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
     }
   }
   let _ = link.next(peer)
@@ -110,7 +114,8 @@ fn check_frame(transport: ref<link.Link>, id: u64) -> bool effects {alloc,net,ti
   if array.len(pictures) != 2 {return false}
   var program: draw.Surface = option.unwrap(array.pop(pictures))
   var source: draw.Surface = option.unwrap(array.pop(pictures))
-  exact(source,13) and exact(program,91)
+  exact(source,13) and exact(program,91) and transport.position.source_frame == cast.sat(id*2) and
+    transport.position.program_frame == cast.sat(id*3) and transport.position.revision == 7
 }
 fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,thread,time} {
   let _ = files.mkdirs(root)
@@ -120,7 +125,7 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
   task.scope {
     var jobs: array<task<bool>> = array.new()
     array.push(jobs,task.spawn(Producer {ticket:link.ticket(transport),root:string.copy(root),mode:mode},fn=produce))
-    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,} and good
     if good {good=wait_marker(root,"started")}
     if mode == 3 or mode == 4 {
       time.sleep_ms(250)
@@ -189,6 +194,21 @@ fn color(surface: ref<draw.Surface>, blue: bool) -> bool effects {} {
     some(value)=>if blue {value.b > 200 and value.r < 30}else{value.r > 200 and value.b < 30},none=>false,
   }
 }
+fn strip_matches(state: ref<app.App>) -> bool effects {alloc} {
+  let document: ref<editor.Document> = struct.borrow(state,field=document)
+  let thumbs: ref<array<app.Thumbnail>> = struct.borrow(state,field=thumbnails)
+  if array.len(thumbs) < 2 {return false}
+  var at: u64 = 0
+  loop {if at >= array.len(thumbs) {break}
+    let thumb: ref<app.Thumbnail> = array.borrow(thumbs,at)
+    let clip: editor.Clip = match editor.clip(document,thumb.clip) {some(value)=>value,none=>{return false},}
+    if thumb.source_frame != media_mapping.source_frame(document,clip,thumb.frame) or
+        thumb.source != clip.source or thumb.revision != state.media_revision or
+        not color(struct.borrow(thumb,field=pixels),thumb.source_frame >= 30) {return false}
+    at=at+1
+  }
+  true
+}
 fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
   let _ = files.mkdirs(root)
   preview.reset(root)
@@ -199,6 +219,12 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
   let _ = commands.append_clip(state,app.default_video_track(state),imported.value,0,60)
   let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
   var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  let strip_root: string = path.join(root,"timeline-task")
+  let _ = files.mkdirs(str.view(strip_root))
+  preview.reset(str.view(strip_root))
+  var strip_transport: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  var strips: preview.Config = preview.config(state,str.view(strip_root),link.ticket(strip_transport))
+  struct.set(strips,true,field=strips_only)
   var configured: preview.Config = preview.config(state,root,link.ticket(transport))
   struct.set(configured,true,field=pixel_stream)
   var good: bool = true
@@ -206,6 +232,11 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
   task.scope {
     var jobs: array<task<bool>> = array.new()
     array.push(jobs,task.spawn(configured,fn=preview.run))
+    array.push(jobs,task.spawn(strips,fn=preview.run))
+    good=match link.connect(strip_transport) {ok(_)=>true,err(_)=>false,} and good
+    good=request(state,strip_transport,str.view(strip_root),1,480,270,0) and good
+    good=match link.await_event(strip_transport,3,1,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=preview.read_thumbnails(state,str.view(strip_root),1) and strip_matches(state) and editor.playing(struct.borrow(state,field=document)) and good
     good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
     var id: u64 = 1
     loop {if id == 7 {break}
@@ -216,6 +247,9 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
       let tall: u32 = if id >= 4 {720}else{270}
       good=request(state,transport,root,id,wide,tall,if id == 6 {1}else{0}) and good
       good=match link.await_ready(transport,id,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+      good=transport.position.program_frame == editor.playhead(struct.borrow(state,field=document)) and
+        transport.position.source_frame == struct.get(struct.borrow(state,field=document),field=monitor).frame and
+        transport.position.revision == (if id == 6 {1}else{0}) and good
       var pictures: array<draw.Surface> = link.take_images(transport,id)
       good=array.len(pictures) == 2 and good
       if array.len(pictures) == 2 {
@@ -239,6 +273,7 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
       id=id+1
     }
     good=match link.await_ready(transport,38,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=transport.position.program_frame == 30 and transport.position.source_frame == 30 and transport.position.revision == 1 and good
     var final: array<draw.Surface> = link.take_images(transport,38)
     good=array.len(final) == 2 and good
     if array.len(final) == 2 {
@@ -247,7 +282,49 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
       if not link.holds_source(transport) {let _ = ref.swap(source,s)}
       good=p.width == 480 and source.width == 480 and color(p,true) and color(source,true) and good
     }
+    // Actual bitmap pixels must follow the same native source frames as video,
+    // including reverse, a trim and rate changes. Old manifests cannot relabel them.
+    struct.set(state,1,field=media_revision)
+    let _ = editor.program_action(struct.borrow(state,field=document),editor.pause())
+    let _ = editor.seek(struct.borrow(state,field=document),0)
+    let clip_id: u64 = struct.get(option.unwrap(editor.clip_at(struct.borrow(state,field=document),0)),field=id)
+    good=request(state,transport,root,39,480,270,1) and good
+    good=match link.await_ready(transport,39,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=request(state,strip_transport,str.view(strip_root),39,480,270,1) and good
+    good=match link.await_event(strip_transport,3,39,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=preview.read_thumbnails(state,str.view(strip_root),39) and strip_matches(state) and good
+    let _ = editor.set_clip_reverse(struct.borrow(state,field=document),clip_id,true)
+    good=preview.read_thumbnails(state,str.view(strip_root),39) and array.len(struct.borrow(state,field=thumbnails)) == 0 and good
+    good=request(state,transport,root,40,480,270,1) and good
+    good=match link.await_ready(transport,40,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=request(state,strip_transport,str.view(strip_root),40,480,270,1) and good
+    good=match link.await_event(strip_transport,3,40,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=preview.read_thumbnails(state,str.view(strip_root),40) and strip_matches(state) and good
+    var reversed: array<draw.Surface> = link.take_images(transport,40)
+    var reversed_program: draw.Surface = option.unwrap(array.pop(reversed))
+    good=color(reversed_program,true) and transport.position.program_frame == 0 and good
+    let _ = editor.set_clip_reverse(struct.borrow(state,field=document),clip_id,false)
+    let _ = editor.trim_end(struct.borrow(state,field=document),clip_id,30)
+    let _ = editor.set_clip_speed(struct.borrow(state,field=document),clip_id,2.0)
+    let _ = editor.seek(struct.borrow(state,field=document),20)
+    good=preview.read_thumbnails(state,str.view(strip_root),40) and array.len(struct.borrow(state,field=thumbnails)) == 0 and good
+    good=request(state,transport,root,41,480,270,1) and good
+    good=match link.await_ready(transport,41,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=request(state,strip_transport,str.view(strip_root),41,480,270,1) and good
+    good=match link.await_event(strip_transport,3,41,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=preview.read_thumbnails(state,str.view(strip_root),41) and strip_matches(state) and good
+    var sped: array<draw.Surface> = link.take_images(transport,41)
+    var sped_program: draw.Surface = option.unwrap(array.pop(sped))
+    good=color(sped_program,true) and transport.position.program_frame == 20 and good
+    // A reused slot in progress must preserve the consumer's already owned strip.
+    let before: u64 = array.len(struct.borrow(state,field=thumbnails))
+    let _ = files.write_text(path.join(str.view(strip_root),"thumbnails.id"),"0")
+    good=not preview.read_thumbnails(state,str.view(strip_root),41) and array.len(struct.borrow(state,field=thumbnails)) == before and good
     preview.stop(root)
+    preview.stop(str.view(strip_root))
+    let _ = link.wake(strip_transport,true)
+    good=match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,} and good
+    link.close_commands(strip_transport)
     good=match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,} and good
     link.close_commands(transport)
   }
@@ -267,6 +344,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
     io.write("[GA_TEST_PIXELS] Real stream pixels, source holding, resize, rewind, Reload or drag burst failed\n")
     return 1}
   io.write("Pixel stream: nine native cases, exact largest-preview RGBA bytes, slow consumer, held/empty/coalesced source, Stop/seek backpressure and coded malformed-frame recovery passed\n")
-  io.write("Real pixel stream: source/program colors, held-source preservation, monitor size changes, rewind, Reload, 32-request drag burst, no monitor mailbox files and idle Stop passed\n")
+  io.write("Real pixel stream: decoded frame/time stamps, source/program colors, held-source preservation, monitor size changes, rewind, Reload, 32-request drag burst, independent timeline bitmaps during playback and after reverse/trim/2x rate, stale/incomplete strip refusal, no monitor mailbox files and idle Stop passed\n")
   0
 }

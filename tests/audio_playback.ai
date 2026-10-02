@@ -37,7 +37,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
     match link.connect(peer) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
       failure=true},}
     var variant: u64 = 0
-    loop {if variant >= 17 or failure {break}
+    loop {if variant >= 33 or failure {break}
       let fps: f64 = if variant == 6 {60000.0/1001.0}else{30.0}
       let length: i64 = if variant == 6 {719}else if variant == 5 {180}else{360}
       var doc: editor.Document = editor.document(fps,1920,1080)
@@ -45,21 +45,45 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
       let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
       let _ = editor.open_source(doc,source)
       let owner: u64 = doc.active
-      let track: u64 = editor.add_track(doc,owner,editor.track_audio(),"Audio")
+      let track: u64 = editor.add_track(doc,owner,if variant == 32 {editor.track_video()}else{editor.track_audio()},"Audio")
       let clip: u64 = option.unwrap(editor.append(doc,track,source,0,length))
-      let kind: str = if variant == 9 {"normalize"}else if variant == 10 {"reverb"}else if variant == 11 {"chorus"}else if variant == 12 {"flanger"}else if variant == 13 {"pitch"}else if variant == 14 {"tremolo"}else if variant == 15 {"gate"}else if variant == 16 {"limiter"}else if variant == 1 {"compressor"}else if variant == 2 {"phaser"}else if variant == 3 or variant == 6 or variant == 8 {""}else{"delay"}
+      let kind: str = if variant == 17 {"gain"}else if variant == 18 {"pan"}else if variant == 19 {"eq_3band"}else if variant == 20 {"eq_10band"}else if variant == 21 {"low_pass"}else if variant == 22 {"high_pass"}else if variant == 23 {"bass"}else if variant == 24 {"treble"}else if variant == 25 {"notch"}else if variant >= 26 {""}else if variant == 9 {"normalize"}else if variant == 10 {"reverb"}else if variant == 11 {"chorus"}else if variant == 12 {"flanger"}else if variant == 13 {"pitch"}else if variant == 14 {"tremolo"}else if variant == 15 {"gate"}else if variant == 16 {"limiter"}else if variant == 1 {"compressor"}else if variant == 2 {"phaser"}else if variant == 3 or variant == 6 or variant == 8 {""}else{"delay"}
       if str.len(kind) != 0 {
         let filter: u64 = option.unwrap(editor.add_filter(doc,clip,kind))
         if str.eq(kind,"pitch") {let _ = editor.set_filter_param(doc,filter,"semitones",3.0)}
         if str.eq(kind,"delay") {let _ = editor.set_filter_param(doc,filter,"time",240.0)
           let _ = editor.set_filter_param(doc,filter,"decay",0.5)}
+        if variant == 17 {let _ = editor.set_filter_param(doc,filter,"level",-6.0)}
+        if variant == 18 {let _ = editor.set_filter_param(doc,filter,"position",-1.0)}
+        if variant == 19 {let _ = editor.set_filter_param(doc,filter,"mid",6.0)}
+        if variant == 20 {let _ = editor.set_filter_param(doc,filter,"band5",6.0)}
+        if variant == 21 or variant == 22 {let _ = editor.set_filter_param(doc,filter,"cutoff",500.0)}
+        if variant == 23 or variant == 24 {let _ = editor.set_filter_param(doc,filter,"level",6.0)}
+        if variant == 25 {let _ = editor.set_filter_param(doc,filter,"frequency",881.3)}
+      }
+      if variant == 26 {let _ = editor.set_clip_gain(doc,clip,0.5)
+        let _ = editor.set_track_gain(doc,track,0.5)}
+      if variant == 27 {let _ = editor.set_clip_pan(doc,clip,-1.0)}
+      if variant == 28 {let _ = editor.set_track_pan(doc,track,1.0)}
+      if variant == 29 {let _ = editor.set_track_muted(doc,track,true)}
+      if variant == 30 or variant == 31 {
+        let other: u64 = editor.add_track(doc,owner,editor.track_audio(),"Other")
+        let added: u64 = option.unwrap(editor.append(doc,other,source,0,length))
+        let _ = editor.set_clip_gain(doc,added,0.5)
+        let _ = editor.set_track_solo(doc,if variant == 30 {track}else{other},true)
       }
       if variant == 4 {let _ = editor.set_clip_reverse(doc,clip,true)}
       if variant == 5 {let _ = editor.set_clip_speed(doc,clip,2.0)}
       let start: i64 = if variant == 7 {150}else{0}
       let prefix: string = text.concat("case-",str.view(string.from_int(variant)))
       let whole: string = path.join(root,str.view(text.concat(str.view(prefix),"-whole.wav")))
-      match media.prepare_audio(doc,worker,start,str.view(whole)) {
+      let reference: result<bool,string> = if variant == 29 {
+        match media.audio_plan_range(doc,worker,start,length,str.view(whole)) {
+          err(problem)=>result.err(problem),ok(value)=>{var silent_plan: media.AudioPlan = value
+            media.execute_audio_plan(silent_plan)},
+        }
+      }else{media.prepare_audio(doc,worker,start,str.view(whole))}
+      match reference {
         err(problem)=>{io.write(str.view(problem))
           failure=true
           break},ok(_)=>{},
@@ -124,6 +148,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
     if time.monotonic_ns()-stopping > 2500000000 {failure=true}
     link.close_commands(peer)
   }
-  if failure {1}else{io.write("Continuous audio task: seventeen edit/source/rate/reset cases, coded filter failure/recovery and idle Stop passed\n")
+  if failure {1}else{io.write("Continuous audio task: thirty-three cases covering all twenty audio effects, clip/track gain and pan, mute, solo, embedded video audio, source/rate/reset, coded failure/recovery and idle Stop passed\n")
     0}
 }

@@ -87,7 +87,7 @@ def main():
             completed = subprocess.run([str(args.client.resolve()), str(args.worker.resolve()), str(source), str(output)],
                 text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
             assert completed.returncode == 0, (completed.returncode, completed.stdout[-4000:])
-            for variant in range(17):
+            for variant in range(33):
                 whole = pcm(output / f"case-{variant}-whole.wav")
                 actual = array.array("h")
                 chunks = sorted(output.glob(f"case-{variant}-[0-9]*.wav"))
@@ -99,6 +99,21 @@ def main():
                 mean = sum(differences)/len(differences)
                 assert max(differences) <= 2 and mean < 0.1, (variant,max(differences),mean)
                 print(f"editor case {variant}: {len(chunks)} chunks, max {max(differences)} PCM units, mean {mean:.6f}", flush=True)
+            baseline = pcm(output / "case-3-whole.wav")
+            def near_scaled(variant, factor):
+                actual = pcm(output / f"case-{variant}-whole.wav")
+                assert len(actual) == len(baseline)
+                assert max(abs(a-b*factor) for a,b in zip(actual,baseline)) <= 2, (variant, factor)
+            near_scaled(26, 0.25)
+            near_scaled(30, 1.0)
+            near_scaled(31, 0.5)
+            near_scaled(32, 1.0)
+            assert not any(pcm(output / "case-29-whole.wav")), "muted track reached the output"
+            for variant, silent_channel, audible_channel in ((18,1,0),(27,1,0),(28,0,1)):
+                actual = pcm(output / f"case-{variant}-whole.wav")
+                assert max(abs(value) for value in actual[silent_channel::2]) <= 1, (variant, "pan did not silence the opposite channel")
+                assert max(abs(value) for value in actual[audible_channel::2]) > 1000, (variant, "pan silenced both channels")
+            print("Independent PCM checks: clip/track gain product, left/right pan, mute, solo isolation and embedded video audio passed", flush=True)
             recovered = pcm(output / "recovered.wav")
             expected = pcm(output / "case-3-whole.wav")[:5 * 48000 * 2]
             assert recovered == expected, "failed filter graph contaminated the next playback session"

@@ -40,8 +40,8 @@ pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_he
 
 // Peak data for one audio clip, keyed by the clip's STABLE id. The view reads this; only a
 // refresh step fills it, so painting never calls the media provider.
-pub type Waveform = struct { clip: u64, peaks: array<f64> }
-pub type Thumbnail = struct {clip: u64, frame: i64, pixels: draw.Surface}
+pub type Waveform = struct {clip: u64, source: u64, length: i64, first: i64, last: i64, revision: u64, peaks: array<f64>}
+pub type Thumbnail = struct {clip: u64, frame: i64, source: u64, source_frame: i64, revision: u64, pixels: draw.Surface}
 
 // What a press on a clip started. A drag is view state, not a project fact: nothing is
 // written to the document until the gesture resolves into a command.
@@ -134,6 +134,8 @@ pub type App = struct {
   project_epoch: u64,
   waveforms: array<Waveform>,
   thumbnails: array<Thumbnail>,
+  presented_source_frame: i64,
+  presented_program_frame: i64,
   audio_left: f64,
   audio_right: f64,
   // TrueType faces for titles and captions, earliest first; later faces are fallbacks.
@@ -167,7 +169,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
     running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, waveforms: array.new(), thumbnails: array.new(),
-    audio_left: 0.0, audio_right: 0.0,
+    presented_source_frame: -1, presented_program_frame: -1, audio_left: 0.0, audio_right: 0.0,
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
 
@@ -186,9 +188,22 @@ pub fn set_project_path(state: ref<App>, text: str) -> unit effects {alloc} {
   ()
 }
 // A reload changes external media without necessarily changing saved project facts.
-pub fn mark_media_changed(state: ref<App>) -> unit effects {} {
+pub fn mark_media_changed(state: ref<App>) -> unit effects {alloc} {
   struct.set(state, state.media_revision + 1, field=media_revision)
+  let _ = struct.replace(state,array.new(),field=waveforms)
+  let _ = struct.replace(state,array.new(),field=thumbnails)
+  struct.set(state,-1,field=presented_source_frame)
+  struct.set(state,-1,field=presented_program_frame)
   ()
+}
+// Transport requests can advance while decoding. Monitor time belongs to the
+// completed picture; during playback the timeline follows that same picture.
+pub fn monitor_frame(state: ref<App>, source: bool) -> i64 effects {} {
+  let shown: i64 = if source {state.presented_source_frame}else{state.presented_program_frame}
+  if shown >= 0 {shown}else{if source {struct.get(struct.borrow(state,field=document),field=monitor).frame}else{editor.playhead(struct.borrow(state,field=document))}}
+}
+pub fn timeline_frame(state: ref<App>) -> i64 effects {} {
+  if editor.playing(struct.borrow(state,field=document)) {monitor_frame(state,false)}else{editor.playhead(struct.borrow(state,field=document))}
 }
 pub fn dirty(state: ref<App>) -> bool effects {} { state.dirty }
 pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
@@ -545,19 +560,21 @@ pub fn default_audio_track(state: ref<App>) -> u64 effects {} {
 
 // ---- waveform cache -------------------------------------------------------
 
-pub fn set_waveform(state: ref<App>, clip: u64, peaks: array<f64> own) -> unit effects {alloc} {
+pub fn set_waveform(state: ref<App>, clip: u64, peaks: array<f64> own, first: i64, last: i64, revision: u64) -> unit effects {alloc} {
   var incoming: array<f64> = peaks
+  let value: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{return ()},}
+  var updated: Waveform = Waveform {clip:clip,source:value.source,length:value.length,first:first,last:last,revision:revision,peaks:incoming}
   var index: u64 = 0
   loop {
     if index >= array.len(struct.borrow(state, field=waveforms)) { break }
     let entry: ref<Waveform> = array.borrow(struct.borrow(state, field=waveforms), index)
     if struct.get(entry, field=clip) == clip {
-      let _ = ref.swap(struct.borrow(entry, field=peaks), incoming)
+      let _ = ref.swap(entry,updated)
       return ()
     }
     index = index + 1
   }
-  array.push(struct.borrow(state, field=waveforms), Waveform {clip: clip, peaks: incoming})
+  array.push(struct.borrow(state, field=waveforms), updated)
   ()
 }
 

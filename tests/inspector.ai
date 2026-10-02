@@ -18,6 +18,7 @@ import "../src/provider.ai" as provider
 import "../src/typeface.ai" as typeface
 import "../src/ui_text.ai" as ui_text
 import "../src/timeline_media.ai" as media
+import "../src/preview.ai" as preview
 
 fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var state: app.App = app.app(provider.fake(scratch))
@@ -26,6 +27,19 @@ fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, 
   var clip: commands.Result = commands.append_clip(state, track, source.value, 0, 60)
   let _ = commands.select_only(state, clip.value)
   state
+}
+fn flat(color: draw.Color) -> draw.Surface effects {alloc} {
+  var canvas: draw.Canvas = draw.canvas(option.unwrap(draw.surface(64,64)))
+  draw.clear(canvas,color)
+  draw.finish(canvas)
+}
+fn histogram_pixel(surface: ref<draw.Surface>, frame: layout.Frame, bucket: u64, channel: u64) -> draw.Color effects {} {
+  let column: f64 = (layout.width_of(frame.dock_body)-12.0)/64.0
+  let bar: f64 = (column-0.5)/3.0
+  // The first red bar touches the plot outline; sample its interior rather
+  // than the antialiased border. Other bins use their channel centers.
+  option.unwrap(draw.surface_pixel(surface,cast.sat(frame.dock_body.left+6.0+cast.float(bucket)*column+(cast.float(channel)+(if bucket == 0 and channel == 0 {0.8}else{0.5}))*bar),
+    cast.sat(frame.dock_body.top+6.0+12.0+48.0)))
 }
 
 fn parameter(controls: ref<array<chrome.Control>>, kind: str, name: str) -> layout.Rect effects {alloc} {
@@ -243,6 +257,36 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let value: editor.Clip = option.unwrap(editor.clip(struct.borrow(state, field=document), clip))
   let _ = test.near_f64(suite, value.pan, 1.0, 0.001, "Clip pan clamps at the right channel")
   let _ = test.check(suite, not editor.set_clip_pan(struct.borrow(state, field=document), 999999, 0.0), "Missing clip pan is refused")
+  var mute_box: layout.Rect = layout.rect(0.0,0.0,0.0,0.0)
+  var solo_box: layout.Rect = layout.rect(0.0,0.0,0.0,0.0)
+  slot=0
+  loop {if slot >= array.len(audio_controls) {break}
+    let control: ref<chrome.Control> = array.borrow(audio_controls,slot)
+    if control.target == track {
+      if control.action == chrome.act_track_mute() {mute_box=control.area}
+      if control.action == chrome.act_track_solo() {solo_box=control.area}
+      let named: string = chrome.name_of(control)
+      if control.action == chrome.act_param_set() and str.eq(str.view(named),"pan") {
+        let box: layout.Rect = control.area
+        let _ = test.check(suite,control.enabled,"Embedded track pan is enabled")
+        let _ = input.pointer_down(state,1600.0,980.0,box.left+layout.width_of(box)*0.75,(box.top+box.bottom)*0.5)
+        let _ = input.pointer_up(state,1600.0,980.0,box.left+layout.width_of(box)*0.75,(box.top+box.bottom)*0.5)
+      }
+    }
+    slot=slot+1
+  }
+  let _ = test.near_f64(suite,editor.track_pan(struct.borrow(state,field=document),track),0.5,0.001,"Audio panel pan edits the actual track mix")
+  let mixed: string = media.audio_signature(struct.borrow(state,field=document))
+  let _ = input.pointer_down(state,1600.0,980.0,(mute_box.left+mute_box.right)*0.5,(mute_box.top+mute_box.bottom)*0.5)
+  let _ = test.check(suite,not editor.track_audible(struct.borrow(state,field=document),track),"Audio panel Mute silences the embedded track")
+  let _ = test.check(suite,not str.eq(str.view(mixed),str.view(media.audio_signature(struct.borrow(state,field=document)))),"Mute invalidates queued sound")
+  let _ = input.pointer_down(state,1600.0,980.0,(mute_box.left+mute_box.right)*0.5,(mute_box.top+mute_box.bottom)*0.5)
+  let _ = test.check(suite,editor.track_audible(struct.borrow(state,field=document),track),"Unmute restores the embedded track")
+  let _ = input.pointer_down(state,1600.0,980.0,(solo_box.left+solo_box.right)*0.5,(solo_box.top+solo_box.bottom)*0.5)
+  let owner: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let _ = test.check(suite,editor.any_solo(struct.borrow(state,field=document),owner),"Audio panel Solo edits the mixer state")
+  let _ = input.pointer_down(state,1600.0,980.0,(solo_box.left+solo_box.right)*0.5,(solo_box.top+solo_box.bottom)*0.5)
+  let _ = test.check(suite,not editor.any_solo(struct.borrow(state,field=document),owner),"Solo toggles back off")
   let _ = test.done(suite)
 
   let _ = test.start(suite, "File shortcuts preserve clips and route to native prompts")
@@ -256,6 +300,58 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = input.key(state, 111, true, false)
   let _ = test.check(suite, app.prompt_active(state) and app.prompt_action(state) == chrome.act_open(), "Ctrl+O opens the project picker")
   let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Histogram shows every equal-height RGB channel and follows the program frame")
+  app.set_dock_tab(state,chrome.tab_scopes())
+  var raster: painter.Renderer = painter.renderer()
+  var source_picture: draw.Surface = flat(draw.rgb(255,0,0))
+  var picture: draw.Surface = flat(draw.rgb(255,255,255))
+  let _ = painter.render(state,raster,1600,980,true,source_picture,picture)
+  var channel: u64 = 0
+  loop {if channel == 3 {break}
+    let white: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,channel)
+    let _ = test.check(suite,if channel == 0 {white.r > 140 and white.g < 100}else if channel == 1 {white.g > 140 and white.r < 100}else{white.b > 140 and white.r < 100},"White frame keeps all three RGB bars visible")
+    channel=channel+1
+  }
+  picture=flat(draw.rgb(0,0,0))
+  let _ = painter.render(state,raster,1600,980,false,source_picture,picture)
+  channel=0
+  loop {if channel == 3 {break}
+    let black: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,0,channel)
+    let _ = test.check(suite,if channel == 0 {black.r > 140 and black.g < 100}else if channel == 1 {black.g > 140 and black.r < 100}else{black.b > 140 and black.r < 100},"Black frame keeps all three zero-level bars visible")
+    channel=channel+1
+  }
+  picture=flat(draw.rgb(0,0,255))
+  let _ = painter.render(state,raster,1600,980,false,source_picture,picture)
+  let high_blue: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,2)
+  let old_red: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,0)
+  let _ = test.check(suite,high_blue.b > 140 and high_blue.r < 100,"Scopes use the blue program picture while the source is red")
+  let _ = test.check(suite,old_red.r < 40 and old_red.g < 40 and old_red.b < 40,"Retained scope repaint removes the previous frame's bins")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Completed video stamps drive monitor time and the playing timeline")
+  let _ = editor.seek(struct.borrow(state,field=document),50)
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+  struct.set(state,30,field=presented_program_frame)
+  struct.set(state,17,field=presented_source_frame)
+  let _ = test.eq_i64(suite,app.monitor_frame(state,false),30,"Program time stays with decoded frame 30 while transport requests frame 50")
+  let _ = test.eq_i64(suite,app.monitor_frame(state,true),17,"Source time uses its independent decoded frame")
+  var shown: timeline.Timeline = painter.timeline_model(state,frame.timeline)
+  let _ = test.eq_i64(suite,shown.playhead,30,"Playing timeline cursor uses the decoded program frame")
+  let _ = test.check(suite,str.eq(str.view(timeline.timecode(app.monitor_frame(state,false),30.0)),"00:00:01:00"),"Program timecode labels the same one-second picture")
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.pause())
+  let _ = test.eq_i64(suite,app.timeline_frame(state),50,"Paused seeking responds immediately")
+  let strip_before: string = preview.strips_signature(struct.borrow(state,field=document))
+  let _ = editor.seek(struct.borrow(state,field=document),55)
+  let _ = editor.seek_monitor(struct.borrow(state,field=document),20)
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+  let _ = test.check(suite,str.eq(str.view(strip_before),str.view(preview.strips_signature(struct.borrow(state,field=document)))),"Playback/seek changes reuse the strip request instead of cancelling it")
+  let _ = editor.set_clip_speed(struct.borrow(state,field=document),clip,0.5)
+  let _ = test.check(suite,not str.eq(str.view(strip_before),str.view(preview.strips_signature(struct.borrow(state,field=document)))),"Clip rate changes invalidate strip sampling")
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.pause())
+  app.mark_media_changed(state)
+  let _ = test.eq_i64(suite,state.presented_program_frame,-1,"Reload invalidates completed monitor stamps")
   let _ = test.done(suite)
 
   let _ = test.start(suite, "TrueType metrics, caching and display scale")

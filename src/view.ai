@@ -25,6 +25,7 @@ import "project_session.ai" as session
 import "chrome.ai" as chrome
 import "layout.ai" as layout
 import "provider.ai" as provider
+import "timeline_media.ai" as timeline_media
 
 pub type Theme = struct {
   background: draw.Color,
@@ -253,6 +254,7 @@ pub fn timeline_model(state: ref<app.App>, area: layout.Rect) -> timeline.Timeli
   let origin: f64 = area.left - cast.float(scroll) * zoom
   var model: timeline.Timeline = editor_view.view(document, sequence, colours, zoom, origin,
     area.top + 4.0)
+  struct.set(model,app.timeline_frame(state),field=playhead)
   var index: u64 = 0
   loop {
     if index >= array.len(struct.borrow(model, field=tracks)) { break }
@@ -367,6 +369,10 @@ fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state
     match editor.clip(document, clip) {
       none => { },
       some(value) => {
+        if entry.source != value.source or entry.length != value.length or entry.revision != state.media_revision or
+            timeline_media.source_frame(document,value,value.start) != entry.first or
+            timeline_media.source_frame(document,value,value.start+value.length-1) != entry.last {index=index+1
+          continue}
         var position: u64 = total
         var scan: u64 = 0
         loop {
@@ -396,6 +402,9 @@ fn paint_thumbnails(canvas: ref<draw.Canvas>, state: ref<app.App>, model: ref<ti
     let thumb: ref<app.Thumbnail> = array.borrow(struct.borrow(state, field=thumbnails), i)
     i = i + 1
     let clip: editor.Clip = match editor.clip(doc, thumb.clip) {none => { continue }, some(value) => value,}
+    if clip.owner != doc.active or clip.source != thumb.source or thumb.revision != state.media_revision or
+        thumb.frame < clip.start or thumb.frame >= clip.start+clip.length or
+        timeline_media.source_frame(doc,clip,thumb.frame) != thumb.source_frame {continue}
     var lane: u64 = 0
     loop { if lane >= array.len(struct.borrow(model, field=tracks)) { break }
       if struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=id) == clip.track { break }
@@ -433,7 +442,7 @@ fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   paint_thumbnails(canvas, state, model, area)
   paint_waveforms(canvas, colours, state, model)
   // Redraw the seek handle above thumbnail/waveform pixels.
-  let head: f64 = timeline.frame_to_x(model, editor.playhead(struct.borrow(state, field=document)))
+  let head: f64 = timeline.frame_to_x(model, app.timeline_frame(state))
   if head >= area.left and head < area.right { fill_at(canvas, head - 1.0, area.top, head + 2.0, area.bottom, colors.focus) }
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
@@ -459,6 +468,7 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
       "Enter to accept    Escape to cancel", type_small(), colors.dim)
     return ()
   }
+  let shown_frame: i64 = app.timeline_frame(state)
   var line: string = app.status(state)
   string.append(line, "   |   ")
   let document: ref<editor.Document> = struct.borrow(state, field=document)
@@ -468,7 +478,7 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   string.append(line, "   duration ")
   string.append(line, str.view(number(editor.duration(document))))
   string.append(line, "   playhead ")
-  string.append(line, str.view(timeline.timecode(editor.playhead(document),
+  string.append(line, str.view(timeline.timecode(shown_frame,
     editor.sequence_fps(document, document.active))))
   var unbounded: array<u64> = editor.unbounded_clips(document)
   if array.len(unbounded) != 0 {
@@ -761,11 +771,14 @@ fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, c
     let hr: f64 = hist_height * array.get(red, index) / peak
     let hg: f64 = hist_height * array.get(green, index) / peak
     let hb: f64 = hist_height * array.get(blue, index) / peak
-    fill_at(canvas, x0, top + hist_height - hr, x0 + column - 0.5, top + hist_height,
+    // Independent channel bars share one baseline. Overlapping end points hid
+    // equal-height green/blue bins, including white and black pictures.
+    let bar: f64 = (column - 0.5) / 3.0
+    fill_at(canvas, x0, top + hist_height - hr, x0 + bar, top + hist_height,
       draw.rgb(180, 70, 70))
-    fill_at(canvas, x0, top + hist_height - hg, x0 + column - 0.5, top + hist_height - hr,
+    fill_at(canvas, x0 + bar, top + hist_height - hg, x0 + bar*2.0, top + hist_height,
       draw.rgb(70, 170, 90))
-    fill_at(canvas, x0, top + hist_height - hb, x0 + column - 0.5, top + hist_height - hg,
+    fill_at(canvas, x0 + bar*2.0, top + hist_height - hb, x0 + bar*3.0, top + hist_height,
       draw.rgb(70, 110, 200))
     index = index + 1
   }
@@ -918,6 +931,8 @@ fn paint_dock(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 // stays free of media work.
 pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
              source_image: ref<draw.Surface>, program_image: ref<draw.Surface>) -> unit effects {alloc} {
+  let shown_source: i64 = app.monitor_frame(state,true)
+  let shown_program: i64 = app.monitor_frame(state,false)
   ui_text.set_scale(struct.borrow(state, field=typography), draw.transform(canvas).a)
   let colors: Theme = theme(state)
   let frame: layout.Frame = layout.frame(width, height)
@@ -939,11 +954,11 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
     let source: bool = state.fullscreen == 2
     let area: layout.Rect = chrome.monitor_area(frame, state, source)
     if source {
-      paint_monitor(canvas, struct.borrow(state, field=typography), colors, area, "SOURCE", monitor.frame,
+      paint_monitor(canvas, struct.borrow(state, field=typography), colors, area, "SOURCE", shown_source,
         if source_last > 0 { source_last - 1 } else { 0 }, monitor.mark_in, monitor.mark_out,
         source_fps, monitor.playing, source_image, false)
     } else {
-      paint_monitor(canvas, struct.borrow(state, field=typography), colors, area, "PROGRAM", program.frame,
+      paint_monitor(canvas, struct.borrow(state, field=typography), colors, area, "PROGRAM", shown_program,
         if total > 0 { total - 1 } else { 0 }, program.mark_in, program.mark_out,
         fps, program.playing, program_image, false)
     }
@@ -954,10 +969,10 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   paint_menu(canvas, colors, state, frame)
   paint_toolbar(canvas, colors, state, frame)
   paint_pool(canvas, colors, state, frame)
-  paint_monitor(canvas, struct.borrow(state, field=typography), colors, frame.source, "SOURCE", monitor.frame,
+  paint_monitor(canvas, struct.borrow(state, field=typography), colors, frame.source, "SOURCE", shown_source,
     if source_last > 0 { source_last - 1 } else { 0 }, monitor.mark_in, monitor.mark_out,
     source_fps, monitor.playing, source_image, focus == app.panel_source())
-  paint_monitor(canvas, struct.borrow(state, field=typography), colors, frame.program, "PROGRAM", program.frame,
+  paint_monitor(canvas, struct.borrow(state, field=typography), colors, frame.program, "PROGRAM", shown_program,
     if total > 0 { total - 1 } else { 0 }, program.mark_in, program.mark_out, fps,
     program.playing, program_image, focus == app.panel_program())
 
@@ -1074,7 +1089,8 @@ fn paint_live_monitor(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: The
       none => editor.sequence_fps(doc, doc.active),
       some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=fps),
     } } else { editor.sequence_fps(doc, doc.active) }
-  paint_monitor_time(canvas, struct.borrow(state, field=typography), colors, area, transport.frame,
+  let shown_frame: i64 = app.monitor_frame(state,source)
+  paint_monitor_time(canvas, struct.borrow(state, field=typography), colors, area, shown_frame,
     if last > 0 { last - 1 } else { 0 }, transport.mark_in, transport.mark_out, fps, transport.playing)
 }
 fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
@@ -1090,8 +1106,8 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
   }
   paint_live_monitor(canvas, state, colors, frame, true, source)
   paint_live_monitor(canvas, state, colors, frame, false, program)
+  let current: i64 = app.timeline_frame(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
-  let current: i64 = editor.playhead(doc)
   let animated: bool = array.len(struct.borrow(doc, field=keys)) != 0
   if current != previous_frame {
     var model: timeline.Timeline = timeline_model(state, frame.timeline)
@@ -1115,10 +1131,10 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
 // Dimension and transport changes conservatively repaint all.
 pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
     full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>) -> bool effects {alloc} {
+  let program_frame: i64 = app.timeline_frame(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   let source_playing: bool = struct.get(struct.borrow(doc, field=monitor), field=playing)
   let program_playing: bool = editor.playing(doc)
-  let program_frame: i64 = editor.playhead(doc)
   let previous: ref<draw.Surface> = struct.borrow(cache, field=surface)
   let resized: bool = previous.width != width or previous.height != height
   let overlay: bool = session.modal(state) or app.open_menu(state) != 0 or app.prompt_active(state)

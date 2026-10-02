@@ -97,7 +97,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     let rewound: bool = await_image(transport, root, 4, false)
     let deadline: u64 = time.monotonic_ns() + 15000000000
     let _ = link.await_event(transport,2,4,deadline)
-    preview.read_waveforms(state, root)
+    let _ = preview.read_waveforms(state, root,4)
     let embedded: bool = app.waveform_count(state) > 0
     let _ = link.await_event(transport,3,4,deadline)
     preview.read_thumbnails(state, root, 4)

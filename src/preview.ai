@@ -25,11 +25,21 @@ fn program_signature(document: ref<editor.Document>) -> string effects {alloc} {
 }
 
 pub type Images = struct {pictures: array<draw.Surface>, source_ns: u64, plan_ns: u64, program_ns: u64,
-  source_key: string, source_held: bool}
+  source_key: string, source_held: bool, source_frame: i64, program_frame: i64}
 pub fn images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface>
     effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var reply: Images = images_measured(state,width,height,false)
   struct.replace(reply,array.new(),field=pictures)
+}
+// Viewport strip requests ignore transient transport and selection changes.
+// Their own decoder can finish while monitor playback advances independently.
+pub fn strips_signature(document: ref<editor.Document>) -> string effects {alloc} {
+  var copy: editor.Document = editor.copy_document(document)
+  struct.set(copy,0,field=monitor_source)
+  struct.set(copy,editor.transport(),field=monitor)
+  struct.set(copy,editor.transport(),field=program)
+  let _ = editor.clear_selection(copy)
+  match editor_io.encode(copy) {ok(value)=>value,err(_)=>string.new(),}
 }
 pub fn images_measured(state: ref<app.App>, width: u32, height: u32, profile: bool) -> Images effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   images_with_source(state,width,height,profile,"")
@@ -122,7 +132,7 @@ fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: boo
     program_frame, width, height) }
   let program_ns: u64 = if profile {time.monotonic_ns()-program_begin-plan_ns}else{0}
   array.push(out, provider.take_pixels(program))
-  Images {pictures:out,source_ns:source_ns,plan_ns:plan_ns,program_ns:program_ns,source_key:source_key,source_held:source_held}
+  Images {pictures:out,source_ns:source_ns,plan_ns:plan_ns,program_ns:program_ns,source_key:source_key,source_held:source_held,source_frame:monitor_frame,program_frame:program_frame}
 }
 
 // Fill the waveform cache for every clip with audio, including video clips. This is the only place the application asks
@@ -182,7 +192,8 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
           array.push(shown, array.get(peaks, position))
           k = k + 1
         }
-        app.set_waveform(state, clip_id, shown)
+        app.set_waveform(state, clip_id, shown,timeline_media.source_frame(document,clip,clip.start),
+          timeline_media.source_frame(document,clip,clip.start+clip.length-1),state.media_revision)
         filled = filled + 1
       }, }
     }
@@ -192,7 +203,7 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
 }
 
 
-pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>, events: channel.Ticket, profile: bool, pixel_stream: bool}
+pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>, events: channel.Ticket, profile: bool, pixel_stream: bool, strips_only: bool}
 pub fn config(state: ref<app.App>, root: str, events: channel.Ticket own) -> Config effects {alloc} {
   let kind: u32 = struct.get(struct.borrow(state, field=provider), field=kind)
   let worker: string = provider.worker_path(struct.borrow(state, field=provider))
@@ -203,7 +214,7 @@ pub fn config(state: ref<app.App>, root: str, events: channel.Ticket own) -> Con
     array.push(fonts, string.copy(str.view(array.borrow(struct.borrow(state, field=fonts), i))))
     i = i + 1
   }
-  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts, events: events, profile: false, pixel_stream: false}
+  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts, events: events, profile: false, pixel_stream: false,strips_only:false}
 }
 
 fn publish_checked(root: str, name: str, value: str) -> bool effects {alloc, fs.write} {
@@ -309,6 +320,9 @@ fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.wr
   loop { if i >= array.len(struct.borrow(state, field=waveforms)) { break }
     let wave: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), i)
     string.append(lines, str.view(string.from_int(wave.clip)))
+    var mapping: array<string> = [string.from_int(wave.source),string.from_int(wave.length),string.from_int(wave.first),string.from_int(wave.last),string.from_int(wave.revision)]
+    string.append(lines,"\t")
+    string.append(lines,str.view(text.join(mapping,"\t")))
     var k: u64 = 0
     loop { if k >= array.len(struct.borrow(wave, field=peaks)) { break }
       string.append(lines, "\t")
@@ -320,25 +334,38 @@ fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.wr
   }
   publish(root, "waveforms.tsv", str.view(lines))
 }
-pub fn read_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.read} {
-  let content: string = match files.read_text(str.view(path.join(root, "waveforms.tsv"))) { ok(value) => value, err(_) => { return () }, }
+pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {alloc, fs.read} {
+  if number(root,"waveforms.id") != id {return false}
+  let content: string = match files.read_text(str.view(path.join(root, "waveforms.tsv"))) { ok(value) => value, err(_) => { return false }, }
+  if number(root,"waveforms.id") != id {return false}
   var rows: array<string> = text.split(str.view(content), "\n")
   var i: u64 = 0
   loop { if i >= array.len(rows) { break }
     var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
-    if array.len(fields) > 1 {
+    if array.len(fields) > 6 {
       let clip: u64 = match text.parse_u64(str.view(array.borrow(fields, 0))) { some(value) => value, none => 0, }
+      let source: u64 = match text.parse_u64(str.view(array.borrow(fields,1))) {some(value)=>value,none=>0,}
+      let length: i64 = match text.parse_i64(str.view(array.borrow(fields,2))) {some(value)=>value,none=>0,}
+      let first: i64 = match text.parse_i64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>-1,}
+      let last: i64 = match text.parse_i64(str.view(array.borrow(fields,4))) {some(value)=>value,none=>-1,}
+      let revision: u64 = match text.parse_u64(str.view(array.borrow(fields,5))) {some(value)=>value,none=>0,}
+      let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{i=i+1
+        continue},}
+      if revision != state.media_revision or current.source != source or current.length != length or
+          timeline_media.source_frame(struct.borrow(state,field=document),current,current.start) != first or
+          timeline_media.source_frame(struct.borrow(state,field=document),current,current.start+current.length-1) != last {i=i+1
+        continue}
       var peaks: array<f64> = array.new()
- var k: u64 = 1
+ var k: u64 = 6
       loop { if k >= array.len(fields) { break }
         array.push(peaks, match text.parse_f64(str.view(array.borrow(fields, k))) { some(value) => value, none => 0.0, })
  k = k + 1
       }
-      if clip != 0 { app.set_waveform(state, clip, peaks) }
+      if clip != 0 { app.set_waveform(state, clip, peaks,first,last,revision) }
     }
     i = i + 1
   }
-  ()
+  true
 }
 
 fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
@@ -348,6 +375,9 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> u
   let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
   let span: i64 = match text.parse_i64(str.view(array.borrow(fields, 2))) {some(value) => value, none => 450,}
   if zoom <= 0.0 or span <= 0 { return () }
+  // Reserve the strip before reusing a slot. Readers keep the previous owned
+  // pictures until the complete manifest and matching generation are committed.
+  if not publish_checked(root,"thumbnails.id","0") {return ()}
   // Match the painted, aspect-fitted tile width at this lane height. A fixed
   // 96px sampling interval left most of a 46px-high video lane without pictures.
   let tile_width: f64 = 80.0 * math.max(1.0, app.track_height(state) - 20.0) / 45.0
@@ -381,6 +411,13 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> u
         string.append(lines, str.view(string.from_int(at)))
         string.append(lines, "\t")
         string.append(lines, str.view(name))
+        string.append(lines, "\t")
+        string.append(lines, str.view(string.from_int(clip.source)))
+        string.append(lines, "\t")
+        string.append(lines, str.view(string.from_int(sample)))
+        string.append(lines, "\t")
+        let revision_text: string = if array.len(fields) >= 6 {string.copy(str.view(array.borrow(fields,5)))}else{string.copy("0")}
+        string.append(lines,str.view(revision_text))
         string.append(lines, "\n")
         total = total + 1
       }
@@ -391,24 +428,33 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> u
   publish(root, "thumbnails.id", str.view(string.from_int(id)))
   ()
 }
-pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> unit effects {alloc, fs.read} {
-  let content: string = match files.read_text(path.join(root, "thumbnails.tsv")) {ok(value) => value, err(_) => { return () },}
+pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects {alloc, fs.read} {
+  if number(root,"thumbnails.id") != id {return false}
+  let content: string = match files.read_text(path.join(root, "thumbnails.tsv")) {ok(value) => value, err(_) => { return false },}
   var rows: array<string> = text.split(str.view(content), "\n")
   var thumbs: array<app.Thumbnail> = array.new()
   var i: u64 = 0
   loop { if i >= array.len(rows) { break }
     var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
     i = i + 1
-    if array.len(fields) != 3 { continue }
+    if array.len(fields) != 6 { continue }
     let clip: u64 = match text.parse_u64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
     let frame: i64 = match text.parse_i64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 0,}
+    let source: u64 = match text.parse_u64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>{continue},}
+    let source_frame: i64 = match text.parse_i64(str.view(array.borrow(fields,4))) {some(value)=>value,none=>{continue},}
+    let revision: u64 = match text.parse_u64(str.view(array.borrow(fields,5))) {some(value)=>value,none=>{continue},}
+    let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{continue},}
+    if revision != state.media_revision or current.owner != struct.get(struct.borrow(state,field=document),field=active) or
+        current.source != source or frame < current.start or frame >= current.start+current.length or
+        timeline_media.source_frame(struct.borrow(state,field=document),current,frame) != source_frame {continue}
     let filename: string = image_file(root, id, str.view(array.borrow(fields, 2)))
     let raw: bytes = match files.read_bytes(str.view(filename)) {ok(value) => value, err(_) => { continue },}
     var pixels: draw.Surface = match draw.surface_from_rgba(80, 45, bytes.view(raw)) {some(value) => value, none => { continue },}
-    array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, pixels: pixels})
+    array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, source:source, source_frame:source_frame, revision:revision, pixels: pixels})
   }
+  if number(root,"thumbnails.id") != id {return false}
   let _ = struct.replace(state, thumbs, field=thumbnails)
-  ()
+  true
 }
 
 pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.write, net, process, time} {
@@ -461,12 +507,23 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       media_revision = revision
       let _ = ref.swap(held_source,string.new())
     }
+    struct.set(state,revision,field=media_revision)
     // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
     if width == 0 or height == 0 or width > 1280 or height > 720 {
       link.fail(wake,id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
       continue
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
+    if owned.strips_only {
+      let _ = waveforms(state)
+      publish(str.view(root),"waveforms.id","0")
+      write_waveforms(state,str.view(root))
+      publish(str.view(root),"waveforms.id",str.view(string.from_int(id)))
+      if not link.notify(wake,2,id) {break}
+      write_thumbnails(state,str.view(root),id,str.view(geometry))
+      if not link.notify(wake,3,number(str.view(root),"thumbnails.id")) {break}
+      continue
+    }
     let previous_source: string = if owned.pixel_stream {string.copy(str.view(held_source))}else{string.new()}
     var measured: Images = images_with_source(state,width,height,owned.profile,str.view(previous_source))
     let source_ns: u64 = measured.source_ns
@@ -480,7 +537,8 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       let timing: link.FrameTiming = link.FrameTiming {generation:id,request_ns:request_ns,source_ns:source_ns,
         plan_ns:plan_ns,program_ns:program_ns,publish_ns:0,coalesce_ns:wake.last_drain_ns}
       match link.notify_pixels(wake,str.view(root),source,program,
-          str.view(provider.last_error(struct.borrow(state,field=provider))),measured.source_held,timing,publish_begin) {
+          str.view(provider.last_error(struct.borrow(state,field=provider))),measured.source_held,timing,
+          link.FramePosition {source_frame:measured.source_frame,program_frame:measured.program_frame,revision:revision},publish_begin) {
         ok(delivered)=>{if not delivered {continue}
           let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))},
         err(problem)=>{link.fail(wake,id,str.view(problem))
@@ -512,9 +570,10 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }else{link.notify(wake,1,id)}
     if not delivered { break }
     }
-    if not editor.playing(struct.borrow(state, field=document)) and
+    if not owned.pixel_stream and not editor.playing(struct.borrow(state, field=document)) and
         not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) {
       let _ = waveforms(state)
+      publish(str.view(root), "waveforms.id", "0")
       write_waveforms(state, str.view(root))
       publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))
       if not link.notify(wake,2,id) { break }

@@ -303,6 +303,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   var audio_task_end: i64 = 0
   var audio_task_output: string = string.new()
   var sound_signature: string = string.new()
+  var sound_revision: u64 = 0
   var previous_source: bool = false
   var previous_playing: bool = false
   var previous_frame: i64 = editor.playhead(struct.borrow(state, field=document))
@@ -339,6 +340,30 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     let _ = preview_link.wake(audio_transport,true)
     return 1},}
   var preview_signature: string = string.new()
+  let strip_root: string = path.join(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)),"timeline-strips")
+  let _ = files.mkdirs(str.view(strip_root))
+  preview.reset(str.view(strip_root))
+  var strip_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{
+    app.set_status(state,str.view(problem))
+    preview.stop(str.view(preview_root))
+    audio_playback.stop(str.view(audio_root))
+    return 1},}
+  var strip_config: preview.Config = preview.config(state,str.view(strip_root),preview_link.ticket(strip_transport))
+  struct.set(strip_config,true,field=strips_only)
+  array.push(preview_jobs,task.spawn(strip_config,fn=preview.run))
+  match preview_link.connect(strip_transport) {ok(_)=>{},err(problem)=>{
+    app.set_status(state,str.view(problem))
+    preview.stop(str.view(strip_root))
+    preview.stop(str.view(preview_root))
+    audio_playback.stop(str.view(audio_root))
+    return 1},}
+  var strip_signature: string = string.new()
+  var strip_requested: u64 = 0
+  var strip_revision: u64 = 0
+  var strip_scroll: i64 = -1
+  var strip_zoom: f64 = 0.0
+  var strip_span: i64 = 0
+  var strip_error: string = string.new()
   var preview_requested: u64 = 0
   var preview_seen: u64 = 0
   var waveform_seen: u64 = 0
@@ -363,8 +388,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       let _ = ref.swap(program_image, draw.empty_surface())
       let _ = ref.swap(source_image, draw.empty_surface())
       preview_seen = preview_requested
-      waveform_seen = preview_requested
-      thumbnail_seen = preview_requested
+      waveform_seen = strip_requested
+      thumbnail_seen = strip_requested
     }
     preview_link.poll(preview_transport)
     let channel_error: string = string.copy(str.view(struct.borrow(preview_transport,field=error)))
@@ -378,8 +403,11 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     let ready: u64 = preview_transport.ready
     if ready > preview_seen {
       var images: array<draw.Surface> = preview_link.take_images(preview_transport,ready)
-      if array.len(images) == 2 {
-        preview_seen = ready
+      let position: preview_link.FramePosition = preview_transport.position
+      preview_seen = ready
+      if array.len(images) == 2 and position.revision == state.media_revision {
+        struct.set(state,position.program_frame,field=presented_program_frame)
+        struct.set(state,position.source_frame,field=presented_source_frame)
         let _ = ref.swap(program_image, option.unwrap(array.pop(images)))
         var new_source: draw.Surface = option.unwrap(array.pop(images))
         if not preview_link.holds_source(preview_transport) {let _ = ref.swap(source_image,new_source)}
@@ -391,19 +419,28 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       preview_error = problem
       dirty = true
     }
-    let wave_ready: u64 = preview_transport.waveforms
-    if wave_ready > waveform_seen {
-      preview.read_waveforms(state, str.view(preview_root))
-      waveform_seen = wave_ready
-      repaint_all = true
-      dirty = true
+    preview_link.poll(strip_transport)
+    let strip_problem: string = string.copy(str.view(struct.borrow(strip_transport,field=error)))
+    if str.len(str.view(strip_problem)) != 0 and not str.eq(str.view(strip_problem),str.view(strip_error)) {
+      app.set_status(state,str.view(strip_problem))
+      dirty=true
     }
-    let thumb_ready: u64 = preview_transport.thumbnails
+    strip_error=strip_problem
+    let wave_ready: u64 = strip_transport.waveforms
+    if wave_ready > waveform_seen {
+      if preview.read_waveforms(state, str.view(strip_root),wave_ready) {
+        waveform_seen = wave_ready
+        repaint_all = true
+        dirty = true
+      }
+    }
+    let thumb_ready: u64 = strip_transport.thumbnails
     if thumb_ready > thumbnail_seen {
-      preview.read_thumbnails(state, str.view(preview_root), thumb_ready)
-      thumbnail_seen = thumb_ready
-      repaint_all = true
-      dirty = true
+      if preview.read_thumbnails(state, str.view(strip_root), thumb_ready) {
+        thumbnail_seen = thumb_ready
+        repaint_all = true
+        dirty = true
+      }
     }
     let now_ns: u64 = clock.start()
     var elapsed_ns: u64 = clock.between_ns(clock_ns, now_ns)
@@ -470,8 +507,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
         }
         let next_sound: string = if source_playing { string.from_int(struct.get(struct.borrow(state, field=document), field=monitor_source)) }
           else { timeline_media.audio_signature(struct.borrow(state, field=document)) }
-        let mix_changed: bool = not str.eq(str.view(next_sound), str.view(sound_signature))
+        let mix_changed: bool = sound_revision != state.media_revision or not str.eq(str.view(next_sound), str.view(sound_signature))
         sound_signature = next_sound
+        sound_revision = state.media_revision
         if playing_now and (not previous_playing or source_playing != previous_source or frame_now != previous_frame or mix_changed) {
           audio_pending=false
           audio_generation = audio_generation + 1
@@ -630,6 +668,19 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       }
       let view_frame: layout.Frame = layout.frame(logical_width, logical_height)
       let span: i64 = cast.sat(layout.width_of(view_frame.timeline) / app.zoom(state))
+      let next_strip: string = preview.strips_signature(struct.borrow(state,field=document))
+      if strip_revision != state.media_revision or strip_scroll != app.scroll(state) or strip_zoom != app.zoom(state) or strip_span != span or
+          not str.eq(str.view(next_strip),str.view(strip_signature)) {
+        strip_requested=strip_requested+1
+        if preview.request_revision(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision) {
+          let _ = preview_link.wake(strip_transport,false)
+          strip_signature=next_strip
+          strip_revision=state.media_revision
+          strip_scroll=app.scroll(state)
+          strip_zoom=app.zoom(state)
+          strip_span=span
+        }else{app.set_status(state,"[GA_TIMELINE_REQUEST] Cannot publish timeline bitmap request")}
+      }
       let monitor_width: u32 = if state.fullscreen != 0 { 1280 } else { 480 }
       let monitor_height: u32 = if state.fullscreen != 0 { 720 } else { 270 }
       if preview_media_revision != state.media_revision or preview_width != monitor_width or not str.eq(str.view(signature), str.view(preview_signature)) or preview_scroll != app.scroll(state) or preview_zoom != app.zoom(state) or preview_span != span {
@@ -832,9 +883,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   let _ = tasks.join_next<bool>(audio_jobs,30000)
   preview_link.close_commands(audio_transport)
   preview.stop(str.view(preview_root))
+  preview.stop(str.view(strip_root))
+  let _ = preview_link.wake(strip_transport,true)
   let _ = preview_link.wake(preview_transport,true)
   let _ = tasks.join_next<bool>(preview_jobs, 30000)
+  let _ = tasks.join_next<bool>(preview_jobs, 30000)
   preview_link.close_commands(preview_transport)
+  preview_link.close_commands(strip_transport)
   }
   match ref.swap(audio_library, option.none()) {
     none => {}, some(opened) => { var library: CAbiLibrary = opened

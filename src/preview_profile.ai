@@ -115,6 +115,10 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
       var program: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
       var new_source: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
       if file_pixels or not link.holds_source(transport) {let _ = ref.swap(source,new_source)}
+      if not file_pixels {
+        struct.set(state,transport.position.source_frame,field=presented_source_frame)
+        struct.set(state,transport.position.program_frame,field=presented_program_frame)
+      }
       let actual_pixels: u64 = cast.wrap(program.width) * cast.wrap(program.height)
       let _ = bench.observe(read, read_begin, actual_pixels)
       if actual_pixels != monitor_pixels { failure = true

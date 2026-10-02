@@ -43,7 +43,13 @@ try {
   $wave = Join-Path $work 'queued audio 日本語.wav'
   & ffmpeg -nostdin -y -v error -i $media -vn -ac 2 -ar 48000 -c:a pcm_s16le $wave
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate native audio fixture.' }
-  Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave)).TrimEnd()
+  $pannedWave = Join-Path $work 'left audio.wav'
+  $silentWave = Join-Path $work 'muted audio.wav'
+  & ffmpeg -nostdin -y -v error -i $wave -af 'pan=stereo|c0=c0|c1=0*c1' -c:a pcm_s16le $pannedWave
+  if ($LASTEXITCODE -ne 0) { throw 'Could not generate panned device fixture.' }
+  & ffmpeg -nostdin -y -v error -i $wave -af 'volume=0' -c:a pcm_s16le $silentWave
+  if ($LASTEXITCODE -ne 0) { throw 'Could not generate silent device fixture.' }
+  Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd()
   $worker = Join-Path $project 'genesis-gcompose.exe'
   if (Test-Path -LiteralPath $worker) {
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()

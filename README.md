@@ -364,25 +364,36 @@ Ctrl+Shift+S opens Save as.
 Drag the timeline ruler or the playhead line to change program time and preview.
 The line takes precedence over a clip underneath it, so seeking cannot move or
 trim that clip. Video/audio lane crossing is refused with `GA_TRACK_KIND`. Cached
-frame bitmaps fill visible video clips after paused background extraction;
+frame bitmaps fill visible video clips through a separate background decoder, including during playback;
 sampling follows the painted thumbnail width instead of leaving large empty gaps;
 waveforms also appear on video clips that contain audio.
 
 Both monitors reuse unchanged pictures. Source transport changes keep the program
 picture, while timeline edits refresh it. Reload, Relink and opening a project
 invalidate the background media cache, including LUTs replaced at the same path.
-Timeline thumbnails and waveforms wait until both transports are paused.
+Timeline thumbnails and waveforms use their own request lane and provider. Transport
+and selection changes reuse the same strip request, so playback does not repeatedly
+cancel extraction. Clip edits, viewport changes and media reloads request fresh strips.
+Each bitmap records its native source frame and timeline position; readers and painting
+refuse an obsolete mapping after a trim, move, reverse or rate change. Waveforms carry
+their source endpoints and length. Incomplete strip slots retain the last owned pictures.
+
+Monitor timecodes use the decoded picture's frame stamp. During playback the timeline
+cursor follows that same program frame; paused scrubbing changes the requested position
+immediately. RGB histogram channels have independent bars, including equal-height bins
+in black and white frames, and refresh from the displayed program picture.
 
 Preview requests and completed frames wake the worker and native window wait through
 bounded `std.channel` lanes. Rapid drag requests are coalesced before decoding; frame,
 waveform and thumbnail completion have separate events. Document, viewport, monitor
-quality and media revision publish as one atomic request snapshot. Reusable image
-slots invalidate their generation before writing and commit it after both pictures
-and dimensions are complete. The reader checks that generation before and after
-loading, retaining its last complete picture if a slot changed. This prevents a
+quality and media revision publish as one atomic request snapshot. Monitor pixel
+packets carry decoded source/program frame stamps and media revision along with their
+dimensions and generation. Diagnostic file slots and timeline strip slots invalidate
+their generation before reuse. The reader retains its last complete picture if a slot
+changes. This prevents a
 rapid scrub from displaying mixed generations or replacing a held frame with an
 incomplete publication. `GA_PREVIEW_REQUEST`, `GA_PREVIEW_GEOMETRY`,
-`GA_PREVIEW_PUBLISH` and `GA_PREVIEW_CHANNEL` identify request, size, pixel publication
+`GA_PREVIEW_PUBLISH`, `GA_PREVIEW_PIXELS`, `GA_TIMELINE_REQUEST` and `GA_PREVIEW_CHANNEL` identify request, size, pixel publication
 and delivery failures. Request errors carry their generation so a later valid
 request can recover. An idle lifecycle deadline also observes persisted Stop if
 its wake was lost; normal frame work wakes immediately.
@@ -517,11 +528,11 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 ```
 
 The Windows gate verifies 152 saved application facts, three native file-drop facts,
-749 control clicks with overlap checks, 78 native media/project checks and 58 focused
+749 control clicks with overlap checks, 78 native media/project checks and 81 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
-clock, stereo output levels and immediate Stop. Continuous audio checks compare four
-worker cases and seventeen editor/source/rate cases against whole-range WAV output;
-the generated PCM fixture matches exactly across chunk boundaries. Cases cover eleven
+clock, stereo, panned and silent output levels and immediate Stop. Continuous audio checks compare four
+worker cases and thirty-three editor/source/rate/mixer cases against whole-range WAV output;
+the generated PCM fixture matches exactly across chunk boundaries. Cases cover all twenty
 effects, reverse, 2x speed, fractional rates, seek reset and source audition, plus coded
 filter failure, recovery and idle Stop. Six additional native cases interrupt a worker
 blocked on a reply or a large stdin write: Stop, seek, and missing request-marker
@@ -543,8 +554,10 @@ failures, recovery on the same worker, refusal of a reused frame slot, fullscree
 The pixel-stream gate adds nine native transport cases: exact RGBA bytes in two
 1280x720 surfaces, a consumer paused for 250 ms, held/empty/coalesced source
 updates, Stop/seek during backpressure and coded malformed-frame recovery.
-Generated-media requests check independent source/program seeking, monitor size
-changes, rewind, Reload, a 32-request drag burst, absent monitor frame files and
+Generated-media requests check independent source/program seeking and decoded frame
+stamps, monitor size changes, rewind, Reload, a 32-request drag burst, strip extraction
+during playback, matching bitmap pixels after reverse/trim/2x rate, stale/incomplete
+strip refusal, absent monitor frame files and
 idle Stop. Project safety has 15 cases /
 84 checks for Save/Discard/Cancel, native close-request dispatch, failed-save retry,
 separate snapshots, paused final-edit autosave, atomic failure preservation, legacy
