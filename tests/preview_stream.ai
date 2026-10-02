@@ -1,0 +1,272 @@
+module genesis.tests.preview_stream
+import std.channel as channel
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/preview.ai" as preview
+import "../src/preview_link.ai" as link
+
+type Producer = struct {ticket:channel.Ticket,root:string,mode:u64}
+fn pattern(seed: u64) -> draw.Surface effects {alloc} {
+  var surface: draw.Surface = option.unwrap(draw.surface(1280,720))
+  var at: u64 = 0
+  loop {if at >= 3686400 {break}
+    let value: u8 = cast.wrap((at*37+seed)%256)
+    array.set(struct.borrow(surface,field=pixels),at,cast.bits(value))
+    at=at+1
+  }
+  surface
+}
+fn exact(surface: ref<draw.Surface>, seed: u64) -> bool effects {} {
+  if surface.width != 1280 or surface.height != 720 {return false}
+  let pixels: ref<array<byte>> = struct.borrow(surface,field=pixels)
+  var at: u64 = 0
+  loop {if at >= array.len(pixels) {break}
+    let value: u8 = cast.wrap((at*37+seed)%256)
+    let expected: byte = cast.bits(value)
+    if array.get(pixels,at) != expected {return false}
+    at=at+1
+  }
+  true
+}
+fn timing(id: u64) -> link.FrameTiming effects {} {
+  link.FrameTiming {generation:id,request_ns:11,source_ns:12,plan_ns:13,program_ns:14,publish_ns:0,coalesce_ns:15}
+}
+fn raw(peer: ref<link.Peer>, kind: u64, data: view<byte>) -> bool effects {alloc,net,time} {
+  match channel.send(struct.borrow(peer,field=events),kind,data,time.monotonic_ns()+1000000000) {
+    ok(_)=>true,err(_)=>false,
+  }
+}
+fn produce(config: Producer own) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,time} {
+  var owned: Producer = config
+  var peer: link.Peer = match link.peer(struct.borrow(owned,field=ticket)) {ok(value)=>value,err(_)=>{return false},}
+  var source: draw.Surface = pattern(13)
+  var program: draw.Surface = pattern(91)
+  let root: string = string.copy(str.view(struct.borrow(owned,field=root)))
+  let _ = files.write_text(path.join(str.view(root),"started"),"yes")
+  var id: u64 = 1
+  if owned.mode == 1 or owned.mode == 2 or owned.mode == 5 or owned.mode == 6 or owned.mode == 7 {
+    let header: str = if owned.mode == 1 {"1\t99999\t720\t0\t0\t287997120\t0\t0\t0"}
+      else if owned.mode == 5 {"1\t0\t0\t0\t0\t0\t0\t0\t1"}
+      else if owned.mode == 6 {"1\t0\t0\t1\t1\t0\t4\t0\t0"}
+      else {"1\t0\t0\t2\t2\t0\t16\t0\t0"}
+    if not raw(peer,5,str.bytes(header)) {return false}
+    if owned.mode == 2 {
+      if not raw(peer,6,b"abcd") or not link.notify(peer,1,1) {return false}
+    } else if owned.mode == 6 {
+      if not raw(peer,6,b"abcde") {return false}
+    } else if owned.mode == 7 {
+      if not raw(peer,6,b"abcdefghijklmnop") or not link.notify(peer,1,2) {return false}
+    }
+    if not link.next(peer) {return false}
+    id=if owned.mode == 7 {3}else{2}
+  }
+  let sent: bool = match link.notify_pixels(peer,str.view(root),source,program,"fixture 日本",false,timing(id),time.monotonic_ns()) {
+    ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+      return false},
+  }
+  if owned.mode == 3 or owned.mode == 4 {
+    if sent {return false}
+    let _ = files.write_text(path.join(str.view(root),"cancelled"),"yes")
+    if owned.mode == 4 {return true}
+    id=2
+    if not match link.notify_pixels(peer,str.view(root),source,program,"",false,timing(id),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
+  } else if not sent {return false}
+  if owned.mode == 0 or owned.mode == 8 {
+    if not link.next(peer) {return false}
+    var empty: draw.Surface = draw.empty_surface()
+    if not match link.notify_pixels(peer,str.view(root),empty,program,"",true,timing(2),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
+    if owned.mode == 0 {
+      if not link.next(peer) {return false}
+      var empty_program: draw.Surface = draw.empty_surface()
+      if not match link.notify_pixels(peer,str.view(root),empty,empty_program,"",false,timing(3),time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} {return false}
+    }
+  }
+  let _ = link.next(peer)
+  link.finish(peer,id)
+  true
+}
+fn exists(root: str, name: str) -> bool effects {alloc,fs.meta} {
+  match files.exists(path.join(root,name)) {ok(value)=>value,err(_)=>false,}
+}
+fn wait_marker(root: str, name: str) -> bool effects {alloc,fs.meta,time} {
+  let deadline: u64 = time.monotonic_ns()+2500000000
+  loop {if exists(root,name) {return true}
+    if time.monotonic_ns() >= deadline {return false}
+    time.sleep_ms(5)
+  }
+  false
+}
+fn check_frame(transport: ref<link.Link>, id: u64) -> bool effects {alloc,net,time} {
+  if not match link.await_ready(transport,id,time.monotonic_ns()+10000000000) {ok(_)=>true,err(_)=>false,} {return false}
+  var pictures: array<draw.Surface> = link.take_images(transport,id)
+  if array.len(pictures) != 2 {return false}
+  var program: draw.Surface = option.unwrap(array.pop(pictures))
+  var source: draw.Surface = option.unwrap(array.pop(pictures))
+  exact(source,13) and exact(program,91)
+}
+fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,thread,time} {
+  let _ = files.mkdirs(root)
+  let _ = files.write_text(path.join(root,"request.id"),"1")
+  var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var good: bool = true
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(Producer {ticket:link.ticket(transport),root:string.copy(root),mode:mode},fn=produce))
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    if good {good=wait_marker(root,"started")}
+    if mode == 3 or mode == 4 {
+      time.sleep_ms(250)
+      if mode == 4 {let _ = files.write_text(path.join(root,"stop"),"yes")}
+      else {let _ = files.write_text(path.join(root,"request.id"),"2")}
+      good=wait_marker(root,"cancelled") and good
+      if mode == 3 {good=check_frame(transport,2) and good}
+      else {good=transport.ready == 0 and good}
+    } else if mode == 8 {
+      good=match link.await_ready(transport,1,time.monotonic_ns()+10000000000) {ok(_)=>true,err(_)=>false,} and good
+      // Complete frame one without taking its images. Frame two reuses its source.
+      let _ = files.write_text(path.join(root,"request.id"),"2")
+      let _ = link.wake(transport,false)
+      good=check_frame(transport,2) and not link.holds_source(transport) and good
+    } else if mode == 0 {
+      // The sender must survive a consumer held longer than the old 100 ms budget.
+      time.sleep_ms(250)
+      good=check_frame(transport,1) and good
+      good=str.eq(str.view(struct.borrow(transport,field=pixel_error)),"fixture 日本") and good
+      let _ = files.write_text(path.join(root,"request.id"),"2")
+      let _ = link.wake(transport,false)
+      good=match link.await_ready(transport,2,time.monotonic_ns()+10000000000) {ok(_)=>true,err(_)=>false,} and good
+      var held: array<draw.Surface> = link.take_images(transport,2)
+      good=array.len(held) == 2 and link.holds_source(transport) and good
+      if array.len(held) == 2 {
+        var p: draw.Surface = option.unwrap(array.pop(held))
+        var s: draw.Surface = option.unwrap(array.pop(held))
+        good=exact(p,91) and s.width == 0 and good
+      }
+      let _ = files.write_text(path.join(root,"request.id"),"3")
+      let _ = link.wake(transport,false)
+      good=match link.await_ready(transport,3,time.monotonic_ns()+10000000000) {ok(_)=>true,err(_)=>false,} and good
+      var empty: array<draw.Surface> = link.take_images(transport,3)
+      good=array.len(empty) == 2 and not link.holds_source(transport) and good
+      if array.len(empty) == 2 {
+        var p: draw.Surface = option.unwrap(array.pop(empty))
+        var s: draw.Surface = option.unwrap(array.pop(empty))
+        good=p.width == 0 and s.width == 0 and good
+      }
+    } else {
+      let refused: bool = match link.await_ready(transport,if mode == 7 {2}else{1},time.monotonic_ns()+10000000000) {
+        ok(_)=>false,err(problem)=>text.contains(str.view(problem),"GA_PREVIEW_PIXELS"),
+      }
+      good=refused and transport.ready == 0 and good
+      let id: u64 = if mode == 7 {3}else{2}
+      let _ = files.write_text(path.join(root,"request.id"),str.view(string.from_int(id)))
+      let _ = link.wake(transport,false)
+      good=check_frame(transport,id) and good
+      good=str.len(str.view(struct.borrow(transport,field=error))) == 0 and good
+    }
+    let _ = files.write_text(path.join(root,"stop"),"yes")
+    let _ = link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2500) {some(ok)=>ok,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+fn request(state: ref<app.App>, transport: ref<link.Link>, root: str, id: u64, wide: u32, tall: u32, revision: u64)
+    -> bool effects {alloc,fs.write,net,time} {
+  let document: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>{return false},}
+  if not preview.request_revision(root,str.view(document),id,0,2.4,450,wide,tall,revision) {return false}
+  match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
+}
+fn color(surface: ref<draw.Surface>, blue: bool) -> bool effects {} {
+  match draw.surface_pixel(surface,surface.width/2,surface.height/2) {
+    some(value)=>if blue {value.b > 200 and value.r < 30}else{value.r > 200 and value.b < 30},none=>false,
+  }
+}
+fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App = app.app(provider.gcompose(worker,root))
+  let imported: commands.Result = commands.import_media(state,media,"real stream")
+  if not imported.ok {return false}
+  let _ = commands.open_source(state,imported.value)
+  let _ = commands.append_clip(state,app.default_video_track(state),imported.value,0,60)
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+  var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var configured: preview.Config = preview.config(state,root,link.ticket(transport))
+  struct.set(configured,true,field=pixel_stream)
+  var good: bool = true
+  var source: draw.Surface = draw.empty_surface()
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(configured,fn=preview.run))
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    var id: u64 = 1
+    loop {if id == 7 {break}
+      if id == 2 {let _ = editor.seek(struct.borrow(state,field=document),30)}
+      if id == 3 {let _ = editor.seek_monitor(struct.borrow(state,field=document),30)}
+      if id == 5 {let _ = editor.seek(struct.borrow(state,field=document),0)}
+      let wide: u32 = if id >= 4 {1280}else{480}
+      let tall: u32 = if id >= 4 {720}else{270}
+      good=request(state,transport,root,id,wide,tall,if id == 6 {1}else{0}) and good
+      good=match link.await_ready(transport,id,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+      var pictures: array<draw.Surface> = link.take_images(transport,id)
+      good=array.len(pictures) == 2 and good
+      if array.len(pictures) == 2 {
+        var p: draw.Surface = option.unwrap(array.pop(pictures))
+        var s: draw.Surface = option.unwrap(array.pop(pictures))
+        let held: bool = id == 2 or id == 5
+        good=link.holds_source(transport) == held and good
+        if not held {let _ = ref.swap(source,s)}
+        good=source.width == wide and source.height == tall and color(source,id >= 3) and good
+        good=p.width == wide and p.height == tall and color(p,id >= 2 and id <= 4) and good
+      }
+      // Interactive pixels use the channel, including size changes and Reload.
+      good=not exists(root,"program0.rgba") and not exists(root,"program1.rgba") and not exists(root,"source0.rgba") and not exists(root,"source1.rgba") and good
+      id=id+1
+    }
+    // Publish a drag burst without consuming pixels between requests. Any old
+    // incomplete packet must yield to the newest committed snapshot.
+    loop {if id == 39 {break}
+      let _ = editor.seek(struct.borrow(state,field=document),if id%2 == 0 {30}else{0})
+      good=request(state,transport,root,id,480,270,1) and good
+      id=id+1
+    }
+    good=match link.await_ready(transport,38,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    var final: array<draw.Surface> = link.take_images(transport,38)
+    good=array.len(final) == 2 and good
+    if array.len(final) == 2 {
+      var p: draw.Surface = option.unwrap(array.pop(final))
+      var s: draw.Surface = option.unwrap(array.pop(final))
+      if not link.holds_source(transport) {let _ = ref.swap(source,s)}
+      good=p.width == 480 and source.width == 480 and color(p,true) and color(source,true) and good
+    }
+    preview.stop(root)
+    good=match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  provider.shutdown(struct.borrow(state,field=provider))
+  good
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) < 4 {return 2}
+  var mode: u64 = 0
+  loop {if mode == 9 {break}
+    let root: string = path.join(view.get(args,1),str.view(string.from_int(mode)))
+    if not case(str.view(root),mode) {io.write(text.concat("[GA_TEST_PIXELS] Failed stream case ",str.view(string.from_int(mode))))
+      return 1}
+    mode=mode+1
+  }
+  if not real(str.view(path.join(view.get(args,1),"real")),view.get(args,2),view.get(args,3)) {
+    io.write("[GA_TEST_PIXELS] Real stream pixels, source holding, resize, rewind, Reload or drag burst failed\n")
+    return 1}
+  io.write("Pixel stream: nine native cases, exact largest-preview RGBA bytes, slow consumer, held/empty/coalesced source, Stop/seek backpressure and coded malformed-frame recovery passed\n")
+  io.write("Real pixel stream: source/program colors, held-source preservation, monitor size changes, rewind, Reload, 32-request drag burst, no monitor mailbox files and idle Stop passed\n")
+  0
+}

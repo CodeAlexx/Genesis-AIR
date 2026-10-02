@@ -26,6 +26,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Retained playback painter | Twenty-four cases / 444 checks: every RGBA byte matches a complete paint across all four docks at 1x/1.5x/2x scaling, changing pictures and playhead positions, rewind, fullscreen, resize, transport changes, transparent pictures, themes, menus, prompts, keyed inspector values and project-decision/Save as cancellation; nine cases keep image dimensions fixed while transitioning between opaque, zero-alpha and mixed-alpha frames in the editor and both fullscreen monitors at three scales |
 | Native pixel handoff | MSVC headless RGB24/RGBA32 converter: all 65,536 channel/alpha pairs, byte/row order, invalid dimensions and buffer lengths; no GUI opened |
 | Asynchronous preview | Generated red/blue pixels after dragging the painted red playhead across lanes; time changes during the drag and the clip track stays intact; the final picture matches a 32-request drag; rewind restores frame-zero pixels; source playback reuses the program picture; actual clip edits invalidate it; actual red/blue thumbnail surfaces are checked both in the mailbox and in painted video-lane pixels; timeline bitmaps and embedded audio waveforms publish independently and wait during playback; fullscreen publishes 1280x720 pixels; replacing a LUT at the same path and requesting Reload changes red program pixels to blue; coded malformed-request and blocked-pixel-publication failures recover on the same worker; a reused image slot refuses its old generation; persisted Stop cancels an idle worker without a wake |
+| Streamed monitor pixels | Nine headless native transport cases verify every RGBA byte in two 1280x720 images, a consumer paused for 250 ms, source holding/clearing and coalescing before the first image is taken, Stop/seek during backpressure, and coded invalid/truncated/oversized/mismatched-frame recovery. Generated-media requests verify source/program colors, held-source preservation, size changes, rewind, Reload, a 32-request drag burst, absent monitor mailbox files and idle Stop |
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
 | Sequence/export quality | Six-frame 3840x2160 ProRes preserving four-pixel detail at 30000/1001 with 24-bit PCM; portrait preview square stays square; 1080x1920 H.264/HEVC output; exact held multicam cuts at frames 30/60 |
 | Precision/color/audio duration | 1024 distinct narrow-band values survive filtered three-layer FFV1 16-bit composition; a supplied 4K AV1/PQ source round trips into a 16-bit PQ/BT.2020 master; SDR preview agrees with the floating-point reference within mean 0.97/255; 100-nit SDR title white is converted to PQ correctly; HEVC HDR is 10-bit PQ/BT.2020; audio remains audible after 181 seconds |
@@ -35,7 +36,15 @@ clip and RTX 5080 measured 59.49 previews/second with D3D11 decode and the NVIDI
 device. It excludes mailbox conversion, canvas painting and audio, and does not
 establish sustained 60 fps in the window or long-run sync.
 
-The current opaque-background checkpoint headless diagnostic uses 20 samples
+Three paired ordinary-editor runs use 120 samples after three warmups on the supplied
+4K/59.94 AV1/PQ source, at 2560x1440 with 480x270 monitor surfaces. Alternating
+stream/file order, the median of per-run medians is 28.58/35.28 ms serial, about
+19% less work for the pixel stream. Request-to-ready is 25.99/28.90 ms, image import
+0.07/4.10 ms, publication 0.26/3.10 ms and painting 2.47/2.50 ms. Program-monitor
+preparation remains 23.52/23.53 ms. Native presentation, audio and overlap are
+excluded; sustained smooth 4K60 remains open. Fullscreen 4K work is deferred.
+
+The earlier opaque-background checkpoint headless diagnostic uses 20 samples
 after three warmups on the supplied 4K/59.94 AV1/PQ source at 2560x1440. Editor
 medians are 27.83 ms request-to-ready, 2.41 ms image loading,
 2.52 ms retained paint and 33.28 ms serial. Fullscreen medians are

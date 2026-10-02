@@ -425,7 +425,32 @@ changed picture dimensions also use a complete paint. Each retained monitor pain
 restores its panel bands and picture background before compositing, including transparent
 frames, so neither image needs a separate alpha scan. The opaque picture interior
 overwrites its destination once. Closing an overlay also repaints its former pixels.
-Physical pixel damage boundaries preserve fractional-DPI edges. The preview mailbox writes the existing RGBA bytes and imports them by bulk copy, preserving alpha.
+Physical pixel damage boundaries preserve fractional-DPI edges. The window transfers
+monitor RGBA pixels through bounded `std.channel` chunks, preserving alpha. Each complete
+frame validates dimensions, byte lengths and generation before becoming visible. A held
+source monitor is neither decoded nor transferred again; its last received pixels survive
+coalesced program frames. Credit waits retry in 50 ms steps and watch Stop/seek markers,
+so a slow consumer can resume without accepting an incomplete frame. File image slots
+remain available for headless diagnostics through `--file-pixels`.
+
+Three paired editor runs on the supplied 4K/59.94 AV1/PQ clip compare the stream
+with file delivery in the same build. Each run uses 120 samples after three warmups
+at 2560x1440, with 480x270 monitor surfaces; pair order alternates. The table gives
+the median of the three per-run medians:
+
+| Median phase (ms) | Pixel stream | File diagnostic |
+|---|---:|---:|
+| Request to ready notification | 25.99 | 28.90 |
+| Import completed images | 0.07 | 4.10 |
+| Worker frame publication | 0.26 | 3.10 |
+| Retained canvas paint | 2.47 | 2.50 |
+| Complete serial diagnostic | 28.58 | 35.28 |
+
+The serial diagnostic takes about 19% less time. Program-monitor preparation
+remains 23.52/23.53 ms, so decoder/compositor work is still the largest measured
+cost. These runs exclude native presentation, audio and pipeline overlap;
+sustained smooth 4K60 is not established. Current work targets ordinary editor
+playback; fullscreen 4K work is deferred.
 
 At the retained-painter checkpoint (`77ea56a`), retained painting took 7.39 ms
 median versus 42.23 ms for a complete paint. AIR now provides true nonblocking
@@ -461,17 +486,19 @@ and program-monitor preparation remain significant costs. Sustained smooth
 4K60 remains unfinished.
 
 ```powershell
-.\Genesis-AIR.exe profile-preview .\preview-profile.json .\project.air 2560 1440 20
+.\Genesis-AIR.exe profile-preview .\preview-profile.json .\project.air 2560 1440 120
+.\Genesis-AIR.exe profile-preview .\file-profile.json .\project.air 2560 1440 120 --file-pixels
 .\Genesis-AIR.exe profile-preview .\fullscreen-profile.json .\project.air 2560 1440 20 --fullscreen
 .\Genesis-AIR.exe profile-preview .\full-paint-profile.json .\project.air 2560 1440 20 --full-paint
 ```
 
-This command opens no window. Its `std.bench` JSON separates request-to-ready, mailbox
+This command opens no window. Its `std.bench` JSON separates request-to-ready, completed
 image loading, retained painting, borrowed presenter handoff and the serial pipeline.
 It also records wake coalescing, snapshot read/decode, source monitor, frame planning,
 program monitor, image publication and remaining request time. Those worker phases
 carry their frame generation, and their warmup/sample counts match the outer pipeline.
-Ordinary playback retains its small generation-only completion messages.
+The default profile follows the window's pixel stream; `--file-pixels` reproduces the
+file-slot diagnostic for comparison. Phase clocks are measured in the explicit profile.
 `--full-paint` measures a complete paint for comparison; it combines with `--fullscreen`. It validates
 published image dimensions and a painted panel pixel so an empty frame cannot pass.
 `GA_PROFILE_ARGS` identifies invalid dimensions/sample counts; `GA_PROFILE_PREVIEW`
@@ -512,7 +539,13 @@ red/blue pixels after a 32-request playhead drag, time changes during the drag,
 unchanged source caching, rewind to frame zero, painted timeline bitmaps and embedded
 audio waveform delivery. It also verifies coded malformed-request/publication
 failures, recovery on the same worker, refusal of a reused frame slot, fullscreen
-720p frames, in-place LUT reload and idle cancellation without a Stop wake. Project safety has 15 cases /
+720p frames, in-place LUT reload and idle cancellation without a Stop wake.
+The pixel-stream gate adds nine native transport cases: exact RGBA bytes in two
+1280x720 surfaces, a consumer paused for 250 ms, held/empty/coalesced source
+updates, Stop/seek during backpressure and coded malformed-frame recovery.
+Generated-media requests check independent source/program seeking, monitor size
+changes, rewind, Reload, a 32-request drag burst, absent monitor frame files and
+idle Stop. Project safety has 15 cases /
 84 checks for Save/Discard/Cancel, native close-request dispatch, failed-save retry,
 separate snapshots, paused final-edit autosave, atomic failure preservation, legacy
 recovery and selecting the active snapshot without replacing it while the decision is

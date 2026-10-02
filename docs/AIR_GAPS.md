@@ -140,8 +140,8 @@ and supports native D3D11 decode with software fallback. Decoder buffers are reu
 the FP32 compositor packs preview bytes on the GPU. OpenCL chooses a discrete GPU
 on hybrid PCs. The supplied 4K clip measured 59.49 worker previews/second over 120
 consecutive frames; mailbox conversion, actual window throughput and sustained 60 fps
-need further work. Fullscreen now requests a 1280x720 surface, with its size published
-beside each image slot. A media revision reaches the background provider on Reload,
+need further work. Fullscreen requests a 1280x720 surface, with its dimensions carried
+by the frame delivery protocol. A media revision reaches the background provider on Reload,
 Relink and project open, so unchanged document JSON cannot retain replaced media or LUTs.
 
 
@@ -314,3 +314,30 @@ are preserved with coded refusals. The latest full Windows gate measured 108–1
 for the five cancellations. These checks exercise pipe and process waits;
 CPU-bound frame-plan work and encoder behavior under sustained load need separate
 latency measurements.
+
+## Monitor pixels over the task channel
+
+The window now receives monitor pixels through the existing `std.channel` transport.
+Four 256 KiB message credits stay within its 1 MiB transport bound. A frame header
+declares dimensions, generation and byte counts; bounded reassembly accepts only a
+complete matching frame. Source updates have their own retained generation, so
+coalescing several program packets before painting cannot lose the source picture.
+Unchanged sources skip both the provider read and pixel transfer. Media revision or
+dimension changes invalidate that hold. Stop/seek retire a frame while credit waits
+retry in 50 ms steps; a slow consumer can resume on the same channel. The file-slot
+route remains an explicit headless diagnostic, selected with `--file-pixels`.
+
+Nine native transport cases cover exact largest-preview RGBA bytes, slow consumers,
+holding/clearing/coalescing, cancellation during backpressure and coded malformed
+frame recovery. Generated-media requests verify independent source/program seeking,
+dimension changes, rewind, Reload, a 32-request drag burst, no monitor frame files
+and idle Stop. No SDK or compositor change was needed.
+
+Three paired editor runs on the supplied 4K/59.94 AV1/PQ clip use 120 samples after
+three warmups, alternating stream/file order at 2560x1440 with 480x270 monitors.
+The median of per-run medians falls from 35.28 ms file delivery to 28.58 ms stream
+delivery for the serial diagnostic, about 19%. Publication falls from 3.10 to
+0.26 ms and image import from 4.10 to 0.07 ms. Program-monitor preparation remains
+23.53/23.52 ms and painting 2.50/2.47 ms. Native presentation, audio and overlap
+are excluded; sustained smooth 4K60 remains unfinished. Current performance work
+targets ordinary editor playback; fullscreen 4K work is deferred at the user's request.

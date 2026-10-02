@@ -1,4 +1,4 @@
-// Headless measurement of the actual preview mailbox and AIR window renderer.
+// Headless measurement of actual preview frame delivery and the AIR window renderer.
 // It excludes audio and the native present call; it opens no window.
 module genesis.preview_profile
 import std.bench as bench
@@ -20,7 +20,7 @@ fn same_color(a: draw.Color, b: draw.Color) -> bool effects {} {
 }
 
 pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
-    fullscreen: bool, samples: u64, full_paint: bool) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, net, process, thread, time} {
+    fullscreen: bool, samples: u64, full_paint: bool, file_pixels: bool) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, net, process, thread, time} {
   if width < 640 or height < 480 or width > 3840 or height > 2160 or samples == 0 or samples > 120 {
     io.write("[GA_PROFILE_ARGS] Use a 640x480..3840x2160 window and 1..120 samples\n")
     return 2
@@ -28,10 +28,11 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   let root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "profile")
   let _ = files.mkdirs(str.view(root))
   preview.reset(str.view(root))
-  var transport: link.Link = match link.open() {ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+  var transport: link.Link = match if file_pixels {link.open()}else{link.open_pixels()} {ok(value)=>value,err(problem)=>{io.write(str.view(problem))
     return 1},}
   var configured: preview.Config = preview.config(state, str.view(root), link.ticket(transport))
   struct.set(configured,true,field=profile)
+  struct.set(configured,not file_pixels,field=pixel_stream)
   struct.set(state, if fullscreen { 1 } else { 0 }, field=fullscreen)
   let _ = editor.program_action(struct.borrow(state, field=document), editor.play())
   let pixels: u64 = cast.wrap(width) * cast.wrap(height)
@@ -39,7 +40,7 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   let monitor_height: u32 = if fullscreen { 720 } else { 270 }
   let monitor_pixels: u64 = cast.wrap(monitor_width) * cast.wrap(monitor_height)
   var ready: bench.Bench = bench.new("request_to_ready", "wake delivery, serialized document, worker decode/composite, monitor conversion and ready notification", monitor_pixels, "pixels", 3, samples)
-  var read: bench.Bench = bench.new("read_images", "RGBA mailbox images into AIR surfaces by bulk copy", monitor_pixels, "pixels", 3, samples)
+  var read: bench.Bench = bench.new("read_images", "completed RGBA pixels into AIR surfaces by bulk copy", monitor_pixels, "pixels", 3, samples)
   var paint: bench.Bench = bench.new("paint", if full_paint { "complete editor paint at physical window dimensions" } else { "retained playback paint at physical window dimensions" }, pixels, "pixels", 3, samples)
   var pack: bench.Bench = bench.new("present_handoff", "borrow the RGBA canvas bytes consumed by the native presenter", pixels, "pixels", 3, samples)
   var total: bench.Bench = bench.new("serial_pipeline", "preview mailbox plus CPU paint and the borrowed presenter handoff, without audio or native present", pixels, "pixels", 3, samples)
@@ -47,7 +48,7 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   var source_stage: bench.Bench = bench.new("source_monitor", "source monitor decode or held frame read", monitor_pixels, "pixels", 3, samples)
   var planning: bench.Bench = bench.new("frame_planning", "program wire plan and document cache signature", 1, "frames", 3, samples)
   var program_stage: bench.Bench = bench.new("program_monitor", "worker request/reply, composition, pixel read and monitor resize", monitor_pixels, "pixels", 3, samples)
-  var publication: bench.Bench = bench.new("frame_publication", "atomic image slot, dimensions and generation publication", monitor_pixels, "pixels", 3, samples)
+  var publication: bench.Bench = bench.new("frame_publication", "bounded pixel transfer and completion, or diagnostic frame files", monitor_pixels, "pixels", 3, samples)
   var coalescing: bench.Bench = bench.new("wake_coalescing", "drain queued wake commands before reading the newest snapshot", 1, "frames", 3, samples)
   var remaining: bench.Bench = bench.new("remaining_request_time", "document encoding, request publication, completion delivery and unclassified overhead", 1, "frames", 3, samples)
   bench.expect(snapshot,1)
@@ -65,6 +66,7 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   var renderer: painter.Renderer = painter.renderer()
   var iteration: u64 = 0
   var failure: bool = false
+  var source: draw.Surface = draw.empty_surface()
   task.scope {
     var jobs: array<task<bool>> = array.new()
     array.push(jobs, task.spawn(configured, fn=preview.run))
@@ -109,9 +111,10 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
       let stages: u64 = timing.request_ns+timing.source_ns+timing.plan_ns+timing.program_ns+timing.publish_ns+timing.coalesce_ns
       bench.record_ns(remaining,if elapsed >= stages {elapsed-stages}else{0},1)
       let read_begin: u64 = bench.mark()
-      var images: array<draw.Surface> = preview.read_images(str.view(root), iteration)
+      var images: array<draw.Surface> = if file_pixels {preview.read_images(str.view(root),iteration)}else{link.take_images(transport,iteration)}
       var program: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
-      var source: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
+      var new_source: draw.Surface = match array.pop(images) {some(value) => value, none => draw.empty_surface(),}
+      if file_pixels or not link.holds_source(transport) {let _ = ref.swap(source,new_source)}
       let actual_pixels: u64 = cast.wrap(program.width) * cast.wrap(program.height)
       let _ = bench.observe(read, read_begin, actual_pixels)
       if actual_pixels != monitor_pixels { failure = true
@@ -140,7 +143,7 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
   }
   if failure { io.write("[GA_PROFILE_PREVIEW] The preview did not publish a complete frame\n")
     return 1 }
-  var group: bench.Group = bench.group("Genesis preview CPU and mailbox phases")
+  var group: bench.Group = bench.group("Genesis preview frame delivery and CPU phases")
   bench.add(group, ready, 120)
   bench.add(group, read, 120)
   bench.add(group, paint, 120)

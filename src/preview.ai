@@ -24,13 +24,18 @@ fn program_signature(document: ref<editor.Document>) -> string effects {alloc} {
   match editor_io.encode(copy) {ok(value) => value, err(_) => string.new(),}
 }
 
-pub type Images = struct {pictures: array<draw.Surface>, source_ns: u64, plan_ns: u64, program_ns: u64}
+pub type Images = struct {pictures: array<draw.Surface>, source_ns: u64, plan_ns: u64, program_ns: u64,
+  source_key: string, source_held: bool}
 pub fn images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface>
     effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var reply: Images = images_measured(state,width,height,false)
   struct.replace(reply,array.new(),field=pictures)
 }
 pub fn images_measured(state: ref<app.App>, width: u32, height: u32, profile: bool) -> Images effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  images_with_source(state,width,height,profile,"")
+}
+fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: bool, previous_source: str)
+    -> Images effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var out: array<draw.Surface> = array.new()
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let monitor_source: u64 = document.monitor_source
@@ -68,9 +73,14 @@ pub fn images_measured(state: ref<app.App>, width: u32, height: u32, profile: bo
     index = index + 1
   }
   let source_begin: u64 = if profile {time.monotonic_ns()}else{0}
-  if str.len(str.view(source_path)) != 0 {
+  var key_fields: array<string> = [provider.wire_path(str.view(source_path)),string.from_int(monitor_frame),
+    string.from_int(width),string.from_int(height)]
+  var source_key: string = text.join(key_fields,"\t")
+  let source_held: bool = str.eq(str.view(source_key),previous_source)
+  if not source_held and str.len(str.view(source_path)) != 0 {
     var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider),
       str.view(source_path), monitor_frame, width, height)
+    if not shot.ok {source_key=string.new()}
     array.push(out, provider.take_pixels(shot))
   } else {
     array.push(out, draw.empty_surface())
@@ -112,7 +122,7 @@ pub fn images_measured(state: ref<app.App>, width: u32, height: u32, profile: bo
     program_frame, width, height) }
   let program_ns: u64 = if profile {time.monotonic_ns()-program_begin-plan_ns}else{0}
   array.push(out, provider.take_pixels(program))
-  Images {pictures:out,source_ns:source_ns,plan_ns:plan_ns,program_ns:program_ns}
+  Images {pictures:out,source_ns:source_ns,plan_ns:plan_ns,program_ns:program_ns,source_key:source_key,source_held:source_held}
 }
 
 // Fill the waveform cache for every clip with audio, including video clips. This is the only place the application asks
@@ -182,7 +192,7 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
 }
 
 
-pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>, events: channel.Ticket, profile: bool}
+pub type Config = struct {worker: string, ffprobe: string, scratch: string, kind: u32, fonts: array<string>, events: channel.Ticket, profile: bool, pixel_stream: bool}
 pub fn config(state: ref<app.App>, root: str, events: channel.Ticket own) -> Config effects {alloc} {
   let kind: u32 = struct.get(struct.borrow(state, field=provider), field=kind)
   let worker: string = provider.worker_path(struct.borrow(state, field=provider))
@@ -193,7 +203,7 @@ pub fn config(state: ref<app.App>, root: str, events: channel.Ticket own) -> Con
     array.push(fonts, string.copy(str.view(array.borrow(struct.borrow(state, field=fonts), i))))
     i = i + 1
   }
-  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts, events: events, profile: false}
+  Config {worker: worker, ffprobe: ffprobe, scratch: string.copy(root), kind: kind, fonts: fonts, events: events, profile: false, pixel_stream: false}
 }
 
 fn publish_checked(root: str, name: str, value: str) -> bool effects {alloc, fs.write} {
@@ -414,6 +424,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
   let _ = struct.replace(state, struct.replace(owned, array.new(), field=fonts), field=fonts)
   var seen: u64 = 0
   var media_revision: u64 = 0
+  var held_source: string = string.new()
   loop {
     if tasks.requested_at(str.view(path.join(str.view(root), "stop"))) { break }
     if not link.next(wake) { break }
@@ -448,6 +459,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     if revision != media_revision {
       provider.restart(struct.borrow(state, field=provider))
       media_revision = revision
+      let _ = ref.swap(held_source,string.new())
     }
     // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
     if width == 0 or height == 0 or width > 1280 or height > 720 {
@@ -455,14 +467,26 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       continue
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
-    var measured: Images = images_measured(state,width,height,owned.profile)
+    let previous_source: string = if owned.pixel_stream {string.copy(str.view(held_source))}else{string.new()}
+    var measured: Images = images_with_source(state,width,height,owned.profile,str.view(previous_source))
     let source_ns: u64 = measured.source_ns
     let plan_ns: u64 = measured.plan_ns
     let program_ns: u64 = measured.program_ns
     var rendered: array<draw.Surface> = struct.replace(measured,array.new(),field=pictures)
-    let publish_begin: u64 = if owned.profile {time.monotonic_ns()}else{0}
+    let publish_begin: u64 = if owned.profile or owned.pixel_stream {time.monotonic_ns()}else{0}
     var program: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
     var source: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
+    if owned.pixel_stream {
+      let timing: link.FrameTiming = link.FrameTiming {generation:id,request_ns:request_ns,source_ns:source_ns,
+        plan_ns:plan_ns,program_ns:program_ns,publish_ns:0,coalesce_ns:wake.last_drain_ns}
+      match link.notify_pixels(wake,str.view(root),source,program,
+          str.view(provider.last_error(struct.borrow(state,field=provider))),measured.source_held,timing,publish_begin) {
+        ok(delivered)=>{if not delivered {continue}
+          let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))},
+        err(problem)=>{link.fail(wake,id,str.view(problem))
+          break},
+      }
+    } else {
     let marker: string = text.concat("frame",text.concat(str.view(string.from_int(id % 2)),".id"))
     if not publish_checked(str.view(root),str.view(marker),"0") {
       link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot reserve the next frame slot")
@@ -487,6 +511,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       link.notify_frame(wake,id,request_ns,source_ns,plan_ns,program_ns,time.monotonic_ns()-publish_begin,wake.last_drain_ns)
     }else{link.notify(wake,1,id)}
     if not delivered { break }
+    }
     if not editor.playing(struct.borrow(state, field=document)) and
         not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) {
       let _ = waveforms(state)

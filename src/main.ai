@@ -326,11 +326,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   let preview_root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "preview")
   let _ = files.mkdirs(str.view(preview_root))
   preview.reset(str.view(preview_root))
-  var preview_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
+  var preview_transport: preview_link.Link = match preview_link.open_pixels() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
     audio_playback.stop(str.view(audio_root))
     let _ = preview_link.wake(audio_transport,true)
     return 1},}
-  let config: preview.Config = preview.config(state, str.view(preview_root), preview_link.ticket(preview_transport))
+  var config: preview.Config = preview.config(state, str.view(preview_root), preview_link.ticket(preview_transport))
+  struct.set(config,true,field=pixel_stream)
   array.push(preview_jobs, task.spawn(config, fn=preview.run))
   match preview_link.connect(preview_transport) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))
     preview.stop(str.view(preview_root))
@@ -376,13 +377,14 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     preview_channel_error=channel_error
     let ready: u64 = preview_transport.ready
     if ready > preview_seen {
-      var images: array<draw.Surface> = preview.read_images(str.view(preview_root), ready)
+      var images: array<draw.Surface> = preview_link.take_images(preview_transport,ready)
       if array.len(images) == 2 {
         preview_seen = ready
         let _ = ref.swap(program_image, option.unwrap(array.pop(images)))
-        let _ = ref.swap(source_image, option.unwrap(array.pop(images)))
+        var new_source: draw.Surface = option.unwrap(array.pop(images))
+        if not preview_link.holds_source(preview_transport) {let _ = ref.swap(source_image,new_source)}
       }
-      let problem: string = preview.error(str.view(preview_root))
+      let problem: string = string.copy(str.view(struct.borrow(preview_transport,field=pixel_error)))
       if str.len(str.view(problem)) != 0 and not str.eq(str.view(problem), str.view(preview_error)) {
         app.set_status(state, str.view(problem))
       }
@@ -876,16 +878,18 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
     let samples: u64 = if view.len(args) > 6 { match text.parse_u64(view.get(args, 6)) {some(value) => value, none => 0,} } else { 20 }
     var full_monitor: bool = false
     var full_paint: bool = false
+    var file_pixels: bool = false
     var flag: u64 = 7
     loop { if flag >= view.len(args) { break }
       let argument: str = view.get(args, flag)
       if str.eq(argument, "--fullscreen") { full_monitor = true }
       else if str.eq(argument, "--full-paint") { full_paint = true }
+      else if str.eq(argument, "--file-pixels") { file_pixels = true }
       else { say("[GA_PROFILE_ARGS] Unknown profile-preview option")
         return 2 }
       flag = flag + 1
     }
-    return preview_profile.run(state, view.get(args, 2), width, height, full_monitor, samples, full_paint)
+    return preview_profile.run(state, view.get(args, 2), width, height, full_monitor, samples, full_paint, file_pixels)
   }
 
   if str.eq(verb, "render") {

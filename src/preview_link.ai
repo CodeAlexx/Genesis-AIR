@@ -1,9 +1,13 @@
 // Bounded command/event lanes wake the preview task and native event loop.
-// Pixels stay in the existing double-buffered RGBA mailbox.
+// The window streams bounded pixel chunks; file frames remain available to diagnostics.
 module genesis.preview_link
 import std.channel as channel
 import std.gui as gui
 import std.text as text
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.tasks as tasks
 
 pub type FrameTiming = struct {
   generation: u64, request_ns: u64, source_ns: u64, plan_ns: u64,
@@ -14,16 +18,26 @@ fn empty_timing() -> FrameTiming effects {} {
 }
 pub type Link = struct {
   events: channel.Receiver, commands: array<channel.Sender>,
-  ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64, timing: FrameTiming
+  ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64, timing: FrameTiming,
+  pixel_stream: bool, pending_pixels: channel.ChunkBuffer, pending_info: array<u64>,
+  pixel_info: array<u64>, pixel_data: bytes, pixel_error: string,
+  source_data: bytes, source_width: u32, source_height: u32, source_generation: u64, source_taken: u64, source_held: bool
 }
 pub type Peer = struct {events: channel.Sender, commands: channel.Receiver, last_drain_ns: u64}
 fn problem(detail: str) -> string effects {alloc} { text.concat("[GA_PREVIEW_CHANNEL] ", detail) }
 pub fn open() -> result<Link,string> effects {alloc,net,time} {
-  var events: channel.Receiver = match channel.open(64,1024) {
+  open_mode(false)
+}
+pub fn open_pixels() -> result<Link,string> effects {alloc,net,time} {open_mode(true)}
+fn open_mode(pixels: bool) -> result<Link,string> effects {alloc,net,time} {
+  var events: channel.Receiver = match channel.open(if pixels {4}else{64},if pixels {262144}else{1024}) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
   result.ok(Link {events:events,commands:array.new(),ready:0,waveforms:0,
-    thumbnails:0,closed:false,error:string.new(),error_generation:0,timing:empty_timing()})
+    thumbnails:0,closed:false,error:string.new(),error_generation:0,timing:empty_timing(),
+    pixel_stream:pixels,pending_pixels:channel.chunk_buffer(7376896),pending_info:array.new(),
+    pixel_info:array.new(),pixel_data:bytes.copy(b""),pixel_error:string.new(),source_data:bytes.copy(b""),
+    source_width:0,source_height:0,source_generation:0,source_taken:0,source_held:false})
 }
 pub fn ticket(link: ref<Link>) -> channel.Ticket effects {alloc} {
   channel.ticket(struct.borrow(link,field=events))
@@ -104,6 +118,159 @@ pub fn notify_frame(peer: ref<Peer>, generation: u64, request_ns: u64, source_ns
   match channel.send(struct.borrow(peer,field=events),1,str.bytes(str.view(payload)),
     time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,}
 }
+
+// A full credit lane is resumable. Poll its credit wait in short steps so native
+// modal dialogs can hold the consumer without poisoning the stream, while Stop
+// or a new committed seek can still retire an incomplete frame.
+fn send_pixels_part(peer: ref<Peer>, root: str, id: u64, kind: u64, data: view<byte>)
+    -> result<bool,string> effects {alloc,fs.meta,fs.read,net,time} {
+  loop {
+    match channel.send(struct.borrow(peer,field=events),kind,data,time.monotonic_ns()+50000000) {
+      ok(_)=>{return result.ok(true)},
+      err(error)=>{
+        if error.code != channel.code_full() {return result.err(problem(str.view(channel.message(error))))}
+        if str.len(root) != 0 {
+          if tasks.requested_at(path.join(root,"stop")) {return result.ok(false)}
+          let current: string = match files.read_text(path.join(root,"request.id")) {
+            ok(value)=>value,err(_)=>{return result.err("[GA_PREVIEW_REQUEST] Cannot read the pixel request marker")},
+          }
+          if not str.eq(str.view(text.trim(str.view(current))),str.view(string.from_int(id))) {return result.ok(false)}
+        }
+      },
+    }
+  }
+  result.ok(false)
+}
+fn send_pixel_bytes(peer: ref<Peer>, root: str, id: u64, data: view<byte>)
+    -> result<bool,string> effects {alloc,fs.meta,fs.read,net,time} {
+  var offset: u64 = 0
+  loop {if offset >= view.len(data) {break}
+    let count: u64 = if view.len(data)-offset > 262144 {262144}else{view.len(data)-offset}
+    if not try send_pixels_part(peer,root,id,6,view.slice(data,offset,offset+count)) {return result.ok(false)}
+    offset=offset+count
+  }
+  result.ok(true)
+}
+pub fn notify_pixels(peer: ref<Peer>, root: str, source: ref<draw.Surface>, program: ref<draw.Surface>,
+    detail: str, held_source: bool, timing: FrameTiming, publish_begin: u64) -> result<bool,string>
+    effects {alloc,fs.meta,fs.read,net,time} {
+  let source_pixels: view<byte> = array.view(struct.borrow(source,field=pixels))
+  let program_pixels: view<byte> = array.view(struct.borrow(program,field=pixels))
+  let values: array<u64> = [timing.generation,cast.wrap(source.width),cast.wrap(source.height),
+    cast.wrap(program.width),cast.wrap(program.height),view.len(source_pixels),view.len(program_pixels),str.len(detail),if held_source {1}else{0}]
+  var header: string = string.new()
+  var index: u64 = 0
+  loop {if index == 9 {break}
+    if index != 0 {string.append(header,"\t")}
+    string.append(header,str.view(string.from_int(array.get(values,index))))
+    index=index+1
+  }
+  if not try send_pixels_part(peer,root,timing.generation,5,str.bytes(str.view(header))) {return result.ok(false)}
+  if not try send_pixel_bytes(peer,root,timing.generation,source_pixels) {return result.ok(false)}
+  if not try send_pixel_bytes(peer,root,timing.generation,program_pixels) {return result.ok(false)}
+  if not try send_pixel_bytes(peer,root,timing.generation,str.bytes(detail)) {return result.ok(false)}
+  let fields: array<u64> = [timing.generation,timing.request_ns,timing.source_ns,timing.plan_ns,
+    timing.program_ns,time.monotonic_ns()-publish_begin,timing.coalesce_ns]
+  var done: string = string.new()
+  index=0
+  loop {if index == 7 {break}
+    if index != 0 {string.append(done,"\t")}
+    string.append(done,str.view(string.from_int(array.get(fields,index))))
+    index=index+1
+  }
+  send_pixels_part(peer,root,timing.generation,1,str.bytes(str.view(done)))
+}
+fn pixel_failure(link: ref<Link>, generation: u64, detail: str) -> unit effects {alloc} {
+  let _ = struct.replace(link,channel.chunk_buffer(7376896),field=pending_pixels)
+  let _ = struct.replace(link,array.new(),field=pending_info)
+  struct.set(link,generation,field=error_generation)
+  let _ = struct.replace(link,text.concat("[GA_PREVIEW_PIXELS] ",detail),field=error)
+  ()
+}
+fn begin_pixels(link: ref<Link>, header: str) -> unit effects {alloc} {
+  var fields: array<string> = text.split(header,"\t")
+  var numbers: array<u64> = array.new()
+  if array.len(fields) != 9 {pixel_failure(link,link.ready+1,"Invalid frame header")
+    return ()}
+  var at: u64 = 0
+  loop {if at == 9 {break}
+    let value: u64 = match text.parse_u64(str.view(array.borrow(fields,at))) {
+      some(value)=>value,none=>{pixel_failure(link,link.ready+1,"Invalid frame dimensions")
+        return ()},
+    }
+    array.push(numbers,value)
+    at=at+1
+  }
+  let id: u64 = array.get(numbers,0)
+  if id <= link.ready or array.get(numbers,1) > 1280 or array.get(numbers,2) > 720 or
+      array.get(numbers,3) > 1280 or array.get(numbers,4) > 720 or array.get(numbers,7) > 4096 or array.get(numbers,8) > 1 or
+      (array.get(numbers,8) == 1 and (array.len(struct.borrow(link,field=pixel_info)) != 9 or array.get(numbers,5) != 0)) or
+      ((array.get(numbers,1) == 0) != (array.get(numbers,2) == 0)) or
+      ((array.get(numbers,3) == 0) != (array.get(numbers,4) == 0)) or
+      array.get(numbers,5) != array.get(numbers,1)*array.get(numbers,2)*4 or
+      array.get(numbers,6) != array.get(numbers,3)*array.get(numbers,4)*4 {
+    pixel_failure(link,id,"Invalid frame dimensions or byte lengths")
+    return ()
+  }
+  let _ = struct.replace(link,channel.chunk_buffer(7376896),field=pending_pixels)
+  let _ = channel.begin_chunks(struct.borrow(link,field=pending_pixels),array.get(numbers,5)+array.get(numbers,6)+array.get(numbers,7))
+  let _ = struct.replace(link,numbers,field=pending_info)
+  ()
+}
+fn finish_pixels(link: ref<Link>, generation: u64) -> bool effects {alloc} {
+  var info: array<u64> = struct.replace(link,array.new(),field=pending_info)
+  if array.len(info) != 9 or array.get(info,0) != generation {pixel_failure(link,generation,"Frame completion does not match its header")
+    return false}
+  var raw: bytes = match channel.finish_chunks(struct.borrow(link,field=pending_pixels)) {
+    some(value)=>value,none=>{pixel_failure(link,generation,"Incomplete pixel frame")
+      return false},
+  }
+  let offset: u64 = array.get(info,5)+array.get(info,6)
+  let detail: string = match str.from_bytes(view.slice(bytes.view(raw),offset,view.len(bytes.view(raw)))) {
+    some(value)=>string.copy(value),none=>{pixel_failure(link,generation,"Invalid frame error text")
+      return false},
+  }
+  // Preserve source updates independently of the newest program packet. Poll
+  // can coalesce several completed frames before the consumer paints any of them.
+  if array.get(info,8) == 0 {
+    let _ = struct.replace(link,bytes.copy(view.slice(bytes.view(raw),0,array.get(info,5))),field=source_data)
+    struct.set(link,cast.sat(array.get(info,1)),field=source_width)
+    struct.set(link,cast.sat(array.get(info,2)),field=source_height)
+    struct.set(link,generation,field=source_generation)
+  }
+  let _ = struct.replace(link,detail,field=pixel_error)
+  let _ = struct.replace(link,raw,field=pixel_data)
+  let _ = struct.replace(link,info,field=pixel_info)
+  true
+}
+pub fn take_images(link: ref<Link>, id: u64) -> array<draw.Surface> effects {alloc} {
+  let info: ref<array<u64>> = struct.borrow(link,field=pixel_info)
+  var out: array<draw.Surface> = array.new()
+  if array.len(info) != 9 or array.get(info,0) != id {return out}
+  let program_width: u32 = cast.sat(array.get(info,3))
+  let program_height: u32 = cast.sat(array.get(info,4))
+  let source_len: u64 = array.get(info,5)
+  let program_len: u64 = array.get(info,6)
+  let held: bool = link.source_taken == link.source_generation
+  struct.set(link,held,field=source_held)
+  let source_width: u32 = link.source_width
+  let source_height: u32 = link.source_height
+  let source_generation: u64 = link.source_generation
+  array.push(out,if held {draw.empty_surface()}else{
+    match draw.surface_from_rgba(source_width,source_height,bytes.view(struct.borrow(link,field=source_data))) {
+      some(value)=>value,none=>draw.empty_surface(),
+    }
+  })
+  struct.set(link,source_generation,field=source_taken)
+  let data: view<byte> = bytes.view(struct.borrow(link,field=pixel_data))
+  array.push(out,match draw.surface_from_rgba(program_width,program_height,view.slice(data,source_len,source_len+program_len)) {
+    some(value)=>value,none=>draw.empty_surface(),
+  })
+  out
+}
+pub fn holds_source(link: ref<Link>) -> bool effects {} {
+  link.source_held
+}
 pub fn finish(peer: ref<Peer>, generation: u64) -> unit effects {alloc,net,time} {
   let _ = notify(peer,9,generation)
   let sender: channel.Sender = struct.replace(peer,channel.orphan(),field=events)
@@ -123,6 +290,19 @@ pub fn fail(peer: ref<Peer>, generation: u64, detail: str) -> unit effects {allo
 }
 fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
   var item: channel.Message = message
+  if item.kind == 5 {
+    if not link.pixel_stream {pixel_failure(link,link.ready+1,"Unexpected pixel frame")
+      return ()}
+    match channel.text_of(item) {some(value)=>begin_pixels(link,str.view(value)),none=>pixel_failure(link,link.ready+1,"Invalid frame header text"),}
+    return ()
+  }
+  if item.kind == 6 {
+    if not channel.append_chunk(struct.borrow(link,field=pending_pixels),bytes.view(struct.borrow(item,field=data))) {
+      let generation: u64 = if array.len(struct.borrow(link,field=pending_info)) == 9 {array.get(struct.borrow(link,field=pending_info),0)}else{link.ready+1}
+      pixel_failure(link,generation,"Unexpected or oversized pixel chunk")
+    }
+    return ()
+  }
   if item.kind == 9 {struct.set(link,true,field=closed)
     return ()}
   let value: string = match channel.text_of(item) {some(value)=>value,none=>string.new(),}
@@ -156,6 +336,7 @@ fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
     }
   }
   if item.kind == 1 and generation > link.ready {
+    if link.pixel_stream and not finish_pixels(link,generation) {return ()}
     struct.set(link,generation,field=ready)
     if generation >= link.error_generation {
       let _ = struct.replace(link,string.new(),field=error)
