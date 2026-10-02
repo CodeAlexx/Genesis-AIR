@@ -359,6 +359,14 @@ source endpoints and length. Both readers and painting reject obsolete mappings 
 editing, and a strip slot is reserved before reuse. Native generated-media checks cover
 publication during playback, reverse/trim/2x mappings and incomplete-slot preservation.
 
+`tests/frame_identity.py` adds a lossless fixture with a different RGB color on every
+frame, independently decoded by FFmpeg before the native application test. Forty-four
+source/program picture pairs and their completed frame stamps, and 128 timeline
+bitmap surfaces, match independently specified colors and integer frame mappings.
+The cases cover 23.976-to-29.97 fps conversion, nonzero clip placement, trim, reverse,
+1.25x/0.5x speed and rewind. Scene-only fixtures could miss a one-frame seek error;
+this check verifies the actual picture within each scene. It is part of the Windows gate.
+
 The RGB histogram previously painted green and blue bars up to the previous channel's
 height, hiding equal-height bins. Independent bars now share one baseline. Native pixel
 checks cover all three channels in white/black pictures, a blue program with a red source

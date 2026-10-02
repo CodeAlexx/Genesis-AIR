@@ -549,6 +549,17 @@ sync measurements. Run that gate separately with:
 python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe --cancel-client .\build-windows\native-pro\bin\Release\genesis-audio-cancel.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
 ```
 
+The Windows gate also checks a lossless fixture with a different RGB color on every
+frame, independently decoded by FFmpeg. Forty-four source/program picture pairs and
+their time stamps, plus 128 actual timeline bitmaps, match the expected native frames.
+Cases use 23.976 fps media in a 29.97 fps sequence, a clip placed away from frame zero,
+trim, reverse, 1.25x/0.5x speed and rewind. This catches an early/late frame within a
+scene as well as a wrong scene. Run the check separately with:
+
+```powershell
+python tests/frame_identity.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-preview-stream.exe
+```
+
 The Windows gate also compares sixty-second and ten-minute reversed PCM sources,
 unequal output pulls, continuous reverse/delay/2x output, fractional 44.1 kHz trims and
 a complete twelve-second AAC reversal against independent samples or a whole pass.

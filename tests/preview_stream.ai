@@ -331,8 +331,142 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
   provider.shutdown(struct.borrow(state,field=provider))
   good
 }
+// The fixture has a different independently specified RGB color on every frame.
+// Scene-only colors cannot catch a decoder that seeks one frame too early/late.
+fn identity_color(surface: ref<draw.Surface>, frame: i64) -> bool effects {alloc,io.write} {
+  let expected_r: i64 = 32+(frame*37)%192
+  let expected_g: i64 = 32+(frame*73)%192
+  let expected_b: i64 = 32+(frame*109)%192
+  let pixel: draw.Color = match draw.surface_pixel(surface,surface.width/2,surface.height/2) {
+    some(value)=>value,none=>{return false},
+  }
+  let r: i64 = cast.wrap(pixel.r)
+  let g: i64 = cast.wrap(pixel.g)
+  let b: i64 = cast.wrap(pixel.b)
+  let good: bool = r >= expected_r-2 and r <= expected_r+2 and
+    g >= expected_g-2 and g <= expected_g+2 and b >= expected_b-2 and b <= expected_b+2
+  if not good {
+    io.write(text.concat("[GA_TEST_FRAME_IDENTITY] Frame ",str.view(string.from_int(frame))))
+    io.write(text.concat(" expected R ",str.view(string.from_int(expected_r))))
+    io.write(text.concat(" got R ",str.view(string.from_int(r))))
+    io.write(text.concat(" G ",str.view(string.from_int(g))))
+    io.write(text.concat(" B ",text.concat(str.view(string.from_int(b)),"\n")))
+  }
+  good
+}
+fn identity_sample(phase: u64, local: i64) -> i64 effects {} {
+  if phase == 0 {local*4/5}
+  else if phase == 1 {(99-local)*4/5}
+  else if phase == 2 {4+local}
+  else {(40+local*4)/10}
+}
+fn frame_identity(root: str, worker: str, media: str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App = app.app(provider.gcompose(worker,root))
+  let imported: commands.Result = commands.import_media(state,media,"frame identity")
+  if not imported.ok {return false}
+  let active: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  if not editor.set_sequence_format(struct.borrow(state,field=document),active,320,180,30000.0/1001.0) {return false}
+  let placed: commands.Result = commands.append_clip(state,app.default_video_track(state),imported.value,0,100)
+  if not placed.ok {return false}
+  let _ = commands.move_clip(state,placed.value,app.default_video_track(state),7)
+  let _ = commands.open_source(state,imported.value)
+  var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var configured: preview.Config = preview.config(state,root,link.ticket(transport))
+  struct.set(configured,true,field=pixel_stream)
+  let strip_root: string = path.join(root,"strips")
+  let _ = files.mkdirs(str.view(strip_root))
+  preview.reset(str.view(strip_root))
+  var strip_transport: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  var strips: preview.Config = preview.config(state,str.view(strip_root),link.ticket(strip_transport))
+  struct.set(strips,true,field=strips_only)
+  var good: bool = true
+  var monitor_checks: u64 = 0
+  var bitmap_checks: u64 = 0
+  var source_picture: draw.Surface = draw.empty_surface()
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(configured,fn=preview.run))
+    array.push(jobs,task.spawn(strips,fn=preview.run))
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,} and good
+    good=match link.connect(strip_transport) {ok(_)=>true,err(_)=>false,} and good
+    var id: u64 = 0
+    var phase: u64 = 0
+    loop {if phase == 4 {break}
+      if phase == 1 {good=editor.set_clip_reverse(struct.borrow(state,field=document),placed.value,true) and good}
+      if phase == 2 {
+        good=editor.set_clip_reverse(struct.borrow(state,field=document),placed.value,false) and good
+        good=editor.trim_start(struct.borrow(state,field=document),placed.value,12) and good
+        good=editor.trim_end(struct.borrow(state,field=document),placed.value,80) and good
+        good=editor.set_clip_speed(struct.borrow(state,field=document),placed.value,1.25) and good
+      }
+      if phase == 3 {good=editor.set_clip_speed(struct.borrow(state,field=document),placed.value,0.5) and good}
+      let clip: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),placed.value))
+      let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+      let encoded: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+      let strip_id: u64 = phase+1
+      good=preview.request_revision(str.view(strip_root),str.view(encoded),strip_id,0,40.0,450,480,270,0) and good
+      good=match link.wake(strip_transport,false) {ok(_)=>true,err(_)=>false,} and good
+      good=match link.await_event(strip_transport,3,strip_id,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+      good=preview.read_thumbnails(state,str.view(strip_root),strip_id) and good
+      let thumbs: ref<array<app.Thumbnail>> = struct.borrow(state,field=thumbnails)
+      good=array.len(thumbs) == 32 and good
+      var at: u64 = 0
+      loop {if at >= array.len(thumbs) {break}
+        let thumb: ref<app.Thumbnail> = array.borrow(thumbs,at)
+        let expected: i64 = identity_sample(phase,thumb.frame-clip.start)
+        good=thumb.source_frame == expected and identity_color(struct.borrow(thumb,field=pixels),expected) and good
+        bitmap_checks=bitmap_checks+1
+        at=at+1
+      }
+      var offsets: array<i64> = [0,1,2,3,4,5,17,31,59,79,0]
+      at=0
+      loop {if at >= array.len(offsets) {break}
+        let local: i64 = array.get(offsets,at)
+        let expected: i64 = identity_sample(phase,local)
+        let _ = editor.seek(struct.borrow(state,field=document),clip.start+local)
+        let _ = editor.seek_monitor(struct.borrow(state,field=document),expected)
+        id=id+1
+        good=request(state,transport,root,id,480,270,0) and good
+        good=match link.await_ready(transport,id,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+        good=transport.position.program_frame == clip.start+local and transport.position.source_frame == expected and good
+        var pictures: array<draw.Surface> = link.take_images(transport,id)
+        good=array.len(pictures) == 2 and good
+        if array.len(pictures) == 2 {
+          var p: draw.Surface = option.unwrap(array.pop(pictures))
+          var s: draw.Surface = option.unwrap(array.pop(pictures))
+          if not link.holds_source(transport) {let _ = ref.swap(source_picture,s)}
+          good=identity_color(p,expected) and identity_color(source_picture,expected) and good
+          struct.set(state,transport.position.program_frame,field=presented_program_frame)
+          struct.set(state,transport.position.source_frame,field=presented_source_frame)
+          good=app.timeline_frame(state) == clip.start+local and app.monitor_frame(state,false) == clip.start+local and good
+          monitor_checks=monitor_checks+1
+        }
+        at=at+1
+      }
+      phase=phase+1
+    }
+    preview.stop(root)
+    preview.stop(str.view(strip_root))
+    let _ = link.wake(strip_transport,true)
+    good=match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,} and good
+    link.close_commands(strip_transport)
+    good=match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  provider.shutdown(struct.borrow(state,field=provider))
+  good=monitor_checks == 44 and bitmap_checks == 128 and good
+  if good {io.write("Frame identity: 44 source/program pictures and time stamps, 128 actual timeline bitmaps, 23.976-to-29.97 fps, nonzero clip placement, trim, reverse, 1.25x/0.5x speed and rewind passed\n")}
+  else {io.write("[GA_TEST_FRAME_IDENTITY] Native pictures, timeline bitmaps or frame/time mapping failed\n")}
+  good
+}
 pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
   if view.len(args) < 4 {return 2}
+  if view.len(args) == 5 and view.get(args,4) == "frame-identity" {
+    return if frame_identity(view.get(args,1),view.get(args,2),view.get(args,3)) {0}else{1}
+  }
   var mode: u64 = 0
   loop {if mode == 9 {break}
     let root: string = path.join(view.get(args,1),str.view(string.from_int(mode)))
