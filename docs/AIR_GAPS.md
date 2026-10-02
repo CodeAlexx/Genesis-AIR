@@ -430,3 +430,33 @@ to the first completed PCM file, including process startup. The earlier worker m
 388.60 MiB and 246.48 ms; its sixty-second fixture used 181.70 MiB, while the new worker
 used 160.11 MiB. This verifies bounded source buffering on these headless native ranges;
 sustained device playback, interactive preview throughput and long-run A/V sync remain open.
+
+## Clip gain automation reaches native audio
+
+Gain keys were serialized by `std.editor`, but the compositor received only one static
+clip/track multiplier for each decoded range. The audio-lane K action also refused them.
+The application now publishes an optional gain envelope with rounded absolute 48 kHz
+sample positions, original clip-local key frames, values and interpolation modes.
+The worker evaluates the envelope after audio effects and before track gain, fades and
+mixing. It preserves the decoder/effect graph across chunks. Original frame coordinates
+retain the pinned `std.curve` Catmull-Rom metric; the remaining ease functions follow the
+same SDK formulas. Gain overshoot below zero clamps to zero. No SDK change was needed.
+
+K works on audio and embedded-video clips. Once a gain is keyed, fader edits add or update
+the current-time key. Inspector values follow the curve after seeking. Existing-key
+interpolation survives an edit, and the whole drag remains one Undo operation.
+The SDK's named key evaluator interns its parameter name. The display enters it only
+for existing gain keys; the audio planner reads stored names directly. Reading an
+unkeyed clip preserves project bytes.
+Track gain and audio-filter automation are still unfinished.
+
+`tests/audio_keys.py` checks 45 editor-to-worker cases against independent unkeyed PCM
+and 9,276 SDK curve samples, with complete-sample linear checks and exact hold boundaries.
+Uneven chunks and whole-range output agree within two signed-16 units through all 38
+modes, reverse/rate/effect history, fractional frame rates, nonzero placement, fades,
+mute and seeking. Each case round-trips project encoding before rendering. Seven invalid
+envelopes report `GA_AUDIO_GAIN_KEYS` and recover without contaminating the next mix.
+The generated-media gate measures a 4:1 gain step after MP4/AAC encoding. Native inspector
+checks exercise the actual K button and fader drag, curve reading and single-step Undo.
+Histogram pixels and per-frame monitor/timeline bitmap acceptance remain in the Windows
+gate. These checks do not establish sustained interactive audio/video synchronization.

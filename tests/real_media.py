@@ -1120,6 +1120,21 @@ def main():
         audio_movie = root / "audio-only.mp4"
         run([args.binary, "export", audio_movie, audio_project], env)
         assert audio_peak(audio_movie) > 0.01, "audio-only timeline was silent"
+        keyed_audio = json.loads(json.dumps(audio_doc))
+        keyed_audio["names"].append("gain")
+        audio_clip = keyed_audio["clips"][0]
+        audio_clip["gain"] = 0.0
+        keyed_audio["keys"] = [dict(clip=audio_clip["id"], owner=audio_clip["owner"],
+                                   param=len(keyed_audio["names"]), frame=frame,
+                                   value=value, interp=4) for frame, value in ((0,0.25),(6,1.0))]
+        keyed_project = root / "audio gain keys.air"
+        keyed_project.write_text(json.dumps(keyed_audio))
+        keyed_movie = root / "audio-gain-keys.mp4"
+        run([args.binary, "export", keyed_movie, keyed_project], env)
+        quiet = audio_rms_window(keyed_movie, 0.04, 0.08)
+        loud = audio_rms_window(keyed_movie, 0.28, 0.08)
+        reference = audio_rms_window(audio_movie, 0.28, 0.08)
+        assert 3.5 < loud / quiet < 4.5 and abs(loud/reference - 1.0) < 0.08, (quiet,loud,reference)
         audio_doc["tracks"][1]["pan"] = 1.0
         audio_project.write_text(json.dumps(audio_doc))
         panned_movie = root / "panned.mp4"
@@ -1395,7 +1410,7 @@ def main():
               f"asymmetric crop, upper Crop/Mask/rotation, half-strength simple effects, "
               f"vignette softness, Stabilize motion/key/upper-lane/flat-shot, "
               f"graded picture/audio filters, audible AAC and "
-              f"audio-only timeline; unsupported edit refused")
+              f"audio-only timeline and keyed gain in encoded AAC; unsupported edit refused")
 
 
 if __name__ == "__main__":

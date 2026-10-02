@@ -12,6 +12,7 @@ module genesis.commands
 import std.editor as editor
 import std.editor_io as editor_io
 import std.curve as curve
+import std.math as math
 import std.files as files
 import std.path as path
 import std.codec as codec
@@ -770,6 +771,23 @@ pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> 
 }
 
 fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  if str.eq(name, "gain") {
+    if not math.is_finite(value) or value < 0.0 {
+      return refused("[GA_AUDIO_GAIN_KEYS] Gain must be finite and nonnegative")
+    }
+    if editor.key_count(doc, clip, "gain") > 0 {
+      let selected: editor.Clip = match editor.clip(doc, clip) {
+        none => { return refused("no clip selected") }, some(found) => found,
+      }
+      let frame: i64 = editor.playhead(doc) - selected.start
+      if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
+      let interp: u32 = gain_key_interp(doc, clip, frame)
+      let _ = editor.set_key(doc, clip, "gain", frame, value, interp)
+      app.mark_dirty(state, true)
+      return done("gain keyframe set", clip)
+    }
+  }
   let frames: i64 = cast.sat(value)
   let ok: bool = if str.eq(name, "fade_in") {
       editor.set_fade_in(struct.borrow(state, field=document), clip, frames)
@@ -845,6 +863,17 @@ pub fn update_parameter(state: ref<app.App>, domain: u32, target: u64, name: str
 
 // A keyframe on the parameter under the pointer, at the playhead. Clip-local frames are the
 // toolkit's contract, so the value is handed over as-is.
+fn gain_key_interp(doc: ref<editor.Document>, clip: u64, frame: i64) -> u32 effects {alloc} {
+  let named: u64 = editor.name_id(doc, "gain")
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(doc, field=keys)) { break }
+    let key: editor.Key = array.get(struct.borrow(doc, field=keys), i)
+    if key.clip == clip and key.param == named and key.frame == frame { return key.interp }
+    i = i + 1
+  }
+  curve.linear()
+}
+
 pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str,
                           name: str, value: f64) -> Result effects {alloc} {
   let clip: u64 = app.current_clip(state)
@@ -858,9 +887,13 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
   var qualified: string = string.copy(kind)
   if str.len(kind) != 0 { string.append(qualified, ".") }
   string.append(qualified, name)
+  let audio_gain: bool = domain == 1 and str.eq(str.view(qualified), "gain")
+  if audio_gain and (not math.is_finite(value) or value < 0.0) {
+    return refused("[GA_AUDIO_GAIN_KEYS] Gain must be finite and nonnegative")
+  }
   if not timeline_media.key_supported(str.view(qualified)) or
-     editor.track_kind(struct.borrow(state, field=document), selected.track) !=
-       editor.track_video() or (domain == 1 and str.len(kind) != 0) or
+     (not audio_gain and editor.track_kind(struct.borrow(state, field=document), selected.track) !=
+       editor.track_video()) or (domain == 1 and str.len(kind) != 0) or
      (domain == 2 and str.len(kind) == 0) or (domain != 1 and domain != 2) {
     return refused("this parameter has no keyframed media behavior yet")
   }
@@ -873,8 +906,11 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
       some(_) => { },
     }
   }
+  let interp: u32 = if audio_gain {
+    gain_key_interp(struct.borrow(state, field=document), clip, frame)
+  } else { curve.linear() }
   if not editor.set_key(struct.borrow(state, field=document), clip,
-                        str.view(qualified), frame, value, curve.linear()) {
+                        str.view(qualified), frame, value, interp) {
     return refused("that parameter could not be keyed")
   }
   app.mark_dirty(state, true)

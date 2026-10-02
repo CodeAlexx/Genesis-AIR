@@ -863,6 +863,23 @@ fn text_row(out: ref<array<Control>>, area: layout.Rect, top: f64, text: str,
 
 // One parameter: a name, a decrement, a bar that can be clicked to a position, an
 // increment, a keyframe button and the current reading.
+// clip_value_at interns its parameter name. Inspecting an unkeyed clip must not
+// mutate the document: enter the SDK evaluator only when a gain key exists.
+fn audio_gain_value(doc: ref<editor.Document>, clip: u64, fallback: f64) -> f64 effects {alloc} {
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(doc,field=keys)) { break }
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == clip {
+      let name: string = editor.name_text(doc,key.param)
+      if str.eq(str.view(name),"gain") {
+        return math.max(0.0,editor.clip_value_at(doc,clip,"gain",editor.playhead(doc),fallback))
+      }
+    }
+    i=i+1
+  }
+  fallback
+}
+
 fn param_row(out: ref<array<Control>>, area: layout.Rect, top: f64, domain: u32,
              target: u64, kind: str, name: str, text: str, value: f64, low: f64,
              high: f64, step: f64, live: bool) -> f64 effects {alloc} {
@@ -1107,7 +1124,8 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
     none => { },
     some(value) => {
       cursor = param_row(out, area, cursor, domain_clip(), clip, "", "gain", "Audio gain",
-        value.gain, 0.0, 4.0, 0.05, clip != 0)
+        audio_gain_value(doc, clip, value.gain),
+        0.0, 4.0, 0.05, clip != 0)
     },
   }
   cursor = kind_section(out, area, cursor, doc, clip, "eq_3band")
@@ -1361,7 +1379,9 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
   if clip_has_audio(doc, clip) {
     cursor = heading(out, area, cursor, "SELECTED CLIP AUDIO")
     match editor.clip(doc, clip) { none => {}, some(value) => {
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "gain", "Clip gain", value.gain, 0.0, 4.0, 0.05, true)
+      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "gain", "Clip gain",
+        audio_gain_value(doc, clip, value.gain),
+        0.0, 4.0, 0.05, true)
       cursor = param_row(out, area, cursor, domain_clip(), clip, "", "pan", "Clip pan", value.pan, -1.0, 1.0, 0.05, true)
     }, }
     cursor = kind_section(out, area, cursor, doc, clip, "eq_3band")

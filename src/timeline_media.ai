@@ -448,7 +448,7 @@ fn overlay_opacity(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> 
 
 pub fn key_supported(param: str) -> bool effects {alloc} {
   if str.eq(param, "opacity") or str.eq(param, "fade_in") or
-     str.eq(param, "fade_out") { return true }
+     str.eq(param, "fade_out") or str.eq(param, "gain") { return true }
   var pieces: array<string> = text.split(param, ".")
   if array.len(pieces) != 2 { return false }
   let kind: str = str.view(array.borrow(pieces, 0))
@@ -1707,6 +1707,34 @@ fn tempo_stages(stages: ref<array<string>>, speed: f64) -> unit effects {alloc} 
   ()
 }
 
+// Absolute rounded sample boundaries are shared by playback chunks and export.
+// Preserve original frame coordinates too: std.curve Catmull tangents use them.
+fn audio_gain_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, fps: f64)
+    -> result<string, string> effects {alloc} {
+  var points: array<string> = array.new()
+  var at: u64 = 0
+  loop { if at >= array.len(struct.borrow(doc, field=keys)) { break }
+    let key: editor.Key = array.get(struct.borrow(doc, field=keys), at)
+    at = at + 1
+    if key.clip != clip.id { continue }
+    let name: string = editor.name_text(doc, key.param)
+    if not str.eq(str.view(name), "gain") { continue }
+    if not math.is_finite(key.value) or key.value < 0.0 or key.value > 3.4028234e38 or
+        key.interp >= 38 {
+      return result.err("[GA_AUDIO_GAIN_KEYS] Invalid clip gain keyframe")
+    }
+    var fields: array<string> = [string.from_int(audio_sample_frame(clip.start + key.frame, fps)),
+      string.from_int(key.frame), string.from_float(key.value), string.from_int(key.interp)]
+    array.push(points, text.join(fields, ","))
+  }
+  if array.len(points) == 0 { return result.ok(string.copy("")) }
+  var token: string = string.copy("GAINKEYS:")
+  string.append(token, str.view(string.from_int(audio_sample_frame(begin, fps))))
+  string.append(token, ":")
+  string.append(token, str.view(text.join(points, "/")))
+  result.ok(token)
+}
+
 fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
                -> result<array<string>, string> effects {alloc} {
   var lines: array<string> = array.new()
@@ -1788,12 +1816,17 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
     }
     let chain: string = if array.len(stages) == 0 { string.copy("-") }
       else { text.join(stages, ",") }
+    let gain_keys: string = match audio_gain_keys(doc, clip, begin, fps) {
+      err(problem) => { return result.err(problem) }, ok(value) => value,
+    }
     var fields: array<string> = [
       string.copy(if streaming { "AUDIOSTREAM" } else { "AUDIO" }),
       provider.wire_path(str.view(struct.borrow(source, field=path))),
       string.from_float(source_s), string.from_float(duration_s),
       string.from_float(destination_s),
-      string.from_float(editor.effective_gain(doc, clip.id)),
+      string.from_float(if str.len(str.view(gain_keys)) == 0 {
+        editor.effective_gain(doc, clip.id)
+      } else { editor.track_gain(doc, clip.track) }),
       string.from_float(cast.float(clip.fade_in) / fps),
       string.from_float(cast.float(clip.fade_out) / fps),
       string.from_float(cast.float(clip.length) / fps),
@@ -1810,6 +1843,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
       array.push(fields, string.from_float(remaining_source))
       array.push(fields, string.from_int(audio_sample_frame(end, fps) - audio_sample_frame(begin, fps)))
     }
+    if str.len(str.view(gain_keys)) != 0 { array.push(fields, gain_keys) }
     array.push(lines, text.join(fields, " "))
   }
   result.ok(lines)

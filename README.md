@@ -75,6 +75,9 @@ The right-hand dock has four tabs:
 - **Audio** — live stereo output meters in dBFS after the complete mix. Tracks with sound,
   including embedded audio on video tracks, expose gain, pan, mute and solo. Selected clips
   expose their own gain, pan, EQ and audio effects. Waveforms also cover embedded video audio.
+  Clip gain supports K keyframes on both audio and video lanes. After the first gain key,
+  editing the fader writes a key at the playhead; its reading follows the curve when seeking.
+  Gain drags remain one undo step. Track faders and audio-filter parameters remain static.
 
 Mouse gestures on the timeline: click a clip to select it, drag a clip to move it between
 lanes or along time, and drag within seven pixels of a clip edge to trim it. Each monitor has Start, Previous frame, Play/Pause, Stop, Next frame and End buttons,
@@ -285,6 +288,13 @@ edits invalidate queued sound. Picture-only edits preserve it. The meters read t
 at the device cursor after mixing. Preview decoding runs on a separate thread; rapid
 seeks publish the newest requested frame. Waveform completion is published independently
 so an early image result cannot hide a later audio envelope.
+
+Clip gain keys are evaluated per 48 kHz stereo sample after the audio effects, then
+multiplied by track gain and the clip fades. Playback and export share rounded absolute
+key boundaries and all 38 interpolation modes from the pinned `std.curve` contract.
+Automation changes do not rebuild the retained effect graph between chunks; a seek or
+actual key edit invalidates queued sound. Negative curve overshoot clamps to zero.
+Malformed gain envelopes report `GA_AUDIO_GAIN_KEYS` and the next request can recover.
 
 Playback pipe reads and writes check Stop and superseding requests in bounded 50 ms
 steps. The owning thread terminates a stale worker and removes its partial WAV;
@@ -546,7 +556,7 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 ```
 
 The Windows gate verifies 152 saved application facts, three native file-drop facts,
-749 control clicks with overlap checks, 81 native media/project checks and 81 focused
+749 control clicks with overlap checks, 81 native media/project checks and 95 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo, panned and silent output levels and immediate Stop. Continuous audio checks compare four
 worker cases and thirty-three editor/source/rate/mixer cases against whole-range WAV output;
@@ -562,6 +572,15 @@ sync measurements. Run that gate separately with:
 ```powershell
 python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe --cancel-client .\build-windows\native-pro\bin\Release\genesis-audio-cancel.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
 ```
+
+`tests/audio_keys.py` adds 45 keyed-gain cases: all 38 SDK interpolation modes,
+reverse, 2x speed, fractional rates, nonzero placement, fades, mute and seeking.
+Chunk output agrees with whole-range output within two signed-16 PCM units;
+9,276 samples also agree with the independent SDK curve oracle. Linear gain is
+checked at every sample and hold transitions at their exact boundary. All cases
+round-trip project serialization, including embedded audio on a video lane.
+Seven malformed envelopes verify coded refusal and clean recovery. The real-media
+gate also decodes an exported MP4's AAC to measure the keyed 4:1 gain step.
 
 The Windows gate also checks a lossless fixture with a different RGB color on every
 frame, independently decoded by FFmpeg. Forty-four source/program picture pairs and
@@ -721,8 +740,8 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 - Compressed-source seek startup can differ
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.
-- Nested sequence rendering, audio automation, animated speed and some filter combinations
-  remain unsupported and are refused explicitly. The library has mappings for 31 video and
+- Nested sequence rendering, track/audio-filter automation, animated speed and some filter combinations
+  remain unfinished. Clip gain automation is covered above. The library has mappings for 31 video and
   20 audio effects; representative output checks do not establish every parameter value,
   ordering combination or keyframe behavior.
 - The source/program transport uses a Windows audio sample clock, but sustained preview

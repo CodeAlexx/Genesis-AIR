@@ -4,6 +4,7 @@ import std.editor as editor
 import std.font as font
 import std.geometry as geometry
 import std.math as math
+import std.curve as curve
 import std.timeline as timeline
 import "../src/view.ai" as painter
 import std.path as path
@@ -300,6 +301,74 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = input.key(state, 111, true, false)
   let _ = test.check(suite, app.prompt_active(state) and app.prompt_action(state) == chrome.act_open(), "Ctrl+O opens the project picker")
   let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Audio gain K and sliders edit clip-local keys with one undo")
+  var keyed: app.App = app.app(provider.fake(scratch))
+  let keyed_source: u64 = editor.add_source(struct.borrow(keyed,field=document),"audio.wav","Audio",120,30.0)
+  let _ = editor.describe_source(struct.borrow(keyed,field=document),keyed_source,0,0,false,true,48000,2)
+  let audio_track: u64 = app.default_audio_track(keyed)
+  let keyed_clip: u64 = option.unwrap(editor.place(struct.borrow(keyed,field=document),audio_track,keyed_source,0,60,10))
+  let _ = commands.select_only(keyed,keyed_clip)
+  let _ = commands.seek(keyed,12)
+  let names_before: u64 = array.len(struct.borrow(struct.borrow(keyed,field=document),field=names))
+  var unkeyed_controls: array<chrome.Control> = chrome.audio_panel(frame,keyed)
+  let _ = test.eq_u64(suite,array.len(struct.borrow(struct.borrow(keyed,field=document),field=names)),names_before,"Reading unkeyed gain leaves project names intact")
+  let unkeyed_audio: string = media.audio_signature(struct.borrow(keyed,field=document))
+  let _ = test.eq_u64(suite,array.len(struct.borrow(struct.borrow(keyed,field=document),field=names)),names_before,"Planning unkeyed audio leaves project names intact")
+  let _ = commands.set_parameter(keyed,chrome.domain_clip(),keyed_clip,"","gain",0.4)
+  app.set_dock_tab(keyed,chrome.tab_audio())
+  var key_controls: array<chrome.Control> = chrome.audio_panel(frame,keyed)
+  var found_key: bool = false
+  var k: u64 = 0
+  loop {if k >= array.len(key_controls) {break}
+    let control: ref<chrome.Control> = array.borrow(key_controls,k)
+    let name: string = chrome.name_of(control)
+    if control.action == chrome.act_param_key() and control.domain == chrome.domain_clip() and
+        str.eq(str.view(name),"gain") {
+      found_key=control.enabled
+      let box: layout.Rect = control.area
+      let _ = input.pointer_down(keyed,1600.0,980.0,(box.left+box.right)*0.5,(box.top+box.bottom)*0.5)
+      break}
+    k=k+1}
+  let _ = test.check(suite,found_key,"Audio clip exposes an active gain K button")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(keyed,field=document),keyed_clip,"gain"),1,"Click K creates an audible gain key")
+  let first_gain: editor.Key = array.get(struct.borrow(struct.borrow(keyed,field=document),field=keys),0)
+  let _ = test.eq_i64(suite,first_gain.frame,2,"Audio gain key uses clip-local frame 2")
+  let _ = commands.seek(keyed,22)
+  let _ = commands.set_parameter(keyed,chrome.domain_clip(),keyed_clip,"","gain",0.8)
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(keyed,field=document),keyed_clip,"gain"),2,"Editing a keyed gain adds a key at the current time")
+  let _ = commands.seek(keyed,17)
+  key_controls=chrome.audio_panel(frame,keyed)
+  var gain_box: layout.Rect = layout.rect(0.0,0.0,0.0,0.0)
+  k=0
+  loop {if k >= array.len(key_controls) {break}
+    let control: ref<chrome.Control> = array.borrow(key_controls,k)
+    let name: string = chrome.name_of(control)
+    if control.action == chrome.act_param_set() and control.domain == chrome.domain_clip() and str.eq(str.view(name),"gain") {
+      let _ = test.near_f64(suite,control.value,0.6,0.0001,"Inspector reading follows the gain curve after seek")
+      gain_box=control.area
+      break}
+    k=k+1}
+  let before_keys: string = media.audio_signature(struct.borrow(keyed,field=document))
+  let _ = input.pointer_down(keyed,1600.0,980.0,gain_box.left+layout.width_of(gain_box)*0.5,(gain_box.top+gain_box.bottom)*0.5)
+  let _ = input.pointer_move(keyed,1600.0,980.0,gain_box.left+layout.width_of(gain_box)*0.75,(gain_box.top+gain_box.bottom)*0.5)
+  let _ = input.pointer_up(keyed,1600.0,980.0,gain_box.left+layout.width_of(gain_box)*0.75,(gain_box.top+gain_box.bottom)*0.5)
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(keyed,field=document),keyed_clip,"gain"),3,"Gain drag creates one current-time key")
+  let _ = test.check(suite,not str.eq(str.view(before_keys),str.view(media.audio_signature(struct.borrow(keyed,field=document)))),"Gain key edit invalidates queued audio")
+  let _ = commands.undo(keyed)
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(keyed,field=document),keyed_clip,"gain"),2,"One undo removes the complete gain drag")
+  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(keyed,field=document),keyed_clip,"gain",17,1.0),0.6,0.0001,"Undo restores the audible curve")
+  let _ = editor.set_key(struct.borrow(keyed,field=document),keyed_clip,"gain",2,0.4,curve.hold())
+  let _ = commands.seek(keyed,12)
+  let _ = commands.set_parameter(keyed,chrome.domain_clip(),keyed_clip,"","gain",0.5)
+  let updated_gain: editor.Key = array.get(struct.borrow(struct.borrow(keyed,field=document),field=keys),0)
+  let _ = test.eq_u64(suite,cast.wrap(updated_gain.interp),cast.wrap(curve.hold()),"Changing an existing key preserves its interpolation")
+  let _ = commands.seek(keyed,0)
+  let outside: commands.Result = commands.set_parameter(keyed,chrome.domain_clip(),keyed_clip,"","gain",0.7)
+  let _ = test.check(suite,not outside.ok,"Keyed gain refuses edits outside its clip")
+  let bad_gain: commands.Result = commands.keyframe_parameter(keyed,chrome.domain_clip(),keyed_clip,"","pan",0.7)
+  let _ = test.check(suite,not bad_gain.ok,"Unsupported audio pan automation remains refused")
   let _ = test.done(suite)
 
   let _ = test.start(suite, "Histogram shows every equal-height RGB channel and follows the program frame")

@@ -1,6 +1,9 @@
 // Headless editor-to-audio-worker acceptance; Python compares the published PCM.
 module genesis.tests.audio_playback
 import std.editor as editor
+import std.editor_io as editor_io
+import std.curve as curve
+import std.math as math
 import std.files as files
 import std.path as path
 import std.tasks as tasks
@@ -26,6 +29,9 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
   let worker: str = view.get(args,1)
   let source_path: str = view.get(args,2)
   let root: str = view.get(args,3)
+  if view.len(args) > 4 and str.eq(view.get(args,4), "gain-keys") {
+    return gain_keys(worker,source_path,root)
+  }
   playback.reset(root)
   var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
   let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
@@ -149,5 +155,106 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
     link.close_commands(peer)
   }
   if failure {1}else{io.write("Continuous audio task: thirty-three cases covering all twenty audio effects, clip/track gain and pan, mute, solo, embedded video audio, source/rate/reset, coded failure/recovery and idle Stop passed\n")
+    0}
+}
+
+// The Python side checks these against unkeyed PCM and the SDK's curve oracle,
+// rather than accepting agreement between two paths through the same evaluator.
+fn gain_keys(worker: str, source_path: str, root: str) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _ = files.mkdirs(root)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var request: u64 = 0
+  var failure: bool = false
+  var oracle: string = string.copy("")
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    match link.connect(peer) {ok(_)=>{},err(_)=>{failure=true},}
+    var variant: u64 = 0
+    loop { if variant >= 45 or failure {break}
+      let fps: f64 = if variant == 40 or variant == 41 {60000.0/1001.0}else{30.0}
+      let length: i64 = if variant == 39 {150}else if variant >= 38 {180}else{90}
+      let placement: i64 = if variant == 41 {11}else{0}
+      let start: i64 = if variant == 44 {23}else{0}
+      let mode: u32 = if variant < 38 {cast.wrap(variant)}else{curve.linear()}
+      var doc: editor.Document = editor.document(fps,640,360)
+      let source: u64 = editor.add_source(doc,source_path,"Gain automation",cast.sat(12.0*fps),fps)
+      let _ = editor.describe_source(doc,source,640,360,variant == 37,true,48000,2)
+      let owner: u64 = doc.active
+      let track: u64 = editor.add_track(doc,owner,if variant == 37 {editor.track_video()}else{editor.track_audio()},"Audio")
+      let clip: u64 = option.unwrap(editor.place(doc,track,source,7,length,placement))
+      if variant == 38 {let _ = editor.set_clip_reverse(doc,clip,true)}
+      if variant == 39 {let _ = editor.set_clip_speed(doc,clip,2.0)}
+      if variant == 42 {let _ = editor.set_fade_in(doc,clip,19)
+        let _ = editor.set_fade_out(doc,clip,21)}
+      if variant == 43 {let _ = editor.set_track_muted(doc,track,true)}
+      if variant == 38 or variant == 39 or variant == 40 or variant == 41 {
+        let filter: u64 = option.unwrap(editor.add_filter(doc,clip,"delay"))
+        let _ = editor.set_filter_param(doc,filter,"time",120.0)
+        let _ = editor.set_filter_param(doc,filter,"decay",0.3)
+      }
+      let prefix: string = text.concat("gain-",str.view(string.from_int(variant)))
+      let base: string = path.join(root,str.view(text.concat(str.view(prefix),"-base.wav")))
+      // Baseline uses exactly the same trim, rate, placement, effects and fades.
+      let _ = editor.set_track_gain(doc,track,0.5)
+      if variant == 43 {
+        var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,start,placement+length,str.view(base)) {
+          ok(value)=>value,err(_)=>{failure=true
+            break}, }
+        // A muted plan has no sounds but must still publish its exact silence.
+        match media.execute_audio_plan(plan) {err(_)=>{failure=true},ok(_)=>{},}
+      }else{match media.prepare_audio(doc,worker,start,str.view(base)) {err(problem)=>{io.write(str.view(problem))
+        failure=true},ok(_)=>{},}}
+      let frames: array<i64> = [0,13,37,61,82]
+      let values: array<f64> = [0.0,0.9,0.15,0.8,0.2]
+      var i: u64 = 0
+      loop {if i >= array.len(frames) {break}
+        let _ = editor.set_key(doc,clip,"gain",array.get(frames,i),array.get(values,i),mode)
+        i=i+1}
+      // A zero static gain must not defeat a keyed clip; track gain still applies.
+      let _ = editor.set_clip_gain(doc,clip,0.0)
+      let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{failure=true
+        break},}
+      let _ = files.write_text(str.view(path.join(root,str.view(text.concat(str.view(prefix),".air")))),str.view(encoded))
+      doc = match editor_io.decode(str.view(encoded)) {ok(value)=>value,err(_)=>{failure=true
+        break},}
+      let whole: string = path.join(root,str.view(text.concat(str.view(prefix),"-whole.wav")))
+      if variant == 43 {
+        var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,start,placement+length,str.view(whole)) {
+          ok(value)=>value,err(_)=>{failure=true
+            break},}
+        match media.execute_audio_plan(plan) {err(_)=>{failure=true},ok(_)=>{},}
+      }else{match media.prepare_audio(doc,worker,start,str.view(whole)) {err(problem)=>{io.write(str.view(problem))
+        failure=true},ok(_)=>{},}}
+      var frame: i64 = start
+      loop {if frame >= placement+length {break}
+        var row: array<string> = [string.from_int(variant),string.from_float(fps),string.from_int(start),
+          string.from_int(placement),string.from_int(frame),string.from_float(math.max(0.0,editor.clip_value_at(doc,clip,"gain",frame,1.0)))]
+        string.append(oracle,str.view(text.join(row,"\t")))
+        string.append(oracle,"\n")
+        frame=frame+1}
+      var at: i64 = start
+      var chunk: u64 = 0
+      loop {if at >= placement+length or failure {break}
+        let size: i64 = if chunk == 0 {17}else if chunk == 1 {24}else{32}
+        let end: i64 = if at+size > placement+length {placement+length}else{at+size}
+        let filename: string = path.join(root,str.view(text.concat(str.view(prefix),text.concat("-",text.concat(str.view(string.from_int(chunk)),".wav")))))
+        var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,end,str.view(filename)) {
+          ok(value)=>value,err(_)=>{failure=true
+            break},}
+        request=request+1
+        if not pull(peer,root,request,variant+1,plan) {failure=true}
+        at=end
+        chunk=chunk+1}
+      variant=variant+1
+    }
+    match files.write_text(str.view(path.join(root,"gain-oracle.tsv")),str.view(oracle)) {err(_)=>{failure=true},ok(_)=>{},}
+    playback.stop(root)
+    match tasks.join_next<bool>(jobs,2500) {none=>{failure=true},some(answer)=>{if not answer {failure=true}},}
+    link.close_commands(peer)
+  }
+  if failure {1}else{io.write("Gain keys: 38 SDK curve modes and seven reverse/rate/placement/fade/mute/seek cases passed\n")
     0}
 }

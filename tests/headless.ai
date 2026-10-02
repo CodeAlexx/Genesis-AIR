@@ -882,7 +882,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_b("keyframe_creates_filter", editor.filter_count(
     struct.borrow(key_state, field=document), key_clip.value) == 1)
   var rejected_key: commands.Result = commands.keyframe_parameter(key_state,
-    chrome.domain_clip(), key_clip.value, "", "gain", 0.5)
+    chrome.domain_clip(), key_clip.value, "", "pan", 0.5)
   emit_b("unrendered_key_refused", not rejected_key.ok and
     str.eq(str.view(rejected_key.message),
       "this parameter has no keyframed media behavior yet"))
