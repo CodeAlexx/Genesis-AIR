@@ -585,6 +585,26 @@ sync measurements. Run that gate separately with:
 python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe --cancel-client .\build-windows\native-pro\bin\Release\genesis-audio-cancel.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
 ```
 
+The Windows audio clock also accepts driver positions returned in bytes or
+milliseconds. It unwraps the native counter before converting to 48 kHz stereo
+frames, holds small backward observations, and preserves time when the reported
+unit changes. This follows the [Windows position API contract](https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/nf-mmeapi-waveoutgetposition).
+Sixty-one controlled native ABI checks cover all three units, repeated rollover,
+unit changes, meter indexing, coded failure/recovery and restart.
+
+The Windows gate adds a twenty-second silent real-device run with uneven PCM
+buffers, monotonic sample positions, drain, resume and restart. A separate
+three-minute run completed 222 buffers with -2.98 ms interval drift and a 3.11 ms
+phase range against the monotonic clock. The drained and resumed counts were
+exact on this device; millisecond-only drivers have a one-millisecond allowance.
+This measures the audio device, without picture presentation or physical speaker
+latency. Long-running interactive A/V sync remains unverified.
+
+```powershell
+.\build-windows\native-pro\bin\Release\genesis-audio-clock.exe
+python tests/audio_clock.py --library .\genesis-native-audio.dll --seconds 180 --report .\build-windows\native-audio-clock-long.json
+```
+
 `tests/audio_keys.py` adds 45 keyed-gain cases: all 38 SDK interpolation modes,
 reverse, 2x speed, fractional rates, nonzero placement, fades, mute and seeking.
 Chunk output agrees with whole-range output within two signed-16 PCM units;

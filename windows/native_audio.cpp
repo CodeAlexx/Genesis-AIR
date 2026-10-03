@@ -17,7 +17,34 @@ struct Block { std::vector<char> data; WAVEHDR header{}; std::uint64_t start = 0
 HWAVEOUT device = nullptr;
 std::vector<std::unique_ptr<Block>> blocks;
 std::string reply;
-std::uint64_t previous_samples = 0, wraps = 0, queued_samples = 0;
+std::uint64_t queued_samples = 0;
+struct Position {
+  UINT type = 0;
+  std::uint32_t previous = 0;
+  std::uint64_t ticks = 0, samples = 0;
+  void reset() { *this = {}; }
+  std::uint64_t read(UINT unit, std::uint32_t raw) {
+    constexpr std::uint64_t period = std::uint64_t(1) << 32;
+    if (type != unit) {
+      // Reconstruct the nearest epoch when a driver changes its reported unit.
+      // Unwrap the native counter BEFORE converting bytes or milliseconds.
+      auto expected = unit == TIME_BYTES ? samples * 4 : unit == TIME_MS ? samples / 48 : samples;
+      ticks = (expected & ~(period - 1)) | raw;
+      if (ticks < expected && expected - ticks > period / 2) ticks += period;
+      else if (ticks > expected && ticks - expected > period / 2 && ticks >= period) ticks -= period;
+      previous = raw;
+      type = unit;
+    } else {
+      // A small unsigned delta spans rollover. A negative/jittering driver
+      // observation has a large delta; hold the last position until it catches up.
+      const std::uint32_t delta = raw - previous;
+      if (delta <= INT32_MAX) { ticks += delta; previous = raw; }
+    }
+    auto converted = unit == TIME_BYTES ? ticks / 4 : unit == TIME_MS ? ticks * 48 : ticks;
+    samples = std::max(samples, converted);
+    return samples;
+  }
+} cursor;
 void collect() {
   for (auto it = blocks.begin(); it != blocks.end();) {
     if ((*it)->header.dwFlags & WHDR_DONE) {
@@ -32,16 +59,18 @@ void stop() {
     for (auto &block : blocks) waveOutUnprepareHeader(device, &block->header, sizeof(WAVEHDR));
     blocks.clear(); waveOutClose(device); device = nullptr;
   }
-  previous_samples = wraps = queued_samples = 0;
+  cursor.reset(); queued_samples = 0;
 }
 MMRESULT position(std::uint64_t &samples) {
   MMTIME value{}; value.wType = TIME_SAMPLES;
   MMRESULT status = waveOutGetPosition(device, &value, sizeof(value));
   if (status != MMSYSERR_NOERROR) return status;
-  if (value.wType != TIME_SAMPLES) return MMSYSERR_NOTSUPPORTED;
-  if (value.u.sample < previous_samples) wraps += (std::uint64_t(1) << 32);
-  previous_samples = value.u.sample;
-  samples = wraps + previous_samples;
+  std::uint32_t raw;
+  if (value.wType == TIME_SAMPLES) raw = value.u.sample;
+  else if (value.wType == TIME_BYTES) raw = value.u.cb;
+  else if (value.wType == TIME_MS) raw = value.u.ms;
+  else return MMSYSERR_NOTSUPPORTED;
+  samples = cursor.read(value.wType, raw);
   return MMSYSERR_NOERROR;
 }
 const char *failure(const char *code, unsigned detail) {

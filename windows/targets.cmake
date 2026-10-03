@@ -10,3 +10,8 @@ set_target_properties(genesis-worker-wrapper PROPERTIES RUNTIME_OUTPUT_DIRECTORY
 add_executable(genesis-ui-pixels "${CMAKE_SOURCE_DIR}/tests/stdlib/ui_pixels.c")
 target_include_directories(genesis-ui-pixels PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
 set_target_properties(genesis-ui-pixels PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(genesis-audio-clock "${GENESIS_ROOT}/tests/audio_clock.cpp")
+target_compile_features(genesis-audio-clock PRIVATE cxx_std_17)
+target_link_libraries(genesis-audio-clock PRIVATE winmm)
+set_target_properties(genesis-audio-clock PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

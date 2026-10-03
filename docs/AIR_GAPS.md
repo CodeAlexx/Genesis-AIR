@@ -491,3 +491,34 @@ path, about 9% less serial work. Native presentation, audio and overlap are excl
 sustained interactive 4K60 and long-run A/V synchronization remain open.
 A one-frame decode/readback-ahead experiment brought no additional measured benefit
 and was removed. The retained implementation adds no decode queue or thread.
+
+## Windows audio position formats and continuity
+
+The native adapter formerly refused any driver position other than `TIME_SAMPLES`.
+[Windows allows `waveOutGetPosition` to return another format](https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/nf-mmeapi-waveoutgetposition),
+so a working byte- or millisecond-position driver could stop playback with
+`GA_AUDIO_CLOCK`. The adapter now converts all three PCM position formats to
+48 kHz stereo frames. Native 32-bit ticks are extended before conversion, so a
+byte-counter rollover retains its correct frame period. Backward observations
+hold the last sample instead of jumping forward by a complete counter epoch.
+A reported-unit change reconstructs the nearest epoch at the previous media time;
+coarse millisecond observations cannot move time backward. Stop/start clears this
+state. Unsupported types and failed driver calls retain coded refusal and do not
+modify the last valid position. The AIR-side clock ABI is unchanged.
+
+`tests/audio_clock.cpp` calls the actual native clock/meter ABI with a controlled
+position API. Its 61 checks cover sample/byte/millisecond conversion, incomplete
+stereo byte counts, three rollover epochs, jitter, changes of units after rollover,
+post-mix meter indexing, failure/recovery and restart. Alternate-format hardware
+has not been physically tested; those formats have controlled ABI evidence.
+
+`tests/audio_clock.py` measures a real output device with silent, uneven stereo
+buffers. The Windows gate runs twenty seconds. A separate 180-second run made
+21,574 observations and completed 222 buffers; its post-startup interval drift was
+-2.976 ms and its phase range 3.114 ms versus monotonic time. Draining held the
+sample cursor and cleared both meters; queueing after a gap resumed at the existing
+count, and a new transport began at zero. Final counts were exact on this device.
+The test allows fewer than 48 missing samples for a driver reporting whole
+milliseconds. This is device-clock evidence, without image presentation or physical
+speaker latency. Sustained interactive 4K playback and long-running A/V sync remain
+open. No AIR SDK change was needed.

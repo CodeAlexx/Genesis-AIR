@@ -42,6 +42,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate the real video fixture.' }
 
   Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-audio-clock.exe' @()).TrimEnd()
+  & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
+    --report (Join-Path $root 'native-audio-clock.json')
+  if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
   $native = Invoke-Native 'genesis-native.exe' @($work, $media)
   Write-Host $native.TrimEnd()
   $wave = Join-Path $work 'queued audio 日本語.wav'
