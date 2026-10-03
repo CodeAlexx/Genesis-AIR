@@ -80,6 +80,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Per-frame monitor and timeline bitmap acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'preview_canvas.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Small-sequence preview/master pixel acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'transition_clips.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Per-clip transition preview/master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_export_length.py') --worker $worker
+    if ($LASTEXITCODE -ne 0) { throw 'Final audio sample and stream-duration acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'playback_timing.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $root 'playback-timing-fixture.json')
     if ($LASTEXITCODE -ne 0) { throw 'Audio-timed picture, histogram and timeline acceptance failed.' }

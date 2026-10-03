@@ -256,6 +256,19 @@ is composed at 3840x2160 rather than an enlarged preview. File offers these prof
 | HEVC HDR | MP4 | 10-bit PQ / BT.2020 | AAC |
 | Lossless HDR master | MKV | FFV1 16-bit PQ / BT.2020 RGB | 24-bit PCM |
 
+PCM masters preserve the exact final sample count, including a partially filled
+encoder buffer. Twenty direct encoder checks cover PCM/FLAC lengths and sample
+values around buffer boundaries, plus AAC stream durations. The encoder submits
+a short final frame when the selected codec supports it.
+
+Transitions prepare each side's picture effects, fade and opacity separately.
+An outgoing contrast edit preserves the incoming clip's colors; incoming opacity
+keys and fades now render through the transition. Fifty-one native preview/master
+comparisons cover all eleven transition kinds, keyed opacity, fades, separate
+grades, overlap, a short gap, titles and an upper layer, with audible audio of the
+exact master length. Incoming Blend/PiP/Chroma key and transitions above the base
+lane remain unsupported.
+
 Media decode retains 16-bit precision and composition/intermediate passes use FP32.
 The encoded format determines the final quantization. HDR sources are tone mapped to
 Rec.709 for the ordinary SDR preview; HDR masters retain PQ / BT.2020. This is not a
@@ -584,7 +597,7 @@ python tests/pro_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose
 python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe
 ```
 
-The Windows gate verifies 152 saved application facts, three native file-drop facts,
+The Windows gate verifies 153 saved application facts, three native file-drop facts,
 749 control clicks with overlap checks, 111 native media/project checks and 105 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo, panned and silent output levels and immediate Stop. Continuous audio checks compare four
@@ -847,7 +860,7 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ```
 
-- **152 application facts** through the command layer with the fake provider: startup,
+- **153 application facts** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
   solo-wins, both transports, elapsed-time playback, reverse sampling at mixed frame

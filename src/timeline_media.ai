@@ -446,6 +446,11 @@ fn overlay_opacity(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> 
   value
 }
 
+fn clip_factor(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> f64 effects {alloc} {
+  fade(doc,clip,frame) * editor.clip_value_at(doc,clip.id,"opacity",frame,1.0) *
+    overlay_opacity(doc,clip,frame)
+}
+
 pub fn key_supported(param: str) -> bool effects {alloc} {
   if str.eq(param, "opacity") or str.eq(param, "fade_in") or
      str.eq(param, "fade_out") or str.eq(param, "gain") { return true }
@@ -546,10 +551,9 @@ fn composited_clip(doc: ref<editor.Document>, track: u64, frame: i64)
 }
 
 fn incoming_transition_supported(doc: ref<editor.Document>, clip: editor.Clip,
-                                 frame: i64) -> bool effects {alloc} {
-  if clip.nested != 0 or not source_range_ok(doc, clip) or fade(doc, clip, frame) != 1.0 or
-     editor.clip_value_at(doc, clip.id, "opacity", frame, 1.0) != 1.0 or
-     overlay_opacity(doc, clip, frame) != 1.0 { return false }
+                                 frame: i64, prepared: bool) -> bool effects {alloc} {
+  if clip.nested != 0 or not source_range_ok(doc, clip) or
+     (not prepared and clip_factor(doc,clip,frame) != 1.0) { return false }
   var key_index: u64 = 0
   loop {
     if key_index >= array.len(struct.borrow(doc, field=keys)) { break }
@@ -621,7 +625,7 @@ fn frame_line_core(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
             none => { return result.err("transition needs an adjacent clip pair at its seam") },
             some(value) => value,
           }
-          if not incoming_transition_supported(doc, pair.incoming, frame) {
+          if not incoming_transition_supported(doc, pair.incoming, frame,str.len(incoming_override) != 0) {
             return result.err("the transition's incoming clip has an unsupported edit")
           }
           let incoming_path: string = if str.len(incoming_override) != 0 {
@@ -934,21 +938,32 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   var upper_override: string = string.new()
   var incoming_override: string = string.new()
   var base_fade_prepassed: bool = false
+  var base_transition: bool = false
   if array.len(visible) >= 1 {
     let base: editor.Clip = array.get(visible, 0)
+    base_transition=match editor.transition_at(doc,base.track,frame) {none=>false,some(_)=>true,}
     match try text_clip_plan(doc, base, frame, scratch_prefix, 0, false, cache) {
-      none => { },
+      none => {
+        // Each side enters a transition with its own picture effects applied.
+        // Applying the outgoing grade afterwards would also grade the incoming clip.
+        if base_transition {
+          let raster: string = preclip_path(scratch_prefix,0)
+          match try preclip_line(doc,base,frame,str.view(raster),false) {
+            none=>{},some(line)=>{array.push(lines,line)
+              base_override=text.concat("FLOAT:",str.view(raster))},
+          }
+        }
+      },
       some(value) => { var prepared: PreparedClip = value
         base_override = string.copy(str.view(prepared.path))
         append_plan(lines, prepared) },
     }
   }
-  // The worker's legacy fade field fades its complete output. Resolve a bottom
-  // clip's fade/opacity in its own pass before adding upper cameras or overlays.
-  if array.len(visible) >= 2 {
+  // The worker's fade field fades its complete output. Resolve a bottom clip's
+  // fade/opacity before its transition and before upper cameras or overlays.
+  if array.len(visible) >= 2 or base_transition {
     let base: editor.Clip = array.get(visible, 0)
-    let factor: f64 = fade(doc, base, frame) *
-      editor.clip_value_at(doc, base.id, "opacity", frame, 1.0) * overlay_opacity(doc, base, frame)
+    let factor: f64 = clip_factor(doc,base,frame)
     if factor != 1.0 {
       var values: array<string> = neutral()
       let prepassed: bool = str.len(str.view(base_override)) != 0
@@ -1014,6 +1029,26 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
               },
             }
           },
+        }
+        let factor: f64 = clip_factor(doc,incoming,frame)
+        if factor != 1.0 {
+          var values: array<string> = neutral()
+          let prepassed: bool = str.len(str.view(incoming_override)) != 0
+          let source: string = if prepassed {string.copy(str.view(incoming_override))}else{
+            match source_path(doc,incoming) {
+              some(value)=>try picture_path(doc,incoming,frame,value),
+              none=>{return result.err("the transition's incoming source is unavailable")},
+            }
+          }
+          put(values,0,str.view(provider.wire_path(str.view(source))))
+          put_i(values,2,if prepassed {0}else{source_frame(doc,incoming,frame)})
+          put_f(values,101,factor)
+          if not filters(doc,incoming,values,false,frame,prepassed) {
+            return result.err("the transition's incoming clip uses an unsupported video filter")
+          }
+          let raster: string = text.concat(scratch_prefix,".incoming-opacity.rgba")
+          array.push(lines,wire_line(values,"FLOAT",str.view(raster)))
+          incoming_override=text.concat("FLOAT:",str.view(raster))
         }
       },
     }
@@ -1364,6 +1399,7 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
 
 pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
   let _ = files.remove(str.view(text.concat(prefix, ".base-opacity.rgba")))
+  let _ = files.remove(str.view(text.concat(prefix, ".incoming-opacity.rgba")))
   let _ = files.remove(str.view(layer_path(prefix, 0)))
   let _ = files.remove(str.view(layer_path(prefix, 1)))
   var slot: u64 = 0

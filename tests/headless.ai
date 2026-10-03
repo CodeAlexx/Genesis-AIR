@@ -792,9 +792,17 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     "opacity", 12, 0.5, 0)
   match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
     str.view(transition_scratch), title_cache) {
-    err(problem) => { emit_b("incoming_opacity_refused",
-      text.contains(str.view(problem), "incoming clip has an unsupported edit")) },
-    ok(value) => { emit_b("incoming_opacity_refused", false) },
+    err(problem) => { emit_b("incoming_opacity_prepared",false) },
+    ok(value) => { var lines: array<string> = value
+      emit_b("incoming_opacity_prepared",array.len(lines) == 6 and
+        text.contains(str.view(array.borrow(lines,4)),".incoming-opacity.rgba") and
+        text.contains(str.view(array.borrow(lines,5)),".incoming-opacity.rgba")) },
+  }
+  timeline_media.cleanup_plan(str.view(transition_scratch))
+  match timeline_media.frame_line(transition_doc,12,"ENC","") {
+    err(problem)=>{emit_b("incoming_opacity_wire_refused",
+      text.contains(str.view(problem),"incoming clip has an unsupported edit"))},
+    ok(_)=>{emit_b("incoming_opacity_wire_refused",false)},
   }
   var in_doc: editor.Document = editor.document(30.0, 640, 360)
   let in_owner: u64 = in_doc.active

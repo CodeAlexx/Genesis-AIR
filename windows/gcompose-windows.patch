@@ -862,7 +862,7 @@ index 8674e4c..8753cf3 100644
      if (c->dec) avcodec_free_context(&c->dec);
      if (c->fmt) avformat_close_input(&c->fmt);
 diff --git a/gcompose/csrc/fpx_encode.c b/gcompose/csrc/fpx_encode.c
-index 805883d..2bce0bc 100644
+index 805883d..0bf3afd 100644
 --- a/gcompose/csrc/fpx_encode.c
 +++ b/gcompose/csrc/fpx_encode.c
 @@ -30,6 +30,7 @@
@@ -1012,6 +1012,40 @@ index 805883d..2bce0bc 100644
  
      int64_t pts = av_rescale_q((int64_t)(ts_sec * 1000.0), MILLISEC_TIMEBASE, e->vctx->time_base);
      e->vfrm->pts = pts;
+@@ -418,17 +467,23 @@ int fpx_enc_finish(void* h) {
+     // flush partial audio frame, then send EOF (cpp:325-339,1234)
+     if (e->aidx >= 0 && e->actx) {
+         if (e->afrm && e->afrm_off > 0) {
+-            // zero the tail of the partial frame (cpp:330) then send
+-            int bps = av_get_bytes_per_sample(e->aencfmt);
+-            int planar = av_sample_fmt_is_planar(e->aencfmt);
+-            int ch = e->ach;
+-            if (planar) {
+-                for (int c = 0; c < ch; c++)
+-                    memset(e->afrm->data[c] + (size_t)e->afrm_off * bps, 0,
+-                           (size_t)(e->aframe_samples - e->afrm_off) * bps);
++            // PCM and codecs accepting a short final frame must keep the actual
++            // sample count. Our 1024-sample batching is not their output duration.
++            int caps = e->actx->codec->capabilities;
++            if (caps & (AV_CODEC_CAP_VARIABLE_FRAME_SIZE | AV_CODEC_CAP_SMALL_LAST_FRAME)) {
++                e->afrm->nb_samples = e->afrm_off;
+             } else {
+-                memset(e->afrm->data[0] + (size_t)e->afrm_off * bps * ch, 0,
+-                       (size_t)(e->aframe_samples - e->afrm_off) * bps * ch);
++                int bps = av_get_bytes_per_sample(e->aencfmt);
++                int planar = av_sample_fmt_is_planar(e->aencfmt);
++                int ch = e->ach;
++                if (planar) {
++                    for (int c = 0; c < ch; c++)
++                        memset(e->afrm->data[c] + (size_t)e->afrm_off * bps, 0,
++                               (size_t)(e->aframe_samples - e->afrm_off) * bps);
++                } else {
++                    memset(e->afrm->data[0] + (size_t)e->afrm_off * bps * ch, 0,
++                           (size_t)(e->aframe_samples - e->afrm_off) * bps * ch);
++                }
+             }
+             int r = fpx__send_audio_frame(e);
+             if (r < 0) ret = r;
 diff --git a/gcompose/csrc/fpx_gpu.c b/gcompose/csrc/fpx_gpu.c
 index 0705636..af83920 100644
 --- a/gcompose/csrc/fpx_gpu.c

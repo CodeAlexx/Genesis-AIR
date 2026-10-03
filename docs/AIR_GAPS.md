@@ -724,3 +724,38 @@ The full Windows gate passes, including gain/pan/mute/solo and all twenty audio
 effects, post-mix meters, histogram/rewind, 44 monitor pictures and 128 actual
 timeline bitmaps. `tests/preview_canvas.py` is included in that gate for future
 preview/master comparisons.
+
+## Prepare both sides of a transition and preserve the last audio samples
+
+The frame adapter refused incoming fades/opacity and could apply an outgoing
+picture grade to the combined transition. It now resolves each side's picture
+effects and clip-local fade/opacity before the transition, using the existing
+FP32 intermediate passes. Outgoing fade also runs before upper layers. Titles
+are prepared before their clip's fade. The single-wire helper still refuses an
+incoming opacity that requires preparation; the complete frame plan supplies it.
+Incoming Blend/PiP/Chroma key and upper-lane transitions remain unimplemented.
+
+`tests/transition_clips.py` checks 51 complete preview/master pairs across all
+eleven kinds and additional opacity-curve, fade, grade, overlap, gap, title and
+upper-layer cases. Non-title pixels agree with independent color/transition
+formulas within three channel units; angular threshold ties permit either whole
+neighbor color. All pixels, including thresholds and glyphs, agree between preview
+and the independently decoded 16-bit FFV1 master within two channel units.
+Seventeen master audio streams have exact decoded sample counts and audible PCM.
+The prior editor fails the grade case with a maximum difference of 32 units.
+
+That gate also exposed padding in the native encoder's final PCM buffer: a
+24-frame / 38400-sample master contained 38912 samples. `fpx_enc_finish` now
+uses the real final count when the codec advertises variable frames or a short
+last frame, retaining padding for codecs requiring fixed frames. The installed
+FFmpeg headers provide these codec capability contracts. No AIR SDK change is
+needed; the encoder fix is maintained in `windows/gcompose-windows.patch`.
+
+`tests/audio_export_length.py` checks sixteen exact PCM/FLAC lengths and every
+sample around buffer boundaries, including a one-sample output, and four AAC
+stream durations. Its input sample count comes from the actual worker accumulator;
+the one-frame picture is separate from this encoder-focused duration test.
+The preceding worker fails by padding that one-sample PCM output to 1024.
+Both media gates are included in `tests/windows.ps1`.
+The pro-media gate also requires exactly 9610 decoded PCM samples in the six-frame
+3840x2160 ProRes output at 30000/1001, preserving its measured four-pixel detail.

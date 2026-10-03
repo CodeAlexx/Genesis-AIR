@@ -150,4 +150,5 @@ title_missing_glyph_refused	true
 title_grade_once	true
 outgoing_title_at_cut	true
 incoming_title_at_cut	true
-incoming_opacity_refused	true
+incoming_opacity_prepared	true
+incoming_opacity_wire_refused	true

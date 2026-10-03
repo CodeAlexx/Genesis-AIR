@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -60,12 +61,16 @@ def main():
         assert (video["width"], video["height"], int(video["nb_frames"])) == (3840, 2160, 6), video
         assert video["codec_name"] == "prores" and video["r_frame_rate"] == "30000/1001", video
         assert next(s for s in info if s["codec_type"] == "audio")["codec_name"] == "pcm_s24le", info
+        pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(mov), "-vn", "-ac", "2", "-ar", "48000",
+                              "-f", "f32le", "pipe:1"], capture_output=True, timeout=60)
+        expected_samples = math.ceil(6 * 48000 * 1001 / 30000)
+        assert pcm.returncode == 0 and len(pcm.stdout) == expected_samples * 8, (len(pcm.stdout), expected_samples, pcm.stderr)
         frame = raw_frame(mov)
         dark = sum(frame.getpixel((1200 + x, 1000))[0] for x in (0, 1, 2, 3)) / 4
         light = sum(frame.getpixel((1200 + x, 1000))[0] for x in (4, 5, 6, 7)) / 4
         assert light - dark > 170, (dark, light)
         assert audio_peak(mov) > 0.01
-        print("4K ProRes: true fine detail, 3840x2160, 6 frames at 30000/1001 and 24-bit PCM passed", flush=True)
+        print(f"4K ProRes: true fine detail, 3840x2160, 6 frames at 30000/1001 and exactly {expected_samples} 24-bit PCM samples passed", flush=True)
 
         portrait = root / "portrait.mp4"
         run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
