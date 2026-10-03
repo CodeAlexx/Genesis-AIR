@@ -433,6 +433,13 @@ CPU resize. A monitor-size change renders from the composition again; it cannot
 enlarge a cached smaller preview. Legacy `PREVIEW`, intermediate `FLOAT` and export
 `ENC` retain their original dimensions and formats.
 
+The provider keeps the program picture's read handle on its owning preview thread.
+After `DONE`, it rewinds and reads the worker's file, which the worker rewrites in
+place. Reload, worker restart, failures and shutdown retire that reader. Reads are
+bounded to the expected RGBA byte count plus one; missing or extra bytes produce
+`GA_PROGRAM_SIZE`, and open/seek/read failures produce `GA_PROGRAM_READ`. This
+removes the repeated Windows file-open cost while retaining exact frame/size checks.
+
 Three paired headless editor runs on the supplied 4K/59.94 AV1/PQ clip use 120
 samples after three warmups at 2560x1440. The median of the per-run medians changes
 from 23.75 to 21.98 ms for program preparation and from 28.83 to 27.10 ms for the
@@ -615,6 +622,12 @@ clock, picture or meter change, matching the editor's scheduling policy. `--poll
 reproduces the earlier sleep/poll diagnostic and its paint on every iteration.
 TSV reports include individual worker phases, paint/wait durations and the active
 timer request, so wait overhead can be distinguished from decoder work.
+Profiling also writes `provider-profile.tsv` under the preview task's scratch folder
+(`GENESIS_SCRATCH/profile` or `GENESIS_SCRATCH/playback-profile`). Its columns are
+`call`, `exchange_ns`, `input_ns`, `read_ns` and `copy_ns`: request/reply, reader
+open/rewind, bounded byte read and surface copy. A new diagnostic session resets
+the file; ordinary editing writes no rows. `tests/playback_timing.py` includes these
+phase medians/p95 values as `provider_ms` when the executable supplies them.
 The Windows gate checks a lossless per-frame 23.976-to-29.97 fps fixture through an
 eight-second device run, including the five-second audio-buffer boundary. Every
 sampled program pixel, picture stamp and playing cursor must agree; future pictures
@@ -708,6 +721,20 @@ p95 delay. Neither run reports early pictures or audio underruns. These silent
 real-device measurements include asynchronous decode/mix and retained ordinary
 editor paint, and exclude native presentation and physical speaker latency.
 This improves the measured preview but still falls short of sustained 4K60.
+
+A subsequent provider measurement found about 4.44 ms in each Windows program-file
+open, compared with about 0.12 ms for reading and 0.07 ms for surface copying. The
+retained reader reduces preparation to about 0.002 ms. Three alternating twenty-second
+pairs using the same compositor and audio DLL improve delivery from 47.00–47.35 to
+52.05–55.40 pictures/second; median-of-run program preparation falls from 17.99 to
+12.50 ms. A ninety-second pair improves 45.33 to 53.92 pictures/second, with
+13.32/12.07 ms median picture delay and 31.83/28.18 ms p95 delay before/after.
+The updated run checks 11,530 clock/picture/cursor observations, with no early
+pictures or audio underruns. These silent native-device, async decode/mix and
+retained ordinary-editor paint measurements exclude native display and speaker
+latency. They remain below sustained interactive 4K60. Twenty-six process/file
+checks cover changing pixels, resize, bounded malformed-frame refusal, Reload,
+worker replacement/restart, broken-pipe retry and diagnostic session behavior.
 
 The Windows gate also compares sixty-second and ten-minute reversed PCM sources,
 unequal output pulls, continuous reverse/delay/2x output, fractional 44.1 kHz trims and

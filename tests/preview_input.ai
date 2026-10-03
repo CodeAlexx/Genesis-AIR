@@ -1,0 +1,88 @@
+// Real process/file checks for repeated preview reads and coded size recovery.
+module genesis.preview_input_test
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/provider.ai" as provider
+
+fn request(state: ref<provider.Provider>, pattern: str, w: u32, h: u32) -> provider.Frame
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let line: string = text.concat("PREVIEW ",text.concat(pattern,text.concat(" ",
+    provider.wire_path(provider.preview_path(state)))))
+  provider.program_command(state,line,w,h)
+}
+fn color(frame: ref<provider.Frame>, r: u8, g: u8, b: u8) -> bool effects {} {
+  if not frame.ok {return false}
+  match draw.surface_pixel(struct.borrow(frame,field=pixels),frame.width/2,frame.height/2) {
+    some(value)=>value.r == r and value.g == g and value.b == b and value.a == 255,
+    none=>false,
+  }
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 3 {return 2}
+  let root: str = view.get(args,1)
+  let _ = files.mkdirs(root)
+  var state: provider.Provider = provider.gcompose(view.get(args,2),root)
+  var suite: test.Suite = test.suite("Genesis retained preview input",false)
+  let _ = test.start(suite,"In-place frames, dimensions, bounded reads and reader lifecycle")
+  provider.set_profile(state,true)
+  var red: provider.Frame = request(state,"red",160,90)
+  let _ = test.check(suite,color(red,255,0,0),"first frame pixels")
+  var blue: provider.Frame = request(state,"blue",160,90)
+  let _ = test.check(suite,color(blue,0,0,255),"next in-place frame rewinds the reader")
+  var large: provider.Frame = request(state,"red",320,180)
+  let _ = test.check(suite,color(large,255,0,0) and large.width == 320 and large.height == 180,"larger monitor reads its complete new picture")
+  var small: provider.Frame = request(state,"red",80,45)
+  let _ = test.check(suite,color(small,255,0,0) and small.width == 80 and small.height == 45,"smaller monitor cannot retain the old tail")
+  let starts: u64 = state.starts
+  var crashed: provider.Frame = request(state,"crash-once",80,45)
+  let _ = test.check(suite,color(crashed,0,0,255),"broken pipe reopens output after the worker replaces it")
+  let _ = test.eq_u64(suite,state.starts,starts+1,"broken pipe makes one recovery attempt")
+  var malformed: provider.Frame = request(state,"short",160,90)
+  let _ = test.check(suite,not malformed.ok,"one missing byte refuses the frame")
+  let _ = test.contains(suite,provider.last_error(state),"GA_PROGRAM_SIZE","short frame code")
+  var recovery: provider.Frame = request(state,"blue",160,90)
+  let _ = test.check(suite,color(recovery,0,0,255),"short frame recovery")
+  var extra: provider.Frame = request(state,"extra",160,90)
+  let _ = test.check(suite,not extra.ok,"one extra byte refuses the frame")
+  let _ = test.contains(suite,provider.last_error(state),"GA_PROGRAM_SIZE","oversized frame code")
+  var empty: provider.Frame = request(state,"empty",160,90)
+  let _ = test.check(suite,not empty.ok,"empty output refuses the frame")
+  let _ = test.contains(suite,provider.last_error(state),"GA_PROGRAM_SIZE","empty frame code")
+  var green: provider.Frame = request(state,"green",160,90)
+  let _ = test.check(suite,color(green,0,255,0),"empty and oversized recovery")
+  var refused: provider.Frame = request(state,"error",160,90)
+  let _ = test.check(suite,not refused.ok,"live worker refusal hides old pixels")
+  let _ = test.contains(suite,provider.last_error(state),"GA_WORKER_REQUEST","worker refusal code")
+  var retry: provider.Frame = request(state,"red",160,90)
+  let _ = test.check(suite,color(retry,255,0,0),"worker refusal recovers on the same pipe")
+  let _ = files.rename(provider.preview_path(state),path.join(root,"retired.rgba"))
+  provider.invalidate(state)
+  var reload: provider.Frame = request(state,"blue",160,90)
+  let _ = test.check(suite,color(reload,0,0,255),"Reload retires a replaced output file")
+  let _ = files.rename(provider.preview_path(state),path.join(root,"retired-again.rgba"))
+  provider.restart(state)
+  var restarted: provider.Frame = request(state,"red",160,90)
+  let _ = test.check(suite,color(restarted,255,0,0),"worker restart reopens replaced output")
+  var invalid: provider.Frame = request(state,"red",0,90)
+  let _ = test.check(suite,not invalid.ok,"invalid dimensions refused")
+  let _ = test.contains(suite,provider.last_error(state),"GA_PREVIEW_SIZE","dimension refusal code")
+  var complete: provider.Frame = request(state,"green",960,540)
+  let _ = test.check(suite,color(complete,0,255,0) and complete.width == 960 and complete.height == 540,"large bounded read recovers after invalid dimensions")
+  let profile_path: string = path.join(root,"provider-profile.tsv")
+  let recorded: string = match files.read_text(profile_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _ = test.contains(suite,recorded,"call\texchange_ns\tinput_ns\tread_ns\tcopy_ns\n","diagnostic phase header")
+  provider.set_profile(state,false)
+  var ordinary: provider.Frame = request(state,"blue",160,90)
+  let _ = test.check(suite,color(ordinary,0,0,255),"ordinary preview remains correct")
+  let after: string = match files.read_text(profile_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _ = test.eq_str(suite,recorded,after,"ordinary preview writes no diagnostic row")
+  provider.set_profile(state,true)
+  let reset: string = match files.read_text(profile_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _ = test.eq_str(suite,reset,"call\texchange_ns\tinput_ns\tread_ns\tcopy_ns\n","new diagnostic session resets its rows")
+  provider.shutdown(state)
+  let _ = test.done(suite)
+  test.conclude(suite,path.join(root,"preview-input-tests.json"),16)
+}

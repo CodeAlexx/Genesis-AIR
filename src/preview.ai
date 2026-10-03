@@ -95,6 +95,7 @@ fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: boo
   } else {
     array.push(out, draw.empty_surface())
   }
+  provider.set_profile(struct.borrow(state,field=provider),profile)
   let program_begin: u64 = if profile {time.monotonic_ns()}else{0}
   let source_ns: u64 = if profile {program_begin-source_begin}else{0}
   var plan_ns: u64 = 0

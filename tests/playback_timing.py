@@ -66,6 +66,18 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
                 phases[name].append(row[name]/1000000)
     paints = [row["paint_ns"]/1000000 for row in steady if row["paint_ns"]]
     waits = [row["wait_ns"]/1000000 for row in steady]
+    provider = root / label / "playback-profile" / "provider-profile.tsv"
+    provider_phases = None
+    if provider.exists():
+        with provider.open(encoding="utf-8", newline="") as file:
+            reader = csv.DictReader(file, delimiter="\t")
+            assert reader.fieldnames == ["call", "exchange_ns", "input_ns", "read_ns", "copy_ns"], reader.fieldnames
+            calls = [{key: int(value) for key, value in row.items()} for row in reader]
+        assert len(calls) > 3 and all(value >= 0 for row in calls for value in row.values())
+        assert all(b["call"] > a["call"] for a, b in zip(calls, calls[1:])), "provider call identity reversed"
+        provider_phases = {name: {"median": statistics.median(row[name]/1000000 for row in calls[3:]),
+                                  "p95": percentile([row[name]/1000000 for row in calls[3:]], .95)}
+                           for name in reader.fieldnames[1:]}
     return {"mode": label, "wait": "sleep_poll" if sleep_poll else "channel_event", "seconds": seconds, "fps": fps, "observations": len(rows),
             "presented_pictures": len(changed), "lag_ms": {
                 "median": statistics.median(lag), "p90": percentile(lag, .9),
@@ -76,6 +88,7 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
             "paint_ms": {"median": statistics.median(paints), "p95": percentile(paints, .95)},
             "wait_ms": {"median": statistics.median(waits), "p95": percentile(waits, .95)},
             "timer_period_ms": rows[-1]["timer_period_ms"],
+            "provider_ms": provider_phases,
             "raw_report": str(report)}
 
 

@@ -649,3 +649,45 @@ decode/mix and retained ordinary-editor paint, excluding native presentation and
 physical speaker latency. The longer result is a modest improvement and does not
 establish sustained smooth 4K60. Worker-only conversion timing must not be used
 as the editor's delivery rate.
+
+## Reuse the Windows program-picture reader
+
+Splitting provider timing showed that opening each newly written program RGBA
+file took a median 4.44 ms in the supplied-media run. Reading its bytes took
+0.12 ms and materializing the surface took 0.07 ms. The file-open cost, rather
+than the bulk pixel copy, was the next measured avoidable delay.
+
+The provider retains its reader on the preview task's owning thread, rewinds
+after the worker's `DONE`, and bounds input to the expected byte count plus one.
+The worker's in-place rewrite contract preserves that file identity. Reload,
+restart, shutdown and failures close the reader, including a broken-pipe retry
+whose replacement worker creates a new output file. `GA_PROGRAM_SIZE` refuses
+short, empty and oversized pictures; `GA_PROGRAM_READ` identifies open, seek and
+read failures. Existing `fs.seek` and resource ownership suffice; no SDK change
+was needed. Twenty-six real-process checks cover new pixel contents, both resize
+directions, malformed data, live worker errors, replaced files, broken-pipe
+recovery and profile enable/disable/reset.
+
+The diagnostic emits a fresh `provider-profile.tsv` with call identity and
+request/reply, reader preparation, byte-read and surface-copy nanoseconds.
+`tests/playback_timing.py` validates its rows and reports phase medians/p95.
+Ordinary editing does not write this artifact.
+
+Three alternating twenty-second pairs keep the native audio DLL and compositor
+fixed. Delivery changes from 47.00–47.35 to 52.05–55.40 pictures/second;
+median-of-run program preparation changes from 17.99 to 12.50 ms, and picture
+delay from 13.14 to 11.63 ms. Reader preparation measures roughly 0.002 ms.
+A ninety-second pair delivers 45.33/53.92 pictures/second before/after, with
+13.32/12.07 ms median delay and 31.83/28.18 ms p95 delay. The new run observes
+11,530 clock/picture/cursor samples with no early pictures or audio underruns.
+These runs use the real silent device, asynchronous decode/mix and ordinary
+retained editor paint. Native presentation and physical speaker latency are
+excluded, and sustained interactive 4K60 remains open.
+
+The Windows gate retains the audio, meter, histogram/rewind, 44 monitor-frame and
+128 timeline-bitmap identity checks. Its eight-second lossless device fixture
+checks 957 pixel/frame/cursor observations across a five-second audio boundary.
+An additional supplied-HDR check compares Source with a neutral Program at
+matched working/monitor sizes: 480x270, 320x180 and the 80x45 thumbnail size.
+Through frames 0/1/7/0, all twelve pairs are exact. That confirms the current
+shared color path; it required no color fix.

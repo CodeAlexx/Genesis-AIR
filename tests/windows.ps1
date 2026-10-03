@@ -48,6 +48,16 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
   $native = Invoke-Native 'genesis-native.exe' @($work, $media)
   Write-Host $native.TrimEnd()
+  $previousInputFixture = $env:GENESIS_TEST_PREVIEW_INPUT
+  try {
+    $env:GENESIS_TEST_PREVIEW_INPUT = '1'
+    $inputRoot = Join-Path $work 'preview-input 日本語'
+    Write-Host (Invoke-Native 'genesis-preview-input.exe' @($inputRoot, (Join-Path $Bin 'genesis-worker-wrapper.exe'))).TrimEnd()
+    Copy-Item -LiteralPath (Join-Path $inputRoot 'preview-input-tests.json') -Destination (Join-Path $root 'preview-input-tests.json') -Force
+  } finally {
+    if ($null -eq $previousInputFixture) { Remove-Item Env:GENESIS_TEST_PREVIEW_INPUT -ErrorAction SilentlyContinue }
+    else { $env:GENESIS_TEST_PREVIEW_INPUT = $previousInputFixture }
+  }
   $wave = Join-Path $work 'queued audio 日本語.wav'
   & ffmpeg -nostdin -y -v error -i $media -vn -ac 2 -ar 48000 -c:a pcm_s16le $wave
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate native audio fixture.' }

@@ -147,6 +147,20 @@ A separate ninety-second event-wait run observes 8,434 clock/picture/cursor samp
 no early pictures or audio underruns, 26.83 pictures/second and 28.81/93.92 ms
 median/p95 picture delay. This uses the same headless scope and exclusions.
 
+The provider now retains its program-picture reader on the owning preview thread.
+Twenty-six process/file checks cover changing pixels, both resize directions,
+short/empty/oversized refusal, live worker errors, Reload, replaced outputs,
+broken-pipe retry, restart and diagnostic session behavior. Reads are bounded to
+the exact RGBA size plus one and failures have `GA_PROGRAM_SIZE`/`GA_PROGRAM_READ`
+codes. Three paired twenty-second 4K runs improve delivery from 47.00–47.35 to
+52.05–55.40 pictures/second, with 17.99/12.50 ms median-of-run program preparation.
+A ninety-second pair improves 45.33 to 53.92 pictures/second and 13.32/12.07 ms
+median picture delay. The new run checks 11,530 clock/picture/cursor observations
+with no early pictures or audio underruns. These silent-device/headless-painter
+measurements exclude native display and speaker latency; sustained interactive
+4K60 remains open. The current lossless Windows fixture passes 957 independent
+pixel/frame/cursor checks, and the monitor/timeline identity checks remain green.
+
 ## Video filters (31)
 
 | Status | Kinds | Remaining gate or implementation |

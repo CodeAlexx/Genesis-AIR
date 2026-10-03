@@ -3,6 +3,69 @@
 #include <stdio.h>
 #include <wchar.h>
 #include <string.h>
+#include <stdlib.h>
+
+/* Deterministic wire producer for retained-reader checks. It rewrites pixels
+ * in place, just like the real compositor, and deliberately emits bad lengths. */
+static int preview_input(void) {
+    char line[16384];
+    while (fgets(line, sizeof(line), stdin)) {
+        char verb[32], pattern[32], encoded[4096], decoded[4096];
+        unsigned width, height;
+        if (sscanf_s(line, "%31s %u %u %31s %4095s", verb, (unsigned)sizeof(verb),
+                     &width, &height, pattern, (unsigned)sizeof(pattern),
+                     encoded, (unsigned)sizeof(encoded)) != 5 ||
+            strcmp(verb, "PREVIEWFIT") != 0 || width == 0 || height == 0 ||
+            width > 1280 || height > 720) return 2;
+        if (strcmp(pattern, "error") == 0) {
+            fputs("ERR [GA_TEST_REQUEST] fixture refusal\n", stdout); fflush(stdout); continue;
+        }
+        size_t at = 0;
+        for (size_t i = 0; encoded[i]; ++i) {
+            if (encoded[i] == '%' && encoded[i+1] && encoded[i+2]) {
+                unsigned value;
+                if (sscanf_s(encoded+i+1, "%2x", &value) != 1) return 2;
+                decoded[at++] = (char)value; i += 2;
+            } else decoded[at++] = encoded[i];
+        }
+        decoded[at] = 0;
+        wchar_t path[4096];
+        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, decoded, -1, path, 4096)) return 2;
+        if (strcmp(pattern, "crash-once") == 0) {
+            wchar_t marker[4096];
+            if (_snwprintf_s(marker, 4096, _TRUNCATE, L"%s.crash", path) < 0) return 2;
+            if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES) {
+                FILE *created = _wfopen(marker, L"wb");
+                if (!created) return 2;
+                fclose(created);
+                if (!DeleteFileW(path)) return 2;
+                return 3;
+            }
+            strcpy_s(pattern, sizeof(pattern), "blue");
+        }
+        size_t wanted = (size_t)width * height * 4;
+        size_t count = strcmp(pattern, "short") == 0 ? wanted-1 :
+                       strcmp(pattern, "extra") == 0 ? wanted+1 :
+                       strcmp(pattern, "empty") == 0 ? 0 : wanted;
+        unsigned char *pixels = (unsigned char *)malloc(wanted+1);
+        if (!pixels) return 2;
+        for (size_t i = 0; i < wanted; i += 4) {
+            pixels[i] = strcmp(pattern, "red") == 0 ? 255 : 0;
+            pixels[i+1] = strcmp(pattern, "green") == 0 ? 255 : 0;
+            pixels[i+2] = strcmp(pattern, "blue") == 0 ? 255 : 0;
+            pixels[i+3] = 255;
+        }
+        pixels[wanted] = 42;
+        FILE *output = _wfopen(path, L"wb");
+        if (!output) { free(pixels); return 2; }
+        int wrote = fwrite(pixels, 1, count, output) == count;
+        int closed = fclose(output) == 0;
+        free(pixels);
+        if (!wrote || !closed) return 2;
+        fprintf(stdout, "DONE %s\n", decoded); fflush(stdout);
+    }
+    return 0;
+}
 
 /* A real blocked pipe/child for active audio cancellation, only when requested
  * by the fixture. A later start delegates to the genuine compositor. */
@@ -61,6 +124,8 @@ static int stall_export(const wchar_t *marker) {
 
 /* Exercise recovery through a real process, inheriting the AIR worker pipes. */
 int wmain(int argc, wchar_t **argv) {
+    wchar_t preview_mode[16];
+    if (GetEnvironmentVariableW(L"GENESIS_TEST_PREVIEW_INPUT", preview_mode, 16)) return preview_input();
     wchar_t starts[32768], crash[32768], worker[32768], command[32768];
     if (!GetEnvironmentVariableW(L"GENESIS_TEST_STARTS", starts, 32768) ||
         !GetEnvironmentVariableW(L"GENESIS_TEST_WORKER", worker, 32768)) return 2;

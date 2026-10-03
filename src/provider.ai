@@ -49,7 +49,9 @@ pub type Provider = struct {
   canvas_width: u32, canvas_height: u32,
   program_width: u32, program_height: u32,
   program_signature: string,
-  starts: u64
+  starts: u64,
+  profile: bool,
+  program_input: option<File>
 }
 
 // What a probe learned about one source. `frames` 0 means the length is genuinely unknown,
@@ -71,7 +73,7 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
     ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none()}
 }
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
@@ -83,7 +85,7 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} 
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none()}
 }
 
 // FFmpeg is a real-media backend, selected only when gcompose is absent.
@@ -91,9 +93,24 @@ pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effec
   Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
     scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none()}
+}
+pub fn set_profile(state: ref<Provider>, enabled: bool) -> unit effects {alloc,fs.write} {
+  if enabled and not state.profile {
+    let _ = files.write_text(path.join(str.view(struct.borrow(state,field=scratch)),"provider-profile.tsv"),
+      "call\texchange_ns\tinput_ns\tread_ns\tcopy_ns\n")
+  }
+  struct.set(state,enabled,field=profile)
+  ()
+}
+fn discard_program_input(state: ref<Provider>) -> unit effects {} {
+  match ref.swap(struct.borrow(state,field=program_input),option.none()) {
+    some(input)=>{let _ = fs.close(input)},none=>{},
+  }
+  ()
 }
 pub fn invalidate(state: ref<Provider>) -> unit effects {alloc} {
+  discard_program_input(state)
   let _ = struct.replace(state, string.new(), field=program_signature)
   struct.set(state,0,field=program_width)
   struct.set(state,0,field=program_height)
@@ -141,6 +158,7 @@ pub fn describe(state: ref<Provider>) -> string effects {alloc} {
 }
 
 pub fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc, fs.write, time} {
+  discard_program_input(state)
   struct.set(state, state.failures + 1, field=failures)
   var message: string = if str.starts_with(detail, "[GA_") { string.copy(detail) }
     else { text.concat("[GA_PROVIDER] ", detail) }
@@ -268,6 +286,7 @@ fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {
     }
     var outcome: Exchange = exchange(child, struct.borrow(state, field=reader), command)
     if outcome.kind == 2 {
+      discard_program_input(state)
       let _ = proc.terminate(child, 200)
       let _ = proc.close(child)
       if attempt == 0 {
@@ -627,11 +646,58 @@ pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32)
   if str.starts_with(line,"PREVIEW ") {string.append(command,str.slice(line,8,str.len(line)))}
   else {string.append(command,line)}
   let output: string = preview_path(state)
+  let started: u64 = if state.profile {time.monotonic_ns()}else{0}
   match ask(state, str.view(command), "program.txt") {
     none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
       detail: last_error(state)},
     some(reply) => {
-      match read_program(str.view(output), width, height, width, height) {
+      let received: u64 = if state.profile {time.monotonic_ns()}else{0}
+      // The worker truncates this file in place after each completed frame.
+      // Keep its reader on this provider's owning thread; seek after DONE before
+      // reading again. Restart, Reload and failed reads retire the handle.
+      var input: File = match ref.swap(struct.borrow(state,field=program_input),option.none()) {
+        some(held)=>held,
+        none=>match fs.open(str.view(output),mode=read) {
+          ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be opened")
+            return failed_frame(state)},
+        },
+      }
+      match fs.seek(input,0,whence=start) {
+        ok(_)=>{},err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be rewound")
+          return failed_frame(state)},
+      }
+      let opened: u64 = if state.profile {time.monotonic_ns()}else{0}
+      let wanted: u64 = total*4
+      var raw: bytes = match fs.read(input,wanted+1) {
+        ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be read")
+          return failed_frame(state)},
+      }
+      loop {
+        if view.len(raw) > wanted {break}
+        let next: bytes = match fs.read(input,wanted+1-view.len(raw)) {
+          ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be read")
+            return failed_frame(state)},
+        }
+        if view.len(next) == 0 {break}
+        bytes.append(raw,next)
+      }
+      let read_end: u64 = if state.profile {time.monotonic_ns()}else{0}
+      if view.len(raw) != wanted {
+        note_failure(state,"[GA_PROGRAM_SIZE] The worker program frame has the wrong byte count")
+        return failed_frame(state)
+      }
+      let _ = ref.swap(struct.borrow(state,field=program_input),option.some(input))
+      let decoded: option<draw.Surface> = rgba_surface(raw,width,height)
+      if state.profile {
+        let completed: u64 = time.monotonic_ns()
+        let record: string = text.concat(string.from_int(state.calls),text.concat("\t",
+          text.concat(string.from_int(received-started),text.concat("\t",
+          text.concat(string.from_int(opened-received),text.concat("\t",
+          text.concat(string.from_int(read_end-opened),text.concat("\t",
+          text.concat(string.from_int(completed-read_end),"\n")))))))))
+        let _ = files.append_text(path.join(str.view(struct.borrow(state,field=scratch)),"provider-profile.tsv"),record)
+      }
+      match decoded {
         none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
           detail: string.copy("the worker's program frame could not be read")},
         some(pixels) => {
