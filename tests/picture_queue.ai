@@ -1,0 +1,66 @@
+module genesis.tests.picture_queue
+import std.draw as draw
+import std.testing as test
+import "../src/picture_queue.ai" as pictures
+import "../src/preview_link.ai" as link
+fn frame(source: i64, program: i64) -> pictures.Frame effects {alloc} {
+  pictures.Frame {source:draw.empty_surface(),program:draw.empty_surface(),
+    position:link.FramePosition {source_frame:source,program_frame:program,revision:1},held_source:false}
+}
+fn position(frame: pictures.Frame own, source: bool) -> i64 effects {} {
+  if source {frame.position.source_frame}else{frame.position.program_frame}
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,time} {
+  var suite: test.Suite = test.suite("Audio-timed prepared pictures",true)
+  var queue: pictures.Queue = pictures.queue()
+  let _ = test.start(suite,"Prepared pixels wait for their audio time")
+  let _ = pictures.configure(queue,"clip",1,true,false,480,270)
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,0,200,60.0,0)),2,"Prepare two frames ahead at 60 fps")
+  pictures.requested(queue,1,2,100000000)
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,1,200,60.0,0)),3,"Next audio frame updates the coalesced mailbox without waiting")
+  let _ = test.check(suite,pictures.receive(queue,1,frame(0,2),120000000),"Complete picture accepted")
+  let _ = test.check(suite,not option.is_some(pictures.take_due(queue,1)),"Future picture is held")
+  let _ = test.eq_i64(suite,position(option.unwrap(pictures.take_due(queue,2)),false),2,"Release at its stamped time")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Bounded queue skips superseded due pictures")
+  pictures.requested(queue,2,3,130000000)
+  let _ = pictures.receive(queue,2,frame(0,3),150000000)
+  pictures.requested(queue,3,4,160000000)
+  let _ = pictures.receive(queue,3,frame(0,4),180000000)
+  let _ = test.check(suite,not option.is_some(pictures.target(queue,2,200,60.0,2)),"Two prepared pictures impose backpressure")
+  let _ = test.eq_i64(suite,position(option.unwrap(pictures.take_due(queue,4)),false),4,"Catch up using newest due picture")
+  let _ = test.eq_u64(suite,array.len(struct.borrow(queue,field=frames)),0,"Superseded pictures released")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Seek, content, geometry and transport invalidate old pixels")
+  pictures.requested(queue,4,8,190000000)
+  let _ = pictures.receive(queue,4,frame(0,8),210000000)
+  pictures.requested(queue,5,9,220000000)
+  let _ = test.check(suite,pictures.configure(queue,"clip",2,true,false,480,270),"Restart changes epoch")
+  let _ = test.check(suite,not pictures.receive(queue,5,frame(0,9),240000000),"Old completion rejected after seek")
+  let _ = test.check(suite,not option.is_some(pictures.take_due(queue,10)),"Retired epoch has no picture")
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,0,200,60.0,10)),0,"Rewind requests exact start first")
+  let _ = test.check(suite,pictures.configure(queue,"edit",2,true,false,480,270),"An edit invalidates pictures")
+  let _ = test.check(suite,pictures.configure(queue,"edit",2,true,false,1280,720),"Geometry invalidates pictures")
+  let _ = test.check(suite,pictures.configure(queue,"edit",2,false,false,480,270),"Pause invalidates future pictures")
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,7,200,60.0,0)),7,"Paused scrub requests exact frame")
+  pictures.requested(queue,6,7,250000000)
+  let _ = pictures.receive(queue,6,frame(0,7),280000000)
+  let _ = test.eq_i64(suite,position(option.unwrap(pictures.take_due(queue,0)),false),7,"Paused completion is immediately visible")
+  let _ = test.check(suite,not option.is_some(pictures.target(queue,7,200,60.0,7)),"Idle paused frame is not decoded again")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Source clock and fractional frame rates")
+  let _ = pictures.configure(queue,"source",3,true,true,480,270)
+  struct.set(queue,50000000,field=latency_ns)
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,10,200,24000.0/1001.0,10)),12,"Fractional lead rounds up and is bounded")
+  pictures.requested(queue,7,12,300000000)
+  let _ = pictures.receive(queue,7,frame(12,80),600000000)
+  let _ = test.check(suite,not option.is_some(pictures.take_due(queue,11)),"Source time governs Source playback")
+  let _ = test.eq_i64(suite,position(option.unwrap(pictures.take_due(queue,12)),true),12,"Source picture releases at its own frame")
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,199,200,60.0,199)),200,"Preparation clamps to last frame")
+  pictures.requested(queue,8,200,700000000)
+  let _ = pictures.receive(queue,8,frame(200,80),730000000)
+  let _ = test.check(suite,not option.is_some(pictures.target(queue,200,200,60.0,199)),"End does not repeatedly decode last frame")
+  let _ = test.done(suite)
+  let report: string = if view.len(args)>1 {string.copy(view.get(args,1))}else{string.copy("picture-queue-tests.json")}
+  test.conclude(suite,report,24)
+}

@@ -522,3 +522,50 @@ The test allows fewer than 48 missing samples for a driver reporting whole
 milliseconds. This is device-clock evidence, without image presentation or physical
 speaker latency. Sustained interactive 4K playback and long-running A/V sync remain
 open. No AIR SDK change was needed.
+
+## Pictures prepared against the Windows audio clock
+
+The old window requested the currently heard frame and painted it after the worker
+completed, creating a persistent picture delay. The application now snapshots a
+future transport position without advancing the authoritative document. Prediction
+uses measured request completion with room for the event wait and retained paint;
+the time lead is capped at 50 ms and rounded up to an output frame. The worker still
+coalesces one latest mailbox. The UI retains at most two complete waiting pictures,
+plus sixteen scalar request timings, and releases only the newest picture whose
+stamp is due. No decode thread or AIR SDK change was needed.
+
+Paused seeks are immediate. Stable edit identity, media revision, audio epoch,
+active monitor and geometry invalidate pending pictures. An older completion within
+the same epoch remains valid even when a newer request is outstanding; a completion
+from a retired epoch cannot overwrite rewind. The parked Source image survives
+retired Program pictures and can be recovered from the channel's cached RGBA bytes.
+Histogram input, monitor timecode and playing timeline cursor all use the released
+picture. The document continues to track the actual audio device sample count.
+
+`tests/picture_queue.ai` checks bounded buffering, due-time release, skipped due
+frames, exact paused requests, invalidation, Source time, fractional rates and end
+clamping. Inspector pixel checks prove the histogram does not show a prepared future
+picture, then changes with its release and with rewind. Stream checks recover every
+RGBA byte of the parked Source after its original image was consumed, and refuse
+recovery after an explicit empty Source. Existing individual-frame and timeline
+bitmap checks continue to use independent lossless source colors.
+
+The new `profile-playback` diagnostic runs the production preview and audio tasks,
+the real Windows device and retained painter without opening a window. The final
+track gain of its loaded document copy is zero; media remains decoded and mixed.
+`tests/playback_timing.py` independently decodes its generated lossless source and
+checks every reported pixel/frame pair, audio clock conversion, playing cursor,
+queue bound, lack of early pictures and audio continuity across five-second buffers.
+Its TSV captures the clock after painting. Native presentation and physical speaker
+latency remain outside this measurement, and sustained interactive 4K60 remains open.
+
+Three alternating twenty-second pairs on the supplied 4K/59.94 AV1/PQ clip
+measure a median of per-run picture-delay medians of 78.79 ms for the diagnostic
+baseline and 26.46 ms with preparation. Picture delivery varies: 28.35–28.65 versus
+25.60–28.70 pictures/second in those short runs. One ninety-second pair over the
+same starting interval measures 115.45/52.63 ms median delay, 205.12/138.95 ms p95,
+and 17.83/20.90 pictures/second. The prepared run observes 5,354 complete clock/
+picture/cursor samples with no audio underruns or early pictures. These are silent
+real-device and headless-painter measurements, including mixed audio buffers, with
+native presentation and speaker latency excluded. They establish less picture delay
+on these runs; throughput still varies with the footage and is below 4K60.

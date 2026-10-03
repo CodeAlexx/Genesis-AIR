@@ -42,6 +42,8 @@ import "timeline_media.ai" as timeline_media
 import "preview.ai" as preview
 import "preview_link.ai" as preview_link
 import "preview_profile.ai" as preview_profile
+import "picture_queue.ai" as picture_queue
+import "playback_profile.ai" as playback_profile
 import "transport_clock.ai" as transport_clock
 import "view.ai" as painter
 
@@ -339,7 +341,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     audio_playback.stop(str.view(audio_root))
     let _ = preview_link.wake(audio_transport,true)
     return 1},}
-  var preview_signature: string = string.new()
+  var pictures: picture_queue.Queue = picture_queue.queue()
   let strip_root: string = path.join(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)),"timeline-strips")
   let _ = files.mkdirs(str.view(strip_root))
   preview.reset(str.view(strip_root))
@@ -368,10 +370,6 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   var preview_seen: u64 = 0
   var waveform_seen: u64 = 0
   var thumbnail_seen: u64 = 0
-  var preview_scroll: i64 = -1
-  var preview_zoom: f64 = 0.0
-  var preview_span: i64 = 0
-  var preview_width: u32 = 0
   var preview_media_revision: u64 = 0
   var preview_error: string = string.new()
   var preview_channel_error: string = string.new()
@@ -400,25 +398,6 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       dirty=true
     }
     preview_channel_error=channel_error
-    let ready: u64 = preview_transport.ready
-    if ready > preview_seen {
-      var images: array<draw.Surface> = preview_link.take_images(preview_transport,ready)
-      let position: preview_link.FramePosition = preview_transport.position
-      preview_seen = ready
-      if array.len(images) == 2 and position.revision == state.media_revision {
-        struct.set(state,position.program_frame,field=presented_program_frame)
-        struct.set(state,position.source_frame,field=presented_source_frame)
-        let _ = ref.swap(program_image, option.unwrap(array.pop(images)))
-        var new_source: draw.Surface = option.unwrap(array.pop(images))
-        if not preview_link.holds_source(preview_transport) {let _ = ref.swap(source_image,new_source)}
-      }
-      let problem: string = string.copy(str.view(struct.borrow(preview_transport,field=pixel_error)))
-      if str.len(str.view(problem)) != 0 and not str.eq(str.view(problem), str.view(preview_error)) {
-        app.set_status(state, str.view(problem))
-      }
-      preview_error = problem
-      dirty = true
-    }
     preview_link.poll(strip_transport)
     let strip_problem: string = string.copy(str.view(struct.borrow(strip_transport,field=error)))
     if str.len(str.view(strip_problem)) != 0 and not str.eq(str.view(strip_problem),str.view(strip_error)) {
@@ -567,10 +546,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           } else {
             if not audio_preparing {
               let doc: ref<editor.Document> = struct.borrow(state, field=document)
-              let sample_count: f64 = cast.float(device.samples)
-              let heard: i64 = audio_origin + cast.sat(sample_count * fps / 48000.0)
               let last: i64 = if finish > 0 { finish - 1 } else { 0 }
-              let actual: i64 = if heard > last { last } else { heard }
+              let actual: i64 = transport_clock.frame_at_samples(audio_origin,device.samples,fps,last)
               let current: i64 = if source_playing { struct.get(struct.borrow(doc, field=monitor), field=frame) } else { editor.playhead(doc) }
               if actual != current { let _ = if source_playing { editor.seek_monitor(doc, actual) } else { editor.seek(doc, actual) }
                 dirty = true }
@@ -662,6 +639,76 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       cast.float(physical_height))
     let logical_width: f64 = cast.float(physical_width) / ui_scale
     let logical_height: f64 = cast.float(physical_height) / ui_scale
+    let doc: ref<editor.Document> = struct.borrow(state,field=document)
+    let picture_source: bool = struct.get(struct.borrow(doc,field=monitor),field=playing)
+    let picture_playing: bool = picture_source or editor.playing(doc)
+    let wanted: i64 = if picture_source {struct.get(struct.borrow(doc,field=monitor),field=frame)}else{editor.playhead(doc)}
+    let fps: f64 = if picture_source {timeline_media.monitor_fps(doc)}else{editor.sequence_fps(doc,doc.active)}
+    let finish: i64 = if picture_source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
+    let monitor_width: u32 = if state.fullscreen != 0 {1280}else{480}
+    let monitor_height: u32 = if state.fullscreen != 0 {720}else{270}
+    if dirty or not pictures.initialized or pictures.epoch != audio_generation or
+        pictures.playing != picture_playing or pictures.source != picture_source or
+        pictures.width != monitor_width or pictures.height != monitor_height {
+      let key: string = picture_queue.identity(state,picture_source,picture_playing)
+      if picture_queue.configure(pictures,key,audio_generation,picture_playing,picture_source,monitor_width,monitor_height) {dirty=true}
+    }
+    preview_media_revision=state.media_revision
+    let ready: u64 = preview_transport.ready
+    if ready > preview_seen {
+      // Configure after following the audio clock, before consuming a completion:
+      // a seek or restart must retire the previous epoch's prepared pictures.
+      preview_seen=ready
+      if picture_queue.accepts(pictures,ready) {
+        var images: array<draw.Surface> = preview_link.take_images(preview_transport,ready)
+        let position: preview_link.FramePosition = preview_transport.position
+        if array.len(images) == 2 and position.revision == state.media_revision {
+          var next_program: draw.Surface = option.unwrap(array.pop(images))
+          var next_source: draw.Surface = option.unwrap(array.pop(images))
+          var held: bool = preview_link.holds_source(preview_transport)
+          if held and (source_image.width == 0 or state.presented_source_frame != position.source_frame) {
+            next_source=preview_link.restore_source(preview_transport)
+            held=false
+          }
+          // The parked Source monitor has no future time. Preserve its pixels
+          // immediately so retiring a prepared Program frame cannot erase it.
+          if not picture_source and not held {
+            let _ = ref.swap(source_image,next_source)
+            next_source=draw.empty_surface()
+            struct.set(state,position.source_frame,field=presented_source_frame)
+            held=true
+            dirty=true
+          }
+          let _ = picture_queue.receive(pictures,ready,picture_queue.Frame {
+            source:next_source,program:next_program,position:position,held_source:held},clock.start())
+        }
+        let problem: string = string.copy(str.view(struct.borrow(preview_transport,field=pixel_error)))
+        if str.len(problem) != 0 and problem != preview_error {app.set_status(state,problem)
+          pause_transport(state,true)
+          pause_transport(state,false)
+          dirty=true}
+        preview_error=problem
+      }
+    }
+    match picture_queue.take_due(pictures,wanted) {none=>{},some(frame)=>{
+      picture_queue.apply(state,frame,source_image,program_image)
+      dirty=true},}
+    let shown: i64 = if picture_source {state.presented_source_frame}else{state.presented_program_frame}
+    match picture_queue.target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown) {
+      none=>{},some(target)=>{
+        var snapshot: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+        let _ = if picture_source {editor.seek_monitor(snapshot,target)}else{editor.seek(snapshot,target)}
+        let encoded: string = match editor_io.encode(snapshot) {ok(value)=>value,err(_)=>string.new(),}
+        preview_requested=preview_requested+1
+        if preview.request_revision(str.view(preview_root),encoded,preview_requested,app.scroll(state),app.zoom(state),450,monitor_width,monitor_height,state.media_revision) {
+          picture_queue.requested(pictures,preview_requested,target,clock.start())
+          match preview_link.wake(preview_transport,false) {ok(_)=>{},err(problem)=>{app.set_status(state,problem)},}
+        }else{app.set_status(state,"[GA_PREVIEW_REQUEST] Cannot publish the preview request")
+          pause_transport(state,true)
+          pause_transport(state,false)
+          dirty=true}
+      },
+    }
     if dirty {
       let signature: string = match editor_io.encode(struct.borrow(state, field=document)) {
         ok(value) => value, err(_) => string.new(),
@@ -680,22 +727,6 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           strip_zoom=app.zoom(state)
           strip_span=span
         }else{app.set_status(state,"[GA_TIMELINE_REQUEST] Cannot publish timeline bitmap request")}
-      }
-      let monitor_width: u32 = if state.fullscreen != 0 { 1280 } else { 480 }
-      let monitor_height: u32 = if state.fullscreen != 0 { 720 } else { 270 }
-      if preview_media_revision != state.media_revision or preview_width != monitor_width or not str.eq(str.view(signature), str.view(preview_signature)) or preview_scroll != app.scroll(state) or preview_zoom != app.zoom(state) or preview_span != span {
-        preview_requested = preview_requested + 1
-        if preview.request_revision(str.view(preview_root), str.view(signature), preview_requested, app.scroll(state), app.zoom(state), span, monitor_width, monitor_height, state.media_revision) {
-          match preview_link.wake(preview_transport,false) {ok(_)=>{},err(problem)=>{app.set_status(state,str.view(problem))},}
-        } else {app.set_status(state,"[GA_PREVIEW_REQUEST] Cannot publish the timeline preview request")
-          pause_transport(state,true)
-          pause_transport(state,false)}
-        preview_width = monitor_width
-        preview_media_revision = state.media_revision
-        preview_scroll = app.scroll(state)
-        preview_zoom = app.zoom(state)
-        preview_span = span
-        preview_signature = signature
       }
       if painter.render(state, renderer, width, height, repaint_all, source_image, program_image) {
         match gui.present_surface(window, struct.borrow(renderer, field=surface)) {
@@ -922,6 +953,18 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
     none => { },
   }
 
+  if verb == "profile-playback" {
+    if view.len(args) < 5 or view.len(args) > 6 {say("profile-playback needs REPORT.tsv PROJECT.air SECONDS [--legacy]")
+      return 2}
+    let legacy: bool = view.len(args) == 6 and view.get(args,5) == "--legacy"
+    if view.len(args) == 6 and not legacy {say("[GA_PLAYBACK_PROFILE_ARGS] Unknown option")
+      return 2}
+    var opened: commands.Result = commands.open_project(state,view.get(args,3))
+    if not opened.ok {say(commands.message(opened))
+      return 1}
+    let seconds: u64 = match text.parse_u64(view.get(args,4)) {some(value)=>value,none=>0,}
+    return playback_profile.run(state,view.get(args,2),seconds,legacy)
+  }
   if str.eq(verb, "profile-preview") {
     if view.len(args) < 4 { say("profile-preview needs a report path and a project")
       return 2 }

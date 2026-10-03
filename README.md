@@ -585,6 +585,43 @@ sync measurements. Run that gate separately with:
 python tests/audio_stream.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-playback.exe --cancel-client .\build-windows\native-pro\bin\Release\genesis-audio-cancel.exe --wrapper .\build-windows\native-pro\bin\Release\genesis-worker-wrapper.exe
 ```
 
+The editor now prepares pictures ahead of the audio device playhead. A bounded
+queue holds at most two complete frames and releases a picture only when its time
+is due. Requests continue through the existing coalesced mailbox, so preparing
+pictures does not force the decoder to wait for each UI completion. The displayed
+picture stamp drives the monitor timecode, playing timeline cursor and histogram.
+Paused scrubbing requests the exact frame immediately. Rewind, edits, media reload,
+monitor geometry and transport restarts retire old prepared pictures; the parked
+Source image can be restored from the channel cache after retirement.
+
+Three alternating twenty-second pairs on the supplied 4K/59.94 AV1/PQ clip
+measure a median of per-run picture-delay medians of 78.79 ms for the diagnostic
+baseline and 26.46 ms with preparation. Picture delivery varies: 28.35–28.65 versus
+25.60–28.70 pictures/second in those short runs. One ninety-second pair over the
+same starting interval measures 115.45/52.63 ms median delay, 205.12/138.95 ms p95,
+and 17.83/20.90 pictures/second. The prepared run observes 5,354 complete clock/
+picture/cursor samples with no audio underruns or early pictures. These are silent
+real-device and headless-painter measurements, including mixed audio buffers, with
+native presentation and speaker latency excluded. They establish less picture delay
+on these runs; throughput still varies with the footage and is below 4K60.
+
+`profile-playback REPORT.tsv PROJECT.air SECONDS [--legacy]` measures the real native
+audio device, asynchronous decode/mix and retained ordinary editor paint. It opens
+no window and silences final track gain in its loaded copy; it never saves that copy.
+Measurements include paint time but exclude native display and physical speaker
+latency. `--legacy` is a diagnostic baseline that requests the current heard frame.
+The Windows gate checks a lossless per-frame 23.976-to-29.97 fps fixture through an
+eight-second device run, including the five-second audio-buffer boundary. Every
+sampled program pixel, picture stamp and playing cursor must agree; future pictures
+and audio underruns fail the check. Inspector pixel tests also hold a prepared red
+frame out of a blue histogram, release both picture and histogram together, then
+rewind to green frame zero while rejecting a late old black picture.
+
+```powershell
+python tests/playback_timing.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --report .\build-windows\playback-timing-fixture.json --compare
+python tests/playback_timing.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --project 'C:\path\to\project.air' --seconds 90 --report .\build-windows\playback-timing-long.json
+```
+
 The Windows audio clock also accepts driver positions returned in bytes or
 milliseconds. It unwraps the native counter before converting to 48 kHz stereo
 frames, holds small backward observations, and preserves time when the reported

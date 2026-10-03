@@ -68,6 +68,9 @@ try {
     Write-Host (Invoke-Native 'genesis-preview-stream.exe' @((Join-Path $work 'stream'), $worker, $media)).TrimEnd()
     & python (Join-Path $PSScriptRoot 'frame_identity.py') --worker $worker --client (Join-Path $Bin 'genesis-preview-stream.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Per-frame monitor and timeline bitmap acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'playback_timing.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --report (Join-Path $root 'playback-timing-fixture.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Audio-timed picture, histogram and timeline acceptance failed.' }
     Copy-Item -LiteralPath (Join-Path $work 'async/timeline-scrub.png') -Destination (Join-Path $root 'timeline-scrub.png') -Force
     & python (Join-Path $PSScriptRoot 'audio_stream.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-playback.exe') `
       --cancel-client (Join-Path $Bin 'genesis-audio-cancel.exe') --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
@@ -84,6 +87,7 @@ try {
   foreach ($artifact in @('project-safety-tests.json', 'project-decision.png', 'recovery-decision.png')) {
     Copy-Item -LiteralPath (Join-Path $work "project-safety/$artifact") -Destination (Join-Path $root $artifact) -Force
   }
+  Write-Host (Invoke-Native 'genesis-picture-queue.exe' @((Join-Path $root 'picture-queue-tests.json'))).TrimEnd()
   Write-Host (Invoke-Native 'genesis-live-paint.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'live-paint-tests.json') -Destination (Join-Path $root 'live-paint-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()

@@ -155,6 +155,8 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
         var s: draw.Surface = option.unwrap(array.pop(held))
         good=exact(p,91) and s.width == 0 and good
       }
+      var restored: draw.Surface = link.restore_source(transport)
+      good=exact(restored,13) and good
       let _ = files.write_text(path.join(root,"request.id"),"3")
       let _ = link.wake(transport,false)
       good=match link.await_ready(transport,3,time.monotonic_ns()+10000000000) {ok(_)=>true,err(_)=>false,} and good
@@ -165,6 +167,8 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
         var s: draw.Surface = option.unwrap(array.pop(empty))
         good=p.width == 0 and s.width == 0 and good
       }
+      var cleared: draw.Surface = link.restore_source(transport)
+      good=cleared.width == 0 and good
     } else {
       let refused: bool = match link.await_ready(transport,if mode == 7 {2}else{1},time.monotonic_ns()+10000000000) {
         ok(_)=>false,err(problem)=>text.contains(str.view(problem),"GA_PREVIEW_PIXELS"),

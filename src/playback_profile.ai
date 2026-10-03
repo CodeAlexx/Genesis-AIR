@@ -1,0 +1,228 @@
+// Ordinary editor playback measured against the real Windows audio device.
+// Uses the production preview/audio tasks, picture queue and retained painter.
+// This diagnostic is silent and opens no window. Native display latency is excluded.
+module genesis.playback_profile
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import "app.ai" as app
+import "audio_playback.ai" as audio
+import "chrome.ai" as chrome
+import "native_audio.ai" as device
+import "picture_queue.ai" as pictures
+import "preview.ai" as preview
+import "preview_link.ai" as link
+import "provider.ai" as provider
+import "timeline_media.ai" as media
+import "transport_clock.ai" as transport_clock
+import "view.ai" as painter
+
+fn publish(state: ref<app.App>, root: str, transport: ref<link.Link>, id: u64,
+    frame: i64) -> bool effects {alloc,fs.write,net,time} {
+  var doc: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+  let _ = editor.seek(doc,frame)
+  let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{return false},}
+  if not preview.request_revision(root,encoded,id,0,2.4,450,480,270,state.media_revision) {return false}
+  match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
+}
+fn plan(state: ref<app.App>, root: str, transport: ref<link.Link>, id: u64,
+    start: i64, end: i64, output: str) -> bool effects {alloc,fs.write,io.write,net,time} {
+  let worker: string = provider.worker_path(struct.borrow(state,field=provider))
+  var prepared: media.AudioPlan = match media.audio_plan_range(struct.borrow(state,field=document),worker,start,end,output) {
+    ok(value)=>value,err(problem)=>{io.write(problem)
+      return false},
+  }
+  audio.request(root,id,1,prepared) and match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
+}
+fn integer(out: ref<string>, value: i64) -> unit effects {alloc} {
+  string.append(out,string.from_int(value))
+  string.append(out,"\t")
+  ()
+}
+pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if seconds < 2 or seconds > 180 {io.write("[GA_PLAYBACK_PROFILE_ARGS] Use 2..180 seconds\n")
+    return 2}
+  let active: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let fps: f64 = editor.sequence_fps(struct.borrow(state,field=document),active)
+  let finish: i64 = editor.duration(struct.borrow(state,field=document))
+  let duration: f64 = cast.float(finish)/fps
+  let requested_seconds: f64 = cast.float(seconds)
+  if duration < requested_seconds+0.1 {io.write("[GA_PLAYBACK_PROFILE_ARGS] Project must extend beyond the measurement\n")
+    return 2}
+  // Keep every audible source in the plan and decode/effect pipeline, but silence
+  // its final track gain. The loaded document is a diagnostic copy, never saved.
+  let tracks: ref<array<editor.Track>> = struct.borrow(struct.borrow(state,field=document),field=tracks)
+  var at: u64 = 0
+  loop {if at == array.len(tracks) {break}
+    struct.set(array.borrow(tracks,at),0.0,field=gain)
+    at=at+1}
+  let _ = editor.seek(struct.borrow(state,field=document),0)
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+  app.set_dock_tab(state,chrome.tab_scopes())
+  let scratch: string = string.copy(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)))
+  let root: string = path.join(scratch,"playback-profile")
+  let sound_root: string = path.join(scratch,"playback-profile-audio")
+  let output: string = path.join(sound_root,"chunk.wav")
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  audio.reset(sound_root)
+  var preview_link: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return 1},}
+  var audio_link: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  var library: CAbiLibrary = match device.open() {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 1},}
+  var configured: preview.Config = preview.config(state,root,link.ticket(preview_link))
+  struct.set(configured,true,field=pixel_stream)
+  struct.set(configured,true,field=profile)
+  let sound: audio.Config = audio.Config {root:string.copy(sound_root),
+    worker:provider.worker_path(struct.borrow(state,field=provider)),events:link.ticket(audio_link)}
+  var queue: pictures.Queue = pictures.queue()
+  let key: string = pictures.identity(state,false,true)
+  let _ = pictures.configure(queue,key,1,true,false,480,270)
+  var renderer: painter.Renderer = painter.renderer()
+  var source: draw.Surface = draw.empty_surface()
+  var program: draw.Surface = draw.empty_surface()
+  var rows: string = string.copy("wall_ns\tsamples\tqueued\theard_frame\tshown_frame\ttimeline_frame\tr\tg\tb\testimated_ready_ns\tprepared\tin_flight\n")
+  var failure: bool = false
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(configured,fn=preview.run))
+    array.push(jobs,task.spawn(sound,fn=audio.run))
+    match link.connect(preview_link) {ok(_)=>{},err(_)=>{failure=true},}
+    match link.connect(audio_link) {ok(_)=>{},err(_)=>{failure=true},}
+    var requested: u64 = 1
+    var seen: u64 = 0
+    var last_legacy: i64 = -1
+    var next_audio: i64 = cast.sat(fps*5.0)
+    if next_audio > finish {next_audio=finish}
+    var audio_end: i64 = next_audio
+    var audio_id: u64 = 1
+    var audio_pending: bool = false
+    // Warm the parked monitor and first mixed audio block before starting time.
+    if not failure {
+      if not publish(state,root,preview_link,1,0) or not plan(state,sound_root,audio_link,1,0,next_audio,output) {failure=true}
+      match link.await_ready(preview_link,1,time.monotonic_ns()+30000000000) {ok(_)=>{},err(_)=>{failure=true},}
+      match link.await_ready(audio_link,1,time.monotonic_ns()+30000000000) {ok(_)=>{},err(_)=>{failure=true},}
+      var images: array<draw.Surface> = link.take_images(preview_link,1)
+      if array.len(images) != 2 {failure=true}else{
+        program=option.unwrap(array.pop(images))
+        source=option.unwrap(array.pop(images))
+        struct.set(state,0,field=presented_program_frame)
+        struct.set(state,preview_link.position.source_frame,field=presented_source_frame)
+        seen=1}
+      if device.request(library,"start","") != "ok" or device.request(library,"queue",output) != "ok" {failure=true}
+    }
+    let begin: u64 = time.monotonic_ns()
+    let deadline: u64 = begin+(seconds+10)*1000000000
+    loop {
+      if failure {break}
+      var clock: device.Clock = device.clock(library)
+      if not clock.ok {io.write(clock.error)
+        failure=true
+        break}
+      if clock.samples >= seconds*48000 {break}
+      if time.monotonic_ns() > deadline {io.write("[GA_PLAYBACK_PROFILE_STALL] Audio clock did not finish\n")
+        failure=true
+        break}
+      let heard: i64 = transport_clock.frame_at_samples(0,clock.samples,fps,finish-1)
+      let _ = editor.seek(struct.borrow(state,field=document),heard)
+      link.poll(audio_link)
+      if audio_pending and audio_link.ready == audio_id {
+        if device.request(library,"queue",output) != "ok" {failure=true
+          break}
+        next_audio=audio_end
+        audio_pending=false
+        clock=device.clock(library)
+        if not clock.ok {failure=true
+          break}
+      }
+      if audio_link.error_generation == audio_id or audio_link.closed {io.write(audio_link.error)
+        failure=true
+        break}
+      if not audio_pending and clock.queued < 2 and next_audio < finish {
+        audio_end=next_audio+cast.sat(fps*5.0)
+        if audio_end > finish {audio_end=finish}
+        audio_id=audio_id+1
+        audio_pending=plan(state,sound_root,audio_link,audio_id,next_audio,audio_end,output)
+        if not audio_pending {failure=true
+          break}
+      }
+      link.poll(preview_link)
+      if preview_link.closed or str.len(preview_link.error) != 0 {io.write(preview_link.error)
+        failure=true
+        break}
+      if preview_link.ready > seen {
+        let ready: u64 = preview_link.ready
+        seen=ready
+        if legacy or pictures.accepts(queue,ready) {
+          var images: array<draw.Surface> = link.take_images(preview_link,ready)
+          if array.len(images) != 2 {failure=true
+            break}
+          var next_program: draw.Surface = option.unwrap(array.pop(images))
+          var next_source: draw.Surface = option.unwrap(array.pop(images))
+          let held: bool = link.holds_source(preview_link)
+          if not held {source=next_source}
+          let frame: pictures.Frame = pictures.Frame {source:draw.empty_surface(),program:next_program,
+            position:preview_link.position,held_source:true}
+          if legacy {pictures.apply(state,frame,source,program)}else{
+            let _ = pictures.receive(queue,ready,frame,time.monotonic_ns())}
+        }
+      }
+      if not legacy {match pictures.take_due(queue,heard) {none=>{},some(frame)=>{pictures.apply(state,frame,source,program)},}}
+      let target: option<i64> = if legacy {if heard != last_legacy {option.some(heard)}else{option.none()}}
+        else {pictures.target(queue,heard,finish-1,fps,state.presented_program_frame)}
+      match target {none=>{},some(frame)=>{
+        requested=requested+1
+        if not publish(state,root,preview_link,requested,frame) {failure=true
+          break}
+        pictures.requested(queue,requested,frame,time.monotonic_ns())
+        last_legacy=frame},}
+      var levels: device.Levels = device.levels(library)
+      if not levels.ok {failure=true
+        break}
+      struct.set(state,levels.left,field=audio_left)
+      struct.set(state,levels.right,field=audio_right)
+      if not painter.render(state,renderer,1600,980,false,source,program) {failure=true
+        break}
+      // Use the clock after painting: it includes the CPU time spent assembling
+      // the picture handed to the presenter, not only the pre-paint playhead.
+      clock=device.clock(library)
+      if not clock.ok {failure=true
+        break}
+      let color: draw.Color = match draw.surface_pixel(program,240,135) {some(value)=>value,none=>{failure=true
+        break},}
+      integer(rows,cast.sat(time.monotonic_ns()-begin))
+      integer(rows,cast.sat(clock.samples))
+      integer(rows,cast.sat(clock.queued))
+      integer(rows,transport_clock.frame_at_samples(0,clock.samples,fps,finish-1))
+      integer(rows,state.presented_program_frame)
+      integer(rows,app.timeline_frame(state))
+      integer(rows,cast.sat(color.r))
+      integer(rows,cast.sat(color.g))
+      integer(rows,cast.sat(color.b))
+      integer(rows,cast.sat(queue.latency_ns))
+      integer(rows,cast.sat(array.len(struct.borrow(queue,field=frames))))
+      string.append(rows,string.from_int(queue.in_flight))
+      string.append(rows,"\n")
+      time.sleep_ms(8)
+    }
+    let _ = device.request(library,"stop","")
+    preview.stop(root)
+    audio.stop(sound_root)
+    let _ = link.wake(preview_link,true)
+    let _ = link.wake(audio_link,true)
+    let _ = tasks.join_next<bool>(jobs,30000)
+    let _ = tasks.join_next<bool>(jobs,30000)
+    link.close_commands(preview_link)
+    link.close_commands(audio_link)
+  }
+  device.close(library)
+  if failure {io.write("[GA_PLAYBACK_PROFILE] Native playback measurement failed\n")
+    return 1}
+  match files.write_text(report,rows) {ok(_)=>{},err(_)=>{return 1},}
+  io.write("Genesis native audio/picture timing report written\n")
+  0
+}

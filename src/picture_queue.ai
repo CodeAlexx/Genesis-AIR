@@ -1,0 +1,142 @@
+// Decode ahead of the heard playhead, then release complete pictures when due.
+// The worker coalesces its single latest mailbox; at most two owned pictures wait.
+module genesis.picture_queue
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.math as math
+import std.text as text
+import "app.ai" as app
+import "preview.ai" as preview
+import "preview_link.ai" as link
+
+pub type Frame = struct {
+  source: draw.Surface, program: draw.Surface,
+  position: link.FramePosition, held_source: bool
+}
+type Request = struct {id:u64,at:u64}
+pub type Queue = struct {
+  frames: array<Frame>, in_flight: u64, request_ns: u64,
+  last_requested: i64, latency_ns: u64, key: string, epoch: u64,
+  playing: bool, source: bool, width: u32, height: u32, initialized: bool,
+  requests:array<Request>,first_id:u64,received:u64
+}
+pub fn queue() -> Queue effects {alloc} {
+  Queue {frames:array.new(),in_flight:0,request_ns:0,last_requested:-1,
+    latency_ns:16000000,key:string.new(),epoch:0,playing:false,source:false,
+    width:0,height:0,initialized:false,requests:array.new(),first_id:0,received:0}
+}
+// During playback the moving transport is excluded from content identity. A
+// parked monitor, paused seek, edit, media revision or audio restart invalidates
+// pending pictures. Viewport changes belong to the independent strip task.
+pub fn identity(state: ref<app.App>, source: bool, playing: bool) -> string effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  var out: string = if playing {preview.strips_signature(doc)}else{
+    match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.new(),}
+  }
+  string.append(out,"\n")
+  string.append(out,string.from_int(state.media_revision))
+  string.append(out,"\n")
+  string.append(out,string.from_int(if source {editor.playhead(doc)}else{
+    struct.get(struct.borrow(doc,field=monitor),field=frame)}))
+  out
+}
+pub fn configure(queue: ref<Queue>, key: str, epoch: u64, playing: bool,
+    source: bool, width: u32, height: u32) -> bool effects {alloc} {
+  if queue.initialized and queue.key == key and queue.epoch == epoch and
+      queue.playing == playing and queue.source == source and
+      queue.width == width and queue.height == height {return false}
+  var empty: array<Frame> = array.new()
+  let _ = struct.replace(queue,empty,field=frames)
+  var requests: array<Request> = array.new()
+  let _ = struct.replace(queue,requests,field=requests)
+  struct.set(queue,0,field=first_id)
+  struct.set(queue,0,field=received)
+  struct.set(queue,0,field=in_flight)
+  struct.set(queue,-1,field=last_requested)
+  let _ = struct.replace(queue,string.copy(key),field=key)
+  struct.set(queue,epoch,field=epoch)
+  struct.set(queue,playing,field=playing)
+  struct.set(queue,source,field=source)
+  struct.set(queue,width,field=width)
+  struct.set(queue,height,field=height)
+  struct.set(queue,true,field=initialized)
+  true
+}
+pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
+    -> option<i64> effects {} {
+  if array.len(struct.borrow(queue,field=frames)) >= 2 {return option.none()}
+  if not queue.playing {
+    return if queue.last_requested == wanted {option.none()}else{option.some(wanted)}
+  }
+  if queue.last_requested >= last {return option.none()}
+  if queue.last_requested < 0 and shown != wanted {return option.some(wanted)}
+  // Bound preparation to 50 ms even after a cold decoder or slow disk. A slow
+  // render skips intermediate frames instead of accumulating an unbounded lag.
+  // Leave room for the event wait and retained CPU paint. Requests continue while
+  // the previous frame renders; the mailbox coalesces them as in the original loop.
+  let lead_ns: u64 = if queue.latency_ns + 16000000 > 50000000 {50000000}else{queue.latency_ns + 16000000}
+  let lead: i64 = cast.sat(math.ceil(cast.float(lead_ns)*fps/1000000000.0))
+  let next: i64 = wanted + if lead > 0 {lead}else{1}
+  let bounded: i64 = if next > last {last}else{next}
+  if bounded <= queue.last_requested {option.none()}else{option.some(bounded)}
+}
+pub fn requested(queue: ref<Queue>, id: u64, frame: i64, now: u64) -> unit effects {alloc} {
+  if queue.first_id == 0 {struct.set(queue,id,field=first_id)}
+  struct.set(queue,id,field=in_flight)
+  struct.set(queue,frame,field=last_requested)
+  struct.set(queue,now,field=request_ns)
+  let requests: ref<array<Request>> = struct.borrow(queue,field=requests)
+  // Only timing metadata is retained for coalesced requests, never their pixels.
+  if array.len(requests) == 16 {array.set(requests,id%16,Request {id:id,at:now})}
+  else {array.push(requests,Request {id:id,at:now})}
+  ()
+}
+pub fn accepts(queue: ref<Queue>, id: u64) -> bool effects {} {
+  queue.first_id != 0 and id >= queue.first_id and id > queue.received and id <= queue.in_flight
+}
+pub fn receive(queue: ref<Queue>, id: u64, frame: Frame own, now: u64) -> bool effects {alloc} {
+  if not accepts(queue,id) {return false}
+  struct.set(queue,id,field=received)
+  if id == queue.in_flight {struct.set(queue,0,field=in_flight)}
+  var at: u64 = 0
+  loop {if at == array.len(struct.borrow(queue,field=requests)) {break}
+    let request: Request = array.get(struct.borrow(queue,field=requests),at)
+    if request.id == id {
+      let elapsed: u64 = if now >= request.at {now-request.at}else{0}
+      let bounded: u64 = if elapsed > 50000000 {50000000}else{elapsed}
+      struct.set(queue,(queue.latency_ns*3+bounded)/4,field=latency_ns)
+      break}
+    at=at+1}
+  if array.len(struct.borrow(queue,field=frames)) >= 2 {return false}
+  array.push(struct.borrow(queue,field=frames),frame)
+  true
+}
+fn first(queue: ref<Queue>) -> option<Frame> effects {} {
+  let frames: ref<array<Frame>> = struct.borrow(queue,field=frames)
+  if array.len(frames) == 2 {array.swap(frames,0,1)}
+  array.pop(frames)
+}
+pub fn take_due(queue: ref<Queue>, wanted: i64) -> option<Frame> effects {} {
+  var out: option<Frame> = option.none()
+  loop {
+    let frames: ref<array<Frame>> = struct.borrow(queue,field=frames)
+    if array.len(frames) == 0 {break}
+    let position: link.FramePosition = struct.get(array.borrow(frames,0),field=position)
+    let at: i64 = if queue.source {position.source_frame}else{position.program_frame}
+    if queue.playing and at > wanted {break}
+    out=first(queue)
+  }
+  out
+}
+pub fn apply(state: ref<app.App>, frame: Frame own, source: ref<draw.Surface>,
+    program: ref<draw.Surface>) -> unit effects {alloc} {
+  var picture: Frame = frame
+  struct.set(state,picture.position.program_frame,field=presented_program_frame)
+  struct.set(state,picture.position.source_frame,field=presented_source_frame)
+  let _ = ref.swap(program,struct.replace(picture,draw.empty_surface(),field=program))
+  if not picture.held_source {
+    let _ = ref.swap(source,struct.replace(picture,draw.empty_surface(),field=source))
+  }
+  ()
+}

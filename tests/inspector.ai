@@ -20,6 +20,8 @@ import "../src/typeface.ai" as typeface
 import "../src/ui_text.ai" as ui_text
 import "../src/timeline_media.ai" as media
 import "../src/preview.ai" as preview
+import "../src/picture_queue.ai" as pictures
+import "../src/preview_link.ai" as link
 
 fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var state: app.App = app.app(provider.fake(scratch))
@@ -397,6 +399,46 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let old_red: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,0)
   let _ = test.check(suite,high_blue.b > 140 and high_blue.r < 100,"Scopes use the blue program picture while the source is red")
   let _ = test.check(suite,old_red.r < 40 and old_red.g < 40 and old_red.b < 40,"Retained scope repaint removes the previous frame's bins")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Prepared pictures release histogram and timeline together, including rewind")
+  let _ = editor.seek(struct.borrow(state,field=document),10)
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+  struct.set(state,10,field=presented_program_frame)
+  var prepared: pictures.Queue = pictures.queue()
+  let _ = pictures.configure(prepared,"playing",1,true,false,480,270)
+  pictures.requested(prepared,1,12,100000000)
+  let _ = pictures.receive(prepared,1,pictures.Frame {source:draw.empty_surface(),
+    program:flat(draw.rgb(255,0,0)),position:link.FramePosition {source_frame:17,program_frame:12,revision:state.media_revision},held_source:true},120000000)
+  let _ = test.check(suite,not option.is_some(pictures.take_due(prepared,10)),"Future red picture stays out of the painter")
+  let _ = painter.render(state,raster,1600,980,false,source_picture,picture)
+  let still_blue: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,2)
+  let future_red: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,0)
+  let _ = test.check(suite,still_blue.b > 140 and future_red.r < 40,"Histogram remains on displayed blue frame while red is prepared")
+  let _ = test.eq_i64(suite,app.timeline_frame(state),10,"Cursor stays on the displayed picture")
+  let _ = editor.seek(struct.borrow(state,field=document),12)
+  pictures.apply(state,option.unwrap(pictures.take_due(prepared,12)),source_picture,picture)
+  let _ = painter.render(state,raster,1600,980,false,source_picture,picture)
+  let now_red: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,0)
+  let former_blue: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,2)
+  let _ = test.check(suite,now_red.r > 140 and former_blue.b < 40,"Histogram changes to the due red picture")
+  let _ = test.eq_i64(suite,app.timeline_frame(state),12,"Cursor changes with picture release")
+  let _ = test.eq_i64(suite,app.monitor_frame(state,false),12,"Timecode changes with picture release")
+  pictures.requested(prepared,2,14,130000000)
+  let _ = pictures.configure(prepared,"rewind",2,false,false,480,270)
+  let _ = editor.program_action(struct.borrow(state,field=document),editor.pause())
+  let _ = editor.seek(struct.borrow(state,field=document),0)
+  let _ = test.check(suite,not pictures.receive(prepared,2,pictures.Frame {source:draw.empty_surface(),
+    program:flat(draw.rgb(0,0,0)),position:link.FramePosition {source_frame:17,program_frame:14,revision:state.media_revision},held_source:true},150000000),"Late old playback image cannot blank rewind")
+  pictures.requested(prepared,3,0,160000000)
+  let _ = pictures.receive(prepared,3,pictures.Frame {source:draw.empty_surface(),
+    program:flat(draw.rgb(0,255,0)),position:link.FramePosition {source_frame:17,program_frame:0,revision:state.media_revision},held_source:true},180000000)
+  pictures.apply(state,option.unwrap(pictures.take_due(prepared,0)),source_picture,picture)
+  let _ = painter.render(state,raster,1600,980,false,source_picture,picture)
+  let start_green: draw.Color = histogram_pixel(struct.borrow(raster,field=surface),frame,63,1)
+  let _ = test.check(suite,start_green.g > 140,"Rewind shows frame zero and its green histogram")
+  let _ = test.eq_i64(suite,app.monitor_frame(state,false),0,"Rewind timecode is zero")
+  let _ = test.eq_i64(suite,app.timeline_frame(state),0,"Rewind cursor is zero")
   let _ = test.done(suite)
 
   let _ = test.start(suite,"Completed video stamps drive monitor time and the playing timeline")

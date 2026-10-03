@@ -277,6 +277,15 @@ pub fn take_images(link: ref<Link>, id: u64) -> array<draw.Surface> effects {all
 pub fn holds_source(link: ref<Link>) -> bool effects {} {
   link.source_held
 }
+// A seek can retire a prepared picture after its Source bytes were consumed.
+// Recover the parked monitor from the transport's authoritative source cache
+// when the next accepted packet holds it, without forcing another media decode.
+pub fn restore_source(link: ref<Link>) -> draw.Surface effects {alloc} {
+  match draw.surface_from_rgba(link.source_width,link.source_height,
+      bytes.view(struct.borrow(link,field=source_data))) {
+    some(value)=>value,none=>draw.empty_surface(),
+  }
+}
 pub fn finish(peer: ref<Peer>, generation: u64) -> unit effects {alloc,net,time} {
   let _ = notify(peer,9,generation)
   let sender: channel.Sender = struct.replace(peer,channel.orphan(),field=events)

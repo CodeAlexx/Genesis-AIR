@@ -4,6 +4,14 @@ import std.editor as editor
 
 pub type Clock = struct { remainder: f64 }
 
+// The real output device counts 48 kHz frames; both the window and its headless
+// timing diagnostic use this conversion rather than a wall-clock approximation.
+pub fn frame_at_samples(origin: i64, samples: u64, fps: f64, last: i64) -> i64 effects {} {
+  let elapsed: f64 = cast.float(samples)*fps/48000.0
+  let heard: i64 = origin+cast.sat(elapsed)
+  if heard > last {last}else{heard}
+}
+
 // The document owns the playhead. The window supplies elapsed monotonic time and keeps only
 // the fractional frame remainder, so slow paints skip to the correct frame rather than
 // playing the sequence in slow motion.
