@@ -1,4 +1,6 @@
 """Transitions combine independently graded/faded clips in preview and export."""
+
+from media_runtime import tool as _media_tool
 import argparse
 from array import array
 import copy
@@ -115,7 +117,7 @@ def main():
     parser.add_argument("--case", type=int, help="Reproduce one numbered case")
     args = parser.parse_args()
     binary, worker = args.binary.resolve(), args.worker.resolve()
-    ffmpeg, ffprobe = worker.parent / "ffmpeg.exe", worker.parent / "ffprobe.exe"
+    ffmpeg, ffprobe = _media_tool(worker, "ffmpeg"), _media_tool(worker, "ffprobe")
     cases = [(kind, dict(opacity=.4), dict(filter_opacity=.7), 12, False) for kind in KINDS]
     cases += [("crossfade", dict(keys=(.2, .8)), dict(keys=(.8, .2)), 12, False),
               ("crossfade", dict(fade_out=6), dict(fade_in=6), 12, False),

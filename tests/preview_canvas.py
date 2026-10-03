@@ -1,4 +1,6 @@
 """Small-sequence previews must agree with independently decoded lossless masters."""
+
+from media_runtime import tool as _media_tool
 import argparse
 import copy
 import json
@@ -18,7 +20,7 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     args = parser.parse_args()
     binary, worker = args.binary.resolve(), args.worker.resolve()
-    ffmpeg, ffprobe = worker.parent / "ffmpeg.exe", worker.parent / "ffprobe.exe"
+    ffmpeg, ffprobe = _media_tool(worker, "ffmpeg"), _media_tool(worker, "ffprobe")
     checks = 0
     with tempfile.TemporaryDirectory(prefix="genesis-preview-canvas-") as temporary:
         root = Path(temporary)

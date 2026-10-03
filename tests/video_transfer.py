@@ -4,6 +4,8 @@ The generated clips exercise NV12/P010, padded textures, B frames and fractional
 timestamps. --reference-worker also checks a prior build's frame selection.
 Hardware availability is reported separately from pixel equivalence.
 """
+
+from media_runtime import tool as _media_tool
 import argparse
 import hashlib
 import json
@@ -99,10 +101,13 @@ def main():
     parser.add_argument("--source", type=Path)
     parser.add_argument("--last-frame", type=int)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--vulkan", action="store_true", help="exercise the native Vulkan decoder with the same color path")
     args = parser.parse_args()
+    if args.vulkan:
+        os.environ["GENESIS_VIDEO_BACKEND"] = "vulkan"
     worker = args.worker.resolve()
     reference = args.reference_worker.resolve() if args.reference_worker else None
-    ffmpeg = worker.parent / "ffmpeg.exe"
+    ffmpeg = _media_tool(worker, "ffmpeg")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     cases, pairs, hardware_cases = [], 0, 0
     with TemporaryDirectory(prefix="genesis-video-transfer-") as directory:
@@ -152,10 +157,12 @@ def main():
             assert len(set(item[2] for item in rgba)) >= 10, (name, "fixture did not advance through pictures")
             assert rgba[0][2] == rgba[-1][2], (name, "rewind lost frame zero")
             stages = len(re.findall(r"staging wait_us=", log))
-            hardware = stages > 0
+            vulkan = "Native Vulkan decode:" in log
+            transfers = len(re.findall(r"\[gcompose\] decode transfer_us=", log)) if vulkan else stages
+            hardware = stages > 0 or vulkan
             if hardware:
-                assert "Native D3D11 decode:" in log
-                assert stages == len(fast), (name, stages, len(fast), "unused source frames were read back")
+                assert vulkan or "Native D3D11 decode:" in log
+                assert transfers == len(fast), (name, transfers, len(fast), "unused source frames were read back")
                 hardware_cases += 1
             else:
                 print(f"{name}: hardware unavailable; verified fallback pixels", flush=True)
@@ -170,9 +177,9 @@ def main():
                 assert "color graph_threads=" in software_log, (name, "software fallback lost HDR metadata")
             pairs += len(software)
             cases.append(dict(name=name, picture_pairs=len(fast), hardware=hardware,
-                              selected_readbacks=stages, color_graph_threads=color_threads,
+                              selected_readbacks=transfers, color_graph_threads=color_threads,
                               median_request_ms=round(statistics.median(elapsed), 3)))
-            print(f"{name}: RGBA/float seek, skip, EOF and rewind pixels identical; {stages} selected GPU readbacks", flush=True)
+            print(f"{name}: RGBA/float seek, skip, EOF and rewind pixels identical; {transfers} selected GPU readbacks", flush=True)
     report = dict(pixel_pairs=pairs, hardware_cases=hardware_cases, cases=cases)
     if args.report:
         args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")

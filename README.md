@@ -27,6 +27,13 @@ AIR stdlib
 
 ## What it is
 
+Windows Genesis reuses the [shared MM-AIR media runtime](docs/FFMPEG_GPU_PREVIEW.md)
+and calls its codec libraries directly from the native compositor. Setup accepts
+`-MmAirRoot` (default `C:\MM-Air`); Genesis does not package a separate FFmpeg
+executable or codec DLL set. An optional native Vulkan decoder is available with
+`GENESIS_VIDEO_BACKEND=vulkan`; D3D11 remains the default. GPU color/scaling
+integration and sustained interactive 4K60 remain unfinished.
+
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
 tracks every exposed control and its remaining media gate.
@@ -157,8 +164,10 @@ executable, and its redirected media subprocesses do not open console windows.
 ```
 
 Both setup and build default to the repository root. The output includes
-`Genesis-AIR.exe`, the native host/audio DLLs, `genesis-gcompose.exe`, FFmpeg DLLs and
-executables, `OpenCL.dll`, `fonts/` and dependency `licenses/`. Keep these together.
+`Genesis-AIR.exe`, the native host/audio DLLs, `genesis-gcompose.exe`,
+`genesis-media-runtime.txt`, `OpenCL.dll`, `fonts/` and dependency `licenses/`.
+Keep these together. MM-AIR supplies the shared media libraries and existing
+FFmpeg/ffprobe tools; use setup's `-MmAirRoot` for an installation outside `C:\MM-Air`.
 The compiler builder defaults to `/root/Genesis-AIR-compiler`, a separate build tree
 attached to this SDK checkout. It preserves unrelated compiler trees. Override its
 `-BuildDirectory` and pass the resulting `bin/airc` to `build-windows.ps1 -LinuxCompiler`
@@ -205,8 +214,9 @@ editor interface; project dimensions and exported video resolution stay as set i
 the project.
 
 The application first finds `genesis-gcompose.exe` beside its executable, then checks
-sibling source builds and PATH. `GENESIS_GCOMPOSE` overrides worker discovery. FFmpeg and
-FFprobe are also discovered beside the executable. `GENESIS_FAKE_PROVIDER=1` selects the
+sibling source builds and PATH. `GENESIS_GCOMPOSE` overrides worker discovery. The
+shared-runtime location file supplies MM-AIR's FFmpeg/ffprobe paths; legacy sibling
+and PATH discovery remain available. `GENESIS_FAKE_PROVIDER=1` selects the
 deterministic test provider; real preview and export require the compositor.
 `GENESIS_SCRATCH` overrides state storage, which defaults to `%LOCALAPPDATA%/GenesisAIR`
 on Windows. This holds recovery snapshots, preview mailboxes, export progress and `errors.jsonl`.

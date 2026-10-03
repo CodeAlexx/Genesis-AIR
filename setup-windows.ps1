@@ -1,4 +1,5 @@
-param([string]$Destination = $PSScriptRoot, [switch]$SkipWorkerBuild)
+param([string]$Destination = $PSScriptRoot, [switch]$SkipWorkerBuild,
+  [string]$MmAirRoot = $(if ($env:MM_AIR_ROOT) { $env:MM_AIR_ROOT } else { 'C:\MM-Air' }))
 $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot
 $deps = Join-Path $repo 'build-windows/deps'
@@ -85,10 +86,12 @@ if ($version -notmatch ('^rustc ' + [regex]::Escape($pins.rust) + ' ')) {
   & $rustup toolchain install $pins.rust --profile minimal
   if ($LASTEXITCODE -ne 0) { throw '[GA_SETUP_RUST] Could not install the pinned Rust compiler.' }
 }
-if (-not $SkipWorkerBuild) { & (Join-Path $repo 'windows/build-worker.ps1') -Destination $Destination }
+if (-not $SkipWorkerBuild) { & (Join-Path $repo 'windows/build-worker.ps1') -Destination $Destination -MmAirRoot $MmAirRoot }
+else {
+  & (Join-Path $repo 'windows/share-media-runtime.ps1') -Sdk (Join-Path $ffmpegRoot ($ffmpeg.name.Replace('.zip', ''))) -Destination $Destination -MmAirRoot $MmAirRoot
+}
 $licenses = Join-Path $Destination 'licenses'
 New-Item -ItemType Directory -Force -Path $licenses | Out-Null
-Copy-Item -LiteralPath (Join-Path $ffmpegRoot ($ffmpeg.name.Replace('.zip', '') + '/LICENSE.txt')) -Destination (Join-Path $licenses 'FFmpeg.txt') -Force
 Copy-Item -LiteralPath (Join-Path $headers 'LICENSE') -Destination (Join-Path $licenses 'OpenCL-Headers.txt') -Force
 Copy-Item -LiteralPath (Join-Path $loader 'LICENSE') -Destination (Join-Path $licenses 'OpenCL-Loader.txt') -Force
 Write-Output "Native media dependencies ready: $Destination. Run build-windows.ps1 to build the AIR editor."

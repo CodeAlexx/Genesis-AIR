@@ -70,6 +70,10 @@ try {
   Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd()
   $env:GENESIS_GCOMPOSE = $Worker
   if (Test-Path -LiteralPath $worker) {
+    if (Test-Path -LiteralPath (Join-Path (Split-Path $worker -Parent) 'genesis-media-runtime.txt')) {
+      & python (Join-Path $PSScriptRoot 'shared_media_runtime.py') --worker $worker
+      if ($LASTEXITCODE -ne 0) { throw 'Shared MM-AIR media runtime acceptance failed.' }
+    }
     & python (Join-Path $PSScriptRoot 'preview_fit.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker

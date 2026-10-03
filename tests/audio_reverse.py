@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Native reverse playback: bounded startup/memory and continuous post-reverse effects."""
+
+from media_runtime import tool as _media_tool
 import argparse
 import array
 import ctypes
@@ -177,7 +179,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="genesis-audio-reverse-") as directory:
         root = pathlib.Path(directory)
         source = root / "long reverse 日本語 %20, clip.wav"
-        result = subprocess.run([str(worker.parent / "ffmpeg.exe"), "-nostdin", "-y", "-v", "error",
+        result = subprocess.run([str(_media_tool(worker, "ffmpeg")), "-nostdin", "-y", "-v", "error",
             "-f", "lavfi", "-i", "aevalsrc=0.2*sin(2*PI*(233.7*t+0.04*t*t))|0.18*sin(2*PI*(881.3*t+0.02*t*t)):s=48000:d=600",
             "-c:a", "pcm_s16le", str(source)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -194,24 +196,24 @@ def main():
             expected = whole(worker, source, root / "whole.wav", 588, 12, chain)
             compare(actual, expected, chain + " retains filter history")
         resampled = root / "fractional 44100.wav"
-        subprocess.run([str(worker.parent / "ffmpeg.exe"), "-nostdin", "-y", "-v", "error",
+        subprocess.run([str(_media_tool(worker, "ffmpeg")), "-nostdin", "-y", "-v", "error",
             "-i", str(source), "-t", "17", "-ar", "44100", "-c:a", "pcm_s16le", str(resampled)],
             check=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         for start, length in ((0.1, 11.7), (0.1234567, 11.704208333333), (0.001234567, 11.111111)):
             actual, _ = pull(worker, resampled, root, length, start=start)
-            expected = reference(worker.parent / "ffmpeg.exe", resampled, start, length)
+            expected = reference(_media_tool(worker, "ffmpeg"), resampled, start, length)
             compare(actual, expected, f"44100 Hz native trim {start}+{length}")
         compressed = root / "compressed AAC.m4a"
-        subprocess.run([str(worker.parent / "ffmpeg.exe"), "-nostdin", "-y", "-v", "error",
+        subprocess.run([str(_media_tool(worker, "ffmpeg")), "-nostdin", "-y", "-v", "error",
             "-i", str(resampled), "-ar", "48000", "-c:a", "aac", "-b:a", "192k", str(compressed)],
             check=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         actual, _ = pull(worker, compressed, root, 12, durations=(0.25, 3.5, 8.25))
-        expected = reference(worker.parent / "ffmpeg.exe", compressed, 0, 12, seconds=12)
+        expected = reference(_media_tool(worker, "ffmpeg"), compressed, 0, 12, seconds=12)
         compare(actual, expected, "Complete twelve-second AAC reverse")
         if args.media:
             supplied = args.media.resolve()
             actual, _ = pull(worker, supplied, root, 12, durations=(0.25, 3.5, 8.25))
-            expected = reference(worker.parent / "ffmpeg.exe", supplied, 0, 12, seconds=12)
+            expected = reference(_media_tool(worker, "ffmpeg"), supplied, 0, 12, seconds=12)
             compare(actual, expected, "Supplied compressed media reverse")
         if args.baseline_worker:
             baseline = []

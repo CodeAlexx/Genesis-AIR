@@ -23,6 +23,7 @@ import std.process as proc
 import std.text as text
 import "ffmpeg.ai" as ffmpeg
 import "diagnostics.ai" as diagnostics
+import "media_runtime.ai" as media_runtime
 
 pub fn kind_fake() -> u32 effects {} { 0 }
 pub fn kind_gcompose() -> u32 effects {} { 1 }
@@ -78,10 +79,9 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
 // actually there, so an application can fall back rather than fail at the first request.
-pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta} {
+pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta, fs.read} {
   let there: bool = match files.exists(worker) { ok(found) => found, err(problem) => false, }
-  let sibling: string = path.join(str.view(path.dirname(worker)), "ffprobe.exe")
-  let probe: string = if match files.exists(str.view(sibling)) { ok(value) => value, err(_) => false, } { sibling } else { string.copy("ffprobe") }
+  let probe: string = media_runtime.tool(worker, "ffprobe")
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
@@ -346,7 +346,7 @@ fn ffprobe_text(state: ref<Provider>, source: str, stream: str, fields: str,
     err(problem) => { return option.none() },
   }
   let log: string = scratch_file(state, tag)
-  var argv: array<string> = ["ffprobe", "-v", "error", "-select_streams",
+  var argv: array<string> = [string.copy(str.view(struct.borrow(state, field=ffprobe))), "-v", "error", "-select_streams",
     string.copy(stream), "-show_entries", string.copy(fields),
     "-of", "default=noprint_wrappers=1", string.copy(source)]
   match proc.run(argv, ".", str.view(log), false) {
@@ -892,8 +892,7 @@ pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> e
     if not info.audio { return out }
     let _ = files.mkdirs(str.view(struct.borrow(state, field=scratch)))
     let binary: string = if state.kind == kind_ffmpeg() { string.copy(str.view(struct.borrow(state, field=worker))) }
-      else { let sibling: string = path.join(str.view(path.dirname(str.view(struct.borrow(state, field=worker)))), "ffmpeg.exe")
-        if match files.exists(str.view(sibling)) { ok(value) => value, err(_) => false, } { sibling } else { string.copy("ffmpeg") } }
+      else { media_runtime.tool(str.view(struct.borrow(state, field=worker)), "ffmpeg") }
     match ffmpeg.envelope(binary, source,
       scratch_file(state, "waveform.pcm"), buckets) {
       err(problem) => { note_failure(state, problem) },

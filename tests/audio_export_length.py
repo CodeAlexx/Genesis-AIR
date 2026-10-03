@@ -1,4 +1,6 @@
 """The encoder preserves final PCM/FLAC samples and AAC packet duration."""
+
+from media_runtime import tool as _media_tool
 import argparse
 from array import array
 import json
@@ -18,7 +20,7 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     args = parser.parse_args()
     worker = args.worker.resolve()
-    ffmpeg, ffprobe = worker.parent / "ffmpeg.exe", worker.parent / "ffprobe.exe"
+    ffmpeg, ffprobe = _media_tool(worker, "ffmpeg"), _media_tool(worker, "ffprobe")
     sizes = (1, 2, 1023, 1024, 1025, 1600, 9601, 48001)
     cases = [(codec, samples) for codec in ("pcm_s24le", "flac") for samples in sizes]
     cases += [("aac", samples) for samples in (1600, 4801, 9601, 48001)]

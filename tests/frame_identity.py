@@ -1,4 +1,6 @@
 """Native monitor/timeline pixels must identify each frame, including fractional rates."""
+
+from media_runtime import tool as _media_tool
 import argparse
 import os
 import pathlib
@@ -12,7 +14,7 @@ def main():
     parser.add_argument("--client", type=pathlib.Path, required=True)
     args = parser.parse_args()
     worker = args.worker.resolve()
-    ffmpeg = worker.parent / "ffmpeg.exe"
+    ffmpeg = _media_tool(worker, "ffmpeg")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     with tempfile.TemporaryDirectory(prefix="genesis-frame-identity-") as directory:
         root = pathlib.Path(directory)

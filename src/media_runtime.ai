@@ -1,0 +1,25 @@
+module genesis.media_runtime
+
+import std.files as files
+import std.path as path
+import std.text as text
+
+// The Windows installer writes locations, without copying codecs beside the app.
+// Other platforms retain their existing PATH-based tools.
+pub fn tool(worker: str, name: str) -> string effects {alloc, fs.read, fs.meta} {
+  let config: string = path.join(str.view(path.dirname(worker)), "genesis-media-runtime.txt")
+  match files.read_text(str.view(config)) {
+    ok(value) => {
+      var lines: array<string> = text.split(str.view(value), "\n")
+      let at: u64 = if str.eq(name, "ffmpeg") { 1 } else { 2 }
+      if array.len(lines) > at {
+        let found: string = text.trim(str.view(array.borrow(lines, at)))
+        if str.len(str.view(found)) > 0 { return found }
+      }
+    },
+    err(_) => { },
+  }
+  let sibling: string = path.join(str.view(path.dirname(worker)), str.view(text.concat(name, ".exe")))
+  if match files.exists(str.view(sibling)) { ok(found) => found, err(_) => false, } { sibling }
+  else { string.copy(name) }
+}

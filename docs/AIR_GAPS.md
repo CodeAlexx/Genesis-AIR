@@ -759,3 +759,27 @@ The preceding worker fails by padding that one-sample PCM output to 1024.
 Both media gates are included in `tests/windows.ps1`.
 The pro-media gate also requires exactly 9610 decoded PCM samples in the six-frame
 3840x2160 ProRes output at 30000/1001, preserving its measured four-pixel detail.
+
+## Share the MM-AIR media runtime and admit native Vulkan decoding
+
+Genesis now reads a three-line location file for the shared MM-AIR codec directory
+and existing tools. Its compositor loads the native libraries before binding delayed
+imports, with coded runtime/ABI failures. Setup stops copying FFmpeg executables and
+DLLs into Genesis. The installed MM-AIR tool is static, so its shared media directory
+holds one versioned native library set for library clients. No AIR SDK change is
+needed; the application uses existing file, text and process operations.
+
+Native Vulkan decoding uses libavcodec directly, with the hardware pixel format
+selected from the chosen device type. It retains the current frame selection and
+color pipeline. D3D11 remains the default; the optional Vulkan path passes 504 exact
+RGBA/FP32 picture/reference comparisons across generated and supplied HDR media.
+Six fresh-process checks prove isolated/Unicode startup without local codec DLLs,
+runtime override, and coded failure behavior. Full Windows and professional-media
+gates pass with the shared runtime.
+
+The [FFmpeg source and performance investigation](FFMPEG_GPU_PREVIEW.md) records
+the tested GPU pipeline, rejected D3D11 resize prototype, current native implementation
+and remaining color/scaling work. Raw FFmpeg pipeline speed is not editor delivery:
+the current shared-runtime editor diagnostic delivers 53.90 pictures/s in twenty
+seconds with no early pictures or observed audio underruns, consistent with the
+53.65 baseline. Sustained interactive 4K60 is still open; fullscreen 4K remains deferred.

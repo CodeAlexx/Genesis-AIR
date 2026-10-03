@@ -1,4 +1,6 @@
 """Real native audio clock, async picture queue, painter and per-frame pixel identity."""
+
+from media_runtime import tool as _media_tool
 import argparse
 import csv
 import json
@@ -93,7 +95,7 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
 
 
 def fixture(binary, worker, root):
-    ffmpeg = worker.parent / "ffmpeg.exe"
+    ffmpeg = _media_tool(worker, "ffmpeg")
     frames = b"".join(bytes(32+(frame*m) % 192 for m in (37, 73, 109))*320*180 for frame in range(288))
     raw = root / "identity.rgb"
     raw.write_bytes(frames)
