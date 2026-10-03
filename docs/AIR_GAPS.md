@@ -612,3 +612,40 @@ all twenty audio effects, post-mix stereo/pan/silent meters, histogram/rewind pi
 44 source/program frame identities and 128 timeline bitmap identities. The default
 eight-second event-wait fixture checks 897 picture/frame/cursor observations with
 no early pictures or audio underruns across its five-second PCM boundary.
+
+## Bounded parallel HDR conversion
+
+The native color graph formerly had a fixed four-thread limit. Phase measurements
+on the supplied 4K/59.94 AV1/PQ footage showed about fourteen milliseconds in
+HDR-to-SDR conversion before upload, compared with roughly two milliseconds for
+GPU effects and final publication. The graph now uses the detected logical CPU
+count, clamped to one through eight. This increases parallel conversion on larger
+machines while bounding its workers and adapting to smaller machines. The color
+transform, 16-bit source conversion, FP32 composition and export precision stay
+the same. `GENESIS_MEDIA_PROFILE` records the graph limit and detected CPU count.
+The setting uses [FFmpeg's filter-graph thread limit](https://ffmpeg.org/doxygen/trunk/structAVFilterGraph.html).
+
+The readback gate now includes generated PQ and HLG P010 clips, with differing
+native dimensions and reordered frames. Independent probing checks the encoded
+primaries, transfer and matrix; `setparams` also puts those tags on the generated
+frames because encoder-only options had dropped their primaries/transfer. Their
+diagnostics must show entry into the color graph on hardware and software decode.
+A candidate/previous-worker run
+with the supplied 4K clip passes 504 exact RGBA/FP32 comparisons through fractional
+timestamps, skipped frames, final frames and rewind. The standard Windows gate
+passes, including audio, histogram pixels, monitor time/frame identity and actual
+timeline bitmaps. The precision suite also retains all 1024 narrow-band values,
+100-nit HDR title white, HEVC 10-bit tags, the native 4K 16-bit PQ master, the SDR
+preview's mean 0.97/255 difference from the independent floating-point reference,
+and audible program audio after 181 seconds.
+
+Three alternating twenty-second native-device playback pairs change only the
+worker's thread limit. Delivery rises from 33.40–35.00 to 36.20–37.75 pictures/second;
+the median of run picture-delay medians falls from 22.16 to 15.77 ms. One
+ninety-second pair delivers 25.01/26.24 pictures/second before/after, with
+30.63/29.78 ms median delay and 110.32/95.35 ms p95 delay. All runs report no early
+pictures or audio underruns. They include the real silent device, asynchronous
+decode/mix and retained ordinary-editor paint, excluding native presentation and
+physical speaker latency. The longer result is a modest improvement and does not
+establish sustained smooth 4K60. Worker-only conversion timing must not be used
+as the editor's delivery rate.

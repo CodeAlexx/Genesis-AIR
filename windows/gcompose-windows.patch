@@ -256,16 +256,17 @@ index 4b33e4a..bd4a1c6 100644
 +    return copied;
 +}
 diff --git a/gcompose/csrc/fpx_decode.c b/gcompose/csrc/fpx_decode.c
-index 8674e4c..03bfee2 100644
+index 8674e4c..8753cf3 100644
 --- a/gcompose/csrc/fpx_decode.c
 +++ b/gcompose/csrc/fpx_decode.c
-@@ -11,8 +11,27 @@
+@@ -11,8 +11,28 @@
  #include <libavcodec/avcodec.h>
  #include <libswscale/swscale.h>
  #include <libavutil/imgutils.h>
 +#include <libavutil/pixdesc.h>
 +#include <libavutil/hwcontext.h>
 +#include <libavutil/time.h>
++#include <libavutil/cpu.h>
 +#if defined(_M_X64) || defined(__SSE2__)
 +#include <emmintrin.h>
 +#endif
@@ -287,7 +288,7 @@ index 8674e4c..03bfee2 100644
  
  typedef struct {
      AVFormatContext* fmt;
-@@ -21,8 +40,25 @@ typedef struct {
+@@ -21,8 +41,25 @@ typedef struct {
      struct SwsContext* sws2;     // scaled-output context (lazy, for fpx_decode_frame_scaled)
      int sw, sh;                  // current scaled target size
      struct SwsContext* sws_lb;   // letterbox context (aspect-preserving, lazy)
@@ -313,7 +314,7 @@ index 8674e4c..03bfee2 100644
      int width, height;
      AVRational time_base;
      AVRational frame_rate;
-@@ -38,6 +74,173 @@ typedef struct {
+@@ -38,6 +75,173 @@ typedef struct {
      int have_pos;
  } FpxCtx;
  
@@ -487,7 +488,7 @@ index 8674e4c..03bfee2 100644
  void* fpx_open(const char* path) {
      FpxCtx* c = (FpxCtx*)calloc(1, sizeof(FpxCtx));
      if (!c) return NULL;
-@@ -49,16 +252,48 @@ void* fpx_open(const char* path) {
+@@ -49,16 +253,48 @@ void* fpx_open(const char* path) {
      c->vindex = idx;
      AVStream* st = c->fmt->streams[idx];
      c->dec = avcodec_alloc_context3(codec);
@@ -539,7 +540,7 @@ index 8674e4c..03bfee2 100644
      c->pkt = av_packet_alloc();
      c->frame = av_frame_alloc();
      return c;
-@@ -85,7 +320,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
+@@ -85,7 +321,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -548,7 +549,7 @@ index 8674e4c..03bfee2 100644
                      int64_t pts = c->frame->best_effort_timestamp;
                      if (pts == AV_NOPTS_VALUE || pts >= target) {
                          uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -107,7 +342,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
+@@ -107,7 +343,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
      // remaining frames and take the first at/after target. Mirrors ffmpeg's end-of-stream drain.
      if (got != 0) {
          avcodec_send_packet(c->dec, NULL);
@@ -557,7 +558,7 @@ index 8674e4c..03bfee2 100644
              int64_t pts = c->frame->best_effort_timestamp;
              if (pts == AV_NOPTS_VALUE || pts >= target) {
                  uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -129,7 +364,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+@@ -129,7 +365,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
      FpxCtx* c = (FpxCtx*)h;
      if (!c->sws2 || c->sw != ow || c->sh != oh) {
          if (c->sws2) sws_freeContext(c->sws2);
@@ -566,7 +567,7 @@ index 8674e4c..03bfee2 100644
                                   ow, oh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->sw = ow; c->sh = oh;
      }
-@@ -142,7 +377,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+@@ -142,7 +378,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -575,7 +576,7 @@ index 8674e4c..03bfee2 100644
                      int64_t pts = c->frame->best_effort_timestamp;
                      if (pts == AV_NOPTS_VALUE || pts >= target) {
                          uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -161,7 +396,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+@@ -161,7 +397,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
      // last ~GOP of a clip decodes instead of returning black.
      if (got != 0) {
          avcodec_send_packet(c->dec, NULL);
@@ -584,7 +585,7 @@ index 8674e4c..03bfee2 100644
              int64_t pts = c->frame->best_effort_timestamp;
              if (pts == AV_NOPTS_VALUE || pts >= target) {
                  uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -182,7 +417,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
+@@ -182,7 +418,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
      FpxCtx* c = (FpxCtx*)h;
      if (!c->sws2 || c->sw != ow || c->sh != oh) {
          if (c->sws2) sws_freeContext(c->sws2);
@@ -593,7 +594,7 @@ index 8674e4c..03bfee2 100644
                                   ow, oh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->sw = ow; c->sh = oh;
      }
-@@ -191,7 +426,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
+@@ -191,7 +427,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -602,7 +603,7 @@ index 8674e4c..03bfee2 100644
                      uint8_t* dst[4] = { out, NULL, NULL, NULL };
                      int dstln[4] = { ow * 4, 0, 0, 0 };
                      sws_scale(c->sws2, (const uint8_t* const*)c->frame->data, c->frame->linesize,
-@@ -222,7 +457,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -222,7 +458,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
      int ox = (ow - dw) / 2, oy = (oh - dh) / 2;
      if (!c->sws_lb || c->lb_dw != dw || c->lb_dh != dh) {
          if (c->sws_lb) sws_freeContext(c->sws_lb);
@@ -611,7 +612,7 @@ index 8674e4c..03bfee2 100644
                                     dw, dh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->lb_dw = dw; c->lb_dh = dh;
      }
-@@ -237,6 +472,155 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -237,6 +473,161 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
      return 0;
  }
  
@@ -631,7 +632,13 @@ index 8674e4c..03bfee2 100644
 +    if (!c->color_graph) {
 +        AVFilterGraph* graph = avfilter_graph_alloc();
 +        if (!graph) return NULL;
-+        graph->nb_threads = 4;
++        // HDR downsampling transforms the native source through linear light.
++        // Bound the graph's parallel work without underusing larger CPUs or
++        // creating more color workers than the machine can run.
++        int cpus = av_cpu_count();
++        graph->nb_threads = cpus < 1 ? 1 : cpus > 8 ? 8 : cpus;
++        if (getenv("GENESIS_MEDIA_PROFILE")) fprintf(stderr,
++            "[gcompose] color graph_threads=%d logical_cpus=%d\n", graph->nb_threads, cpus);
 +        char args[256];
 +        snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1:colorspace=%d:range=%d",
 +            frame->width, frame->height, frame->format, c->time_base.num, c->time_base.den, frame->colorspace, frame->color_range);
@@ -767,7 +774,7 @@ index 8674e4c..03bfee2 100644
  // Like fpx_decode_frame_scaled but ASPECT-PRESERVING (letterbox/pillarbox into ow x oh).
  // Forward-decode window (frames): a request this many frames AHEAD of the current decoder position
  // (or fewer) decodes forward WITHOUT seeking — the sequential playback/render case. A larger forward
-@@ -245,7 +629,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -245,7 +636,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
  // returns the exact frame); it only trades a seek for a forward decode. ~1 GOP is the sweet spot.
  #define FPX_SEQ_FWD_WINDOW 300
  
@@ -776,7 +783,7 @@ index 8674e4c..03bfee2 100644
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
      FpxCtx* c = (FpxCtx*)h;
      int64_t target = av_rescale_q(frame_index, av_inv_q(c->frame_rate), c->time_base);
-@@ -271,13 +655,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -271,13 +662,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      // Return the FIRST frame with pts >= target (frame-accurate; identical selection to before).
      int eof_sent = 0;
      for (;;) {
@@ -794,7 +801,7 @@ index 8674e4c..03bfee2 100644
                  return 0;
              }
              continue; // frame is before target: drop it and keep receiving
-@@ -302,6 +688,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -302,6 +695,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      }
  }
  
@@ -808,7 +815,7 @@ index 8674e4c..03bfee2 100644
  // Aspect-preserving sequential decode (no seek) — for playback.
  int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
-@@ -310,7 +703,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
+@@ -310,7 +710,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -817,7 +824,7 @@ index 8674e4c..03bfee2 100644
                      if (fpx_lb_blit(c, out, ow, oh) < 0) { av_packet_unref(c->pkt); return -4; }
                      got = 0; break;
                  }
-@@ -332,7 +725,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
+@@ -332,7 +732,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -826,7 +833,7 @@ index 8674e4c..03bfee2 100644
                      uint8_t* dst[4] = { out, NULL, NULL, NULL };
                      int dstln[4] = { c->width * 4, 0, 0, 0 };
                      sws_scale(c->sws, (const uint8_t* const*)c->frame->data, c->frame->linesize,
-@@ -359,7 +752,7 @@ int fpx_nframes(void* h) {
+@@ -359,7 +759,7 @@ int fpx_nframes(void* h) {
      if (st->nb_frames > 0) return (int)st->nb_frames;
      if (c->fmt->duration > 0 && c->frame_rate.num > 0) {
          double secs = (double)c->fmt->duration / AV_TIME_BASE;
@@ -835,7 +842,7 @@ index 8674e4c..03bfee2 100644
      }
      return 0;
  }
-@@ -367,10 +760,18 @@ int fpx_nframes(void* h) {
+@@ -367,10 +767,18 @@ int fpx_nframes(void* h) {
  void fpx_close(void* h) {
      if (!h) return;
      FpxCtx* c = (FpxCtx*)h;

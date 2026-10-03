@@ -684,16 +684,30 @@ python tests/preview_fit.py --worker .\genesis-gcompose.exe
 
 Native video readback adds exact RGBA/float comparisons with FFmpeg's ordinary
 transfer for H.264 NV12 and HEVC/AV1 P010. Generated fractional-rate clips exercise
-padded textures, reordered frames, skips, final-frame decoding and rewind. The gate
-also checks software fallback and that only selected pictures are read back. It
+padded textures, reordered frames, skips, final-frame decoding and rewind. Generated
+PQ and HLG P010 clips also require HDR conversion on hardware and software decode.
+The native color graph adapts to the available logical CPUs with at most eight
+threads, preserving its color transform and precision. `GENESIS_MEDIA_PROFILE`
+reports the graph limit and CPU count. The gate also checks software fallback
+and that only selected pictures are read back. It
 reports hardware availability separately. A prior worker and supplied source can
-also be compared; the supplied 4K clip passes 332 pixel pairs across these cases:
+also be compared; the supplied 4K clip passes 504 pixel pairs across these cases:
 
 ```powershell
 python tests/video_transfer.py --worker .\genesis-gcompose.exe
 python tests/video_transfer.py --worker .\genesis-gcompose.exe --reference-worker C:\path\to\previous\genesis-gcompose.exe --source 'C:\path\to\clip.mp4' --last-frame 18807
 .\tests\windows.ps1 -Bin .\build-windows\native-pro\bin\Release -Worker C:\path\to\candidate\genesis-gcompose.exe
 ```
+
+Three alternating twenty-second native-device playback pairs on the supplied
+4K/59.94 AV1/PQ clip change only the worker's color-graph thread limit. Delivery
+increases from 33.40–35.00 to 36.20–37.75 pictures/second; the median of picture-delay
+medians falls from 22.16 to 15.77 ms. A ninety-second pair delivers 25.01/26.24
+pictures/second before/after, with 30.63/29.78 ms median delay and 110.32/95.35 ms
+p95 delay. Neither run reports early pictures or audio underruns. These silent
+real-device measurements include asynchronous decode/mix and retained ordinary
+editor paint, and exclude native presentation and physical speaker latency.
+This improves the measured preview but still falls short of sustained 4K60.
 
 The Windows gate also compares sixty-second and ten-minute reversed PCM sources,
 unequal output pulls, continuous reverse/delay/2x output, fractional 44.1 kHz trims and

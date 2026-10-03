@@ -108,16 +108,31 @@ def main():
     with TemporaryDirectory(prefix="genesis-video-transfer-") as directory:
         root = Path(directory)
         fixtures = []
-        for name, dimensions, pixel_format, codec in (
-                ("H264 NV12", "638x358", "yuv420p", ["libx264", "-crf", "16", "-preset", "fast", "-bf", "3", "-g", "24"]),
-                ("HEVC P010", "642x362", "yuv420p10le", ["libx265", "-crf", "16", "-preset", "fast", "-x265-params", "keyint=24:min-keyint=24:scenecut=0:bframes=3:log-level=error"]),
-                ("AV1 P010", "638x358", "yuv420p10le", ["libaom-av1", "-crf", "24", "-cpu-used", "8", "-g", "24"])):
+        hevc = ["libx265", "-crf", "16", "-preset", "fast", "-x265-params",
+                "keyint=24:min-keyint=24:scenecut=0:bframes=3:log-level=error"]
+        for name, dimensions, pixel_format, codec, transfer in (
+                ("H264 NV12", "638x358", "yuv420p", ["libx264", "-crf", "16", "-preset", "fast", "-bf", "3", "-g", "24"], "bt709"),
+                ("HEVC P010", "642x362", "yuv420p10le", hevc, "bt709"),
+                ("AV1 P010", "638x358", "yuv420p10le", ["libaom-av1", "-crf", "24", "-cpu-used", "8", "-g", "24"], "bt709"),
+                ("HEVC PQ P010", "642x362", "yuv420p10le", hevc, "smpte2084"),
+                ("HEVC HLG P010", "638x358", "yuv420p10le", hevc, "arib-std-b67")):
             source = root / (name + " 日本語.mp4")
+            primaries = "bt709" if transfer == "bt709" else "bt2020"
+            matrix = "bt709" if transfer == "bt709" else "bt2020nc"
+            # Set frame metadata as well as encoder options. Without setparams,
+            # this FFmpeg/libx265 build drops transfer/primaries on the synthetic input.
             subprocess.run([str(ffmpeg), "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i",
                             f"testsrc2=size={dimensions}:rate=24000/1001", "-frames:v", "48",
-                            "-pix_fmt", pixel_format, "-c:v", *codec, "-color_primaries", "bt709",
-                            "-color_trc", "bt709", "-colorspace", "bt709", str(source)],
+                            "-vf", f"setparams=color_primaries={primaries}:color_trc={transfer}:colorspace={matrix}",
+                            "-pix_fmt", pixel_format, "-c:v", *codec,
+                            "-color_primaries", primaries, "-color_trc", transfer, "-colorspace", matrix, str(source)],
                            check=True, timeout=90, creationflags=flags)
+            probed = subprocess.run([str(ffmpeg.parent / "ffprobe.exe"), "-v", "error",
+                                     "-select_streams", "v:0", "-show_streams", "-of", "json", str(source)],
+                                    capture_output=True, encoding="utf-8", check=True, timeout=30, creationflags=flags)
+            metadata = json.loads(probed.stdout)["streams"][0]
+            assert (metadata.get("color_primaries"), metadata.get("color_transfer"), metadata.get("color_space")) == \
+                   (primaries, transfer, matrix), (name, "fixture lost its color metadata", metadata)
             fixtures.append((name, source, [0, 1, 2, 4, 7, 12, 23, 24, 25, 37, 46, 47, 0, 47, 2, 1, 0]))
         if args.source:
             assert args.last_frame is not None and args.last_frame > 100
@@ -144,13 +159,19 @@ def main():
                 hardware_cases += 1
             else:
                 print(f"{name}: hardware unavailable; verified fallback pixels", flush=True)
+            color_threads = sorted(set(map(int, re.findall(r"color graph_threads=(\d+)", log))))
+            if "PQ" in name or "HLG" in name:
+                assert color_threads, (name, "HDR metadata did not reach the color transform")
             software, _, software_log = capture(worker, source, frames[:8] + [0], root, software=True)
             software_default, _, _ = capture(worker, source, frames[:8] + [0], root, default=True, software=True)
             assert software == software_default, (name, "software decode changed")
             assert "staging wait_us=" not in software_log and "Native D3D11 decode:" not in software_log
+            if "PQ" in name or "HLG" in name:
+                assert "color graph_threads=" in software_log, (name, "software fallback lost HDR metadata")
             pairs += len(software)
             cases.append(dict(name=name, picture_pairs=len(fast), hardware=hardware,
-                              selected_readbacks=stages, median_request_ms=round(statistics.median(elapsed), 3)))
+                              selected_readbacks=stages, color_graph_threads=color_threads,
+                              median_request_ms=round(statistics.median(elapsed), 3)))
             print(f"{name}: RGBA/float seek, skip, EOF and rewind pixels identical; {stages} selected GPU readbacks", flush=True)
     report = dict(pixel_pairs=pairs, hardware_cases=hardware_cases, cases=cases)
     if args.report:
