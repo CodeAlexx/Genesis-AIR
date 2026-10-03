@@ -1,8 +1,12 @@
-param([string]$Bin = (Join-Path $PSScriptRoot '../build-windows/native/bin/Release'))
+param(
+  [string]$Bin = (Join-Path $PSScriptRoot '../build-windows/native/bin/Release'),
+  [string]$Worker = (Join-Path $PSScriptRoot '../genesis-gcompose.exe')
+)
 $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $root = Join-Path $project 'build-windows'
 $work = Join-Path $root ('test-' + [guid]::NewGuid().ToString('N'))
+$previousWorker = $env:GENESIS_GCOMPOSE
 New-Item -ItemType Directory -Path $work | Out-Null
 function Invoke-Native([string]$Name, [string[]]$Arguments, [int]$Expected = 0) {
   $start = [System.Diagnostics.ProcessStartInfo]::new()
@@ -50,10 +54,12 @@ try {
   & ffmpeg -nostdin -y -v error -i $wave -af 'volume=0' -c:a pcm_s16le $silentWave
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate silent device fixture.' }
   Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd()
-  $worker = Join-Path $project 'genesis-gcompose.exe'
+  $env:GENESIS_GCOMPOSE = $Worker
   if (Test-Path -LiteralPath $worker) {
     & python (Join-Path $PSScriptRoot 'preview_fit.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker
+    if ($LASTEXITCODE -ne 0) { throw 'Native video readback pixel acceptance failed.' }
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
     Write-Host (Invoke-Native 'genesis-preview-stream.exe' @((Join-Path $work 'stream'), $worker, $media)).TrimEnd()
     & python (Join-Path $PSScriptRoot 'frame_identity.py') --worker $worker --client (Join-Path $Bin 'genesis-preview-stream.exe')
@@ -131,6 +137,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'real.png') -Destination (Join-Path $root 'real-media.png') -Force
   Write-Host 'Real Windows media/Unicode paths, source/program preview and failure exit codes passed.'
 } finally {
+  if ($null -eq $previousWorker) { Remove-Item Env:GENESIS_GCOMPOSE -ErrorAction SilentlyContinue }
+  else { $env:GENESIS_GCOMPOSE = $previousWorker }
   $resolved = (Resolve-Path -LiteralPath $work).Path
   $expectedRoot = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
   if (-not $resolved.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Test cleanup path escaped the build directory.' }

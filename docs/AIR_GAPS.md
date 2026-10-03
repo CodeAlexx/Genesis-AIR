@@ -460,3 +460,34 @@ The generated-media gate measures a 4:1 gain step after MP4/AAC encoding. Native
 checks exercise the actual K button and fader drag, curve reading and single-step Undo.
 Histogram pixels and per-frame monitor/timeline bitmap acceptance remain in the Windows
 gate. These checks do not establish sustained interactive audio/video synchronization.
+
+## Selected-frame Windows readback
+
+The native Windows decoder now checks timestamps before transferring a decoded
+picture to CPU memory. Scrubbing, mixed frame rates and speed changes still decode
+the necessary source frames, but unused pictures do not cross that boundary.
+Selected NV12/P010 pictures use a cached D3D11 staging texture and reusable aligned
+AVFrame buffers with libavutil's public uncached-memory copy primitive. Chroma offsets
+use the texture's padded height, and visible row widths are checked against its pitch.
+Color metadata and the existing FP32 conversion/composition path are preserved.
+Other formats and failed staging reads use the ordinary FFmpeg transfer, with
+`GA_VIDEO_TRANSFER` marking recovery. `GENESIS_DEFAULT_TRANSFER=1` selects that path
+for comparison. No AIR SDK change was required.
+
+`tests/video_transfer.py` compares exact RGBA and float output against the ordinary
+transfer and, optionally, a previous worker. Generated H.264/HEVC/AV1 clips use
+non-aligned dimensions, B-frame/reordered decoding and fractional timestamps, with
+forward skips, final frames, reverse seeks and frame-zero rewind. The supplied
+4K/59.94 AV1/PQ clip also passes, including its final frame. Together they pass
+332 pixel pairs, including software decode; all four sources use native D3D11 in
+this run. The profile logs contain one readback per selected picture, including
+requests that skip many source frames. The standard Windows gate includes the
+generated cases and reports hardware availability separately from pixel equivalence.
+
+Three paired headless editor runs at 2560x1440, each with three warmups and 120
+consecutive sequence frames, compare this worker with `7f0d124`. Median-of-run-medians
+are 22.18/19.63 ms for program preparation and 27.22/24.74 ms for the serial preview
+path, about 9% less serial work. Native presentation, audio and overlap are excluded;
+sustained interactive 4K60 and long-run A/V synchronization remain open.
+A one-frame decode/readback-ahead experiment brought no additional measured benefit
+and was removed. The retained implementation adds no decode queue or thread.

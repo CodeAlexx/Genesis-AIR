@@ -417,7 +417,13 @@ the final preview on the GPU before downloading it. FLOAT intermediates and mast
 exports retain their precision. Windows uses D3D11 decoding when supported and prefers
 a discrete OpenCL GPU on hybrid PCs. Software decoding remains available with
 `GENESIS_SOFTWARE_DECODE=1`; `GENESIS_OPENCL_DEVICE` selects a GPU by name substring.
-`GENESIS_MEDIA_PROFILE=1` emits colour, RGB conversion and preview phase timings.
+The Windows decoder reads NV12/P010 staging memory into reusable aligned buffers.
+It selects the requested timestamp before copying pixels, so skipped frames during
+seeks or rate conversion stay on the GPU. Other layouts and a failed staging read
+use FFmpeg's ordinary transfer; `GA_VIDEO_TRANSFER` identifies that recovery.
+`GENESIS_DEFAULT_TRANSFER=1` selects the ordinary transfer for diagnostics.
+`GENESIS_MEDIA_PROFILE=1` emits staging wait/copy, transfer, colour, RGB conversion
+and preview phase timings.
 
 The native provider uses `PREVIEWFIT` to fit and pack the completed program picture
 on the GPU before downloading it. The composition keeps its existing resolution, so
@@ -432,6 +438,12 @@ samples after three warmups at 2560x1440. The median of the per-run medians chan
 from 23.75 to 21.98 ms for program preparation and from 28.83 to 27.10 ms for the
 serial preview path, about 6% overall. These samples exclude native presentation,
 audio and asynchronous overlap; sustained smooth 4K60 remains unverified.
+
+The subsequent Windows readback change has three paired 120-sample headless editor
+runs on the same clip and window size. Against `7f0d124`, median-of-run-medians fall
+from 22.18 to 19.63 ms for program preparation and 27.22 to 24.74 ms for the serial
+preview path, about 9% overall. These measurements also exclude native presentation,
+audio and overlap; they do not establish sustained interactive 4K60.
 
 A 120-sample measurement of consecutive frames on the supplied 4K/59.94 AV1/PQ clip
 and RTX 5080 reached 59.49 worker previews per second at a 1280x720 working canvas,
@@ -599,6 +611,19 @@ looks. It also checks size refusal/recovery and unchanged full-precision output:
 
 ```powershell
 python tests/preview_fit.py --worker .\genesis-gcompose.exe
+```
+
+Native video readback adds exact RGBA/float comparisons with FFmpeg's ordinary
+transfer for H.264 NV12 and HEVC/AV1 P010. Generated fractional-rate clips exercise
+padded textures, reordered frames, skips, final-frame decoding and rewind. The gate
+also checks software fallback and that only selected pictures are read back. It
+reports hardware availability separately. A prior worker and supplied source can
+also be compared; the supplied 4K clip passes 332 pixel pairs across these cases:
+
+```powershell
+python tests/video_transfer.py --worker .\genesis-gcompose.exe
+python tests/video_transfer.py --worker .\genesis-gcompose.exe --reference-worker C:\path\to\previous\genesis-gcompose.exe --source 'C:\path\to\clip.mp4' --last-frame 18807
+.\tests\windows.ps1 -Bin .\build-windows\native-pro\bin\Release -Worker C:\path\to\candidate\genesis-gcompose.exe
 ```
 
 The Windows gate also compares sixty-second and ten-minute reversed PCM sources,

@@ -7,7 +7,7 @@ agree. The 749-click UI gate proves hit testing and command dispatch in its repr
 panel states;
 state-dependent controls also need focused checks. It does not by itself prove media output.
 
-## Verified Windows checkpoint (2026-10-01)
+## Verified Windows checkpoint (2026-10-03)
 
 Branch `windows-native`, SDK `df80f270dd28af76674b6e80a4f08970c081be3e`, and the
 compositor revision/Windows patch recorded in `windows/source-pins.json` and
@@ -32,6 +32,7 @@ compositor revision/Windows patch recorded in `windows/source-pins.json` and
 | Generated media | All 11 transition kinds, all 12 blend modes, representative mapped effects, captions, Latin/Cyrillic/CJK text, reverse/speed audio, audio-only projects, worker recovery, progress/cancellation/partial cleanup |
 | Individual frame identity | A lossless per-frame RGB fixture is independently decoded by FFmpeg. Forty-four source/program picture pairs and completed frame/time positions, and 128 actual timeline bitmap surfaces, match independent colors and integer frame mappings through 23.976-to-29.97 fps conversion, nonzero clip placement, trim, reverse, 1.25x/0.5x speed and rewind. |
 | GPU monitor fitting | Forty exact RGBA comparisons against independently fitted full-canvas frames: landscape/portrait/odd sizes, all alpha levels, opaque bars, blur and the final look buffer. Invalid/oversized dimensions are refused, valid commands recover, and full-precision FLOAT/legacy PREVIEW bytes remain unchanged. Native cache checks require the requested display geometry. |
+| Windows video readback | 332 exact RGBA/float picture pairs with ordinary FFmpeg transfer, software decode and the previous worker. H.264 NV12, HEVC/AV1 P010 and the supplied 4K clip cover padded textures, fractional timestamps, forward skips, final frames and rewind; only selected pictures cross the GPU/CPU boundary. Hardware availability is reported independently. |
 | Sequence/export quality | Six-frame 3840x2160 ProRes preserving four-pixel detail at 30000/1001 with 24-bit PCM; portrait preview square stays square; 1080x1920 H.264/HEVC output; exact held multicam cuts at frames 30/60 |
 | Precision/color/audio duration | 1024 distinct narrow-band values survive filtered three-layer FFV1 16-bit composition; a supplied 4K AV1/PQ source round trips into a 16-bit PQ/BT.2020 master; SDR preview agrees with the floating-point reference within mean 0.97/255; 100-nit SDR title white is converted to PQ correctly; HEVC HDR is 10-bit PQ/BT.2020; audio remains audible after 181 seconds |
 
@@ -109,6 +110,14 @@ interaction has not received a new interactive Windows check in this checkpoint.
 The highest-impact remaining work is sustained playback,
 parameter/animation measurements for mapped effects, nested sequences,
 complex-script text, track/audio-filter automation and measured sustained audio/video synchronization.
+
+The latest native worker checkpoint retains the audio, histogram and frame-identity
+gates above. NV12/P010 readback additionally has 332 exact RGBA/float pixel pairs
+against ordinary FFmpeg transfer, software decode and the prior worker, including
+the supplied 4K clip's final frame and rewind. Only selected source frames are copied
+to CPU memory. Three paired ordinary-editor headless profiles measure 27.22/24.74 ms
+serial preparation before/after, about 9% less work; native presentation, audio and
+overlap are excluded. Sustained interactive 4K60 remains an acceptance gap.
 
 ## Video filters (31)
 

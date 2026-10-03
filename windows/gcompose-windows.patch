@@ -256,10 +256,10 @@ index 4b33e4a..bd4a1c6 100644
 +    return copied;
 +}
 diff --git a/gcompose/csrc/fpx_decode.c b/gcompose/csrc/fpx_decode.c
-index 8674e4c..dd4ddcf 100644
+index 8674e4c..03bfee2 100644
 --- a/gcompose/csrc/fpx_decode.c
 +++ b/gcompose/csrc/fpx_decode.c
-@@ -11,9 +11,23 @@
+@@ -11,8 +11,27 @@
  #include <libavcodec/avcodec.h>
  #include <libswscale/swscale.h>
  #include <libavutil/imgutils.h>
@@ -275,15 +275,19 @@ index 8674e4c..dd4ddcf 100644
 +#include <stdio.h>
  #include <string.h>
  #include <stdlib.h>
- 
++#include <limits.h>
++#ifdef _WIN32
++#define COBJMACROS
++#include <libavutil/hwcontext_d3d11va.h>
++#endif
++
 +static int working_hdr = 0;
 +void fpx_set_hdr(int hdr) { working_hdr = hdr != 0; }
 +int fpx_working_hdr(void) { return working_hdr; }
-+
+ 
  typedef struct {
      AVFormatContext* fmt;
-     AVCodecContext*  dec;
-@@ -21,8 +35,18 @@ typedef struct {
+@@ -21,8 +40,25 @@ typedef struct {
      struct SwsContext* sws2;     // scaled-output context (lazy, for fpx_decode_frame_scaled)
      int sw, sh;                  // current scaled target size
      struct SwsContext* sws_lb;   // letterbox context (aspect-preserving, lazy)
@@ -299,13 +303,118 @@ index 8674e4c..dd4ddcf 100644
      int vindex;
 +    int cpu_format;
 +    AVFrame* hw_transfer;
++#ifdef _WIN32
++    ID3D11Texture2D* staging;
++    AVBufferRef* staging_frames;
++    AVBufferPool* transfer_pool;
++    int transfer_width, transfer_height;
++    int transfer_failed;
++#endif
      int width, height;
      AVRational time_base;
      AVRational frame_rate;
-@@ -38,6 +62,51 @@ typedef struct {
+@@ -38,6 +74,173 @@ typedef struct {
      int have_pos;
  } FpxCtx;
  
++#ifdef _WIN32
++static void fpx_transfer_clear(FpxCtx* c) {
++    if (c->staging) ID3D11Texture2D_Release(c->staging);
++    c->staging = NULL;
++    av_buffer_unref(&c->staging_frames);
++    av_buffer_pool_uninit(&c->transfer_pool);
++}
++
++// D3D11 staging memory can be uncached/write-combined. The public libavutil
++// copy primitive dispatches suitable CPU reads while preserving every byte.
++// Cache the staging resource and reuse aligned AVFrame backing buffers.
++static int fpx_d3d11_prepare(FpxCtx* c) {
++    AVFrame* input = c->frame;
++    if (input->format != AV_PIX_FMT_D3D11 || !input->hw_frames_ctx) return AVERROR(ENOSYS);
++    AVHWFramesContext* frames = (AVHWFramesContext*)input->hw_frames_ctx->data;
++    AVD3D11VADeviceContext* device = (AVD3D11VADeviceContext*)frames->device_ctx->hwctx;
++    ID3D11Texture2D* texture = (ID3D11Texture2D*)input->data[0];
++    D3D11_TEXTURE2D_DESC desc;
++    if (!texture || !device || !device->device_context) return AVERROR(EINVAL);
++    ID3D11Texture2D_GetDesc(texture, &desc);
++    // Only the tested semiplanar decode layouts use this path. FFmpeg owns
++    // other formats, including opaque decoder surfaces.
++    if ((frames->sw_format != AV_PIX_FMT_NV12 && frames->sw_format != AV_PIX_FMT_P010LE) ||
++        desc.Width > INT_MAX || desc.Height > INT_MAX || input->width > (int)desc.Width ||
++        input->height > (int)desc.Height) return AVERROR(ENOSYS);
++    if (c->staging_frames && (c->staging_frames->data != input->hw_frames_ctx->data ||
++        c->transfer_width != input->width || c->transfer_height != input->height)) fpx_transfer_clear(c);
++    if (!c->staging) {
++        int size = av_image_get_buffer_size(frames->sw_format, input->width, input->height, 64);
++        if (size < 1 || size > INT_MAX - 64) return AVERROR(EINVAL);
++        D3D11_TEXTURE2D_DESC staging = desc;
++        staging.ArraySize = 1; staging.MipLevels = 1;
++        staging.Usage = D3D11_USAGE_STAGING; staging.BindFlags = 0;
++        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ; staging.MiscFlags = 0;
++        if (FAILED(ID3D11Device_CreateTexture2D(device->device, &staging, NULL, &c->staging))) return AVERROR(EIO);
++        c->staging_frames = av_buffer_ref(input->hw_frames_ctx);
++        c->transfer_pool = av_buffer_pool_init(size + 64, NULL);
++        if (!c->staging_frames || !c->transfer_pool) { fpx_transfer_clear(c); return AVERROR(ENOMEM); }
++        c->transfer_width = input->width; c->transfer_height = input->height;
++    }
++    if (device->lock) device->lock(device->lock_ctx);
++    ID3D11DeviceContext_CopySubresourceRegion(device->device_context, (ID3D11Resource*)c->staging,
++        0, 0, 0, 0, (ID3D11Resource*)texture, (UINT)(uintptr_t)input->data[1], NULL);
++    if (device->unlock) device->unlock(device->lock_ctx);
++    return 0;
++}
++
++static int fpx_d3d11_transfer(FpxCtx* c) {
++    int prepared = fpx_d3d11_prepare(c);
++    if (prepared < 0) return prepared;
++    AVFrame* input = c->frame;
++    AVHWFramesContext* frames = (AVHWFramesContext*)input->hw_frames_ctx->data;
++    AVD3D11VADeviceContext* device = (AVD3D11VADeviceContext*)frames->device_ctx->hwctx;
++    D3D11_TEXTURE2D_DESC desc;
++    ID3D11Texture2D_GetDesc(c->staging, &desc);
++    AVFrame* output = c->hw_transfer;
++    av_frame_unref(output);
++    output->format = frames->sw_format; output->width = input->width; output->height = input->height;
++    output->buf[0] = av_buffer_pool_get(c->transfer_pool);
++    if (!output->buf[0]) return AVERROR(ENOMEM);
++    uint8_t* aligned = (uint8_t*)(((uintptr_t)output->buf[0]->data + 63) & ~(uintptr_t)63);
++    if (av_image_fill_arrays(output->data, output->linesize, aligned, frames->sw_format,
++        input->width, input->height, 64) < 0) return AVERROR(EINVAL);
++    D3D11_MAPPED_SUBRESOURCE map;
++    int result = 0;
++    int64_t started = av_gettime_relative();
++    if (device->lock) device->lock(device->lock_ctx);
++    HRESULT mapped = ID3D11DeviceContext_Map(device->device_context, (ID3D11Resource*)c->staging,
++        0, D3D11_MAP_READ, 0, &map);
++    int64_t ready = av_gettime_relative();
++    if (FAILED(mapped)) result = AVERROR(EIO);
++    else {
++        uint8_t* source[4] = {0};
++        int pitch[4] = {(int)map.RowPitch, (int)map.RowPitch, (int)map.RowPitch, (int)map.RowPitch};
++        // The chroma plane starts after the texture's padded height, rather
++        // than the visible picture height (e.g. 1088 versus 1080).
++        int minimum_pitch[4];
++        result = av_image_fill_linesizes(minimum_pitch, frames->sw_format, input->width);
++        if (result >= 0 && (map.RowPitch > INT_MAX || (int)map.RowPitch < minimum_pitch[0] ||
++            (int)map.RowPitch < minimum_pitch[1])) result = AVERROR(EINVAL);
++        if (result >= 0) result = av_image_fill_pointers(source, frames->sw_format, desc.Height, map.pData, pitch);
++        if (result >= 0) {
++            ptrdiff_t dst_pitch[4], src_pitch[4];
++            for (int i=0; i<4; ++i) {dst_pitch[i]=output->linesize[i]; src_pitch[i]=pitch[i];}
++            av_image_copy_uc_from(output->data, dst_pitch, (const uint8_t* const*)source, src_pitch,
++                frames->sw_format, input->width, input->height);
++            result = 0;
++        }
++        ID3D11DeviceContext_Unmap(device->device_context, (ID3D11Resource*)c->staging, 0);
++    }
++    if (device->unlock) device->unlock(device->lock_ctx);
++    if (getenv("GENESIS_MEDIA_PROFILE")) fprintf(stderr, "[gcompose] staging wait_us=%lld copy_us=%lld\n",
++        (long long)(ready-started), (long long)(av_gettime_relative()-ready));
++    if (result < 0) return result;
++    return av_frame_copy_props(output, input);
++}
++#endif
++
 +static enum AVPixelFormat fpx_hw_format(AVCodecContext* dec, const enum AVPixelFormat* formats) {
 +    for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
 +        if (*p == AV_PIX_FMT_D3D11) return *p;
@@ -316,27 +425,46 @@ index 8674e4c..dd4ddcf 100644
 +    return AV_PIX_FMT_NONE;
 +}
 +
-+// The compositor receives CPU pixels. Transfer a native D3D11 decoded frame once,
-+// retaining its timestamps, transfer function and primaries for the float color path.
-+static int fpx_receive(FpxCtx* c) {
-+    int result = avcodec_receive_frame(c->dec, c->frame);
++// Inspect native timestamps before transferring pixels. The letterbox/float
++// path drops pictures before the requested time while they are still on the GPU.
++// Preserve stream color metadata for the selected picture's float color path.
++static int fpx_pull(FpxCtx* c, AVFrame* frame) {
++    int result = avcodec_receive_frame(c->dec, frame);
 +    if (result < 0) return result;
++    const AVCodecParameters* metadata = c->fmt->streams[c->vindex]->codecpar;
++    if (frame->color_primaries == AVCOL_PRI_UNSPECIFIED) frame->color_primaries = metadata->color_primaries;
++    if (frame->color_trc == AVCOL_TRC_UNSPECIFIED) frame->color_trc = metadata->color_trc;
++    if (frame->colorspace == AVCOL_SPC_UNSPECIFIED) frame->colorspace = metadata->color_space;
++    if (frame->color_range == AVCOL_RANGE_UNSPECIFIED) frame->color_range = metadata->color_range;
++    return 0;
++}
++static int fpx_cpu_frame(FpxCtx* c) {
++    int64_t started = av_gettime_relative();
++    int result = 0;
 +    const AVPixFmtDescriptor* format = av_pix_fmt_desc_get(c->frame->format);
 +    if (format && (format->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
 +        if (!c->hw_transfer) c->hw_transfer = av_frame_alloc();
 +        if (!c->hw_transfer) return AVERROR(ENOMEM);
-+        av_frame_unref(c->hw_transfer);
-+        result = av_hwframe_transfer_data(c->hw_transfer, c->frame, 0);
++        int fast = 0;
++#ifdef _WIN32
++        if (!c->transfer_failed && !getenv("GENESIS_DEFAULT_TRANSFER")) {
++            result = fpx_d3d11_transfer(c);
++            if (result >= 0) fast = 1;
++            else { c->transfer_failed = 1; fpx_transfer_clear(c);
++                fprintf(stderr, "[GA_VIDEO_TRANSFER] Fast D3D11 read failed (%d), using the default transfer\n", result); }
++        }
++#endif
++        if (!fast) {
++            av_frame_unref(c->hw_transfer);
++            result = av_hwframe_transfer_data(c->hw_transfer, c->frame, 0);
++            if (result >= 0) result = av_frame_copy_props(c->hw_transfer, c->frame);
++        }
 +        if (result < 0) return result;
-+        av_frame_copy_props(c->hw_transfer, c->frame);
 +        av_frame_unref(c->frame);
 +        av_frame_move_ref(c->frame, c->hw_transfer);
 +    }
-+    const AVCodecParameters* metadata = c->fmt->streams[c->vindex]->codecpar;
-+    if (c->frame->color_primaries == AVCOL_PRI_UNSPECIFIED) c->frame->color_primaries = metadata->color_primaries;
-+    if (c->frame->color_trc == AVCOL_TRC_UNSPECIFIED) c->frame->color_trc = metadata->color_trc;
-+    if (c->frame->colorspace == AVCOL_SPC_UNSPECIFIED) c->frame->colorspace = metadata->color_space;
-+    if (c->frame->color_range == AVCOL_RANGE_UNSPECIFIED) c->frame->color_range = metadata->color_range;
++    if (getenv("GENESIS_MEDIA_PROFILE")) fprintf(stderr, "[gcompose] decode transfer_us=%lld\n",
++        (long long)(av_gettime_relative()-started));
 +    if (c->cpu_format != c->frame->format) {
 +        c->cpu_format = c->frame->format;
 +        if (c->sws) sws_freeContext(c->sws);
@@ -351,10 +479,15 @@ index 8674e4c..dd4ddcf 100644
 +    return 0;
 +}
 +
++static int fpx_receive(FpxCtx* c) {
++    int result = fpx_pull(c, c->frame);
++    return result < 0 ? result : fpx_cpu_frame(c);
++}
++
  void* fpx_open(const char* path) {
      FpxCtx* c = (FpxCtx*)calloc(1, sizeof(FpxCtx));
      if (!c) return NULL;
-@@ -49,16 +118,48 @@ void* fpx_open(const char* path) {
+@@ -49,16 +252,48 @@ void* fpx_open(const char* path) {
      c->vindex = idx;
      AVStream* st = c->fmt->streams[idx];
      c->dec = avcodec_alloc_context3(codec);
@@ -406,7 +539,7 @@ index 8674e4c..dd4ddcf 100644
      c->pkt = av_packet_alloc();
      c->frame = av_frame_alloc();
      return c;
-@@ -85,7 +186,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
+@@ -85,7 +320,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -415,7 +548,7 @@ index 8674e4c..dd4ddcf 100644
                      int64_t pts = c->frame->best_effort_timestamp;
                      if (pts == AV_NOPTS_VALUE || pts >= target) {
                          uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -107,7 +208,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
+@@ -107,7 +342,7 @@ int fpx_decode_frame_rgba(void* h, int frame_index, unsigned char* out, int out_
      // remaining frames and take the first at/after target. Mirrors ffmpeg's end-of-stream drain.
      if (got != 0) {
          avcodec_send_packet(c->dec, NULL);
@@ -424,7 +557,7 @@ index 8674e4c..dd4ddcf 100644
              int64_t pts = c->frame->best_effort_timestamp;
              if (pts == AV_NOPTS_VALUE || pts >= target) {
                  uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -129,7 +230,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+@@ -129,7 +364,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
      FpxCtx* c = (FpxCtx*)h;
      if (!c->sws2 || c->sw != ow || c->sh != oh) {
          if (c->sws2) sws_freeContext(c->sws2);
@@ -433,7 +566,7 @@ index 8674e4c..dd4ddcf 100644
                                   ow, oh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->sw = ow; c->sh = oh;
      }
-@@ -142,7 +243,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+@@ -142,7 +377,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -442,7 +575,7 @@ index 8674e4c..dd4ddcf 100644
                      int64_t pts = c->frame->best_effort_timestamp;
                      if (pts == AV_NOPTS_VALUE || pts >= target) {
                          uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -161,7 +262,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
+@@ -161,7 +396,7 @@ int fpx_decode_frame_scaled(void* h, int frame_index, unsigned char* out, int ow
      // last ~GOP of a clip decodes instead of returning black.
      if (got != 0) {
          avcodec_send_packet(c->dec, NULL);
@@ -451,7 +584,7 @@ index 8674e4c..dd4ddcf 100644
              int64_t pts = c->frame->best_effort_timestamp;
              if (pts == AV_NOPTS_VALUE || pts >= target) {
                  uint8_t* dst[4] = { out, NULL, NULL, NULL };
-@@ -182,7 +283,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
+@@ -182,7 +417,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
      FpxCtx* c = (FpxCtx*)h;
      if (!c->sws2 || c->sw != ow || c->sh != oh) {
          if (c->sws2) sws_freeContext(c->sws2);
@@ -460,7 +593,7 @@ index 8674e4c..dd4ddcf 100644
                                   ow, oh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->sw = ow; c->sh = oh;
      }
-@@ -191,7 +292,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
+@@ -191,7 +426,7 @@ int fpx_decode_next_scaled(void* h, unsigned char* out, int ow, int oh) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -469,7 +602,7 @@ index 8674e4c..dd4ddcf 100644
                      uint8_t* dst[4] = { out, NULL, NULL, NULL };
                      int dstln[4] = { ow * 4, 0, 0, 0 };
                      sws_scale(c->sws2, (const uint8_t* const*)c->frame->data, c->frame->linesize,
-@@ -222,7 +323,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -222,7 +457,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
      int ox = (ow - dw) / 2, oy = (oh - dh) / 2;
      if (!c->sws_lb || c->lb_dw != dw || c->lb_dh != dh) {
          if (c->sws_lb) sws_freeContext(c->sws_lb);
@@ -478,7 +611,7 @@ index 8674e4c..dd4ddcf 100644
                                     dw, dh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->lb_dw = dw; c->lb_dh = dh;
      }
-@@ -237,6 +338,155 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -237,6 +472,155 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
      return 0;
  }
  
@@ -634,7 +767,7 @@ index 8674e4c..dd4ddcf 100644
  // Like fpx_decode_frame_scaled but ASPECT-PRESERVING (letterbox/pillarbox into ow x oh).
  // Forward-decode window (frames): a request this many frames AHEAD of the current decoder position
  // (or fewer) decodes forward WITHOUT seeking — the sequential playback/render case. A larger forward
-@@ -245,7 +495,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -245,7 +629,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
  // returns the exact frame); it only trades a seek for a forward decode. ~1 GOP is the sweet spot.
  #define FPX_SEQ_FWD_WINDOW 300
  
@@ -643,23 +776,25 @@ index 8674e4c..dd4ddcf 100644
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
      FpxCtx* c = (FpxCtx*)h;
      int64_t target = av_rescale_q(frame_index, av_inv_q(c->frame_rate), c->time_base);
-@@ -271,13 +521,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -271,13 +655,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      // Return the FIRST frame with pts >= target (frame-accurate; identical selection to before).
      int eof_sent = 0;
      for (;;) {
 -        int r = avcodec_receive_frame(c->dec, c->frame);
-+        int r = fpx_receive(c);
++        int r = fpx_pull(c, c->frame);
          if (r == 0) {
              int64_t pts = c->frame->best_effort_timestamp;
              if (pts != AV_NOPTS_VALUE) { c->cur_pts = pts; c->have_pos = 1; }
              if (pts == AV_NOPTS_VALUE || pts >= target) {
                  if (pts == AV_NOPTS_VALUE) c->have_pos = 0; // can't track an unknown-pts position
 -                if (fpx_lb_blit(c, out, ow, oh) < 0) { c->have_pos = 0; return -4; }
++                // Unused source frames never cross the GPU/CPU boundary.
++                if (fpx_cpu_frame(c) < 0) { c->have_pos = 0; return -4; }
 +                if ((high ? fpx_hi_blit(c, (float*)out, ow, oh) : fpx_lb_blit(c, (unsigned char*)out, ow, oh)) < 0) { c->have_pos = 0; return -4; }
                  return 0;
              }
              continue; // frame is before target: drop it and keep receiving
-@@ -302,6 +552,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -302,6 +688,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      }
  }
  
@@ -673,7 +808,7 @@ index 8674e4c..dd4ddcf 100644
  // Aspect-preserving sequential decode (no seek) — for playback.
  int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
-@@ -310,7 +567,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
+@@ -310,7 +703,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -682,7 +817,7 @@ index 8674e4c..dd4ddcf 100644
                      if (fpx_lb_blit(c, out, ow, oh) < 0) { av_packet_unref(c->pkt); return -4; }
                      got = 0; break;
                  }
-@@ -332,7 +589,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
+@@ -332,7 +725,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -691,7 +826,7 @@ index 8674e4c..dd4ddcf 100644
                      uint8_t* dst[4] = { out, NULL, NULL, NULL };
                      int dstln[4] = { c->width * 4, 0, 0, 0 };
                      sws_scale(c->sws, (const uint8_t* const*)c->frame->data, c->frame->linesize,
-@@ -359,7 +616,7 @@ int fpx_nframes(void* h) {
+@@ -359,7 +752,7 @@ int fpx_nframes(void* h) {
      if (st->nb_frames > 0) return (int)st->nb_frames;
      if (c->fmt->duration > 0 && c->frame_rate.num > 0) {
          double secs = (double)c->fmt->duration / AV_TIME_BASE;
@@ -700,7 +835,7 @@ index 8674e4c..dd4ddcf 100644
      }
      return 0;
  }
-@@ -367,9 +624,14 @@ int fpx_nframes(void* h) {
+@@ -367,10 +760,18 @@ int fpx_nframes(void* h) {
  void fpx_close(void* h) {
      if (!h) return;
      FpxCtx* c = (FpxCtx*)h;
@@ -713,8 +848,12 @@ index 8674e4c..dd4ddcf 100644
      if (c->sws_lb) sws_freeContext(c->sws_lb);   // letterbox scaler (fpx_lb_blit) — was leaked on close
 +    if (c->hw_transfer) av_frame_free(&c->hw_transfer);
      if (c->frame) av_frame_free(&c->frame);
++#ifdef _WIN32
++    fpx_transfer_clear(c);
++#endif
      if (c->pkt) av_packet_free(&c->pkt);
      if (c->dec) avcodec_free_context(&c->dec);
+     if (c->fmt) avformat_close_input(&c->fmt);
 diff --git a/gcompose/csrc/fpx_encode.c b/gcompose/csrc/fpx_encode.c
 index 805883d..2bce0bc 100644
 --- a/gcompose/csrc/fpx_encode.c
