@@ -8,6 +8,7 @@ import std.editor_io as editor_io
 import std.files as files
 import std.path as path
 import std.tasks as tasks
+import std.text as text
 import "app.ai" as app
 import "audio_playback.ai" as audio
 import "chrome.ai" as chrome
@@ -42,7 +43,7 @@ fn integer(out: ref<string>, value: i64) -> unit effects {alloc} {
   string.append(out,"\t")
   ()
 }
-pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
+pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_poll: bool) -> i32
     effects {alloc,env,ffi,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
   if seconds < 2 or seconds > 180 {io.write("[GA_PLAYBACK_PROFILE_ARGS] Use 2..180 seconds\n")
     return 2}
@@ -85,7 +86,7 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
   var renderer: painter.Renderer = painter.renderer()
   var source: draw.Surface = draw.empty_surface()
   var program: draw.Surface = draw.empty_surface()
-  var rows: string = string.copy("wall_ns\tsamples\tqueued\theard_frame\tshown_frame\ttimeline_frame\tr\tg\tb\testimated_ready_ns\tprepared\tin_flight\n")
+  var rows: string = string.copy("wall_ns\tsamples\tqueued\theard_frame\tshown_frame\ttimeline_frame\tr\tg\tb\testimated_ready_ns\tprepared\tin_flight\tpaint_ns\twait_ns\tready_id\tsnapshot_ns\tsource_ns\tplan_ns\tprogram_ns\tpublish_ns\tcoalesce_ns\ttimer_period_ms\n")
   var failure: bool = false
   task.scope {
     var jobs: array<task<bool>> = array.new()
@@ -101,6 +102,10 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
     var audio_end: i64 = next_audio
     var audio_id: u64 = 1
     var audio_pending: bool = false
+    var last_heard: i64 = -1
+    var last_left: f64 = -1.0
+    var last_right: f64 = -1.0
+    var wait_ns: u64 = 0
     // Warm the parked monitor and first mixed audio block before starting time.
     if not failure {
       if not publish(state,root,preview_link,1,0) or not plan(state,sound_root,audio_link,1,0,next_audio,output) {failure=true}
@@ -116,6 +121,7 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
       if device.request(library,"start","") != "ok" or device.request(library,"queue",output) != "ok" {failure=true}
     }
     let begin: u64 = time.monotonic_ns()
+    let period: i64 = match text.parse_u64(device.request(library,"timer-resolution","")) {some(value)=>cast.sat(value),none=>-1,}
     let deadline: u64 = begin+(seconds+10)*1000000000
     loop {
       if failure {break}
@@ -128,6 +134,8 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
         failure=true
         break}
       let heard: i64 = transport_clock.frame_at_samples(0,clock.samples,fps,finish-1)
+      var dirty: bool = heard != last_heard
+      last_heard=heard
       let _ = editor.seek(struct.borrow(state,field=document),heard)
       link.poll(audio_link)
       if audio_pending and audio_link.ready == audio_id {
@@ -164,14 +172,18 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
           var next_program: draw.Surface = option.unwrap(array.pop(images))
           var next_source: draw.Surface = option.unwrap(array.pop(images))
           let held: bool = link.holds_source(preview_link)
-          if not held {source=next_source}
+          if not held {source=next_source
+            dirty=true}
           let frame: pictures.Frame = pictures.Frame {source:draw.empty_surface(),program:next_program,
             position:preview_link.position,held_source:true}
-          if legacy {pictures.apply(state,frame,source,program)}else{
+          if legacy {pictures.apply(state,frame,source,program)
+            dirty=true}else{
             let _ = pictures.receive(queue,ready,frame,time.monotonic_ns())}
         }
       }
-      if not legacy {match pictures.take_due(queue,heard) {none=>{},some(frame)=>{pictures.apply(state,frame,source,program)},}}
+      if not legacy {match pictures.take_due(queue,heard) {none=>{},some(frame)=>{
+        pictures.apply(state,frame,source,program)
+        dirty=true},}}
       let target: option<i64> = if legacy {if heard != last_legacy {option.some(heard)}else{option.none()}}
         else {pictures.target(queue,heard,finish-1,fps,state.presented_program_frame)}
       match target {none=>{},some(frame)=>{
@@ -185,8 +197,16 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
         break}
       struct.set(state,levels.left,field=audio_left)
       struct.set(state,levels.right,field=audio_right)
-      if not painter.render(state,renderer,1600,980,false,source,program) {failure=true
-        break}
+      if levels.left != last_left or levels.right != last_right {dirty=true}
+      last_left=levels.left
+      last_right=levels.right
+      var paint_ns: u64 = 0
+      if dirty or sleep_poll {
+        let paint_begin: u64 = time.monotonic_ns()
+        if not painter.render(state,renderer,1600,980,false,source,program) {failure=true
+          break}
+        paint_ns=time.monotonic_ns()-paint_begin
+      }
       // Use the clock after painting: it includes the CPU time spent assembling
       // the picture handed to the presenter, not only the pre-paint playhead.
       clock=device.clock(library)
@@ -205,9 +225,25 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool) -> i32
       integer(rows,cast.sat(color.b))
       integer(rows,cast.sat(queue.latency_ns))
       integer(rows,cast.sat(array.len(struct.borrow(queue,field=frames))))
-      string.append(rows,string.from_int(queue.in_flight))
+      integer(rows,cast.sat(queue.in_flight))
+      integer(rows,cast.sat(paint_ns))
+      integer(rows,cast.sat(wait_ns))
+      let timing: link.FrameTiming = preview_link.timing
+      integer(rows,cast.sat(timing.generation))
+      integer(rows,cast.sat(timing.request_ns))
+      integer(rows,cast.sat(timing.source_ns))
+      integer(rows,cast.sat(timing.plan_ns))
+      integer(rows,cast.sat(timing.program_ns))
+      integer(rows,cast.sat(timing.publish_ns))
+      integer(rows,cast.sat(timing.coalesce_ns))
+      string.append(rows,string.from_int(period))
       string.append(rows,"\n")
-      time.sleep_ms(8)
+      let wait_begin: u64 = time.monotonic_ns()
+      if sleep_poll {time.sleep_ms(8)}else{
+        match link.wait_activity(preview_link,8) {ok(_)=>{},err(problem)=>{io.write(problem)
+          failure=true},}
+      }
+      wait_ns=time.monotonic_ns()-wait_begin
     }
     let _ = device.request(library,"stop","")
     preview.stop(root)

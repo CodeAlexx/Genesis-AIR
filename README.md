@@ -610,6 +610,11 @@ audio device, asynchronous decode/mix and retained ordinary editor paint. It ope
 no window and silences final track gain in its loaded copy; it never saves that copy.
 Measurements include paint time but exclude native display and physical speaker
 latency. `--legacy` is a diagnostic baseline that requests the current heard frame.
+The default diagnostic wakes on preview-channel activity and paints only after a
+clock, picture or meter change, matching the editor's scheduling policy. `--poll`
+reproduces the earlier sleep/poll diagnostic and its paint on every iteration.
+TSV reports include individual worker phases, paint/wait durations and the active
+timer request, so wait overhead can be distinguished from decoder work.
 The Windows gate checks a lossless per-frame 23.976-to-29.97 fps fixture through an
 eight-second device run, including the five-second audio-buffer boundary. Every
 sampled program pixel, picture stamp and playing cursor must agree; future pictures
@@ -626,8 +631,15 @@ The Windows audio clock also accepts driver positions returned in bytes or
 milliseconds. It unwraps the native counter before converting to 48 kHz stereo
 frames, holds small backward observations, and preserves time when the reported
 unit changes. This follows the [Windows position API contract](https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/nf-mmeapi-waveoutgetposition).
-Sixty-one controlled native ABI checks cover all three units, repeated rollover,
-unit changes, meter indexing, coded failure/recovery and restart.
+Seventy-five controlled native ABI checks cover all three units, repeated rollover,
+unit changes, meter indexing, coded failure/recovery, restart and timer lifecycle.
+Successful device opening requests a one-millisecond Windows timer period. Stop,
+restart and guard destruction release each successful request; device-open failure
+makes no request and timer refusal preserves audio playback. The diagnostic
+`timer-resolution` operation reports `1` when the request is active and `0` otherwise.
+This follows the [Windows timer-period contract](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod).
+It improves short wait precision rather than the device clock itself; Windows may
+relax timer precision when a window is minimized or occluded.
 
 The Windows gate adds a twenty-second silent real-device run with uneven PCM
 buffers, monotonic sample positions, drain, resume and restart. A separate
@@ -704,7 +716,8 @@ failures, recovery on the same worker, refusal of a reused frame slot, fullscree
 720p frames, in-place LUT reload and idle cancellation without a Stop wake.
 The pixel-stream gate adds nine native transport cases: exact RGBA bytes in two
 1280x720 surfaces, a consumer paused for 250 ms, held/empty/coalesced source
-updates, Stop/seek during backpressure and coded malformed-frame recovery.
+updates, idle event-wait expiry followed by recovery, Stop/seek during backpressure
+and coded malformed-frame recovery.
 Generated-media requests check independent source/program seeking and decoded frame
 stamps, monitor size changes, rewind, Reload, a 32-request drag burst, strip extraction
 during playback, matching bitmap pixels after reverse/trim/2x rate, stale/incomplete

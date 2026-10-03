@@ -402,6 +402,19 @@ pub fn await_event(link: ref<Link>, kind: u64, generation: u64, deadline: u64) -
 pub fn await_ready(link: ref<Link>, generation: u64, deadline: u64) -> result<unit,string> effects {alloc,net} {
   await_event(link,1,generation,deadline)
 }
+// Headless equivalent of the editor's socket wake. Consume one complete message
+// and let poll drain the remaining burst. An idle deadline is ordinary inactivity,
+// not a channel failure, and partial packet state remains owned by the receiver.
+pub fn wait_activity(link: ref<Link>, timeout_ms: u64) -> result<bool,string> effects {alloc,net,time} {
+  if link.closed {return result.err(problem("Preview task ended unexpectedly"))}
+  match channel.recv(struct.borrow(link,field=events),time.monotonic_ns()+timeout_ms*1000000) {
+    ok(value)=>match value {some(value)=>{take(link,value)
+      result.ok(true)},none=>{struct.set(link,true,field=closed)
+      result.err(problem("Preview task ended unexpectedly"))},},
+    err(error)=>{if error.code == channel.code_empty() {result.ok(false)}else{
+      result.err(problem(str.view(channel.message(error))))}},
+  }
+}
 // The runtime wakes on the channel socket or native input. No window is opened
 // by this helper; already decoded messages return without a timed wait.
 pub fn wait(window: ref<Window>, link: ref<Link>, timeout: u64) -> ui.event effects {ui} {

@@ -143,6 +143,7 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
     } else if mode == 0 {
       // The sender must survive a consumer held longer than the old 100 ms budget.
       time.sleep_ms(250)
+      good=match link.wait_activity(transport,200) {ok(value)=>value,err(_)=>false,} and good
       good=check_frame(transport,1) and good
       good=str.eq(str.view(struct.borrow(transport,field=pixel_error)),"fixture 日本") and good
       let _ = files.write_text(path.join(root,"request.id"),"2")
@@ -157,6 +158,10 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
       }
       var restored: draw.Surface = link.restore_source(transport)
       good=exact(restored,13) and good
+      // No timer sleep is needed to wait for headless playback. An idle deadline
+      // must leave the established stream and its already completed pixels valid.
+      good=match link.wait_activity(transport,5) {ok(value)=>not value,err(_)=>false,} and
+        transport.ready == 2 and str.len(str.view(struct.borrow(transport,field=error))) == 0 and good
       let _ = files.write_text(path.join(root,"request.id"),"3")
       let _ = link.wake(transport,false)
       good=match link.await_ready(transport,3,time.monotonic_ns()+10000000000) {ok(_)=>true,err(_)=>false,} and good

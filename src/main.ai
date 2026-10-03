@@ -954,16 +954,22 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
   }
 
   if verb == "profile-playback" {
-    if view.len(args) < 5 or view.len(args) > 6 {say("profile-playback needs REPORT.tsv PROJECT.air SECONDS [--legacy]")
+    if view.len(args) < 5 or view.len(args) > 7 {say("profile-playback needs REPORT.tsv PROJECT.air SECONDS [--legacy] [--poll]")
       return 2}
-    let legacy: bool = view.len(args) == 6 and view.get(args,5) == "--legacy"
-    if view.len(args) == 6 and not legacy {say("[GA_PLAYBACK_PROFILE_ARGS] Unknown option")
-      return 2}
+    var legacy: bool = false
+    var sleep_poll: bool = false
+    var flag: u64 = 5
+    loop {if flag >= view.len(args) {break}
+      let option: str = view.get(args,flag)
+      if option == "--legacy" {legacy=true}else if option == "--poll" {sleep_poll=true}else{
+        say("[GA_PLAYBACK_PROFILE_ARGS] Unknown option")
+        return 2}
+      flag=flag+1}
     var opened: commands.Result = commands.open_project(state,view.get(args,3))
     if not opened.ok {say(commands.message(opened))
       return 1}
     let seconds: u64 = match text.parse_u64(view.get(args,4)) {some(value)=>value,none=>0,}
-    return playback_profile.run(state,view.get(args,2),seconds,legacy)
+    return playback_profile.run(state,view.get(args,2),seconds,legacy,sleep_poll)
   }
   if str.eq(verb, "profile-preview") {
     if view.len(args) < 4 { say("profile-preview needs a report path and a project")

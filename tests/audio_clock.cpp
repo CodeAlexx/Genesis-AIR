@@ -11,6 +11,25 @@ UINT reported_type = TIME_SAMPLES;
 DWORD reported_value = 0;
 MMRESULT reported_status = MMSYSERR_NOERROR;
 unsigned checks = 0;
+unsigned timer_begins = 0, timer_ends = 0;
+MMRESULT timer_status = TIMERR_NOERROR;
+MMRESULT open_status = MMSYSERR_NOERROR;
+MMRESULT WINAPI begin_timer(UINT period) {
+  if (period != 1) std::abort();
+  ++timer_begins;
+  return timer_status;
+}
+MMRESULT WINAPI end_timer(UINT period) {
+  if (period != 1) std::abort();
+  ++timer_ends;
+  return TIMERR_NOERROR;
+}
+MMRESULT WINAPI open_driver(LPHWAVEOUT out, UINT, LPCWAVEFORMATEX, DWORD_PTR, DWORD_PTR, DWORD) {
+  *out = open_status == MMSYSERR_NOERROR ? reinterpret_cast<HWAVEOUT>(1) : nullptr;
+  return open_status;
+}
+MMRESULT WINAPI reset_driver(HWAVEOUT) { return MMSYSERR_NOERROR; }
+MMRESULT WINAPI close_driver(HWAVEOUT) { return MMSYSERR_NOERROR; }
 MMRESULT WINAPI driver_position(HWAVEOUT, LPMMTIME value, UINT size) {
   if (size != sizeof(MMTIME) || value->wType != TIME_SAMPLES) std::abort();
   value->wType = reported_type;
@@ -19,8 +38,18 @@ MMRESULT WINAPI driver_position(HWAVEOUT, LPMMTIME value, UINT size) {
 }
 }
 #define waveOutGetPosition driver_position
+#define timeBeginPeriod begin_timer
+#define timeEndPeriod end_timer
+#define waveOutOpen open_driver
+#define waveOutReset reset_driver
+#define waveOutClose close_driver
 #include "../windows/native_audio.cpp"
 #undef waveOutGetPosition
+#undef timeBeginPeriod
+#undef timeEndPeriod
+#undef waveOutOpen
+#undef waveOutReset
+#undef waveOutClose
 
 namespace {
 void expect(bool condition, const char *label) {
@@ -96,6 +125,41 @@ int main() {
   device = nullptr;
   expect(std::strstr(air_genesis_audio("clock", ""), "[GA_AUDIO_CLOSED]") != nullptr,
          "closed device retains coded refusal");
-  std::printf("Native audio clock: %u ABI checks, sample/byte/ms positions, rollover, jitter, unit changes, meter cursor and coded recovery passed\n", checks);
+  expect(std::strcmp(air_genesis_audio("timer-resolution", ""), "0") == 0,
+         "idle device requests no timer precision");
+  expect(std::strcmp(air_genesis_audio("start", ""), "ok") == 0 && timer_begins == 1 && timer_ends == 0,
+         "successful device start acquires one timer request");
+  expect(std::strcmp(air_genesis_audio("timer-resolution", ""), "1") == 0,
+         "active timer request is inspectable");
+  expect(std::strcmp(air_genesis_audio("start", ""), "ok") == 0 && timer_begins == 2 && timer_ends == 1,
+         "restart releases the old request before acquiring another");
+  expect(std::strcmp(air_genesis_audio("stop", ""), "ok") == 0 && timer_ends == 2,
+         "stop releases the matching timer request");
+  expect(std::strcmp(air_genesis_audio("stop", ""), "ok") == 0 && timer_ends == 2,
+         "repeated stop cannot over-release timer precision");
+  open_status = MMSYSERR_ERROR;
+  expect(std::strstr(air_genesis_audio("start", ""), "[GA_AUDIO_DEVICE]") != nullptr &&
+         timer_begins == 2 && timer_ends == 2 && device == nullptr,
+         "failed device opening never requests timer precision");
+  open_status = MMSYSERR_NOERROR;
+  timer_status = TIMERR_NOCANDO;
+  expect(std::strcmp(air_genesis_audio("start", ""), "ok") == 0 && timer_begins == 3,
+         "timer precision refusal preserves audio availability");
+  expect(std::strcmp(air_genesis_audio("timer-resolution", ""), "0") == 0,
+         "timer refusal is visible to diagnostics");
+  expect(std::strcmp(air_genesis_audio("stop", ""), "ok") == 0 && timer_ends == 2,
+         "refused timer request is never released as a successful one");
+  timer_status = TIMERR_NOERROR;
+  {
+    PlaybackTimer scoped;
+    scoped.start(); scoped.start();
+    expect(timer_begins == 4, "timer guard start is idempotent");
+  }
+  expect(timer_ends == 3, "guard destruction releases its successful request");
+  expect(std::strcmp(air_genesis_audio("start", ""), "ok") == 0 && timer_begins == 5,
+         "precision can recover after a refusal");
+  air_genesis_audio("stop", "");
+  expect(timer_ends == 4 && !playback_timer.active, "all successful requests are balanced after recovery");
+  std::printf("Native audio clock/timing: %u ABI checks, sample/byte/ms positions, rollover, jitter, unit changes, meter cursor, coded recovery and scoped timer lifecycle passed\n", checks);
   return 0;
 }

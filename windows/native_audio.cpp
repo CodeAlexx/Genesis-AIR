@@ -18,6 +18,18 @@ HWAVEOUT device = nullptr;
 std::vector<std::unique_ptr<Block>> blocks;
 std::string reply;
 std::uint64_t queued_samples = 0;
+// Multimedia playback needs short event/deadline waits. Windows otherwise can
+// round an 8 ms wait to nearly a full scheduler tick. Keep the request scoped
+// to the live device; failure leaves ordinary audio playback available.
+struct PlaybackTimer {
+  bool active = false;
+  PlaybackTimer() = default;
+  PlaybackTimer(const PlaybackTimer &) = delete;
+  PlaybackTimer &operator=(const PlaybackTimer &) = delete;
+  void start() { if (!active) active = timeBeginPeriod(1) == TIMERR_NOERROR; }
+  void stop() { if (active) { timeEndPeriod(1); active = false; } }
+  ~PlaybackTimer() { stop(); }
+} playback_timer;
 struct Position {
   UINT type = 0;
   std::uint32_t previous = 0;
@@ -60,6 +72,7 @@ void stop() {
     blocks.clear(); waveOutClose(device); device = nullptr;
   }
   cursor.reset(); queued_samples = 0;
+  playback_timer.stop();
 }
 MMRESULT position(std::uint64_t &samples) {
   MMTIME value{}; value.wType = TIME_SAMPLES;
@@ -116,12 +129,14 @@ bool wave(const char *filename, std::vector<char> &data) {
 extern "C" __declspec(dllexport) const char *air_genesis_audio(const char *operation, const char *filename) {
   if (!operation || !filename) return failure("ARGUMENT", 0);
   if (!strcmp(operation, "stop")) { stop(); return "ok"; }
+  if (!strcmp(operation, "timer-resolution")) return playback_timer.active ? "1" : "0";
   if (!strcmp(operation, "start")) {
     stop(); WAVEFORMATEX format{};
     format.wFormatTag = WAVE_FORMAT_PCM; format.nChannels = 2; format.nSamplesPerSec = 48000;
     format.wBitsPerSample = 16; format.nBlockAlign = 4; format.nAvgBytesPerSec = 192000;
     MMRESULT status = waveOutOpen(&device, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
     if (status != MMSYSERR_NOERROR) { device = nullptr; return failure("DEVICE", status); }
+    playback_timer.start();
     return "ok";
   }
   if (!device) return failure("CLOSED", 0);

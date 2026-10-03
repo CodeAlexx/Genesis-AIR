@@ -24,12 +24,12 @@ def percentile(values, fraction):
     return values[min(len(values)-1, math.floor((len(values)-1)*fraction))]
 
 
-def measure(binary, worker, project, root, seconds, legacy, identity):
-    label = "legacy" if legacy else "prepared"
+def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll=False):
+    label = ("legacy" if legacy else "prepared") + ("-poll" if sleep_poll else "")
     report = root / f"{label}.tsv"
     env = dict(os.environ, GENESIS_GCOMPOSE=str(worker), GENESIS_SCRATCH=str(root / label))
     env.pop("GENESIS_FAKE_PROVIDER", None)
-    run([binary, "profile-playback", report, project, seconds] + (["--legacy"] if legacy else []),
+    run([binary, "profile-playback", report, project, seconds] + (["--legacy"] if legacy else []) + (["--poll"] if sleep_poll else []),
         env, seconds+90)
     with report.open(encoding="utf-8", newline="") as file:
         rows = [{key: int(value) for key, value in row.items()} for row in csv.DictReader(file, delimiter="\t")]
@@ -57,12 +57,25 @@ def measure(binary, worker, project, root, seconds, legacy, identity):
     # Ignore the initial half-second of cold prefetch when describing steady timing.
     steady = [row for row in rows if row["samples"] >= 24000]
     lag = [(row["samples"]/48000-row["shown_frame"]/fps)*1000 for row in steady]
-    return {"mode": label, "seconds": seconds, "fps": fps, "observations": len(rows),
+    phases = {name: [] for name in ("snapshot_ns", "source_ns", "plan_ns", "program_ns", "publish_ns", "coalesce_ns")}
+    seen = set()
+    for row in steady:
+        if row["ready_id"] not in seen:
+            seen.add(row["ready_id"])
+            for name in phases:
+                phases[name].append(row[name]/1000000)
+    paints = [row["paint_ns"]/1000000 for row in steady if row["paint_ns"]]
+    waits = [row["wait_ns"]/1000000 for row in steady]
+    return {"mode": label, "wait": "sleep_poll" if sleep_poll else "channel_event", "seconds": seconds, "fps": fps, "observations": len(rows),
             "presented_pictures": len(changed), "lag_ms": {
                 "median": statistics.median(lag), "p90": percentile(lag, .9),
                 "p95": percentile(lag, .95), "maximum": max(lag)},
             "peak_prepared": max(row["prepared"] for row in rows),
             "audio_underruns": 0, "early_pictures": 0, "pixel_checks": len(rows) if identity else 0,
+            "phase_ms": {name: {"median": statistics.median(values), "p95": percentile(values, .95)} for name, values in phases.items()},
+            "paint_ms": {"median": statistics.median(paints), "p95": percentile(paints, .95)},
+            "wait_ms": {"median": statistics.median(waits), "p95": percentile(waits, .95)},
+            "timer_period_ms": rows[-1]["timer_period_ms"],
             "raw_report": str(report)}
 
 
@@ -102,6 +115,7 @@ def main():
     parser.add_argument("--seconds", type=int, default=8)
     parser.add_argument("--compare", action="store_true")
     parser.add_argument("--pairs", type=int, default=1)
+    parser.add_argument("--poll", action="store_true", help="reproduce the earlier sleep/poll diagnostic")
     args = parser.parse_args()
     assert 1 <= args.pairs <= 5
     binary, worker = args.binary.resolve(), args.worker.resolve()
@@ -120,10 +134,10 @@ def main():
             for legacy in modes:
                 root = evidence / f"pair-{n}"
                 root.mkdir(exist_ok=True)
-                result = measure(binary, worker, project, root, args.seconds, legacy, not args.project)
+                result = measure(binary, worker, project, root, args.seconds, legacy, not args.project, args.poll)
                 results.append(result)
                 print(json.dumps(result), flush=True)
-    report.write_text(json.dumps({"schema": "genesis.playback-timing", "revision": 1,
+    report.write_text(json.dumps({"schema": "genesis.playback-timing", "revision": 2,
                                  "scope": "silent native device + asynchronous decode/mix + ordinary 480x270 monitors + 1600x980 retained paint; native display and speaker latency excluded",
                                  "measurements": results}, indent=2), encoding="utf-8")
 

@@ -559,7 +559,8 @@ queue bound, lack of early pictures and audio continuity across five-second buff
 Its TSV captures the clock after painting. Native presentation and physical speaker
 latency remain outside this measurement, and sustained interactive 4K60 remains open.
 
-Three alternating twenty-second pairs on the supplied 4K/59.94 AV1/PQ clip
+The earlier sleep/poll diagnostic (`--poll`) ran three alternating twenty-second
+pairs on the supplied 4K/59.94 AV1/PQ clip. These
 measure a median of per-run picture-delay medians of 78.79 ms for the diagnostic
 baseline and 26.46 ms with preparation. Picture delivery varies: 28.35–28.65 versus
 25.60–28.70 pictures/second in those short runs. One ninety-second pair over the
@@ -569,3 +570,45 @@ picture/cursor samples with no audio underruns or early pictures. These are sile
 real-device and headless-painter measurements, including mixed audio buffers, with
 native presentation and speaker latency excluded. They establish less picture delay
 on these runs; throughput still varies with the footage and is below 4K60.
+
+## Native playback wait precision
+
+The playback diagnostic now waits for preview-channel activity and repaints only
+after clock, picture or meter changes, matching the window's scheduling policy.
+The earlier fixed eight-millisecond sleep and unconditional repaint remain
+available as `--poll`; their historical throughput is not a measurement of the
+window's event loop. Idle channel deadlines preserve partial packets and permit
+the next request to recover. The TSV adds worker phase, paint and wait durations
+and the active timer request.
+
+The native audio adapter requests `timeBeginPeriod(1)` after successful device
+opening. Its noncopyable guard balances each successful request on Stop, restart
+or destruction. Device-open failure makes no request; timer refusal preserves
+ordinary audio availability. `timer-resolution` reports the current request state
+even after Stop. Fourteen additional controlled ABI checks bring the clock/timing
+total to 75 and cover acquisition, restart, repeated Stop, refusal, destruction and
+recovery. No SDK change was needed.
+
+[Windows documents improved short-wait accuracy from this request](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod),
+not improved performance-counter accuracy. Restricting the request to the open
+device avoids keeping the finer period while idle. Windows 11 may relax precision
+for a minimized or occluded window; this checkpoint does not override that policy.
+
+Three alternating twenty-second pairs on the supplied 4K/59.94 AV1/PQ clip use
+an identical diagnostic executable and prepared-picture policy, changing only
+the native audio DLL. The median of run p95 waits falls from 20.73 to 9.72 ms;
+the median of picture-delay medians falls from 25.36 to 16.89 ms. Picture delivery
+is 26.15–32.30 before and 34.35–35.45 pictures/second after. These event-wait
+measurements include the real silent device, asynchronous decode/mix and retained
+ordinary-editor paint; they exclude native presentation and physical speaker latency.
+No run reports an early picture or audio underrun. Results are specific to this
+footage and machine and remain below sustained 4K60.
+One ninety-second event-wait run after the change observes 8,434 complete clock/
+picture/cursor samples with no early pictures or audio underruns. It delivers
+26.83 pictures/second, with 28.81 ms median and 93.92 ms p95 picture delay.
+
+The full Windows gate passes, including 75 clock/timing ABI checks, the real device,
+all twenty audio effects, post-mix stereo/pan/silent meters, histogram/rewind pixels,
+44 source/program frame identities and 128 timeline bitmap identities. The default
+eight-second event-wait fixture checks 897 picture/frame/cursor observations with
+no early pictures or audio underruns across its five-second PCM boundary.
