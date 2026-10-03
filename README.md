@@ -433,6 +433,16 @@ CPU resize. A monitor-size change renders from the composition again; it cannot
 enlarge a cached smaller preview. Legacy `PREVIEW`, intermediate `FLOAT` and export
 `ENC` retain their original dimensions and formats.
 
+The working preview canvas fits within 1280x720 and never enlarges a smaller
+sequence. A 320x180 sequence is composited at 320x180; fitting to the monitor
+happens afterwards. This removes unnecessary filtering and scaling and keeps
+small-sequence spatial effects and title rasterization at their export scale.
+The native gate checks six canvas formats without changing sequence dimensions
+or time. Six complete pixel comparisons cover small landscape, odd-sized and
+portrait previews, both plain and with Blur/Text, against independently decoded
+16-bit lossless masters. Maximum channel error is one 8-bit unit; the preceding
+build fails the same fixture with a maximum difference of 43.
+
 The provider keeps the program picture's read handle on its owning preview thread.
 After `DONE`, it rewinds and reads the worker's file, which the worker rewrites in
 place. Reload, worker restart, failures and shutdown retire that reader. Reads are
@@ -575,7 +585,7 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 ```
 
 The Windows gate verifies 152 saved application facts, three native file-drop facts,
-749 control clicks with overlap checks, 81 native media/project checks and 95 focused
+749 control clicks with overlap checks, 111 native media/project checks and 105 focused
 inspector/transport/audio checks. Native device tests verify queueing, advancing sample
 clock, stereo, panned and silent output levels and immediate Stop. Continuous audio checks compare four
 worker cases and thirty-three editor/source/rate/mixer cases against whole-range WAV output;

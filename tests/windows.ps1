@@ -78,6 +78,8 @@ try {
     Write-Host (Invoke-Native 'genesis-preview-stream.exe' @((Join-Path $work 'stream'), $worker, $media)).TrimEnd()
     & python (Join-Path $PSScriptRoot 'frame_identity.py') --worker $worker --client (Join-Path $Bin 'genesis-preview-stream.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Per-frame monitor and timeline bitmap acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'preview_canvas.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Small-sequence preview/master pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'playback_timing.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $root 'playback-timing-fixture.json')
     if ($LASTEXITCODE -ne 0) { throw 'Audio-timed picture, histogram and timeline acceptance failed.' }

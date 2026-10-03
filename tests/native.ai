@@ -12,6 +12,7 @@ import "../src/commands.ai" as commands
 import "../src/input.ai" as input
 import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as timeline_media
 import "../src/view.ai" as painter
 
 fn red_frame(frame: ref<provider.Frame>) -> bool effects {} {
@@ -210,6 +211,30 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   struct.set(monitor,0,field=program_height)
   let _ = files.write_bytes(str.view(fixture),b"short")
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,4) {none=>true,some(_)=>false,},"incomplete canvas refused")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Preview preserves small sequences and bounds large working canvases")
+  var formats: array<u32> = [320,180,320,180,641,361,641,361,480,640,480,640,
+    1280,720,1280,720,3840,2160,1280,720,1080,1920,405,720]
+  var format: u64 = 0
+  loop {if format >= array.len(formats) {break}
+    let width: u32 = array.get(formats,format)
+    let height: u32 = array.get(formats,format+1)
+    var document: editor.Document = editor.document(30000.0/1001.0,width,height)
+    let clock_source: u64 = editor.add_source(document,"clock.mp4","clock",100,30000.0/1001.0)
+    let clock_track: u64 = editor.add_track(document,document.active,editor.track_video(),"V1")
+    let _ = editor.append(document,clock_track,clock_source,0,100)
+    let _ = editor.seek(document,37)
+    var fonts: array<string> = array.new()
+    var cache: timeline_media.RenderCache = timeline_media.render_cache(fonts)
+    timeline_media.configure_preview(document,cache)
+    let _ = test.eq_u64(suite,cast.wrap(cache.width),cast.wrap(array.get(formats,format+2)),"working width")
+    let _ = test.eq_u64(suite,cast.wrap(cache.height),cast.wrap(array.get(formats,format+3)),"working height")
+    let sequence: ref<editor.Sequence> = array.borrow(struct.borrow(document,field=sequences),0)
+    let _ = test.eq_u64(suite,cast.wrap(sequence.width),cast.wrap(width),"sequence/export width preserved")
+    let _ = test.eq_u64(suite,cast.wrap(sequence.height),cast.wrap(height),"sequence/export height preserved")
+    let _ = test.eq_i64(suite,editor.playhead(document),37,"preview sizing preserves time")
+    format=format+4
+  }
   let _ = test.done(suite)
   test.conclude(suite, path.join(scratch, "native-tests.json"), 32)
 }

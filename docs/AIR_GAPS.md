@@ -691,3 +691,36 @@ An additional supplied-HDR check compares Source with a neutral Program at
 matched working/monitor sizes: 480x270, 320x180 and the 80x45 thumbnail size.
 Through frames 0/1/7/0, all twelve pairs are exact. That confirms the current
 shared color path; it required no color fix.
+
+## Preserve small-sequence preview resolution
+
+`configure_preview` previously always filled its 1280x720 bound. A 320x180
+sequence therefore passed through a four-times-larger canvas in each dimension
+before fitting back to the monitor. Capping the fit factor at one preserves a
+small sequence's own pixels and avoids unnecessary scaling and filtering.
+Large sequences still use the existing preview bound; export dimensions and
+frame/time mapping are unchanged. This uses existing AIR math operations and
+requires no SDK or compositor change.
+
+Thirty native assertions cover working/export dimensions and playhead preservation
+for six formats, including odd-sized, portrait and 4K sequences. Six whole-image
+media comparisons cover 320x180, 321x181 and 180x320, plain and with Blur/Text,
+against independently decoded 16-bit FFV1 masters fitted to the monitor. The new
+build has at most one 8-bit channel unit of difference. The preceding build fails
+the first comparison with maximum difference 43, so the fixture detects the
+unnecessary canvas scaling rather than only checking successful replies.
+
+Three alternating eight-second native playback pairs use the same 320x180
+lossless 23.976 source in a 29.97 sequence, compositor and audio DLL. The median
+of run program-preparation medians falls from 10.10 to 2.39 ms; median picture
+delay falls from 19.40 to 15.15 ms. The new runs show 240 pictures each and check
+2,933 pixel/frame/cursor observations, with no early pictures or observed audio
+underruns. These measurements include asynchronous preparation, the silent
+native audio device and ordinary retained editor paint, excluding native
+presentation and physical speaker latency. They measure small-project playback
+and do not establish a new 4K delivery rate.
+
+The full Windows gate passes, including gain/pan/mute/solo and all twenty audio
+effects, post-mix meters, histogram/rewind, 44 monitor pictures and 128 actual
+timeline bitmaps. `tests/preview_canvas.py` is included in that gate for future
+preview/master comparisons.
