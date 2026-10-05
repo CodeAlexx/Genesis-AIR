@@ -97,6 +97,10 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_about() {
     return note("Genesis AIR — native nonlinear editor written in AIR")
   }
+  if action == chrome.act_ui_scale() {
+    app.set_ui_percent(state, cast.sat(target))
+    return ui_size_message(state)
+  }
 
   // ---- project ----
   if action == chrome.act_new() {
@@ -746,6 +750,14 @@ pub fn prompt_is_render(state: ref<app.App>) -> bool effects {} {
 
 // A key press. The set is the conventional editor one; while the prompt is open the
 // printable keys belong to it instead.
+fn ui_size_message(state: ref<app.App>) -> string effects {alloc} {
+  var message: string = string.copy("UI size ")
+  let percent: u64 = cast.wrap(app.ui_percent(state))
+  string.append(message, string.from_int(percent))
+  string.append(message, "%")
+  message
+}
+
 pub fn key(state: ref<app.App>, code: u32, control: bool,
            shift: bool) -> string effects {alloc, fs.meta, fs.read, fs.write, process} {
   if app.prompt_active(state) {
@@ -763,6 +775,19 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     return note("")
   }
 
+  // X keysyms for +, =, -, and 0. Preserve ordinary timeline zoom shortcuts.
+  if control and (code == 43 or code == 61) {
+    app.set_ui_percent(state, app.ui_percent(state) + 25)
+    return ui_size_message(state)
+  }
+  if control and code == 45 {
+    app.set_ui_percent(state, app.ui_percent(state) - 25)
+    return ui_size_message(state)
+  }
+  if control and code == 48 {
+    app.set_ui_percent(state, 100)
+    return ui_size_message(state)
+  }
   if code == widgets.key_space() {
     let playing: bool = editor.playing(struct.borrow(state, field=document))
     var landed: commands.Result = commands.program(state,

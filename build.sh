@@ -14,7 +14,7 @@ case "$AIR_SDK" in /*) ;; *) AIR_SDK="$here/$AIR_SDK" ;; esac
 case "$AIR_TOOLCHAIN" in /*) ;; *) AIR_TOOLCHAIN="$here/$AIR_TOOLCHAIN" ;; esac
 AIR_HOME=${AIR_HOME:-$AIR_SDK}
 case "$AIR_HOME" in /*) ;; *) AIR_HOME="$here/$AIR_HOME" ;; esac
-AIRC=${AIRC:-$AIR_TOOLCHAIN/build-dev/bin/airc}
+AIRC=${AIRC:-$AIR_TOOLCHAIN/build-gcc15/bin/airc}
 case "$AIRC" in /*) ;; *) AIRC="$here/$AIRC" ;; esac
 export AIR_STDLIB="$AIR_HOME/stdlib"
 

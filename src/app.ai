@@ -11,6 +11,7 @@ module genesis.app
 
 import std.editor as editor
 import std.editor_io as editor_io
+import std.gui as gui
 import "provider.ai" as provider
 
 // The panels a keystroke can be aimed at. The filter stack, the properties column and the
@@ -71,6 +72,7 @@ pub type App = struct {
   history: editor.History,
   provider: provider.Provider,
   viewport: Viewport,
+  display_scale: gui.Scale,
   focus: u32,
   menu: u32,
   hover_action: u32,
@@ -108,7 +110,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
   let _ = editor.add_track(document, sequence, editor.track_video(), "V1")
   let _ = editor.add_track(document, sequence, editor.track_video(), "V2")
   App {document: document, history: editor.history(64), provider: engine,
-    viewport: viewport(), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
+    viewport: viewport(), display_scale: gui.scale(100), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
     pool_row: 0, selected_filter: 0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
     dock_scroll_drag_offset: 0.0, snap: true,
@@ -121,6 +123,14 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
 
 pub fn status(state: ref<App>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(state, field=status)))
+}
+// UI size is view state. Painting and pointer input use the same scale, while
+// the document and timeline zoom retain their own units.
+pub fn display_scale(state: ref<App>) -> gui.Scale effects {} { state.display_scale }
+pub fn ui_percent(state: ref<App>) -> u32 effects {} { gui.scale_percent(state.display_scale) }
+pub fn set_ui_percent(state: ref<App>, value: u32) -> unit effects {} {
+  let bounded: u32 = if value < 100 { 100 } else if value > 250 { 250 } else { value }
+  struct.set(state, gui.scale(bounded), field=display_scale)
 }
 pub fn set_status(state: ref<App>, text: str) -> unit effects {alloc} {
   let _ = ref.swap(struct.borrow(state, field=status), string.copy(text))

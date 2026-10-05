@@ -1,0 +1,73 @@
+// Application typography uses AIR's shared TrueType renderer and metric cache.
+module genesis.typography
+
+import std.font as font
+import std.draw as draw
+import std.geometry as geometry
+import std.system as system
+import std.path as path
+
+pub type Text = struct { small: font.Font, body: font.Font, title: font.Font, factor: f64, source: string }
+
+pub fn new() -> Text effects {alloc} {
+  Text {small: font.new(12), body: font.new(13), title: font.new(14), factor: 1.0, source: ""}
+}
+
+pub fn load(value: ref<Text>, file: str) -> bool effects {alloc, fs.meta, fs.read} {
+  var small = match font.load(file) { ok(face) => face, err(_) => { return false }, }
+  var body = match font.load(file) { ok(face) => face, err(_) => { return false }, }
+  var title = match font.load(file) { ok(face) => face, err(_) => { return false }, }
+  var fresh = new()
+  font.add_face(struct.borrow(fresh, field=small), small)
+  font.add_face(struct.borrow(fresh, field=body), body)
+  font.add_face(struct.borrow(fresh, field=title), title)
+  let _ = ref.swap(struct.borrow(fresh, field=source), string.copy(file))
+  let _ = ref.swap(value, fresh)
+  true
+}
+
+pub fn configure(value: ref<Text>) -> bool effects {alloc, env, fs.meta, fs.read} {
+  match env.get("GENESIS_UI_FONT") { some(file) => { return load(value, file) }, none => {}, }
+  match env.get("AIR_UI_FONT") { some(file) => { return load(value, file) }, none => {}, }
+  var candidates: array<string> = []
+  if system.platform() == "windows" {
+    let root = match env.get("WINDIR") { some(file) => file, none => "C:/Windows", }
+    array.push(candidates, path.join(root, "Fonts/segoeui.ttf"))
+    array.push(candidates, path.join(root, "Fonts/arial.ttf"))
+  } else {
+    array.push(candidates, "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")
+    array.push(candidates, "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    array.push(candidates, "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+  }
+  var index: u64 = 0
+  loop {
+    if index >= array.len(candidates) { break }
+    if load(value, array.borrow(candidates, index)) { return true }
+    index = index + 1
+  }
+  false
+}
+
+pub fn resize(value: ref<Text>, factor: f64) -> unit effects {alloc} {
+  struct.set(value, factor, field=factor)
+  font.set_pixel_size(struct.borrow(value, field=small), cast.sat(12.0 * factor))
+  font.set_pixel_size(struct.borrow(value, field=body), cast.sat(13.0 * factor))
+  font.set_pixel_size(struct.borrow(value, field=title), cast.sat(14.0 * factor))
+}
+
+pub fn measure(value: ref<Text>, text: str, size: f64) -> f64 effects {alloc} {
+  let factor = value.factor
+  let width = if size <= 12.0 { font.measure(struct.borrow(value, field=small), text) }
+    else if size <= 13.0 { font.measure(struct.borrow(value, field=body), text) }
+    else { font.measure(struct.borrow(value, field=title), text) }
+  width / factor
+}
+
+pub fn label(canvas: ref<draw.Canvas>, value: ref<Text>, x: f64, y: f64,
+             text: str, size: f64, color: draw.Color) -> unit effects {alloc} {
+  let origin = geometry.vec2(x, y + size * 0.78)
+  let _ = if size <= 12.0 { font.draw_text(canvas, struct.borrow(value, field=small), origin, text, color) }
+    else if size <= 13.0 { font.draw_text(canvas, struct.borrow(value, field=body), origin, text, color) }
+    else { font.draw_text(canvas, struct.borrow(value, field=title), origin, text, color) }
+  ()
+}

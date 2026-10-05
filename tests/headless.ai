@@ -16,6 +16,7 @@ import "../src/input.ai" as input
 import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
 import "../src/view.ai" as painter
+import "../src/typography.ai" as typography
 
 fn emit(name: str, value: str) -> unit effects {io.write} {
   io.write(name)
@@ -532,7 +533,9 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var canvas: draw.Canvas = draw.canvas(target)
   var blank_a: draw.Surface = match array.pop(image) { some(v) => v, none => draw.empty_surface(), }
   var blank_b: draw.Surface = match array.pop(image) { some(v) => v, none => draw.empty_surface(), }
-  painter.paint(state, canvas, 1600.0, 980.0, blank_a, blank_b)
+  var typeface = typography.new()
+  if not typography.configure(typeface) { return 1 }
+  painter.paint(state, typeface, canvas, 1600.0, 980.0, blank_a, blank_b)
   var finished: draw.Surface = draw.finish(canvas)
   emit_u("render_width", cast.wrap(draw.surface_width(finished)))
   emit_u("render_height", cast.wrap(draw.surface_height(finished)))

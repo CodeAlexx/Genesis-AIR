@@ -100,6 +100,7 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/layout.ai` | panel geometry. One function computes where every panel sits, so painting and hit testing cannot disagree about which pixels belong to which panel. |
 | `src/chrome.ai` | every clickable control, built once as a list carrying its own rectangle, label and state — plus the filter library and its parameter schemas. The view paints this list; the input layer hit-tests the same list. Neither computes a rectangle. |
 | `src/view.ai` | painting. Holds no project state and mutates nothing. |
+| `src/typography.ai` | system TrueType font selection and three reusable glyph caches; rendering and measurement come from `std.font`. |
 | `src/input.ai` | which command a click, drag or key means. Never edits the document. |
 | `src/commands.ai` | the only path to a mutation: capture for undo, then one toolkit call. No edit arithmetic. |
 | `src/provider.ai` | the media seam. Genesis AIR never learns where a frame came from. |
@@ -130,6 +131,21 @@ build/genesis-air new
 Environment: `AIRC` / `AIR_HOME` override the toolchain, `GENESIS_GCOMPOSE` points at the
 media worker, `GENESIS_FAKE_PROVIDER=1` forces the deterministic provider, `GENESIS_SCRATCH`
 sets the provider's scratch directory.
+
+For a 4K display, launch with `GENESIS_UI_SCALE=200 build/genesis-air new`.
+**View → UI size** offers 100%, 150%, 200%, and 250%. **Ctrl++ / Ctrl+-** adjust
+the size in 25% steps; **Ctrl+0** resets it to 100%. This scales text, controls,
+monitor images, and pointer coordinates together, independently of timeline zoom.
+The setting is per session; `GENESIS_UI_SCALE` sets the startup percentage.
+The coordinate and drawing mechanics come from AIR's reusable
+[`std.gui.Scale` toolkit](https://github.com/CodeAlexx/AIR/blob/main/stdlib/gui.md).
+
+UI text uses AIR's [antialiased TrueType renderer](https://github.com/CodeAlexx/AIR/blob/main/stdlib/font.md) (`std.font`), with proportional
+spacing and measured prompt caret placement. Linux selects Noto Sans, then DejaVu
+Sans or Liberation Sans; Windows selects Segoe UI or Arial. Set `GENESIS_UI_FONT`
+to a TrueType font file to choose another face (`AIR_UI_FONT` is also accepted).
+An explicitly selected font that cannot load produces a startup error. Faces are
+loaded once; changing UI size rebuilds the glyph caches at the new pixel size.
 
 ## Keys
 
@@ -189,29 +205,34 @@ AIR_STDLIB=/path/to/AIR/stdlib "$AIRC" run tests/headless.ai --mode release -- \
   /tmp/genesis-air-test /tmp/genesis-air-test/project.air /tmp/genesis-air-test/frame.png
 AIR_STDLIB=/path/to/AIR/stdlib "$AIRC" run tests/controls.ai --mode release -- \
   /tmp/genesis-air-controls
+# Font selection, Unicode metrics and UI scaling; needs a system TrueType font.
+AIR_STDLIB=/path/to/AIR/stdlib "$AIRC" run tests/typography.ai --mode release --
 ```
 
-- **116 application facts** through the command layer with the fake provider: startup,
+- **116 application fact records** through the command layer with the fake provider: startup,
   project create/save/load, media import, every timeline edit, selection, grouping,
   transitions, fades, keyframes, markers, subtitles, the filter stack, the mixer including
   solo-wins, both transports, panel focus and pool/ruler clicks, keyboard commands, and
-  undo/redo compared exactly in both directions — plus the chrome: every toolbar, timeline
+  undo/redo digests for comparison in both directions — plus the chrome: every toolbar, timeline
   toolbar, dock tab, track header and inspector control is clicked at the centre of the
-  rectangle it was BUILT with, which is what proves painting and dispatch share one geometry
-  rather than two that happen to agree. The drag gesture is asserted to land as a single
-  undo step, and the prompt is asserted to route a committed line to the action that opened
-  it.
-- **594 control clicks** across the four inspector tabs. Every control the chrome builds is
-  clicked at the centre of the rectangle it was built with, and the resulting document and
-  application state is diffed against a baseline. Two properties are asserted, and both catch
-  bugs that a screenshot cannot show: **no two enabled controls in a panel may overlap** — an
-  overlapped control is unreachable and the click silently runs the one on top of it — and
-  **every control must report an outcome**, so a button drawn but wired to nothing shows up.
-  Rows below the fold are scrolled into view first, the way a person would.
-- **Render smoke**: `build/genesis-air demo OUT.png PROJECT.air` paints a 1600×980 frame
-  and saves its project.
+  rectangle it was built with. The output records the drag undo step and prompt routing
+  for inspection; this fixture emits facts rather than asserting every emitted value.
+- **610 control clicks** across Properties (230), Filters (161), Scopes (102),
+  and Audio (117), including menus and the four UI-size choices. The fixture emits
+  each control's rectangle, resulting state and outcome. The Ubuntu run returned
+  zero for all four tabs with no empty outcomes; rectangle records remain available
+  for overlap inspection. Rows below the fold are scrolled into view first.
+- **Typography gate**: three cases, nine asserted checks for font selection,
+  proportional Unicode metrics, stable logical widths at 100/150/200%, raster
+  resizing, glyph reuse and preservation after an unavailable font replacement.
+- **Render smoke**: `build/genesis-air demo OUT.png PROJECT.air` paints a 1600×980 frame at 100%
+  and saves its project. At 150% it writes 2400×1470; at 200% it writes 3200×1960.
+  These three sizes were rendered and the 200% preview was visually inspected.
 - **gcompose smoke** (bounded): `build/genesis-air probe MEDIA.mp4 OUT.png` opens one real
   file, reads its frame count, places a short clip, decodes one source frame and paints.
+  The local 60-frame H.264/AAC test returned `source_frame ok`, four provider calls
+  and zero provider failures. This does not establish synchronized realtime audio
+  playback or finished-timeline export.
 
 ## Known gaps
 

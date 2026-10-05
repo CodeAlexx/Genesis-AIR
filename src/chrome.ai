@@ -109,6 +109,7 @@ pub fn act_param_key() -> u32 effects {} { 85 }
 
 pub fn act_menu() -> u32 effects {} { 90 }
 pub fn act_about() -> u32 effects {} { 91 }
+pub fn act_ui_scale() -> u32 effects {} { 92 }
 
 // ---------------------------------------------------------------------------
 
@@ -292,6 +293,10 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     top = menu_item(out, state, left, top, act_zoom_fit(), 0, "Fit timeline", false)
     top = menu_item(out, state, left, top, act_zoom_out(), 0, "Zoom out", false)
     top = menu_item(out, state, left, top, act_snap(), 0, "Snapping", app.snap(state))
+    top = menu_item(out, state, left, top, act_ui_scale(), 100, "UI size 100%", app.ui_percent(state) == 100)
+    top = menu_item(out, state, left, top, act_ui_scale(), 150, "UI size 150%", app.ui_percent(state) == 150)
+    top = menu_item(out, state, left, top, act_ui_scale(), 200, "UI size 200%", app.ui_percent(state) == 200)
+    top = menu_item(out, state, left, top, act_ui_scale(), 250, "UI size 250%", app.ui_percent(state) == 250)
     return out
   }
   if which == menu_project() {

@@ -1,0 +1,47 @@
+module genesis.tests.typography
+
+import "../src/typography.ai" as typography
+import std.font as font
+import std.math as math
+import std.testing as t
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, time} {
+  var suite = t.suite("Genesis TrueType UI", false)
+  var text = typography.new()
+  if t.start(suite, "system face and proportional Unicode metrics") {
+    let _ = t.check(suite, typography.configure(text), "a system TrueType face loads")
+    let narrow = typography.measure(text, "iii", 14.0)
+    let wide = typography.measure(text, "WWW", 14.0)
+    let _ = t.check(suite, wide > narrow * 2.0, "labels use proportional glyph advances")
+    let _ = typography.measure(text, "café Привет", 14.0)
+    let _ = t.eq_u64(suite, font.missing_count(struct.borrow(text, field=title)), 0,
+      "accented Latin and Cyrillic render actual glyphs")
+    let _ = t.done(suite)
+  }
+  if t.start(suite, "UI scaling keeps logical widths and cached faces") {
+    let original = typography.measure(text, "Render timeline", 14.0)
+    typography.resize(text, 1.5)
+    let scaled = typography.measure(text, "Render timeline", 14.0)
+    let _ = t.check(suite, math.abs(original - scaled) < 0.01,
+      "150% text occupies the same logical width")
+    typography.resize(text, 2.0)
+    let scaled = typography.measure(text, "Render timeline", 14.0)
+    let _ = t.check(suite, math.abs(original - scaled) < 0.01,
+      "200% text occupies the same logical width")
+    let face = struct.borrow(text, field=title)
+    let _ = t.eq_u64(suite, font.pixel_size(face), 28, "200% uses a fresh 28-pixel raster")
+    let cached = font.cached_glyphs(face)
+    font.set_pixel_size(face, 28)
+    let _ = t.eq_u64(suite, font.cached_glyphs(face), cached, "repaints reuse glyphs")
+    let _ = t.done(suite)
+  }
+  if t.start(suite, "failed font replacement preserves the current face") {
+    let before = typography.measure(text, "Render", 14.0)
+    let _ = t.check(suite, not typography.load(text, "/missing-genesis-ui-font.ttf"),
+      "an unavailable font reports failure")
+    let after = typography.measure(text, "Render", 14.0)
+    let _ = t.check(suite, before == after, "a failed replacement leaves metrics intact")
+    let _ = t.done(suite)
+  }
+  t.conclude(suite, "", 16)
+}

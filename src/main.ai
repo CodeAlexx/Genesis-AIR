@@ -16,6 +16,8 @@ import std.gui as gui
 import std.image as image
 import std.png_tools as png_tools
 import std.widgets as widgets
+import std.text as text
+import "typography.ai" as typography
 import "app.ai" as app
 import "commands.ai" as commands
 import "chrome.ai" as chrome
@@ -139,7 +141,14 @@ fn refresh_waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.rea
   filled
 }
 
-fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process} {
+fn render_to(state: ref<app.App>, typeface: ref<typography.Text>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process} {
+  let display: gui.Scale = app.display_scale(state)
+  let wide_units: u64 = cast.wrap(width)
+  let tall_units: u64 = cast.wrap(height)
+  let logical_w: f64 = cast.float(wide_units)
+  let logical_h: f64 = cast.float(tall_units)
+  let pixel_width: u32 = gui.device_size(display, logical_w)
+  let pixel_height: u32 = gui.device_size(display, logical_h)
   let _ = refresh_waveforms(state)
   var images: array<draw.Surface> = monitor_images(state, 320, 180)
   var program_image: draw.Surface = match array.pop(images) {
@@ -148,14 +157,15 @@ fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool 
   var source_image: draw.Surface = match array.pop(images) {
     some(value) => value, none => draw.empty_surface(),
   }
-  var surface: draw.Surface = match draw.surface(width, height) {
+  var surface: draw.Surface = match draw.surface(pixel_width, pixel_height) {
     some(value) => value,
     none => { return false },
   }
   var canvas: draw.Canvas = draw.canvas(surface)
+  draw.set_transform(canvas, gui.scale_transform(display))
   let wide: u64 = cast.wrap(width)
   let tall: u64 = cast.wrap(height)
-  painter.paint(state, canvas, cast.float(wide), cast.float(tall), source_image, program_image)
+  painter.paint(state, typeface, canvas, cast.float(wide), cast.float(tall), source_image, program_image)
   var finished: draw.Surface = draw.finish(canvas)
   var metadata: array<png_tools.TextEntry> = [
     png_tools.text("Title", "Genesis AIR"),
@@ -202,8 +212,11 @@ fn build_demo(state: ref<app.App>) -> unit effects {alloc, fs.meta, fs.read, fs.
 
 // The windowed application. One repaint per input burst; the document is the only state,
 // so a repaint always shows exactly what the last command did.
-fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, ui} {
-  var window: Window = match gui.open_canvas(title, 1600, 980) {
+fn run_window(state: ref<app.App>, typeface: ref<typography.Text>, title: str) -> i32 effects {alloc, fs.meta, fs.read, fs.write, io.write, process, ui} {
+  let initial_display: gui.Scale = app.display_scale(state)
+  let initial_width: u32 = gui.device_size(initial_display, 1600.0)
+  let initial_height: u32 = gui.device_size(initial_display, 980.0)
+  var window: Window = match gui.open_canvas(title, initial_width, initial_height) {
     ok(value) => value,
     err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
       return 1 },
@@ -216,23 +229,29 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
   loop {
     if not app.running(state) { break }
     let box: gui.Rect = gui.window_size(window)
-    let width: u32 = if box.width < 640 { 640 } else { box.width }
-    let height: u32 = if box.height < 480 { 480 } else { box.height }
+    let display: gui.Scale = app.display_scale(state)
+    let pixel_width: u32 = box.width
+    let pixel_height: u32 = box.height
+    let logical_w: f64 = gui.logical_size(display, pixel_width)
+    let logical_h: f64 = gui.logical_size(display, pixel_height)
+    let width: u32 = cast.sat(logical_w)
+    let height: u32 = cast.sat(logical_h)
     if dirty {
       let _ = refresh_waveforms(state)
       var images: array<draw.Surface> = monitor_images(state, 320, 180)
       var program_image: draw.Surface = match array.pop(images) { some(v) => v, none => draw.empty_surface(), }
       var source_image: draw.Surface = match array.pop(images) { some(v) => v, none => draw.empty_surface(), }
-      match draw.surface(width, height) {
+      match draw.surface(pixel_width, pixel_height) {
         none => { },
         some(target) => {
           var canvas: draw.Canvas = draw.canvas(target)
+          draw.set_transform(canvas, gui.scale_transform(display))
           let w: u64 = cast.wrap(width)
           let h: u64 = cast.wrap(height)
-          painter.paint(state, canvas, cast.float(w), cast.float(h), source_image, program_image)
+          painter.paint(state, typeface, canvas, cast.float(w), cast.float(h), source_image, program_image)
           var finished: draw.Surface = draw.finish(canvas)
           var pixels: bytes = draw.surface_rgb24(finished, draw.rgb(0, 0, 0))
-          match gui.present(window, bytes.view(pixels), width, height) {
+          match gui.present(window, bytes.view(pixels), pixel_width, pixel_height) {
             ok(shown) => { }, err(problem) => { },
           }
         },
@@ -252,10 +271,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
         some(signal) => {
           match signal {
             PointerDown(point) => {
-              let at_x: u64 = cast.wrap(point.x)
-              let at_y: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(at_x)
-              pointer_y = cast.float(at_y)
+
+              pointer_x = gui.logical_size(display, point.x)
+              pointer_y = gui.logical_size(display, point.y)
               let w: u64 = cast.wrap(width)
               let h: u64 = cast.wrap(height)
               var note: string = input.pointer_down(state, cast.float(w), cast.float(h),
@@ -264,10 +282,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
               dirty = true
             },
             PointerMove(point) => {
-              let mx: u64 = cast.wrap(point.x)
-              let my: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(mx)
-              pointer_y = cast.float(my)
+
+              pointer_x = gui.logical_size(display, point.x)
+              pointer_y = gui.logical_size(display, point.y)
               let w: u64 = cast.wrap(width)
               let h: u64 = cast.wrap(height)
               if input.pointer_hover(state, cast.float(w), cast.float(h), pointer_x, pointer_y) {
@@ -285,10 +302,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             Scroll(wheel) => {
               let w: u64 = cast.wrap(width)
               let h: u64 = cast.wrap(height)
-              let wheel_x: u64 = cast.wrap(wheel.x)
-              let wheel_y: u64 = cast.wrap(wheel.y)
+
               var note: string = input.wheel(state, cast.float(w), cast.float(h),
-                cast.float(wheel_x), cast.float(wheel_y),
+                gui.logical_size(display, wheel.x), gui.logical_size(display, wheel.y),
                 wheel.down, wheel.lines, control)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               dirty = true
@@ -320,10 +336,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             Resize(extent) => { dirty = true },
             Tick => { },
             PointerUp(point) => {
-              let ux: u64 = cast.wrap(point.x)
-              let uy: u64 = cast.wrap(point.y)
-              pointer_x = cast.float(ux)
-              pointer_y = cast.float(uy)
+
+                  pointer_x = gui.logical_size(display, point.x)
+                  pointer_y = gui.logical_size(display, point.y)
               if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) {
                 let w: u64 = cast.wrap(width)
                 let h: u64 = cast.wrap(height)
@@ -337,6 +352,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, fs.meta, f
             },
             Text(entry) => { },
             Progress(step) => { },
+            MenuAccess(access) => { },
           }
         },
       }
@@ -362,6 +378,20 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   match env.get("GENESIS_SCRATCH") { some(value) => { scratch = value }, none => { }, }
   var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
   var state: app.App = app.app(engine)
+  var typeface = typography.new()
+  if not typography.configure(typeface) {
+    say("No usable TrueType UI font. Set GENESIS_UI_FONT to a .ttf font file.")
+    return 1
+  }
+  match env.get("GENESIS_UI_SCALE") {
+    some(value) => {
+      match text.parse_u64(str.view(value)) {
+        some(percent) => { app.set_ui_percent(state, cast.sat(percent)) },
+        none => { say("GENESIS_UI_SCALE must be a percentage, for example 200") },
+      }
+    },
+    none => { },
+  }
   // Which inspector tab a headless render shows, so every panel is checkable without a
   // screen. The window path starts on Properties like any other launch.
   match env.get("GENESIS_TAB") {
@@ -382,7 +412,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       if not opened.ok { say(str.view(commands.message(opened)))
         return 1 }
     }
-    if not render_to(state, view.get(args, 2), 1600, 980) {
+    if not render_to(state, typeface, view.get(args, 2), 1600, 980) {
       say("the frame could not be written")
       return 1
     }
@@ -400,7 +430,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
         return 1 }
       say("project saved")
     }
-    if not render_to(state, view.get(args, 2), 1600, 980) {
+    if not render_to(state, typeface, view.get(args, 2), 1600, 980) {
       say("the frame could not be written")
       return 1
     }
@@ -438,7 +468,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     io.write("source_frame ")
     io.write(if provider.frame_ok(shot) { "ok" } else { "failed" })
     io.write("\n")
-    if not render_to(state, view.get(args, 3), 1600, 980) {
+    if not render_to(state, typeface, view.get(args, 3), 1600, 980) {
       say("the frame could not be written")
       return 1
     }
@@ -459,12 +489,12 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     var opened: commands.Result = commands.open_project(state, view.get(args, 2))
     if not opened.ok { say(str.view(commands.message(opened)))
       return 1 }
-    return run_window(state, "Genesis AIR")
+    return run_window(state, typeface, "Genesis AIR")
   }
 
   if str.eq(verb, "new") {
     build_demo(state)
-    return run_window(state, "Genesis AIR")
+    return run_window(state, typeface, "Genesis AIR")
   }
 
   say("unknown command")
