@@ -24,6 +24,7 @@ pub type Link = struct {
   pending_pixels: channel.ChunkBuffer, pending_info: array<u64>,
   pixel_info: array<u64>, pixel_data: bytes, pixel_error: string,
   position: FramePosition,
+  completed_total: u64, overwritten_total: u64, pixel_taken: u64,
   source_data: bytes, source_width: u32, source_height: u32, source_generation: u64, source_taken: u64, source_held: bool
 }
 pub type Peer = struct {events: channel.Sender, commands: channel.Receiver, last_drain_ns: u64,
@@ -43,6 +44,7 @@ fn open_mode(pixels: bool) -> result<Link,string> effects {alloc,net,time} {
     pending_pixels:channel.chunk_buffer(7376896),pending_info:array.new(),
     pixel_info:array.new(),pixel_data:bytes.copy(b""),pixel_error:string.new(),source_data:bytes.copy(b""),
     position:FramePosition {source_frame:0,program_frame:0,revision:0},
+    completed_total:0,overwritten_total:0,pixel_taken:0,
     source_width:0,source_height:0,source_generation:0,source_taken:0,source_held:false})
 }
 pub fn ticket(link: ref<Link>) -> channel.Ticket effects {alloc} {
@@ -256,6 +258,13 @@ fn finish_pixels(link: ref<Link>, generation: u64) -> bool effects {alloc} {
     some(value)=>string.copy(value),none=>{pixel_failure(link,generation,"Invalid frame error text")
       return false},
   }
+  // Count validated packets lost before the consumer takes their pixels. These
+  // integers expose completion coalescing without changing its current policy.
+  if array.len(struct.borrow(link,field=pixel_info)) == 12 and
+      array.get(struct.borrow(link,field=pixel_info),0) != link.pixel_taken {
+    struct.set(link,link.overwritten_total+1,field=overwritten_total)
+  }
+  struct.set(link,link.completed_total+1,field=completed_total)
   // Preserve source updates independently of the newest program packet. Poll
   // can coalesce several completed frames before the consumer paints any of them.
   if array.get(info,8) == 0 {
@@ -278,6 +287,7 @@ pub fn take_images(link: ref<Link>, id: u64) -> array<draw.Surface> effects {all
   let program_height: u32 = cast.sat(array.get(info,4))
   let source_len: u64 = array.get(info,5)
   let program_len: u64 = array.get(info,6)
+  struct.set(link,id,field=pixel_taken)
   let held: bool = link.source_taken == link.source_generation
   struct.set(link,held,field=source_held)
   let source_width: u32 = link.source_width

@@ -1,0 +1,409 @@
+// Shared trim acceptance uses original source/sample coordinates, whole nonlinear
+// key contexts and independent scalar envelope formulas. No media device is opened.
+module genesis.tests.editor_trim
+import std.editor as editor
+import std.editor_io as editor_io
+import std.curve as curve
+import std.files as files
+import std.path as path
+import std.math as math
+import std.testing as test
+import "../src/filter_keys.ai" as scoped
+import "../src/timeline_media.ai" as media
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn envelope(value: editor.Clip, local: i64) -> f64 effects {} {
+  var answer: f64 = 1.0
+  if value.fade_in > 0 and local < value.fade_in {answer=cast.float(local)/cast.float(value.fade_in)}
+  if value.fade_out > 0 and value.length-local <= value.fade_out {
+    answer=math.min(answer,cast.float(value.length-local)/cast.float(value.fade_out))
+  }
+  answer
+}
+fn cubic(local: i64) -> f64 effects {} {
+  if local <= -12 {return 0.2}
+  if local >= 120 {return 0.8}
+  let t: f64 = cast.float(local+12)/132.0
+  let u: f64 = -2.0*t+2.0
+  let eased: f64 = if t < 0.5 {4.0*t*t*t}else{1.0-u*u*u/2.0}
+  0.2+0.6*eased
+}
+fn body_at(doc: ref<editor.Document>, track: u64, frame: i64) -> option<u64> effects {} {
+  var i: u64 = 0
+  loop {if i >= editor.clip_count(doc) {break}
+    let value: editor.Clip = option.unwrap(editor.clip_at(doc,i))
+    if value.track == track and value.start <= frame and frame < editor.clip_end(value) {return option.some(value.id)}
+    i=i+1}
+  option.none()
+}
+fn keys(doc: ref<editor.Document>, id: u64, name: str) -> unit effects {alloc} {
+  let _ = editor.set_key(doc,id,name,-12,0.2,curve.cubic_in_out())
+  let _ = editor.set_key(doc,id,name,120,0.8,curve.cubic_in_out())
+  let _ = editor.set_key(doc,id,"gain",-12,0.2,curve.smooth_natural())
+  let _ = editor.set_key(doc,id,"gain",18,0.9,curve.smooth_natural())
+  let _ = editor.set_key(doc,id,"gain",70,0.3,curve.smooth_natural())
+  let _ = editor.set_key(doc,id,"gain",120,0.7,curve.smooth_natural())
+  let _ = editor.set_key(doc,id,"brightness.amount",-12,0.4,curve.hold())
+  let _ = editor.set_key(doc,id,"brightness.amount",48,0.7,curve.hold())
+  ()
+}
+fn full_keys(suite: ref<test.Suite>, old: ref<editor.Document>, next: ref<editor.Document>, id: u64, delta: i64) -> unit effects {alloc} {
+  let _ = test.eq_u64(suite,array.len(struct.borrow(next,field=keys)),array.len(struct.borrow(old,field=keys)),"Trim retains every negative and after-body context key")
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(old,field=keys)) {break}
+    let a: editor.Key = array.get(struct.borrow(old,field=keys),i)
+    let b: editor.Key = array.get(struct.borrow(next,field=keys),i)
+    let _ = test.check(suite,b.clip == a.clip and b.owner == a.owner and b.param == a.param and b.value == a.value and b.interp == a.interp,"Key ownership parameter value and interpolation remain exact")
+    let _ = test.eq_i64(suite,b.frame,a.frame-if a.clip == id {delta}else{0},"Only edited clip keys rebase by the actual head offset")
+    i=i+1}
+  ()
+}
+fn sample_matrix(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"All head tail and ripple samples preserve static forward reverse mixed-fps source and complete curves")
+  var variant: u64 = 0
+  loop {if variant >= 12 {break}
+    var operation: u64 = 0
+    loop {if operation >= 6 {break}
+      var doc: editor.Document = editor.document(30.0,1920,1080)
+      let source: u64 = editor.add_source(doc,"sample.mov","Sample",3000,24.0)
+      let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+      let other: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+      let id: u64 = option.unwrap(editor.place(doc,track,source,48,96,30))
+      let follower: u64 = option.unwrap(editor.place(doc,track,source,0,30,126))
+      let fixed: u64 = option.unwrap(editor.place(doc,other,source,0,30,126))
+      let rate: f64 = if variant < 2 {0.0}else if variant < 4 {0.5}else if variant < 6 {1.0}else if variant < 8 {2.0}else if variant < 10 {1.5}else{0.5}
+      let effective: f64 = if variant >= 10 {2.0}else{rate}
+      let _ = editor.set_clip_speed(doc,id,rate)
+      let _ = editor.set_clip_reverse(doc,id,variant%2 == 1)
+      if variant >= 10 {
+        let speed: u64 = option.unwrap(editor.add_filter(doc,id,"speed"))
+        let _ = editor.set_filter_param(doc,speed,"rate",4.0)
+      }
+      let filter: u64 = option.unwrap(editor.add_filter(doc,id,"brightness"))
+      let duplicate: u64 = option.unwrap(editor.add_filter(doc,id,"brightness"))
+      let _ = editor.set_filter_param(doc,filter,"amount",0.25)
+      let _ = editor.set_filter_text_param(doc,filter,"label","Retained instance")
+      let _ = editor.set_filter_enabled(doc,duplicate,false)
+      let name: string = scoped.name(filter,"brightness","amount")
+      keys(doc,id,name)
+      var original: editor.Document = editor.copy_document(doc)
+      let before: string = encoded(doc)
+      var history: editor.History = editor.history(8)
+      editor.capture(history,doc)
+      let head: bool = operation == 0 or operation == 2 or operation == 4
+      let ripple: bool = operation >= 4
+      let extension: bool = operation == 2 or operation == 3
+      let delta: i64 = if extension {-12}else{24}
+      let success: bool = if operation == 0 {editor.trim_start(doc,id,30+delta)}
+        else if operation == 1 {editor.trim_end(doc,id,96-delta)}
+        else if operation == 2 {editor.trim_start(doc,id,30+delta)}
+        else if operation == 3 {editor.trim_end(doc,id,96-delta)}
+        else if operation == 4 {editor.ripple_trim_start(doc,id,30+delta)}
+        else {editor.ripple_trim_end(doc,id,96-delta)}
+      let _ = test.check(suite,success,"Representable exact-phase edge edit succeeds")
+      let changed: editor.Clip = option.unwrap(editor.clip(doc,id))
+      let key_delta: i64 = if head {delta}else{0}
+      let _ = test.eq_i64(suite,changed.start,if head and not ripple {30+delta}else{30},"Plain trim holds opposite edge and ripple holds original anchor")
+      let _ = test.eq_i64(suite,changed.length,96-delta,"Edit applies requested body length")
+      let phase: f64 = if head {if changed.reverse {0.0}else{cast.float(delta)*effective}}
+        else {if changed.reverse {cast.float(delta)*effective}else{0.0}}
+      let expected_in: i64 = 48+cast.sat(phase)
+      let _ = test.eq_i64(suite,changed.source_in,expected_in,"Independent lower-bound source phase is exact")
+      full_keys(suite,original,doc,id,key_delta)
+      let _ = test.eq_u64(suite,editor.filter_count(doc,id),editor.filter_count(original,id),"Trim retains ordered filter instances")
+      let _ = test.check(suite,editor.filter_enabled(doc,filter) and not editor.filter_enabled(doc,duplicate),"Filter enabled state and identity survive")
+      let _ = test.eq_str(suite,editor.filter_text_param(doc,filter,"label",""),"Retained instance","Owned filter text survives")
+      let _ = test.eq_i64(suite,option.unwrap(editor.clip(doc,follower)).start,if ripple {126-delta}else{126},"Ripple shifts only later clips by actual edge delta")
+      let _ = test.eq_i64(suite,option.unwrap(editor.clip(doc,fixed)).start,126,"Other track remains fixed")
+      var local: i64 = 0
+      loop {if local >= changed.length {break}
+        let old_local: i64 = local+if head {delta}else{0}
+        let source_position: i64 = if changed.reverse {95-old_local}else{old_local}
+        let independent: i64 = cast.sat(math.floor((48.0+cast.float(source_position)*effective)*0.8))
+        let frame: i64 = changed.start+local
+        let _ = test.eq_i64(suite,media.source_frame(doc,changed,frame),independent,"Every retained and extended frame matches independent original source coordinates")
+        let _ = test.near_f64(suite,editor.clip_value_at(doc,id,name,frame,-1.0),cubic(old_local),0.000000000001,"Scoped cubic curve follows the original local-time formula")
+        let _ = test.near_f64(suite,editor.clip_value_at(doc,id,"brightness.amount",frame,-1.0),if old_local < 48 {0.4}else{0.7},0.0,"Legacy Hold keys retain their exact boundary")
+        let original_curve: f64 = editor.clip_value_at(original,id,"gain",30+old_local,-1.0)
+        let _ = test.near_f64(suite,editor.clip_value_at(doc,id,"gain",frame,-1.0),original_curve,0.000000000001,"Complete Catmull context retains all original tangents")
+        local=local+1}
+      let committed: string = encoded(doc)
+      let _ = test.check(suite,editor.undo(history,doc),"One Undo succeeds")
+      let _ = test.eq_str(suite,encoded(doc),before,"One Undo restores exact complete document bytes")
+      let _ = test.check(suite,editor.redo(history,doc),"One Redo succeeds")
+      let _ = test.eq_str(suite,encoded(doc),committed,"One Redo restores exact edited document bytes")
+      var reloaded: editor.Document = match editor_io.decode(committed) {ok(value)=>value,err(_)=>editor.document(30.0,1920,1080),}
+      let _ = test.eq_str(suite,encoded(reloaded),committed,"Negative and after-body key contexts survive save/load")
+      operation=operation+1}
+    variant=variant+1}
+  let _ = test.done(suite)
+  ()
+}
+
+fn fade_edges(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Edited-edge fade removal and long opposite ramps preserve every surviving envelope sample")
+  var operation: u64 = 0
+  loop {if operation >= 2 {break}
+    var doc: editor.Document = editor.document(30.0,1920,1080)
+    let source: u64 = editor.add_source(doc,"sample.mov","Sample",1000,30.0)
+    let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let id: u64 = option.unwrap(editor.place(doc,track,source,48,96,30))
+    let _ = editor.set_fade_in(doc,id,if operation == 0 {24}else{72})
+    let _ = editor.set_fade_out(doc,id,if operation == 0 {72}else{24})
+    let old: editor.Clip = option.unwrap(editor.clip(doc,id))
+    let success: bool = if operation == 0 {editor.trim_start(doc,id,90)}else{editor.trim_end(doc,id,36)}
+    let _ = test.check(suite,success,"Completely removed edited-edge fade is representable")
+    let changed: editor.Clip = option.unwrap(editor.clip(doc,id))
+    let _ = test.eq_i64(suite,if operation == 0 {changed.fade_out}else{changed.fade_in},72,"Opposite ramp is preserved beyond the shortened body length")
+    let _ = test.eq_i64(suite,if operation == 0 {changed.fade_in}else{changed.fade_out},0,"Removed fade is zero without inventing a new ramp")
+    var local: i64 = 0
+    loop {if local >= changed.length {break}
+      let _ = test.near_f64(suite,envelope(changed,local),envelope(old,local+if operation == 0 {60}else{0}),0.000000000001,"Every surviving scalar fade sample is unchanged")
+      local=local+1}
+    let saved: string = encoded(doc)
+    var decoded: editor.Document = match editor_io.decode(saved) {ok(value)=>value,err(_)=>editor.document(30.0,1920,1080),}
+    let _ = test.eq_str(suite,encoded(decoded),saved,"Long opposite fade persists without a schema change")
+    operation=operation+1}
+  let _ = test.done(suite)
+  ()
+}
+
+fn sample_bounds(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Native final partial frame is admitted at fractional fps and clamping preserves exact edge phase")
+  var owner: u64 = 0
+  loop {if owner >= 2 {break}
+    var count: i64 = 1
+    loop {if count > 2 {break}
+      var doc: editor.Document = editor.document(if owner == 0 {30.0}else{29.97},1920,1080)
+      let source: u64 = editor.add_source(doc,"short.mov","Short",count,24.0)
+      let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+      let id: u64 = option.unwrap(editor.place(doc,track,source,0,1,0))
+      let _ = editor.set_clip_speed(doc,id,0.5)
+      let available: i64 = count*2+1
+      let _ = test.check(suite,editor.trim_end(doc,id,available),"Half-rate final partial native frame is legal")
+      let value: editor.Clip = option.unwrap(editor.clip(doc,id))
+      let _ = test.eq_i64(suite,value.length,available,"Sample bound admits the final partial frame")
+      let _ = test.eq_i64(suite,media.source_frame(doc,value,available-1),count-1,"Final partial frame selects the final existing native frame")
+      struct.set(doc,editor.bounds_reject(),field=source_bounds)
+      let before: string = encoded(doc)
+      let _ = test.check(suite,not editor.trim_end(doc,id,available+1),"First genuinely absent native sample refuses under reject policy")
+      let _ = test.eq_str(suite,encoded(doc),before,"Native overrun refusal is byte exact")
+      struct.set(doc,editor.bounds_clamp(),field=source_bounds)
+      let _ = test.check(suite,editor.trim_end(doc,id,available+10),"Clamp holds legal final sampled frame")
+      let _ = test.eq_i64(suite,option.unwrap(editor.clip(doc,id)).length,available,"Clamp never truncates a legal final partial sample")
+      count=count+1}
+    owner=owner+1}
+  var direction: u64 = 0
+  loop {if direction >= 2 {break}
+    var doc: editor.Document = editor.document(30.0,1920,1080)
+    let source: u64 = editor.add_source(doc,"sample.mov","Sample",200,30.0)
+    let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let id: u64 = option.unwrap(editor.place(doc,track,source,8,60,40))
+    let _ = editor.set_clip_speed(doc,id,2.0)
+    let _ = editor.set_clip_reverse(doc,id,direction == 1)
+    let _ = test.check(suite,if direction == 0 {editor.trim_start(doc,id,0)}else{editor.trim_end(doc,id,100)},"Lower source bound clamp uses playback rate")
+    let value: editor.Clip = option.unwrap(editor.clip(doc,id))
+    let _ = test.eq_i64(suite,value.source_in,0,"Clamped lower source phase lands exactly at zero")
+    let _ = test.eq_i64(suite,value.length,64,"Only four timeline frames are available at double speed")
+    let _ = test.eq_i64(suite,value.start,if direction == 0 {36}else{40},"Clamp holds the unedited timeline edge")
+    direction=direction+1}
+  // Both source-fps and owner-fps rounding must use the same sampled frame floor.
+  var doc: editor.Document = editor.document(30.0,1920,1080)
+  let source: u64 = editor.add_source(doc,"fractional.mov","Fractional native fps",300,29.97)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let id: u64 = option.unwrap(editor.place(doc,track,source,0,60,0))
+  let _ = test.check(suite,editor.trim_end(doc,id,301),"Fractional native fps admits a sampled final partial frame")
+  let value: editor.Clip = option.unwrap(editor.clip(doc,id))
+  let _ = test.eq_i64(suite,media.source_frame(doc,value,300),299,"Fractional native fps final frame is selected by actual renderer floor")
+  struct.set(doc,editor.bounds_reject(),field=source_bounds)
+  let saved: string = encoded(doc)
+  let _ = test.check(suite,not editor.trim_end(doc,id,302),"The next fractional-fps sampled frame is truly absent")
+  let _ = test.eq_str(suite,encoded(doc),saved,"Fractional-fps absent-sample refusal is exact")
+  let _ = test.done(suite)
+  ()
+}
+
+fn refused(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Unsupported phase fades rate and local history refuse without any document mutation")
+  var variant: u64 = 0
+  loop {if variant >= 12 {break}
+    var doc: editor.Document = editor.document(30.0,1920,1080)
+    let source: u64 = editor.add_source(doc,"sample.mov","Sample",1000,30.0)
+    let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let id: u64 = option.unwrap(editor.place(doc,track,source,48,96,30))
+    let filter: u64 = option.unwrap(editor.add_filter(doc,id,"brightness"))
+    let name: string = scoped.name(filter,"brightness","amount")
+    keys(doc,id,name)
+    let head: bool = variant != 1 and variant != 3 and variant != 5
+    if variant < 2 {let _ = editor.set_clip_speed(doc,id,0.5)}
+    if variant == 1 {let _ = editor.set_clip_reverse(doc,id,true)}
+    if variant == 2 {let _ = editor.set_fade_in(doc,id,48)}
+    if variant == 3 {let _ = editor.set_fade_out(doc,id,48)}
+    if variant == 4 {let _ = editor.set_key(doc,id,"fade_in",0,0.0,curve.linear())}
+    if variant == 5 {let _ = editor.set_key(doc,id,"fade_out",0,0.0,curve.linear())}
+    if variant == 6 {let _ = editor.set_key(doc,id,"speed.rate",0,1.0,curve.linear())}
+    if variant >= 7 and variant <= 9 {
+      let kind: string = if variant == 7 {string.copy("timer")}else if variant == 8 {string.copy("delay")}else{string.copy("reverb")}
+      let _ = editor.add_filter(doc,id,kind)
+    }
+    if variant == 10 {let _ = editor.set_track_lock(doc,track,true)}
+    if variant == 11 {let _ = editor.set_key(doc,id,"gain",-9223372036854775807,0.2,curve.linear())}
+    let before: string = encoded(doc)
+    let delta: i64 = if variant < 2 {1}else{24}
+    let result: bool = if head {editor.trim_start(doc,id,30+delta)}else{editor.trim_end(doc,id,96-delta)}
+    let _ = test.check(suite,not result,"Unrepresentable source phase or context is explicitly refused")
+    let _ = test.eq_str(suite,encoded(doc),before,"Refusal preserves every clip key filter name and ID allocator byte")
+    let ripple: bool = if head {editor.ripple_trim_start(doc,id,30+delta)}else{editor.ripple_trim_end(doc,id,96-delta)}
+    let _ = test.check(suite,not ripple,"Ripple propagates refusal without shifting other clips")
+    let _ = test.eq_str(suite,encoded(doc),before,"Ripple refusal preserves full project bytes")
+    variant=variant+1}
+  var operation: u64 = 0
+  loop {if operation >= 2 {break}
+    var doc: editor.Document = editor.document(30.0,1920,1080)
+    let source: u64 = editor.add_source(doc,"sample.mov","Sample",1000,30.0)
+    let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let id: u64 = option.unwrap(editor.place(doc,track,source,48,96,30))
+    let follower: option<u64> = editor.place(doc,track,source,0,15,9223372036854775800)
+    let _ = test.check(suite,match follower {none=>false,some(_)=>true,},"Overflow fixture has a real later clip")
+    let before: string = encoded(doc)
+    let result: bool = if operation == 0 {editor.ripple_trim_start(doc,id,18)}else{editor.ripple_trim_end(doc,id,120)}
+    let _ = test.check(suite,not result,"Ripple follower overflow refuses before applying the initiating trim")
+    let _ = test.eq_str(suite,encoded(doc),before,"Overflow refusal leaves the head and every later body untouched")
+    operation=operation+1}
+  let _ = test.done(suite)
+  ()
+}
+
+fn lifted(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Lift plans both original reverse and forward survivors with independent samples and remapped full curves")
+  var direction: u64 = 0
+  loop {if direction >= 2 {break}
+    var doc: editor.Document = editor.document(30.0,1920,1080)
+    let source: u64 = editor.add_source(doc,"sample.mov","Sample",3000,24.0)
+    let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let id: u64 = option.unwrap(editor.place(doc,track,source,48,96,30))
+    let _ = editor.set_clip_speed(doc,id,1.5)
+    let _ = editor.set_clip_reverse(doc,id,direction == 1)
+    let _ = editor.set_fade_in(doc,id,48)
+    let filter: u64 = option.unwrap(editor.add_filter(doc,id,"brightness"))
+    let name: string = scoped.name(filter,"brightness","amount")
+    keys(doc,id,name)
+    var original: editor.Document = editor.copy_document(doc)
+    let _ = test.check(suite,editor.lift_range_possible(doc,track,54,78),"Two exact-phase surviving trims are admitted even inside the opposite fade")
+    editor.lift_range(doc,track,54,78)
+    let _ = test.eq_u64(suite,editor.clip_count(doc),2,"Lift retains two independent bodies")
+    var frame: i64 = 30
+    loop {if frame >= 126 {break}
+      if frame >= 54 and frame < 78 {frame=78}
+      let selected: u64 = option.unwrap(body_at(doc,track,frame))
+      let value: editor.Clip = option.unwrap(editor.clip(doc,selected))
+      let local: i64 = frame-30
+      let expected: i64 = cast.sat(math.floor((48.0+cast.float(if direction == 1 {95-local}else{local})*1.5)*0.8))
+      let _ = test.eq_i64(suite,media.source_frame(doc,value,frame),expected,"Both lift survivors retain original source identity at every frame")
+      let cloned: u64 = option.unwrap(editor.filter_at(doc,selected,0))
+      let parameter: string = scoped.name(cloned,"brightness","amount")
+      let _ = test.near_f64(suite,editor.clip_value_at(doc,selected,parameter,frame,-1.0),cubic(local),0.000000000001,"Fresh right filter IDs retain original scoped curve coordinates")
+      let _ = test.near_f64(suite,envelope(value,frame-value.start),envelope(option.unwrap(editor.clip(original,id)),local),0.000000000001,"Survivor fade remains the original envelope, including a ramp longer than the left body")
+      frame=frame+1}
+    direction=direction+1}
+  // A later unsupported survivor must not let an earlier eligible clip mutate first.
+  var doc: editor.Document = editor.document(30.0,1920,1080)
+  let source: u64 = editor.add_source(doc,"sample.mov","Sample",1000,30.0)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let first: u64 = option.unwrap(editor.place(doc,track,source,0,60,0))
+  let second: u64 = option.unwrap(editor.place(doc,track,source,0,96,60))
+  let _ = editor.add_filter(doc,second,"timer")
+  let before: string = encoded(doc)
+  let _ = test.check(suite,not editor.lift_range_possible(doc,track,30,90),"Whole-range preflight sees unsupported later head context")
+  editor.lift_range(doc,track,30,90)
+  let _ = test.eq_str(suite,encoded(doc),before,"Failed multi-clip Lift leaves earlier eligible body untouched")
+  let _ = test.eq_i64(suite,option.unwrap(editor.clip(doc,first)).length,60,"Earlier clip was not partially trimmed")
+  let _ = test.done(suite)
+  ()
+}
+
+fn fractional_identity(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Integral decimal phase still requires identical retained native samples with a bounded preflight")
+  var ratio_case: u64 = 0
+  loop {if ratio_case >= 4 {break}
+    var operation: u64 = 0
+    loop {if operation >= 2 {break}
+      let owner_fps: f64 = if ratio_case == 2 {29.97}else{30.0}
+      let source_fps: f64 = if ratio_case == 1 {24.0}else if ratio_case == 3 {29.97}else{30.0}
+      var doc: editor.Document = editor.document(owner_fps,1920,1080)
+      let source: u64 = editor.add_source(doc,"decimal.mov","Decimal rate",3000,source_fps)
+      let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+      let id: u64 = option.unwrap(editor.place(doc,track,source,0,600,30))
+      let _ = editor.set_clip_speed(doc,id,0.58)
+      let _ = editor.set_clip_reverse(doc,id,operation == 1)
+      let before: string = encoded(doc)
+      var split_doc: editor.Document = editor.copy_document(doc)
+      let split_right: option<u64> = editor.split(split_doc,id,if operation == 0 {180}else{480})
+      let result: bool = if operation == 0 {editor.trim_start(doc,id,180)}else{editor.trim_end(doc,id,450)}
+      if ratio_case == 0 {
+        let _ = test.check(suite,150.0*0.58 == 87.0,"Decimal lower-bound phase is integral")
+        let original_frame: i64 = if operation == 0 {230}else{429}
+        let _ = test.eq_i64(suite,media.source_frame(doc,option.unwrap(editor.clip(doc,id)),original_frame),115,"Original frame200 formula floors200*0.58 to115")
+        let _ = test.eq_i64(suite,cast.sat(math.floor((87.0+50.0*0.58))),116,"Rebased frame50 formula would floor87+50*0.58 to116")
+        let _ = test.check(suite,not result,"Integral phase with a changed native sample is refused")
+        let _ = test.eq_str(suite,encoded(doc),before,"Floating source-identity refusal preserves every document byte")
+        let _ = test.check(suite,match split_right {none=>true,some(_)=>false,},"Split uses the same actual sampled-identity guard for the changed-source half")
+        let _ = test.eq_str(suite,encoded(split_doc),before,"Decimal Split refusal preserves bytes before allocating any clip or filter ID")
+      } else {
+        let _ = test.check(suite,result,"Decimal phase remains allowed when actual mixed-fps samples are identical")
+        let _ = test.check(suite,match split_right {none=>false,some(_)=>true,},"Split remains legal when the fractional native/owner ratio preserves every source sample")
+        let value: editor.Clip = option.unwrap(editor.clip(doc,id))
+        var local: i64 = 0
+        loop {if local >= value.length {break}
+          let original_local: i64 = local+if operation == 0 {150}else{0}
+          let original_position: i64 = if operation == 1 {599-original_local}else{original_local}
+          let independent: i64 = cast.sat(math.floor((cast.float(original_position)*0.58)*(source_fps/owner_fps)))
+          let _ = test.eq_i64(suite,media.source_frame(doc,value,value.start+local),independent,"Every decimal-rate accepted frame retains the original actual native/owner floor")
+          local=local+1}
+        local=0
+        loop {if local >= 600 {break}
+          let frame: i64 = 30+local
+          let landed: u64 = option.unwrap(body_at(split_doc,track,frame))
+          let original_position: i64 = if operation == 1 {599-local}else{local}
+          let independent: i64 = cast.sat(math.floor((cast.float(original_position)*0.58)*(source_fps/owner_fps)))
+          let _ = test.eq_i64(suite,media.source_frame(split_doc,option.unwrap(editor.clip(split_doc,landed)),frame),independent,"Every accepted decimal Split sample retains original native/owner source coordinates")
+          local=local+1}
+      }
+      operation=operation+1}
+    ratio_case=ratio_case+1}
+  var doc: editor.Document = editor.document(30.0,1920,1080)
+  let source: u64 = editor.add_source(doc,"long.mov","Bounded edit",3000000,30.0)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let id: u64 = option.unwrap(editor.place(doc,track,source,0,editor.trim_sample_cap()+33,30))
+  let _ = editor.set_clip_speed(doc,id,0.5)
+  let before: string = encoded(doc)
+  let _ = test.check(suite,not editor.trim_start(doc,id,62),"Unproved fractional interval beyond one million retained samples refuses before scanning")
+  let _ = test.eq_str(suite,encoded(doc),before,"Cap refusal is byte exact")
+  let refused_split: option<u64> = editor.split(doc,id,62)
+  let _ = test.check(suite,match refused_split {none=>true,some(_)=>false,},"Split shares the bounded fractional source-identity preflight")
+  let _ = test.eq_str(suite,encoded(doc),before,"Split cap refusal preserves all document bytes")
+  let _ = editor.set_clip_speed(doc,id,1.0)
+  let _ = test.check(suite,editor.trim_start(doc,id,62),"Integer-rate proof within exact f64 intermediates admits an interval beyond the scan cap")
+  let changed: editor.Clip = option.unwrap(editor.clip(doc,id))
+  let _ = test.eq_i64(suite,changed.length,editor.trim_sample_cap()+1,"Integer-rate edit applies the complete requested long body")
+  let _ = test.eq_i64(suite,changed.source_in,32,"Integer-rate source offset is exactly represented")
+  let _ = test.eq_i64(suite,media.source_frame(doc,changed,editor.clip_end(changed)-1),editor.trim_sample_cap()+32,"Long integer-rate retained last sample is exact")
+  let _ = test.done(suite)
+  ()
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Genesis shared editor trim source and curve continuity",false)
+  sample_matrix(suite)
+  fade_edges(suite)
+  sample_bounds(suite)
+  refused(suite)
+  lifted(suite)
+  fractional_identity(suite)
+  test.conclude(suite,path.join(root,"editor-trim-tests.json"),8)
+}

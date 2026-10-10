@@ -1,5 +1,5 @@
 diff --git a/stdlib/editor.ai b/stdlib/editor.ai
-index 13f78f4..3e622f3 100644
+index 13f78f4..91ae34d 100644
 --- a/stdlib/editor.ai
 +++ b/stdlib/editor.ai
 @@ -17,6 +17,7 @@
@@ -29,7 +29,7 @@ index 13f78f4..3e622f3 100644
    lift_range(doc, track, start, start + want)
    place(doc, track, source, source_in, want, start)
  }
-@@ -1129,28 +1133,142 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+@@ -1129,28 +1133,149 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
  // / `ripple_trim_end` / `ripple_delete`, whose ripple-current-track-only rule is Shotcut's
  // default and is kept here.
  
@@ -88,7 +88,14 @@ index 13f78f4..3e622f3 100644
 +      if key.frame < -9223372036854775807+offset {return false}
 +    }
 +    i=i+1}
-+  true
++  let advance: i64 = cast.sat(advanced)
++  let moved: Clip = Clip {id:old.id,owner:old.owner,source:old.source,nested:old.nested,
++    source_in:add.sat(old.source_in,advance),
++    length:if old.reverse {offset}else{old.length-offset},
++    start:if old.reverse {old.start}else{frame},track:old.track,group:old.group,
++    enabled:old.enabled,selected:old.selected,fade_in:old.fade_in,fade_out:old.fade_out,
++    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse}
++  trim_same_samples(doc,old,moved,rate)
 +}
 +
 +// Preserve every control point, including context outside the new body. Truncating
@@ -180,7 +187,7 @@ index 13f78f4..3e622f3 100644
        option.some(right)
      },
      none => option.none(),
-@@ -1165,7 +1283,8 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+@@ -1165,7 +1290,8 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
    loop {
      if index >= array.len(struct.borrow(doc, field=clips)) { break }
      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
@@ -190,12 +197,331 @@ index 13f78f4..3e622f3 100644
        array.push(targets, value.id)
      }
      index = index + 1
-@@ -1303,8 +1422,27 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+@@ -1180,56 +1306,254 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+   cuts
+ }
+ 
+-// TRIM the head to a new timeline start, holding the right edge. The source can only supply
+-// `source_in` extra frames when extending left, so the extension is held to what the source
+-// has — the bounds contract, applied at the one edge that can under-run it.
+-pub fn trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool effects {} {
+-  match clip_slot(doc, id) {
+-    some(slot) => {
+-      let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+-      let finish: i64 = clip_end(old)
+-      var start: i64 = if new_start < 0 { 0 } else { new_start }
+-      if start > finish - min_clip() { start = finish - min_clip() }
+-      if start < 0 { start = 0 }
+-      var delta: i64 = start - old.start
+-      if delta < 0 and old.source_in + delta < 0 {
+-        delta = 0 - old.source_in
+-        start = old.start + delta
+-      }
+-      let length: i64 = finish - start
+-      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
+-        nested: old.nested, source_in: old.source_in, length: old.length, start: start,
+-        track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+-        fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
+-      set_range(doc, slot, add.sat(old.source_in, delta), if length < 1 { 1 } else { length })
++// A native source's exclusive sample bound in owner-sequence units, before rounding.
++// A final partial sequence frame is legal when its sampled native frame is still present:
++// floor(position * native_fps / owner_fps) < native_frames. Do not test whole-frame duration.
++fn trim_sample_limit(doc: ref<Document>, value: Clip) -> option<f64> effects {} {
++  let owner_fps: f64 = sequence_fps(doc,value.owner)
++  if owner_fps <= 0.0 or not math.is_finite(owner_fps) {return option.some(0.0)}
++  if value.nested != 0 {
++    let fps: f64 = sequence_fps(doc,value.nested)
++    if fps <= 0.0 or not math.is_finite(fps) {return option.some(0.0)}
++    return option.some(cast.float(sequence_duration(doc,value.nested))*owner_fps/fps)
++  }
++  match source_slot(doc,value.source) {
++    none=>option.none(),
++    some(slot)=>{
++      let source: ref<Source> = array.borrow(struct.borrow(doc,field=sources),slot)
++      if source.frames <= 0 {return option.none()}
++      if source.fps <= 0.0 or not math.is_finite(source.fps) {return option.some(0.0)}
++      option.some(cast.float(source.frames)*owner_fps/source.fps)
+     },
+-    none => false,
+   }
+ }
+ 
+-// TRIM the tail to a new length, holding the head. The length floor is `min_clip`.
+-pub fn trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool effects {} {
+-  match clip_slot(doc, id) {
+-    some(slot) => {
+-      let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+-      let want: i64 = if new_length < min_clip() { min_clip() } else { new_length }
+-      set_range(doc, slot, old.source_in, want)
++// Use the renderer's actual floor operation for the last sample, including the
++// f64 fps ratio. The continuous bound above proposes a clamp; this verifies it.
++fn trim_sample_valid(doc: ref<Document>, value: Clip, position: f64) -> bool effects {} {
++  let owner_fps: f64 = sequence_fps(doc,value.owner)
++  if owner_fps <= 0.0 or not math.is_finite(owner_fps) {return false}
++  if value.nested != 0 {
++    let fps: f64 = sequence_fps(doc,value.nested)
++    if fps <= 0.0 or not math.is_finite(fps) {return false}
++    return math.floor(position*(fps/owner_fps)) < cast.float(sequence_duration(doc,value.nested))
++  }
++  match source_slot(doc,value.source) {
++    none=>true,
++    some(slot)=>{
++      let source: ref<Source> = array.borrow(struct.borrow(doc,field=sources),slot)
++      if source.frames <= 0 {return true}
++      if source.fps <= 0.0 or not math.is_finite(source.fps) {return false}
++      math.floor(position*(source.fps/owner_fps)) < cast.float(source.frames)
+     },
+-    none => false,
+   }
+ }
+ 
++// Head trims move the curve's local origin. Keep all surrounding keys, and refuse
++// unrepresented rate/envelope or temporal history instead of resetting it silently.
++fn trim_context(doc: ref<Document>, old: Clip, delta: i64, length: i64) -> bool effects {alloc} {
++  if delta == 0 and length == old.length {return true}
++  var i: u64 = 0
++  loop {if i >= array.len(struct.borrow(doc,field=filters)) {break}
++    let filter: ref<Filter> = array.borrow(struct.borrow(doc,field=filters),i)
++    if delta != 0 and filter.clip == old.id and filter.enabled {
++      let kind: ref<string> = struct.borrow(filter,field=kind)
++      if str.eq(kind,"timer") or str.eq(kind,"delay") or str.eq(kind,"reverb") {return false}
++    }
++    i=i+1}
++  i=0
++  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
++    let key: Key = array.get(struct.borrow(doc,field=keys),i)
++    if key.clip == old.id {
++      let named: string = name_text(doc,key.param)
++      if str.eq(str.view(named),"fade_in") or str.eq(str.view(named),"fade_out") or
++          str.eq(str.view(named),"speed") or str.eq(str.view(named),"speed.rate") or
++          (str.starts_with(str.view(named),"filter.") and text.ends_with(str.view(named),".speed.rate")) {return false}
++      if delta > 0 and key.frame < -9223372036854775807+delta {return false}
++      if delta < 0 and key.frame > 9223372036854775807+delta {return false}
++    }
++    i=i+1}
++  true
++}
++
++fn trim_keys(doc: ref<Document>, id: u64, delta: i64) -> unit effects {} {
++  if delta == 0 {return ()}
++  var i: u64 = 0
++  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
++    let old: Key = array.get(struct.borrow(doc,field=keys),i)
++    if old.clip == id {
++      array.set(struct.borrow(doc,field=keys),i,Key {clip:old.clip,owner:old.owner,
++        param:old.param,frame:old.frame-delta,value:old.value,interp:old.interp})
++    }
++    i=i+1}
++  ()
++}
++
++// Integral lower bounds alone do not prove f64 distribution across a fractional
++// rate. For example 200*0.58 floors to115 but 87+50*0.58 floors to116.
++// Check every retained native sample before mutation, with bounded edit-time work.
++// Integer-rate arithmetic may bypass the scan only when every nonnegative product
++// and sum is inside f64's exact integer range; identical positions then share a floor.
++pub fn trim_sample_cap() -> i64 effects {} {1000000}
++fn trim_same_samples(doc: ref<Document>, old: Clip, next: Clip, rate: f64) -> bool effects {} {
++  if old.source_in == next.source_in {return true}
++  let old_last: f64 = cast.float(old.source_in)+cast.float(old.length-1)*rate
++  let next_last: f64 = cast.float(next.source_in)+cast.float(next.length-1)*rate
++  if rate == math.floor(rate) and
++      old_last < 9007199254740992.0 and next_last < 9007199254740992.0 {return true}
++  let delta: i64 = next.start-old.start
++  let begin: i64 = if delta < 0 {-delta}else{0}
++  let count: i64 = if next.length < old.length {next.length}else{old.length}
++  if count > trim_sample_cap() {return false}
++  let owner_fps: f64 = sequence_fps(doc,old.owner)
++  let source_fps: f64 = if old.nested != 0 {sequence_fps(doc,old.nested)}else{
++    match source_slot(doc,old.source) {none=>30.0,some(slot)=>{
++      struct.get(array.borrow(struct.borrow(doc,field=sources),slot),field=fps)
++    },}
++  }
++  let ratio: f64 = if owner_fps > 0.0 and source_fps > 0.0 {source_fps/owner_fps}else{1.0}
++  var i: i64 = 0
++  loop {if i >= count {break}
++    let local: i64 = begin+i
++    let old_local: i64 = local+delta
++    let a: i64 = if old.reverse {old.length-1-old_local}else{old_local}
++    let b: i64 = if next.reverse {next.length-1-local}else{local}
++    let before: f64 = math.floor((cast.float(old.source_in)+cast.float(a)*rate)*ratio)
++    let after: f64 = math.floor((cast.float(next.source_in)+cast.float(b)*rate)*ratio)
++    if before != after {return false}
++    i=i+1}
++  true
++}
++
++// Plan both edges without mutation. `head` holds the far timeline edge; a tail holds
++// the first sample. source_in is the lower source bound even for reversed playback.
++// Static fractional rates are allowed only when the new lower bound is integral.
++fn trim_target(doc: ref<Document>, old: Clip, request: i64, head: bool) -> option<Clip> effects {alloc} {
++  if track_locked(doc,old.track) or old.length < 1 or old.start < 0 or old.source_in < 0 or
++      old.fade_in < 0 or old.fade_out < 0 {return option.none()}
++  // Beyond the exact integer range of f64, phase arithmetic cannot prove continuity.
++  if old.length >= 9007199254740992 or old.start >= 9007199254740992 or
++      old.source_in >= 9007199254740992 {return option.none()}
++  let floor_length: i64 = if old.length < min_clip() {old.length} else {min_clip()}
++  var start: i64 = old.start
++  var length: i64 = old.length
++  let finish: i64 = clip_end(old)
++  if head {
++    start=if request < 0 {0} else {request}
++    if start > finish-floor_length {start=finish-floor_length}
++    length=finish-start
++  } else {length=if request < floor_length {floor_length} else {request}}
++  let rate: f64 = playback_rate(doc,old)
++  if not math.is_finite(rate) or rate < 0.0 {return option.none()}
++  // Clamp availability along the edited edge only: never change retained sample time.
++  if rate > 0.0 {
++    if (head and not old.reverse) or (not head and old.reverse) {
++      let extent: f64 = math.floor(cast.float(old.source_in)/rate)
++      let available: i64 = cast.sat(extent)
++      if head and start < old.start-available {
++        if doc.source_bounds == bounds_reject() {return option.none()}
++        start=if old.start-available < 0 {0}else{old.start-available}
++        length=finish-start
++      }
++      if not head and length > add.sat(old.length,available) {
++        if doc.source_bounds == bounds_reject() {return option.none()}
++        length=add.sat(old.length,available)
++      }
++    } else {
++      match trim_sample_limit(doc,old) {none=>{},some(limit)=>{
++        // length-1 samples steps: ceil admits a legal final partial native frame.
++        var maximum: i64 = cast.sat(math.ceil((limit-cast.float(old.source_in))/rate))
++        // Ratio rounding at an integer boundary may move the estimate by one;
++        // settle that boundary using exactly the native sample selection formula.
++        if maximum > 0 and not trim_sample_valid(doc,old,cast.float(old.source_in)+cast.float(maximum-1)*rate) {maximum=maximum-1}
++        if maximum >= 0 and maximum < 9007199254740991 and
++            trim_sample_valid(doc,old,cast.float(old.source_in)+cast.float(maximum)*rate) {maximum=maximum+1}
++        if length > maximum {
++          if doc.source_bounds == bounds_reject() {return option.none()}
++          length=maximum
++          if head {start=finish-length}
++        }
++      },}
++    }
++  }
++  if length < floor_length or length >= 9007199254740992 or start < 0 or
++      start >= 9007199254740992 or start > 9223372036854775807-length {return option.none()}
++  let delta: i64 = start-old.start
++  let steps: i64 = if head {if old.reverse {0}else{delta}}
++    else {if old.reverse {old.length-length}else{0}}
++  let phase: f64 = cast.float(steps)*rate
++  if not math.is_finite(phase) or phase != math.floor(phase) or
++      phase <= -9007199254740992.0 or phase >= 9007199254740992.0 {return option.none()}
++  let advance: i64 = cast.sat(phase)
++  let source_in: i64 = old.source_in+advance
++  if source_in < 0 or source_in >= 9007199254740992 {return option.none()}
++  let last: f64 = cast.float(source_in)+cast.float(length-1)*rate
++  if not math.is_finite(last) {return option.none()}
++  if not trim_sample_valid(doc,old,last) {return option.none()}
++  if not trim_context(doc,old,delta,length) {return option.none()}
++  var fade_in: i64 = old.fade_in
++  var fade_out: i64 = old.fade_out
++  if head and delta != 0 and fade_in > 0 {
++    if delta < fade_in {return option.none()}
++    fade_in=0
++  }
++  if not head and length != old.length and fade_out > 0 {
++    if length > old.length-fade_out {return option.none()}
++    fade_out=0
++  }
++  let next: Clip = Clip {id:old.id,owner:old.owner,source:old.source,nested:old.nested,
++    source_in:source_in,length:length,start:start,track:old.track,group:old.group,
++    enabled:old.enabled,selected:old.selected,fade_in:fade_in,fade_out:fade_out,
++    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse}
++  if not trim_same_samples(doc,old,next,rate) {return option.none()}
++  option.some(next)
++}
++
++// TRIM the head holding the right edge, and rebase the complete curve context.
++// Every refusal preserves all document fields, including IDs/names/filter tables.
++pub fn trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool effects {alloc} {
++  let slot: u64 = match clip_slot(doc,id) {none=>{return false},some(found)=>found,}
++  let old: Clip = array.get(struct.borrow(doc,field=clips),slot)
++  let next: Clip = match trim_target(doc,old,new_start,true) {none=>{return false},some(found)=>found,}
++  put_clip(doc,slot,next)
++  trim_keys(doc,id,next.start-old.start)
++  true
++}
++
++// TRIM the tail holding the head and its first source sample. Complete local keys
++// stay at the same origin; opposite fade ramps are not clamped to the shorter body.
++pub fn trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool effects {alloc} {
++  let slot: u64 = match clip_slot(doc,id) {none=>{return false},some(found)=>found,}
++  let old: Clip = array.get(struct.borrow(doc,field=clips),slot)
++  let next: Clip = match trim_target(doc,old,new_length,false) {none=>{return false},some(found)=>found,}
++  put_clip(doc,slot,next)
++  true
++}
++
++fn trim_shift_possible(doc: ref<Document>, track: u64, from: i64, delta: i64, skip: u64) -> bool effects {} {
++  var i: u64 = 0
++  loop {if i >= clip_count(doc) {break}
++    let value: Clip = array.get(struct.borrow(doc,field=clips),i)
++    if value.id != skip and value.track == track and value.start >= from {
++      if delta > 0 and value.start > 9223372036854775807-delta {return false}
++      if delta < 0 and value.start < -delta {return false}
++    }
++    i=i+1}
++  true
++}
++
+ // RIPPLE TRIM the head: trim, then re-anchor the shortened clip at its original start and
+ // slide the later same-track clips left by the amount actually trimmed, so the sequence stays
+ // tight. Genesis `ripple_trim_start`.
+-pub fn ripple_trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool effects {} {
++pub fn ripple_trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool effects {alloc} {
+   match clip_slot(doc, id) {
+     some(slot) => {
+       let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+       let track: u64 = old.track
+       let was_start: i64 = old.start
+       let was_end: i64 = clip_end(old)
++      let target: Clip = match trim_target(doc,old,new_start,true) {none=>{return false},some(found)=>found,}
++      if not trim_shift_possible(doc,track,was_end,old.start-target.start,id) {return false}
+       if not trim_start(doc, id, new_start) { return false }
+       match clip_slot(doc, id) {
+         some(now) => {
+@@ -1252,13 +1576,15 @@ pub fn ripple_trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool ef
+ 
+ // RIPPLE TRIM the tail: trim, then shift the later same-track clips by the length actually
+ // applied, so shortening closes the gap and lengthening opens one. Genesis `ripple_trim_end`.
+-pub fn ripple_trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool effects {} {
++pub fn ripple_trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool effects {alloc} {
+   match clip_slot(doc, id) {
+     some(slot) => {
+       let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+       let track: u64 = old.track
+       let was_end: i64 = clip_end(old)
+       let was_length: i64 = old.length
++      let target: Clip = match trim_target(doc,old,new_length,false) {none=>{return false},some(found)=>found,}
++      if not trim_shift_possible(doc,track,was_end,target.length-old.length,id) {return false}
+       if not trim_end(doc, id, new_length) { return false }
+       match clip_slot(doc, id) {
+         some(now) => {
+@@ -1303,56 +1629,62 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
  // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
  // up, because a clamped remnant would spill back into the range and never clear.
  // Genesis `lift_range`.
-+// Guard destructive callers before any trim/lift. Ordinary trim source/automation
-+// rebasing remains separate from Split, so non-unit/reverse surviving trims refuse.
+-pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
+-  if to <= from { return () }
+-  var passes: u64 = array.len(struct.borrow(doc, field=clips)) * 4 + 8
+-  loop {
+-    if passes == 0 { break }
+-    passes = passes - 1
+-    var hit: option<u64> = option.none()
+-    var index: u64 = 0
+-    loop {
+-      if index >= array.len(struct.borrow(doc, field=clips)) { break }
+-      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
+-      if value.track == track and value.start < to and clip_end(value) > from {
+-        hit = option.some(value.id)
+-        break
++// Guard every surviving trim before touching any clip. Planning the two survivors
++// directly avoids an artificial Split fade boundary inside the removed interval.
 +pub fn lift_range_possible(doc: ref<Document>, track: u64, from: i64, to: i64) -> bool effects {alloc} {
 +  if to <= from {return true}
 +  if track_locked(doc,track) {return false}
@@ -203,18 +529,99 @@ index 13f78f4..3e622f3 100644
 +  loop {if i >= clip_count(doc) {break}
 +    let value: Clip = array.get(struct.borrow(doc,field=clips),i)
 +    let end: i64 = clip_end(value)
-+    if value.track == track and value.start < to and end > from and
-+        not (from <= value.start and end <= to) {
-+      if value.reverse or playback_rate(doc,value) != 1.0 {return false}
-+      if value.start < from and from < end and not split_possible(doc,value.id,from) {return false}
-+      if value.start < to and to < end and not split_possible(doc,value.id,to) {return false}
-+    }
++    if value.track == track and value.start < to and end > from {
++      let left_length: i64 = from-value.start
++      let right_length: i64 = end-to
++      if left_length >= min_clip() {
++        let target: Clip = match trim_target(doc,value,left_length,false) {none=>{return false},some(found)=>found,}
++        if target.length != left_length {return false}
++      }
++      if right_length >= min_clip() {
++        let target: Clip = match trim_target(doc,value,to,true) {none=>{return false},some(found)=>found,}
++        if target.start != to {return false}
+       }
+-      index = index + 1
+-    }
+-    match hit {
+-      none => { break },
+-      some(id) => {
+-        let value: Clip = match clip(doc, id) { some(found) => found, none => { break }, }
+-        let start: i64 = value.start
+-        let finish: i64 = clip_end(value)
+-        if from <= start and finish <= to {
+-          let _ = lift(doc, id)
+-        } else if start < from and to < finish {
+-          let left_length: i64 = from - start
+-          let right_length: i64 = finish - to
+-          if left_length < min_clip() {
+-            if right_length < min_clip() { let _ = lift(doc, id) }
+-            else { let _ = trim_start(doc, id, to) }
+-          } else if right_length < min_clip() {
+-            let _ = trim_end(doc, id, left_length)
+-          } else {
+-            match split(doc, id, from) {
+-              some(right) => { let _ = trim_start(doc, right, to) },
+-              none => { let _ = trim_end(doc, id, left_length) },
+-            }
+-          }
+-        } else if start >= from {
+-          if finish - to < min_clip() { let _ = lift(doc, id) }
+-          else { let _ = trim_start(doc, id, to) }
+-        } else {
+-          let left_length: i64 = from - start
+-          if left_length < min_clip() { let _ = lift(doc, id) }
+-          else { let _ = trim_end(doc, id, left_length) }
+-        }
+-      },
+     }
+-  }
 +    i=i+1}
 +  true
 +}
- pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
-   if to <= from { return () }
++pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
++  if to <= from { return () }
 +  if not lift_range_possible(doc,track,from,to) {return ()}
-   var passes: u64 = array.len(struct.borrow(doc, field=clips)) * 4 + 8
-   loop {
-     if passes == 0 { break }
++  var targets: array<u64> = array.new()
++  var index: u64 = 0
++  loop {if index >= clip_count(doc) {break}
++    let value: Clip = array.get(struct.borrow(doc,field=clips),index)
++    if value.track == track and value.start < to and clip_end(value) > from {array.push(targets,value.id)}
++    index=index+1}
++  index=0
++  loop {if index >= array.len(targets) {break}
++    let id: u64 = array.get(targets,index)
++    let slot: u64 = option.unwrap(clip_slot(doc,id))
++    let old: Clip = array.get(struct.borrow(doc,field=clips),slot)
++    let left_length: i64 = from-old.start
++    let right_length: i64 = clip_end(old)-to
++    if left_length >= min_clip() and right_length >= min_clip() {
++      // Both were admitted against the same original body before any mutation.
++      let left: Clip = option.unwrap(trim_target(doc,old,left_length,false))
++      let planned_right: Clip = option.unwrap(trim_target(doc,old,to,true))
++      let right: u64 = fresh_id(doc)
++      put_clip(doc,slot,left)
++      array.push(struct.borrow(doc,field=clips),Clip {id:right,owner:old.owner,
++        source:old.source,nested:old.nested,source_in:planned_right.source_in,
++        length:planned_right.length,start:planned_right.start,track:old.track,group:old.group,
++        enabled:old.enabled,selected:false,fade_in:planned_right.fade_in,fade_out:planned_right.fade_out,
++        gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse})
++      split_content(doc,id,right,to-old.start)
++    } else if left_length >= min_clip() {let _ = trim_end(doc,id,left_length)}
++      else if right_length >= min_clip() {let _ = trim_start(doc,id,to)}
++      else {let _ = lift(doc,id)}
++    index=index+1}
+   ()
+ }
+ 
+@@ -2131,9 +2463,8 @@ pub fn boundary_at(doc: ref<Document>, track: u64, center: i64)
+ // Keyframes
+ //
+ // One flat, sorted store animates every parameter of every clip, plus the sequence-wide ones
+-// (`clip` 0). A clip key's frame is CLIP-LOCAL, so it survives every move, ripple and trim
+-// without a remap — the index-stability dance Genesis needs for its flat PiP store is simply
+-// absent here, because clips are identified rather than positioned.
++// (`clip` 0). A clip key's frame is CLIP-LOCAL: moves and tail trims keep that origin;
++// head trims rebase the complete curve context. Stable clip IDs avoid index remapping.
+ //
+ // Parameters are named by the application and interned, so this module carries no registry of
+ // what may be animated. The curve shapes come from `std.curve`, which holds the MLT-parity

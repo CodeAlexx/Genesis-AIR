@@ -406,27 +406,61 @@ pub fn split_at_playhead(state: ref<app.App>) -> Result effects {alloc} {
   done("split all tracks", cuts)
 }
 
+// Compare actual toolkit outcomes rather than repeating source-bound or ripple geometry.
+// A clamped edit may succeed with the complete document unchanged.
+fn trim_unchanged(before: ref<editor.Document>, after: ref<editor.Document>) -> bool effects {alloc} {
+  let previous: string = match editor_io.encode(before) {err(_)=>{return false},ok(value)=>value,}
+  let candidate: string = match editor_io.encode(after) {err(_)=>{return false},ok(value)=>value,}
+  str.eq(previous,candidate)
+}
 pub fn trim_start(state: ref<app.App>, clip: u64, start: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.trim_start(struct.borrow(state, field=document), clip, start) {
-    return refused("that head trim was refused")
+  let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {
+    none=>{return refused("[GA_TRIM_CONTEXT] No such clip for head trim")},some(value)=>value,
   }
+  if start == current.start {return done("[GA_TRIM_NO_CHANGE] Head already at this frame",clip)}
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  if not editor.trim_start(candidate, clip, start) {
+    return refused("[GA_TRIM_CONTEXT] Head trim cannot preserve unlocked source time and effect history")
+  }
+  if trim_unchanged(struct.borrow(state,field=document),candidate) {
+    return done("[GA_TRIM_NO_CHANGE] Head remains at the available source bound",clip)
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let _ = struct.replace(state, candidate, field=document)
   app.document_changed(state)
   done("trimmed head", clip)
 }
 pub fn trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.trim_end(struct.borrow(state, field=document), clip, length) {
-    return refused("that tail trim was refused")
+  let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {
+    none=>{return refused("[GA_TRIM_CONTEXT] No such clip for tail trim")},some(value)=>value,
   }
+  if length == current.length {return done("[GA_TRIM_NO_CHANGE] Tail already at this frame",clip)}
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  if not editor.trim_end(candidate, clip, length) {
+    return refused("[GA_TRIM_CONTEXT] Tail trim cannot preserve unlocked source time and effect history")
+  }
+  if trim_unchanged(struct.borrow(state,field=document),candidate) {
+    return done("[GA_TRIM_NO_CHANGE] Tail remains at the available source bound",clip)
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let _ = struct.replace(state, candidate, field=document)
   app.document_changed(state)
   done("trimmed tail", clip)
 }
 pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.ripple_trim_end(struct.borrow(state, field=document), clip, length) {
-    return refused("that ripple trim was refused")
+  let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {
+    none=>{return refused("[GA_TRIM_CONTEXT] No such clip for ripple trim")},some(value)=>value,
   }
+  if length == current.length {return done("[GA_TRIM_NO_CHANGE] Ripple tail already at this frame",clip)}
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  if not editor.ripple_trim_end(candidate, clip, length) {
+    return refused("[GA_TRIM_CONTEXT] Ripple trim cannot preserve unlocked source time and effect history")
+  }
+  if trim_unchanged(struct.borrow(state,field=document),candidate) {
+    return done("[GA_TRIM_NO_CHANGE] Ripple tail remains at the available source bound",clip)
+  }
+  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  let _ = struct.replace(state, candidate, field=document)
   app.document_changed(state)
   done("ripple trimmed", clip)
 }

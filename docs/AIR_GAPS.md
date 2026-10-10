@@ -891,7 +891,7 @@ Direct2D draw. Physical speaker/display alignment remains unmeasured. See
 [native measurements](FFMPEG_GPU_PREVIEW.md#native-window-measurements-on-2026-10-09)
 for the measured scope and retained transport failure.
 
-## Shared editor Split overlay
+## Shared editor Split and trim overlay
 
 The pinned editor previously created the right-hand clip without its filters or
 automation, and advanced its source lower bound as though every clip played at
@@ -908,13 +908,30 @@ contexts before mutation; application commands capture history only after succes
 
 Fractional source phases, cuts inside active scalar fade ramps, animated speed or
 fade lengths, and enabled Timer/Delay/Reverb cannot preserve their original context
-with the current model and are refused. Surviving reverse/nonunit lift/overwrite
-trims are also refused. Other temporal DSP continuity and ordinary trim rebasing
-need separate contracts and media acceptance; they are not established by cloning
-the filter list.
+with the current model and are refused. Ordinary head/tail and ripple trims now
+preserve representable forward/reverse source positions and the complete local
+automation context. Head keys shift by the actual applied trim; tail keys retain
+their original origin. An edited fade must be absent or wholly removed, while an
+opposite fade retains its full original ramp even when longer than the new body.
+Lift and Overwrite plan both survivors from the original clip, preflight all
+affected clips, and clone/remap the right survivor's filter instances.
 
-The Windows cache/Split gate passes eight cases and 1,619 checks, including every
+An integral source offset alone cannot prove decimal-rate continuity: at 0.58x,
+moving the lower bound by 87 can change a retained source frame from 115 to 116.
+Split and trims therefore compare retained native-frame identities before a
+changed fractional lower bound is committed. Work is bounded to one million
+retained samples; larger unproved intervals refuse. Integer rates bypass the
+scan only when nonnegative products/sums are inside the exact f64 integer range.
+Unsupported temporal DSP history remains a separate contract.
+
+The Windows cache/Split gate passes eight cases and 2,517 checks, including every
 pre-/post-cut source position, nonlinear and held keys, fade samples, project
 roundtrip and exact document/history preservation on refusal. The SDK's independent
 native/reference oracle passes 192 model/render facts. Actual scratch application
-and reversal reproduce the tested shared source and clean baseline.
+and reversal reproduce the tested shared source and clean baseline. The trim gate
+passes six cases/33,371 checks in Windows native, Linux native and the AIR
+interpreter, covering retained samples, nonlinear/full-context keys, fade ramps,
+fractional FPS, decimal-rate refusals, source bounds and atomic Lift/ripple refusal.
+The application history gate passes ten cases/187 checks: refusals and exact or
+clamped no-ops preserve all redo snapshots, selections, revision and clean state;
+successful trims capture once and restore exact project bytes with Undo/Redo.

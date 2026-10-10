@@ -125,8 +125,14 @@ try {
   }
   Write-Host (Invoke-Native 'genesis-picture-queue.exe' @((Join-Path $root 'picture-queue-tests.json'))).TrimEnd()
   Write-Host (Invoke-Native 'genesis-window-cache.exe' @((Join-Path $work 'window-cache'))).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-editor-trim.exe' @((Join-Path $work 'editor-trim'))).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-trim-history.exe' @((Join-Path $work 'trim-history'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'editor-trim/editor-trim-tests.json') -Destination (Join-Path $root 'editor-trim-tests.json') -Force
+  Copy-Item -LiteralPath (Join-Path $work 'trim-history/trim-history-tests.json') -Destination (Join-Path $root 'trim-history-tests.json') -Force
   & python (Join-Path $PSScriptRoot 'window_timing_test.py')
   if ($LASTEXITCODE -ne 0) { throw 'Native window timing reader regression failed.' }
+  & python (Join-Path $PSScriptRoot 'window_loss.py') --self-test
+  if ($LASTEXITCODE -ne 0) { throw 'Native window loss attribution regression failed.' }
   Write-Host (Invoke-Native 'genesis-live-paint.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'live-paint-tests.json') -Destination (Join-Path $root 'live-paint-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()

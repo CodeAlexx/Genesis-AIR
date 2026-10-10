@@ -254,3 +254,72 @@ The paced fixture checks every picture at 60 requests/second and requires one
 worker with no refusal. It writes `preview-lifetime-tests.json`, port receipts and
 a Winsock error receipt when available. Routine Windows gates retain the shorter
 fault suite; this five-minute check is separate.
+
+## Native window recovery on 2026-10-10
+
+Three successive native Audio-tab measurements use the same 4K/59.94 AV1/PQ
+source, compositor, stereo output device, 480x270 fitted monitors and maximized
+2560x1316 editor canvas. Every row records request identity, completed packets
+and both prepared frame positions. Reports are flushed after closing each
+isolated measurement process, and exclude one second of playback warmup.
+
+| Queue behavior | Measured seconds | Distinct pictures/s | Skipped positions | Picture gap p95 |
+|---|---:|---:|---:|---:|
+| Existing future requests | 83.13 | 55.76 | 347 | 30.90 ms |
+| One outstanding future request | 101.28 | 56.97 | 301 | 24.69 ms |
+| Also recover a one-frame delay at the current frame | 131.88 | 59.87 | 8 | 18.26 ms |
+
+The baseline loses 283 delivered frames while two future pictures already fill
+the queue, 63 requested frames have no receipt, and one stored frame is
+superseded when two become due. Reserving one outstanding future decode removes
+the capacity and undelivered losses. Small late completions then reveal a
+separate problem: catch-up jumps directly to the future lead. Recovering a
+one-frame delay at the current wanted frame preserves nearly the full cadence.
+Larger delays still use the existing bounded catch-up and avoid a decode backlog.
+
+The final interval has 7,897 distinct pictures and 7,899 successful presentations.
+All 7,896 warm completion events match receipts, with zero packet overwrites,
+mapping errors, or full queues containing another outstanding request. Its eight
+omissions are two intentional four-frame catch-up jumps following native
+presentation/event-wait delays. Median after-presentation lateness is 16.68 ms,
+p95 33.37 ms, maximum 83.42 ms; native presentation frequently crosses an audio
+frame boundary. Median paint/presentation times are 1.24/14.19 ms. The device
+interval differs by -2.19 ms over the measured run, with no observed drained
+queues or early pictures. Stop silences output; Start restores nonblank frame zero.
+The original project file is unchanged.
+
+This establishes near-full input cadence for the supplied source and ordinary
+editor view. Zero-drop playback, physical speaker/display alignment, complex
+effect-stack throughput and fullscreen 4K remain open. The measured recovery
+application SHA256 is `BF975EEE6D5EBEAD0EC3775EFA2E3BB7A949DE440A013F35FAD71320DC957F6B`;
+the worker is `66EE15B507E15EEC67E69999411654C4893A0F9FF3EA8ACCBD1224CC5B62FD9C`.
+The subsequent combined application adds the shared trim safeguards and skips
+request publication on a newly handled preview error; its acceptance is separate.
+
+`tests/window_loss.py PROFILE.tsv --report REPORT.json` reproduces omission
+categories from actual request-to-frame mappings, including source mode, and
+checks packet/receipt conservation. IDs are not inferred from numeric gaps.
+The loss reader has four independent synthetic tests; the timing reader retains
+compatibility with prior 32-column profiles and has four tests. Queue acceptance
+passes nine native cases/77 checks. Raw numeric profiles, hashes and sanitized
+reports are retained in `archive/trim-playback-2026-10-10.tar.gz`.
+
+The combined Windows build and full gate passed with application SHA256
+`0878CC77DE9F626FB4D08BAD0334B37C58F78CA9687BA1A04A002190FB30BB8F`,
+including native audio continuity, project safety, preview/master pixels,
+trim history, frame-zero rewind and timeline bitmap identities. A final bounded
+main-only change clears error deduplication after recovery, allowing an identical
+generation-zero channel failure to be reported again. The final application
+SHA256 is `D8CAD5EC8CF0B2100134EAA9C13BD1F38C2292D780C0041D2DC2DF32ADAB829C`;
+its demo render smoke and all ten native stream cases passed after that change.
+The full media suite was not repeated after this reset. The archive distinguishes
+these applications from the measured playback candidate.
+
+The final root executable was launched with the supplied project after publication.
+Its native-window check showed advancing Program playback with live stereo meters,
+silent Stop, a nonblank frame-zero Start, timeline seeks at `00:00:02:49` and
+`00:00:07:14`, corresponding Program pictures/timecodes, and changing histogram,
+RGB parade and luma waveform. Filmstrip bitmaps remained visible; Source stayed
+at zero while Program moved. Six shared-runtime process cases also passed against
+the published worker, with no separate Genesis codec bundle. The original project
+SHA256 stayed `480D82E310BA6F231FAB2C0C0DB9945DAB193D63073CB63FE053019A13AEB143`.

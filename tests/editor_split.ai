@@ -40,6 +40,42 @@ fn fade_sample(value: editor.Clip, frame: i64) -> f64 effects {} {
   }
   gain
 }
+fn lift_survivors(suite: ref<test.Suite>, original: ref<editor.Document>, changed: ref<editor.Document>, id: u64) -> unit effects {alloc} {
+  let old: editor.Clip = option.unwrap(editor.clip(original,id))
+  let source_slot: u64 = option.unwrap(editor.source_slot(original,old.source))
+  let source_fps: f64 = struct.get(array.borrow(struct.borrow(original,field=sources),source_slot),field=fps)
+  let ratio: f64 = source_fps/editor.sequence_fps(original,old.owner)
+  var frame: i64 = old.start
+  loop {if frame >= editor.clip_end(old) {break}
+    if frame >= 37 and frame < 52 {frame=52}
+    var landed: u64 = 0
+    var i: u64 = 0
+    loop {if i >= editor.clip_count(changed) {break}
+      let value: editor.Clip = option.unwrap(editor.clip_at(changed,i))
+      if value.track == old.track and value.start <= frame and frame < editor.clip_end(value) {
+        landed=value.id
+        break
+      }
+      i=i+1}
+    let _ = test.check(suite,landed != 0,"Lift retains every outside-gap sample")
+    if landed != 0 {
+      let next: editor.Clip = option.unwrap(editor.clip(changed,landed))
+      let local: i64 = frame-old.start
+      let expected: i64 = cast.sat(math.floor((cast.float(old.source_in)+cast.float(if old.reverse {old.length-1-local}else{local})*editor.playback_rate(original,old))*ratio))
+      let _ = test.eq_i64(suite,media.source_frame(changed,next,frame),expected,"Newly legal Lift survivor matches independent original source coordinates")
+      let _ = test.near_f64(suite,fade_sample(next,frame),fade_sample(old,frame),0.000000000001,"Newly legal Lift survivor retains every original fade sample")
+      i=0
+      loop {if i >= array.len(struct.borrow(original,field=keys)) {break}
+        let key: editor.Key = array.get(struct.borrow(original,field=keys),i)
+        if key.clip == id {
+          let name: string = editor.name_text(original,key.param)
+          let _ = test.near_f64(suite,editor.clip_value_at(changed,landed,name,frame,-1.0),editor.clip_value_at(original,id,name,frame,-1.0),0.000000000001,"Surviving original automation remains at the original frame time")
+        }
+        i=i+1}
+    }
+    frame=frame+1}
+  ()
+}
 fn source_continuity(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
   let _ = test.start(suite,"Split preserves forward reverse freeze and mixed-fps source samples")
   var variant: u64 = 0
@@ -175,10 +211,21 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
     let _ = test.check(suite,match inserted {none=>true,some(_)=>false,},"Insert propagates occupied-clip split refusal")
     let _ = test.eq_str(suite,encoded(probe),before,"SDK refused insertion leaves occupied content untouched")
     let overwritten: option<u64> = editor.overwrite(probe,app.default_video_track(state),source.value,0,15,37)
-    let _ = test.check(suite,match overwritten {none=>true,some(_)=>false,},"Overwrite preflights unsafe surviving trims")
-    let _ = test.eq_str(suite,encoded(probe),before,"SDK refused overwrite preserves both remnants")
-    editor.lift_range(probe,app.default_video_track(state),37,52)
-    let _ = test.eq_str(suite,encoded(probe),before,"Destructive lift-range caller fails safely before unsupported split")
+    // A fractional Split at37 still refuses, but lifting37..52 needs an integral
+    // head phase only at52. Likewise the gap can fully remove a right fade-in while
+    // preserving a longer left ramp. These operations now have exact representations.
+    if variant == 0 or variant == 2 {
+      let _ = test.check(suite,match overwritten {none=>false,some(_)=>true,},"Overwrite admits independently representable surviving trims")
+      lift_survivors(suite,struct.borrow(state,field=document),probe,placed.value)
+      var lifted: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+      editor.lift_range(lifted,app.default_video_track(state),37,52)
+      lift_survivors(suite,struct.borrow(state,field=document),lifted,placed.value)
+    } else {
+      let _ = test.check(suite,match overwritten {none=>true,some(_)=>false,},"Overwrite preflights unsafe surviving trims")
+      let _ = test.eq_str(suite,encoded(probe),before,"SDK refused overwrite preserves both remnants")
+      editor.lift_range(probe,app.default_video_track(state),37,52)
+      let _ = test.eq_str(suite,encoded(probe),before,"Destructive lift-range caller fails safely before unsupported context")
+    }
     let result: commands.Result = commands.split_at_playhead(state)
     let _ = test.check(suite,not result.ok,"Unsupported phase fade rate timer or temporal-history cut is refused")
     let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Refusal does not cut the other eligible audio clip")

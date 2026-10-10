@@ -272,3 +272,27 @@ Source pixels, transparent same-size replacement, resize at all three UI scales,
 scrolled unkeyed Audio meters, and narrow/short windows. Two added cases exposed
 status erasure crossing a track header and timecode glyphs escaping the narrow
 monitor's redraw band; both boundaries are fixed without pixel tolerances.
+
+## Additional acceptance on 2026-10-10
+
+The shared trim/Split overlay passes six cases/33,371 retained-source, key-curve,
+fade, bounds and atomic-refusal checks in Windows native, Linux native and the
+AIR interpreter. The cache/Split suite now passes eight cases/2,517 checks.
+Ten application trim-history cases/187 checks establish exact refusal and
+clamped-no-op preservation, single capture, and byte-exact Undo/Redo.
+
+The pixel transport has ten synthetic native cases. Its added failure case checks
+25 outcomes on real channel events: retired epochs, Stop/restart, the same error
+code at different generations, current-error pause and valid pixel recovery.
+The producer checks the committed request marker after decoding; the presenter
+checks the freshly configured request range before applying an error. An old
+decode failure cannot pause newly restarted playback. A current failure pauses
+and suppresses that iteration's next frame request.
+
+Native queue tests pass nine cases/77 checks. The supplied 4K/59.94 source now
+delivers 59.87 distinct pictures/s over 131.88 seconds in the ordinary maximized
+Audio-tab editor, with eight skipped positions and continuous queued stereo
+audio. Median/p95 after-presentation lateness remains 16.68/33.37 ms. These
+measurements use fitted monitors and exclude physical display/speaker latency;
+fullscreen 4K remains deferred. See the [full timing and loss
+attribution](FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).

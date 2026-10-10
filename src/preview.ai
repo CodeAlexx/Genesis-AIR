@@ -233,6 +233,22 @@ fn number(root: str, name: str) -> u64 effects {alloc, fs.read} {
     err(_) => 0, ok(value) => match text.parse_u64(str.view(text.trim(str.view(value)))) { none => 0, some(value) => value, },
   }
 }
+// The presenter supplies eligibility from its freshly configured request queue.
+// Connection-wide failures have no retired picture identity to discard.
+pub fn current_failure(transport: ref<link.Link>, request_current: bool) -> option<string> effects {alloc} {
+  let detail: str = str.view(struct.borrow(transport,field=error))
+  if str.len(detail) == 0 {return option.none()}
+  if not transport.closed and transport.error_generation != 0 and not request_current {return option.none()}
+  option.some(string.copy(detail))
+}
+// request.id is committed before the command wake. Check that authoritative
+// marker after decoding without consuming the next queued frame command.
+pub fn fail_current(peer: ref<link.Peer>, root: str, generation: u64, detail: str)
+    -> bool effects {alloc,fs.meta,fs.read,net,time} {
+  if tasks.requested_at(path.join(root,"stop")) or number(root,"request.id") != generation {return false}
+  link.fail(peer,generation,detail)
+  true
+}
 pub fn reset(root: str) -> unit effects {alloc, fs.write} {
   let _ = files.remove(str.view(path.join(root, "stop")))
   publish(root, "request.id", "0")
@@ -523,7 +539,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     if tick {
       var fields: array<string> = text.split(struct.borrow(wake,field=command),"\t")
       if array.len(fields) != 5 {
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid frame command")
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame command")
         continue
       }
       let carried: u64 = match text.parse_u64(array.borrow(fields,0)) {some(value)=>value,none=>0,}
@@ -533,28 +549,28 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       source_frame=match text.parse_i64(array.borrow(fields,3)) {some(value)=>value,none=>{continue},}
       tick_revision=match text.parse_u64(array.borrow(fields,4)) {some(value)=>value,none=>{continue},}
       if base == 0 or base > id {
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid frame snapshot identity")
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame snapshot identity")
         continue
       }
     }
     var geometry: string = string.copy(snapshot_geometry)
     if not tick or base != snapshot_generation {
       let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => {
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
         continue }, }
       let boundary: u64 = match str.find(str.view(data),"\n") {some(value)=>value,none=>{
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
         continue},}
       let header: str = str.slice(str.view(data),0,boundary)
       let separator: u64 = match str.find(header,"\t") {some(value)=>value,none=>{
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
         continue},}
       let carried_id: u64 = match text.parse_u64(str.slice(header,0,separator)) {some(value)=>value,none=>0,}
       if carried_id != base {continue}
       geometry = string.copy(str.slice(header,separator+1,boundary))
       let document: editor.Document = match editor_io.decode(str.slice(str.view(data),boundary+1,str.len(str.view(data)))) {
         ok(value) => value, err(_) => {
-          link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
+          let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
           continue }, }
       if number(str.view(root), "request.id") != id { continue }
       let _ = struct.replace(state, document, field=document)
@@ -570,7 +586,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     let revision: u64 = if array.len(dimensions) >= 6 { match text.parse_u64(str.view(array.borrow(dimensions, 5))) {some(value) => value, none => 0,} } else { 0 }
     if tick {
       if tick_revision != revision {
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Frame media revision differs from its snapshot")
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Frame media revision differs from its snapshot")
         continue
       }
       let _ = editor.seek(struct.borrow(state,field=document),program_frame)
@@ -584,7 +600,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     struct.set(state,revision,field=media_revision)
     // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
     if width == 0 or height == 0 or width > 1280 or height > 720 {
-      link.fail(wake,id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
+      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
       continue
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
@@ -603,7 +619,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     let media_error: string = provider.last_error(struct.borrow(state,field=provider))
     if str.len(media_error) != 0 {
       publish(str.view(root),"error.txt",media_error)
-      link.fail(wake,id,media_error)
+      let _ = fail_current(wake,str.view(root),id,media_error)
       continue
     }
     let source_ns: u64 = measured.source_ns
@@ -621,18 +637,18 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
           link.FramePosition {source_frame:measured.source_frame,program_frame:measured.program_frame,revision:revision},publish_begin) {
         ok(delivered)=>{if not delivered {continue}
           let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))},
-        err(problem)=>{link.fail(wake,id,str.view(problem))
+        err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
           break},
       }
     } else {
     let marker: string = text.concat("frame",text.concat(str.view(string.from_int(id % 2)),".id"))
     if not publish_checked(str.view(root),str.view(marker),"0") {
-      link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot reserve the next frame slot")
+      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot reserve the next frame slot")
       continue
     }
     if not write_image(str.view(root),id,"source",source) or
         not write_image(str.view(root),id,"program",program) {
-      link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot publish preview pixels")
+      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot publish preview pixels")
       continue
     }
     publish(str.view(root), "error.txt", str.view(provider.last_error(struct.borrow(state, field=provider))))
@@ -641,7 +657,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     let generation_text: string = string.from_int(id)
     if not publish_checked(str.view(root),str.view(size_name),str.view(size_text)) or
         not publish_checked(str.view(root),str.view(marker),str.view(generation_text)) {
-      link.fail(wake,id,"[GA_PREVIEW_PUBLISH] Cannot commit preview dimensions and generation")
+      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot commit preview dimensions and generation")
       continue
     }
     publish(str.view(root), "ready.id", str.view(generation_text))

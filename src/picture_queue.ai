@@ -84,6 +84,13 @@ pub fn configure(queue: ref<Queue>, key: str, epoch: u64, playing: bool,
   struct.set(queue,true,field=initialized)
   true
 }
+// Native diagnostics inspect positions without allocating or consuming pixels.
+pub fn pending_frame(queue: ref<Queue>, index: u64) -> i64 effects {} {
+  let frames: ref<array<Frame>> = struct.borrow(queue,field=frames)
+  if index >= array.len(frames) {return -1}
+  let position: link.FramePosition = struct.get(array.borrow(frames,index),field=position)
+  if queue.source {position.source_frame}else{position.program_frame}
+}
 pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
     -> option<i64> effects {} {
   if array.len(struct.borrow(queue,field=frames)) >= 2 {return option.none()}
@@ -91,11 +98,17 @@ pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
     return if queue.last_requested == wanted {option.none()}else{option.some(wanted)}
   }
   if queue.last_requested >= last {return option.none()}
+  // Keep one future decode reserved until its matching completion. Replacing
+  // on-time requests in the latest mailbox loses consecutive pictures even
+  // when the decoder and presenter each fit within one frame's budget.
+  // An already late request may still be superseded by the bounded catch-up
+  // target below; seeks, Stop and content changes retire the whole reservation.
+  if queue.in_flight != 0 and queue.last_requested >= wanted {return option.none()}
   if queue.last_requested < 0 and shown != wanted {return option.some(wanted)}
   // Bound preparation to 50 ms even after a cold decoder or slow disk. A slow
   // render skips intermediate frames instead of accumulating an unbounded lag.
-  // Leave room for the event wait and retained CPU paint. Requests continue while
-  // the previous frame renders; the mailbox coalesces them as in the original loop.
+  // Leave room for the event wait and retained CPU paint. A matching completion
+  // permits the next decode before painting, overlapping the native presenter.
   let lead_ns: u64 = if queue.latency_ns + 16000000 > 50000000 {50000000}else{queue.latency_ns + 16000000}
   let lead: i64 = cast.sat(math.ceil(cast.float(lead_ns)*fps/1000000000.0))
   let next: i64 = wanted + if lead > 0 {lead}else{1}
@@ -104,7 +117,13 @@ pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
     // A changing preparation estimate must not skip a future picture that is
     // still on time. Advance consecutive requests within the lead window;
     // coalesce to the current target only when the renderer has fallen behind.
-    if queue.last_requested >= wanted {option.some(queue.last_requested+1)}else{option.some(bounded)}
+    if queue.last_requested >= wanted {option.some(queue.last_requested+1)}
+    else if queue.last_requested >= 0 and wanted-queue.last_requested == 1 {
+      // A slightly late decode must not make us skip the current heard sample
+      // and several still-future pictures. Recover this sample, then prepare
+      // consecutively again. Larger lag keeps the bounded latest-target path.
+      option.some(wanted)
+    }else{option.some(bounded)}
   }
 }
 pub fn requested(queue: ref<Queue>, id: u64, frame: i64, now: u64) -> unit effects {alloc} {

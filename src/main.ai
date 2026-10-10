@@ -381,6 +381,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var thumbnail_seen: u64 = 0
   var preview_media_revision: u64 = 0
   var preview_error: string = string.new()
+  var preview_channel_generation: u64 = 0
   var preview_channel_error: string = string.new()
   var source_image: draw.Surface = draw.empty_surface()
   var program_image: draw.Surface = draw.empty_surface()
@@ -414,14 +415,6 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       thumbnail_seen = strip_requested
     }
     preview_link.poll(preview_transport)
-    let channel_error: string = string.copy(str.view(struct.borrow(preview_transport,field=error)))
-    if str.len(str.view(channel_error)) != 0 and not str.eq(str.view(channel_error),str.view(preview_channel_error)) {
-      app.set_status(state,str.view(channel_error))
-      pause_transport(state,true)
-      pause_transport(state,false)
-      dirty=true
-    }
-    preview_channel_error=channel_error
     preview_link.poll(strip_transport)
     let strip_problem: string = string.copy(str.view(struct.borrow(strip_transport,field=error)))
     if str.len(str.view(strip_problem)) != 0 and not str.eq(str.view(strip_problem),str.view(strip_error)) {
@@ -701,6 +694,32 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       if picture_queue.configure(pictures,key,audio_generation,picture_playing,picture_source,monitor_width,monitor_height) {dirty=true}
       struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
     }
+    // A failed old decode belongs to the retired request range after Stop,
+    // seek, source replacement or an audio restart. Evaluate failure only after
+    // configuring that range, and distinguish repeated codes by generation.
+    var picture_failed: bool = false
+    match preview.current_failure(preview_transport,
+        picture_queue.accepts(pictures,preview_transport.error_generation)) {
+      none=>{
+        // Recovery clears deduplication too: a later generation-zero channel
+        // failure can have the same text as the earlier recovered failure.
+        if str.len(preview_channel_error) != 0 {
+          preview_channel_generation=0
+          preview_channel_error=string.new()
+        }
+      },some(channel_error)=>{
+        if preview_channel_generation != preview_transport.error_generation or
+            not str.eq(str.view(channel_error),str.view(preview_channel_error)) {
+          app.set_status(state,str.view(channel_error))
+          pause_transport(state,true)
+          pause_transport(state,false)
+          picture_failed=true
+          dirty=true
+        }
+        preview_channel_generation=preview_transport.error_generation
+        preview_channel_error=channel_error
+      },
+    }
     preview_media_revision=state.media_revision
     let ready: u64 = preview_transport.ready
     if ready > preview_seen {
@@ -744,7 +763,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       picture_queue.apply(state,frame,source_image,program_image)
       dirty=true},}
     let shown: i64 = if picture_source {state.presented_source_frame}else{state.presented_program_frame}
-    match picture_queue.target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown) {
+    let next_target: option<i64> = if picture_failed {option.none()}else{
+      picture_queue.target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown)
+    }
+    match next_target {
       none=>{},some(target)=>{
         preview_requested=preview_requested+1
         let program_frame: i64 = if picture_source {parked_program}else{target}
@@ -759,6 +781,15 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           dirty=true}
         struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
       },
+    }
+    if window_measure.enabled {
+      struct.set(window_row,picture_queue.pending_frame(pictures,0),field=prepared_first)
+      struct.set(window_row,picture_queue.pending_frame(pictures,1),field=prepared_last)
+      struct.set(window_row,pictures.last_requested,field=requested_frame)
+      struct.set(window_row,pictures.in_flight,field=in_flight)
+      struct.set(window_row,pictures.received,field=received)
+      struct.set(window_row,preview_transport.completed_total,field=completed)
+      struct.set(window_row,preview_transport.overwritten_total,field=overwritten)
     }
     // Fresh pictures and user actions repaint immediately. Clock/meter-only
     // updates get a bounded interval so repeated old frames cannot monopolize

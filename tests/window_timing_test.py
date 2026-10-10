@@ -72,6 +72,20 @@ class WindowTimingTests(unittest.TestCase):
         report = self.report(rows)
         self.assertEqual(len(report["errors"]), 3)
 
+    def test_packet_loss_diagnostics_do_not_inflate_picture_delivery(self):
+        rows = fixture()
+        for index, row in enumerate(rows):
+            row.update(completed_packets=2*(index+1), overwritten_packets=index+1,
+                       in_flight_request=index+1, last_requested_frame=index+2)
+            if index % 3 == 1:
+                row["program_shown"] -= 1
+        report = self.report(rows)
+        self.assertEqual(report["transport_packets"]["completed"], 720)
+        self.assertEqual(report["transport_packets"]["overwritten_before_consumption"], 360)
+        self.assertEqual(report["transport_packets"]["active_future_reservation_rows"], 360)
+        self.assertLess(report["runs"][0]["pictures_per_second"], 41)
+        self.assertIsNone(self.report(fixture())["transport_packets"])
+
 
 if __name__ == "__main__":
     unittest.main()

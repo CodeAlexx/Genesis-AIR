@@ -937,12 +937,24 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
+The 2026-10-10 native-window recovery candidate delivers 59.87 distinct pictures/s
+over 131.88 seconds from the supplied 4K/59.94 AV1/PQ source, with live stereo
+audio and fitted 480x270 monitors on a 2560x1316 canvas. Eight frame positions are
+skipped in two catch-up jumps; median after-presentation lateness is 16.68 ms,
+p95 33.37 ms. No early pictures or drained audio queues are observed. This is
+near-full cadence for that ordinary editor view, rather than zero-drop playback
+or native-resolution fullscreen acceptance. See the [measurements and their
+scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
+
 - Both build scripts apply the shared `patches/air-editor.patch` overlay to the pinned
   SDK. Split preserves filter instances, full automation curves and representable source
   offsets. Cuts with fractional source phases, cuts inside active scalar fades,
   animated speed/fade lengths, or enabled Timer/Delay/Reverb refuse with
-  `GA_SPLIT_CONTEXT`; document and undo/redo remain unchanged. Ordinary reverse/nonunit
-  trim rebasing and other temporal DSP history preservation remain unfinished.
+  `GA_SPLIT_CONTEXT`; document and undo/redo remain unchanged. Head/tail trims now
+  preserve representable forward/reverse source samples and complete clip-local
+  automation curves. An unsupported phase, partial edited fade or temporal effect
+  context refuses with `GA_TRIM_CONTEXT`; refusals and clamped no-ops preserve redo.
+  General temporal DSP history preservation remains unfinished.
 - Compressed-source seek startup can differ
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.

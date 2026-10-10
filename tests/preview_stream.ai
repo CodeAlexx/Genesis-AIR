@@ -12,6 +12,7 @@ import "../src/commands.ai" as commands
 import "../src/provider.ai" as provider
 import "../src/preview.ai" as preview
 import "../src/preview_link.ai" as link
+import "../src/picture_queue.ai" as pictures
 import "../src/timeline_media.ai" as media_mapping
 
 type Producer = struct {ticket:channel.Ticket,root:string,mode:u64}
@@ -140,6 +141,7 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
       let _ = files.write_text(path.join(root,"request.id"),"2")
       let _ = link.wake(transport,false)
       good=check_frame(transport,2) and not link.holds_source(transport) and good
+      good=transport.completed_total == 2 and transport.overwritten_total == 1 and good
     } else if mode == 0 {
       // The sender must survive a consumer held longer than the old 100 ms budget.
       time.sleep_ms(250)
@@ -174,6 +176,7 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
       }
       var cleared: draw.Surface = link.restore_source(transport)
       good=cleared.width == 0 and good
+      good=transport.completed_total == 3 and transport.overwritten_total == 0 and good
     } else {
       let refused: bool = match link.await_ready(transport,if mode == 7 {2}else{1},time.monotonic_ns()+10000000000) {
         ok(_)=>false,err(problem)=>text.contains(str.view(problem),"GA_PREVIEW_PIXELS"),
@@ -184,10 +187,157 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
       let _ = link.wake(transport,false)
       good=check_frame(transport,id) and good
       good=str.len(str.view(struct.borrow(transport,field=error))) == 0 and good
+      good=transport.completed_total == 1 and transport.overwritten_total == 0 and good
     }
     let _ = files.write_text(path.join(root,"stop"),"yes")
     let _ = link.wake(transport,true)
     good=match tasks.join_next<bool>(jobs,2500) {some(ok)=>ok,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+type FailureProducer = struct {ticket:channel.Ticket,root:string}
+type FailureSeen = struct {generation:u64,detail:string}
+fn failure_produce(config: FailureProducer own) -> bool effects {alloc,fs.meta,fs.read,fs.write,net,time} {
+  var owned: FailureProducer = config
+  var peer: link.Peer = match link.peer(struct.borrow(owned,field=ticket)) {ok(value)=>value,err(_)=>{return false},}
+  let root: string = string.copy(struct.borrow(owned,field=root))
+  let detail: str = "[GA_TEST_DECODE] Identical decode failure"
+  let _ = files.write_text(path.join(root,"started"),"yes")
+  if not link.next(peer) {return false}
+  if preview.fail_current(peer,root,1,detail) {return false}
+  // A failure already queued before retirement still needs consumer filtering.
+  link.fail(peer,1,detail)
+  let _ = files.write_text(path.join(root,"retired"),"yes")
+  if not link.next(peer) or not preview.fail_current(peer,root,2,detail) {return false}
+  if not link.next(peer) {return false}
+  if preview.fail_current(peer,root,3,detail) {return false}
+  let _ = files.write_text(path.join(root,"stopped"),"yes")
+  if not link.next(peer) {return false}
+  if preview.fail_current(peer,root,3,detail) {return false}
+  link.fail(peer,3,detail)
+  let _ = files.write_text(path.join(root,"restarted"),"yes")
+  if not link.next(peer) or not preview.fail_current(peer,root,4,detail) {return false}
+  if not link.next(peer) {return false}
+  var source: draw.Surface = option.unwrap(draw.surface(1,1))
+  var program: draw.Surface = option.unwrap(draw.surface(1,1))
+  let red: u8 = 85
+  array.set(struct.borrow(program,field=pixels),0,cast.bits(red))
+  if not match link.notify_pixels(peer,root,source,program,"",false,timing(5),position(5),time.monotonic_ns()) {
+    ok(value)=>value,err(_)=>false,
+  } {return false}
+  let _ = link.next(peer)
+  link.finish(peer,5)
+  true
+}
+fn wait_failure(transport: ref<link.Link>, generation: u64) -> bool effects {alloc,net,time} {
+  let deadline: u64 = time.monotonic_ns()+2500000000
+  loop {
+    link.poll(transport)
+    if transport.error_generation == generation and str.len(struct.borrow(transport,field=error)) != 0 {return true}
+    if time.monotonic_ns() >= deadline {return false}
+    time.sleep_ms(2)
+  }
+  false
+}
+// Match the native presenter: configure the queue first, then filter the event,
+// and deduplicate eligible failures by generation as well as their text.
+fn consume_failure(state: ref<app.App>, transport: ref<link.Link>, queue: ref<pictures.Queue>, seen: ref<FailureSeen>)
+    -> bool effects {alloc} {
+  match preview.current_failure(transport,pictures.accepts(queue,transport.error_generation)) {
+    none=>false,some(detail)=>{
+      if seen.generation == transport.error_generation and seen.detail == detail {return false}
+      struct.set(seen,transport.error_generation,field=generation)
+      let _ = struct.replace(seen,string.copy(detail),field=detail)
+      app.set_status(state,detail)
+      let _ = commands.program(state,editor.pause())
+      let _ = commands.monitor(state,editor.pause())
+      true
+    },
+  }
+}
+fn failure_check(value: bool, label: str) -> bool effects {alloc,io.write} {
+  if not value {io.write(text.concat("[GA_TEST_FAILURE_SCOPE] ",text.concat(label,"\n")))}
+  value
+}
+fn failure_case(root: str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let red: u8 = 85
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App = app.app(provider.fake(root))
+  let imported: commands.Result = commands.import_media(state,"synthetic.mov","Synthetic failure scope")
+  let added: commands.Result = commands.append_clip(state,app.default_video_track(state),imported.value,0,60)
+  let _ = commands.open_source(state,imported.value)
+  let _ = commands.program(state,editor.play())
+  var queue: pictures.Queue = pictures.queue()
+  let _ = pictures.configure(queue,"original",1,true,false,480,270)
+  pictures.requested(queue,1,0,0)
+  var seen: FailureSeen = FailureSeen {generation:0,detail:string.new()}
+  var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var good: bool = imported.ok and added.ok and editor.playing(struct.borrow(state,field=document))
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(FailureProducer {ticket:link.ticket(transport),root:string.copy(root)},fn=failure_produce))
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,} and good
+    good=wait_marker(root,"started") and good
+    let _ = pictures.configure(queue,"edited",2,true,false,480,270)
+    pictures.requested(queue,2,10,0)
+    let _ = files.write_text(path.join(root,"request.id"),"2")
+    let _ = link.wake(transport,false)
+    good=failure_check(wait_marker(root,"retired"),"producer rejects retired decode") and good
+    good=failure_check(wait_failure(transport,1),"old failure arrives on actual event lane") and good
+    good=failure_check(not consume_failure(state,transport,queue,seen),"epoch failure is ineligible") and good
+    good=failure_check(editor.playing(struct.borrow(state,field=document)),"epoch failure leaves new playback running") and good
+    good=failure_check(seen.generation == 0,"ignored failure does not poison deduplication") and good
+    let _ = link.wake(transport,false)
+    good=failure_check(wait_failure(transport,2),"current identical error arrives") and good
+    good=failure_check(consume_failure(state,transport,queue,seen),"current failure pauses") and good
+    good=failure_check(not editor.playing(struct.borrow(state,field=document)) and seen.generation == 2,"current failure pauses actual transport") and good
+    good=failure_check(not consume_failure(state,transport,queue,seen),"same generation is handled once") and good
+    let _ = pictures.configure(queue,"stopped",3,false,false,480,270)
+    let _ = files.write_text(path.join(root,"request.id"),"3")
+    preview.stop(root)
+    let _ = link.wake(transport,false)
+    good=failure_check(wait_marker(root,"stopped"),"producer suppresses Stop failure") and good
+    good=failure_check(not consume_failure(state,transport,queue,seen),"Stop retires previous error") and good
+    let _ = files.remove(path.join(root,"stop"))
+    let _ = commands.program(state,editor.play())
+    let _ = pictures.configure(queue,"restart",4,true,false,480,270)
+    pictures.requested(queue,4,0,0)
+    let _ = files.write_text(path.join(root,"request.id"),"4")
+    let _ = link.wake(transport,false)
+    good=failure_check(wait_marker(root,"restarted"),"producer suppresses old restart failure") and good
+    good=failure_check(wait_failure(transport,3),"old restart event arrives") and good
+    good=failure_check(not consume_failure(state,transport,queue,seen),"restart event is ineligible") and good
+    good=failure_check(editor.playing(struct.borrow(state,field=document)) and seen.generation == 2,"restart keeps playback and previous handled identity") and good
+    let _ = link.wake(transport,false)
+    good=failure_check(wait_failure(transport,4),"current restarted failure arrives") and good
+    good=failure_check(consume_failure(state,transport,queue,seen),"same code in new generation is handled") and good
+    good=failure_check(not editor.playing(struct.borrow(state,field=document)) and seen.generation == 4,"restarted current failure pauses actual transport") and good
+    let _ = commands.program(state,editor.play())
+    let _ = pictures.configure(queue,"recovery",5,true,false,480,270)
+    pictures.requested(queue,5,0,0)
+    let _ = files.write_text(path.join(root,"request.id"),"5")
+    let _ = link.wake(transport,false)
+    good=failure_check(match link.await_ready(transport,5,time.monotonic_ns()+2500000000) {ok(_)=>true,err(_)=>false,},"new generation recovers from error") and good
+    var images: array<draw.Surface> = link.take_images(transport,5)
+    good=failure_check(array.len(images) == 2,"recovery delivers both actual surfaces") and good
+    if array.len(images) == 2 {
+      var program: draw.Surface = option.unwrap(array.pop(images))
+      good=failure_check(program.width == 1 and array.get(struct.borrow(program,field=pixels),0) == cast.bits(red),"recovery preserves pixel bytes") and good
+    }
+    good=failure_check(transport.error_generation == 0 and not consume_failure(state,transport,queue,seen) and editor.playing(struct.borrow(state,field=document)),"recovery clears old error and keeps transport running") and good
+    // Connection failures remain eligible even with no pending picture.
+    let _ = struct.replace(transport,string.copy("[GA_PREVIEW_CHANNEL] Connection lost"),field=error)
+    good=failure_check(option.is_some(preview.current_failure(transport,false)),"generation-zero connection failure remains fatal") and good
+    struct.set(transport,1,field=error_generation)
+    struct.set(transport,true,field=closed)
+    good=failure_check(option.is_some(preview.current_failure(transport,false)),"closed connection failure remains fatal") and good
+    struct.set(transport,false,field=closed)
+    let _ = struct.replace(transport,string.new(),field=error)
+    preview.stop(root)
+    let _ = link.wake(transport,true)
+    good=failure_check(match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,},"failure producer shuts down") and good
     link.close_commands(transport)
   }
   good
@@ -546,10 +696,13 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
       return 1}
     mode=mode+1
   }
-  if not real(str.view(path.join(view.get(args,1),"real")),view.get(args,2),view.get(args,3)) {
+  if not failure_case(path.join(view.get(args,1),"failure-scope")) {return 1}
+  let synthetic_only: bool = view.len(args) == 5 and view.get(args,4) == "synthetic"
+  if not synthetic_only and not real(str.view(path.join(view.get(args,1),"real")),view.get(args,2),view.get(args,3)) {
     io.write("[GA_TEST_PIXELS] Real stream pixels, source holding, resize, rewind, Reload or drag burst failed\n")
     return 1}
-  io.write("Pixel stream: nine native cases, exact largest-preview RGBA bytes, slow consumer, held/empty/coalesced source, Stop/seek backpressure and coded malformed-frame recovery passed\n")
+  io.write("Pixel stream: ten native cases, exact largest-preview RGBA bytes, slow consumer, held/empty/coalesced source, Stop/seek backpressure, coded malformed-frame recovery and generation-scoped failure producer/presenter eligibility passed\n")
+  if synthetic_only {return 0}
   io.write("Real pixel stream: decoded frame/time stamps, source/program colors, immutable snapshot reuse, held-source preservation, source switch while playing, monitor resize, rewind, Reload, 32-request frame-command burst, coded media-revision refusal/recovery, independent scrolled/zoomed timeline bitmaps during playback and after reverse/trim/2x rate, stale/incomplete strip refusal, no monitor image files and idle Stop passed\n")
   0
 }

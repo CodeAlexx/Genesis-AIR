@@ -110,7 +110,17 @@ def analyze(path, sample_rate=48000, warmup=1.0):
                 phases_ms={name: distribution([row[name]/1e6 for row in rows]) for name in
                            ("signature_ns", "paint_ns", "present_ns", "wait_ns", "diagnostic_previous_ns")},
                 audio_cache_rebuilds=max((row["audio_cache_rebuilds"] for row in rows), default=0),
-                strip_requests=max((row["strip_requests"] for row in rows), default=0))
+                strip_requests=max((row["strip_requests"] for row in rows), default=0),
+                transport_packets=(dict(
+                    completed=max(row["completed_packets"] for row in rows),
+                    overwritten_before_consumption=max(row["overwritten_packets"] for row in rows),
+                    active_future_reservation_rows=sum(
+                        row["in_flight_request"] != 0 and
+                        row["last_requested_frame"] >= row["heard_before"] for row in active),
+                    active_late_reservation_rows=sum(
+                        row["in_flight_request"] != 0 and
+                        row["last_requested_frame"] < row["heard_before"] for row in active))
+                    if "completed_packets" in rows[0] else None))
 
 
 def main():

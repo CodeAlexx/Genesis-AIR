@@ -12,14 +12,17 @@ pub type Row = struct {
   samples_before: u64, samples_after: u64, queued_before: u64, queued_after: u64,
   origin: i64, fps: f64, last: i64, source_mode: bool, playing: bool,
   clock_ok: bool, present_ok: bool, revision: u64, media_revision: u64,
-  width: u32, height: u32, prepared: u64, snapshot: u64, rebuilds: u64, strips: u64, inputs: u64
+  width: u32, height: u32, prepared: u64, snapshot: u64, rebuilds: u64, strips: u64, inputs: u64,
+  prepared_first: i64, prepared_last: i64, requested_frame: i64, in_flight: u64,
+  received: u64, completed: u64, overwritten: u64
 }
 pub fn row() -> Row effects {} {
   Row {begin:0,present_begin:0,present_end:0,end:0,signature:0,paint:0,present:0,wait:0,
     program:-1,source:-1,heard_before:-1,heard_after:-1,samples_before:0,samples_after:0,
     queued_before:0,queued_after:0,origin:0,fps:0.0,last:0,source_mode:false,playing:false,
     clock_ok:false,present_ok:false,revision:0,media_revision:0,width:0,height:0,
-    prepared:0,snapshot:0,rebuilds:0,strips:0,inputs:0}
+    prepared:0,snapshot:0,rebuilds:0,strips:0,inputs:0,
+    prepared_first:-1,prepared_last:-1,requested_frame:-1,in_flight:0,received:0,completed:0,overwritten:0}
 }
 // Poll-only iterations belong to the current playing epoch too. Present stamps
 // remain zero until pixels really pass through the native presenter.
@@ -38,7 +41,7 @@ pub fn profile() -> Profile effects {alloc,env,fs.write} {
   var target: string = match env.get("GENESIS_WINDOW_PROFILE") {some(value)=>value,none=>string.new(),}
   var enabled: bool = str.len(target) != 0
   if enabled {
-    let header: str = "loop_begin_ns\tpresent_begin_ns\tpresent_end_ns\tloop_end_ns\tsignature_ns\tpaint_ns\tpresent_ns\twait_ns\tprogram_shown\tsource_shown\theard_before\theard_after\tsamples_before\tsamples_after\tqueued_before\tqueued_after\taudio_origin\tfps\tsource_mode\tplaying\tclock_ok\tpresent_ok\tdocument_revision\tmedia_revision\twidth\theight\tprepared_frames\tsnapshot_generation\taudio_cache_rebuilds\tstrip_requests\tinput_events\tdiagnostic_previous_ns\n"
+    let header: str = "loop_begin_ns\tpresent_begin_ns\tpresent_end_ns\tloop_end_ns\tsignature_ns\tpaint_ns\tpresent_ns\twait_ns\tprogram_shown\tsource_shown\theard_before\theard_after\tsamples_before\tsamples_after\tqueued_before\tqueued_after\taudio_origin\tfps\tsource_mode\tplaying\tclock_ok\tpresent_ok\tdocument_revision\tmedia_revision\twidth\theight\tprepared_frames\tsnapshot_generation\taudio_cache_rebuilds\tstrip_requests\tinput_events\tdiagnostic_previous_ns\tprepared_first_frame\tprepared_last_frame\tlast_requested_frame\tin_flight_request\treceived_request\tcompleted_packets\toverwritten_packets\n"
     enabled=match files.write_text(target,header) {ok(_)=>true,err(_)=>false,}
   }
   Profile {enabled:enabled,path:target,pending:string.new(),rows:0,buffered:0,previous_ns:0}
@@ -102,6 +105,13 @@ pub fn record(profile: ref<Profile>, row: ref<Row>) -> unit effects {alloc,fs.wr
     integer(out,array.get(tail,i))
     i=i+1}
   string.append(out,string.from_int(profile.previous_ns))
+  var queue: array<i64> = [row.prepared_first,row.prepared_last,row.requested_frame,
+    cast.wrap(row.in_flight),cast.wrap(row.received),cast.wrap(row.completed),cast.wrap(row.overwritten)]
+  i=0
+  loop {if i >= array.len(queue) {break}
+    string.append(out,"\t")
+    string.append(out,string.from_int(array.get(queue,i)))
+    i=i+1}
   string.append(out,"\n")
   struct.set(profile,profile.rows+1,field=rows)
   struct.set(profile,profile.buffered+1,field=buffered)
