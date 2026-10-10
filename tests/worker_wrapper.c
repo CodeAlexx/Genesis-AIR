@@ -188,6 +188,15 @@ int wmain(int argc, wchar_t **argv) {
     FILE *log = _wfopen(starts, L"ab");
     if (!log) return 2;
     fputs("start\n", log); fclose(log);
+    /* Separate opt-in receipt: existing start-count fault tests stay unchanged. */
+    wchar_t canvas_trace[32768];
+    if (argc >= 5 && wcscmp(argv[1], L"--serve") == 0 && wcscmp(argv[2], L"--size") == 0 &&
+        GetEnvironmentVariableW(L"GENESIS_TEST_CANVAS_TRACE", canvas_trace, 32768)) {
+        FILE *canvas_log = _wfopen(canvas_trace, L"ab");
+        if (!canvas_log) return 2;
+        fwprintf(canvas_log, L"%ls\t%ls\n", argv[3], argv[4]);
+        fclose(canvas_log);
+    }
     wchar_t audio_block[32768];
     if (GetEnvironmentVariableW(L"GENESIS_TEST_AUDIO_BLOCK", audio_block, 32768) &&
         GetFileAttributesW(audio_block) == INVALID_FILE_ATTRIBUTES) return stall_audio(audio_block);

@@ -8,6 +8,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import time
 
+from media_session import session_env, session_root
 from audio_stream import assert_process_exited
 from real_media import audio_peak, pixel, run
 
@@ -57,10 +58,12 @@ def main():
                             GENESIS_TEST_EXPORT_BLOCK=str(marker), GENESIS_TEST_EXPORT_PHASE=phase,
                             GENESIS_TEST_EXPORT_PARTIAL=str(partial))
             argv = [binary, "export", movie, project]
-            exporting = subprocess.Popen([str(a) for a in argv], env=test_env, text=True,
+            exporting_env, session_report = session_env(test_env, work)
+            exporting = subprocess.Popen([str(a) for a in argv], env=exporting_env, text=True,
                                          encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT)
             try:
+                media_root = session_root(session_report, exporting)
                 deadline = time.monotonic() + 20
                 pid = None
                 while exporting.poll() is None and time.monotonic() < deadline:
@@ -75,13 +78,13 @@ def main():
                 if phase == "exit":
                     time.sleep(0.15)
                 started = time.monotonic()
-                (scratch / "export.cancel").write_text("cancel\n")
+                (media_root / "export.cancel").write_text("cancel\n")
                 said, _ = exporting.communicate(timeout=2.5)
                 elapsed = (time.monotonic() - started) * 1000
                 assert exporting.returncode != 0 and "[GA_EXPORT_CANCELLED]" in said, (phase, said)
                 assert_process_exited(pid)
                 assert not movie.exists() and not list(work.glob(movie.name + ".*")), (phase, "partial export left")
-                assert not (scratch / "export.cancel").exists() and not (scratch / "export.progress").exists()
+                assert not (media_root / "export.cancel").exists() and not (media_root / "export.progress").exists()
                 assert starts.read_text().splitlines() == ["start"], (phase, starts.read_text())
                 print(f"Export {phase}: cancelled in {elapsed:.0f} ms, worker exited and partial removed", flush=True)
             finally:

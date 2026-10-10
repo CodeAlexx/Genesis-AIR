@@ -88,39 +88,107 @@ pub fn read(file: str) -> result<Snapshot, string> effects {alloc, fs.read} {
   result.ok(Snapshot {document: document, original: original, autosave: str.eq(str.view(schema), "genesis.autosave")})
 }
 
+fn path_key(file: str) -> string effects {alloc} {
+  let normalized: string = path.normalize(file)
+  let windows: bool = str.starts_with(normalized,"//") or
+    (str.len(normalized) >= 3 and str.slice(normalized,1,3) == ":/")
+  if windows {text.lower_ascii(normalized)}else{string.copy(normalized)}
+}
 fn same_path(first: str, second: str) -> bool effects {alloc} {
-  str.eq(str.view(text.lower_ascii(str.view(path.normalize(first)))),
-    str.view(text.lower_ascii(str.view(path.normalize(second)))))
+  str.eq(path_key(first),path_key(second))
 }
 fn managed(state: ref<app.App>, file: str) -> bool effects {alloc} {
-  let normalized: string = text.lower_ascii(str.view(path.normalize(file)))
-  let directory: string = text.lower_ascii(str.view(path.normalize(str.view(root(state)))))
-  let old: string = text.lower_ascii(str.view(path.normalize(str.view(legacy(state)))))
+  let normalized: string = path_key(file)
+  let directory: string = path_key(root(state))
+  let old: string = path_key(legacy(state))
   str.eq(str.view(normalized), str.view(old)) or
     str.eq(str.view(path.dirname(str.view(normalized))), str.view(directory))
 }
 // A plain project inside the recovery directory is still a user's project.
 pub fn managed_snapshot(state: ref<app.App>, file: str, autosave: bool) -> bool effects {alloc} {
   if autosave { return managed(state, file) }
-  str.eq(str.view(text.lower_ascii(str.view(path.normalize(file)))),
-    str.view(text.lower_ascii(str.view(path.normalize(str.view(legacy(state)))))))
+  same_path(file,legacy(state))
 }
 // A selected recovery file stays available until a pending Recover has loaded it.
 // Only application-managed files can be removed; ordinary project files are preserved.
+fn has_lease(lease: ref<option<File>>) -> bool effects {} {match lease {some(_)=>true,none=>false,}}
+fn clear_file(file: ref<string>, lease: ref<option<File>>, keep: str) -> bool effects {alloc,fs.write} {
+  if str.len(file) == 0 or same_path(file,keep) {return true}
+  if not has_lease(lease) {return false}
+  match files.remove(file) {
+    err(error)=>{if error.code != 1 {return false}},ok(_)=>{},
+  }
+  let _ = ref.swap(file,string.new())
+  let _ = ref.swap(lease,option.none())
+  true
+}
 pub fn clear_owned(state: ref<app.App>) -> bool effects {alloc, fs.write} {
   let keep: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=pending_project), field=target)))
-  var paths: array<string> = [struct.replace(state, string.new(), field=recovery_file),
-    struct.replace(state, string.new(), field=recovered_file)]
-  var good: bool = true
-  var i: u64 = 0
-  loop { if i >= array.len(paths) { break }
-    let file: str = str.view(array.borrow(paths, i))
-    if str.len(file) != 0 and not same_path(file, str.view(keep)) and managed(state, file) {
-      match files.remove(file) {ok(_) => {}, err(error) => { if error.code != 1 { good = false } },}
-    }
-    i = i + 1
+  let current_file: string = string.copy(struct.borrow(state,field=recovery_file))
+  let recovered_file: string = string.copy(struct.borrow(state,field=recovered_file))
+  let current: bool = if managed(state,current_file) {
+    clear_file(struct.borrow(state,field=recovery_file),struct.borrow(state,field=recovery_lease),keep)
+  }else{str.len(struct.borrow(state,field=recovery_file)) == 0}
+  let recovered: bool = if managed(state,recovered_file) {
+    clear_file(struct.borrow(state,field=recovered_file),struct.borrow(state,field=recovered_lease),keep)
+  }else{str.len(struct.borrow(state,field=recovered_file)) == 0}
+  current and recovered
+}
+pub fn owner_path(file: str) -> string effects {alloc} {text.concat(file,".owner")}
+fn lock_snapshot(file: str) -> result<File,string> effects {alloc,fs.write} {
+  match files.lock(owner_path(file)) {
+    ok(value)=>result.ok(value),err(error)=>result.err(string.copy(if error.code == 8 {
+      "[GA_RECOVERY_BUSY] This recovery snapshot belongs to another running editing session"
+    }else{"[GA_RECOVERY_OWNER] Recovery ownership could not be checked; the snapshot is preserved"})),
   }
-  good
+}
+fn owned(state: ref<app.App>, file: str) -> bool effects {alloc} {
+  (same_path(file,struct.borrow(state,field=recovery_file)) and has_lease(struct.borrow(state,field=recovery_lease))) or
+    (same_path(file,struct.borrow(state,field=recovered_file)) and has_lease(struct.borrow(state,field=recovered_lease)))
+}
+// Probe the schema without modifying ordinary projects. Managed records are
+// reread after claiming the stable sidecar, before replacing any current state.
+pub fn recover(state: ref<app.App>, file: str) -> result<Snapshot,string> effects {alloc,fs.read,fs.write} {
+  var snapshot: Snapshot = try read(file)
+  let tracked: bool = managed_snapshot(state,file,snapshot.autosave)
+  var lease: option<File> = option.none()
+  var own_slot: u32 = 0
+  var own_file: string = string.new()
+  if tracked and not owned(state,file) {
+    lease=option.some(try lock_snapshot(file))
+    snapshot=try read(file)
+    if not managed_snapshot(state,file,snapshot.autosave) {
+      return result.err(string.copy("[GA_RECOVERY_CHANGED] The selected snapshot changed before ownership was claimed"))
+    }
+  }
+  // Keep the selected own snapshot and its handle through Save-before-Recover.
+  // Cleanup of other snapshots is still guarded by their retained handles.
+  if tracked {
+    if same_path(file,struct.borrow(state,field=recovery_file)) and has_lease(struct.borrow(state,field=recovery_lease)) {
+      lease=struct.replace(state,option.none(),field=recovery_lease)
+      own_file=struct.replace(state,string.new(),field=recovery_file)
+      own_slot=1
+    }else if same_path(file,struct.borrow(state,field=recovered_file)) and has_lease(struct.borrow(state,field=recovered_lease)) {
+      lease=struct.replace(state,option.none(),field=recovered_lease)
+      own_file=struct.replace(state,string.new(),field=recovered_file)
+      own_slot=2
+    }
+  }
+  if not clear_owned(state) {
+    if own_slot == 1 {
+      let _ = struct.replace(state,string.copy(own_file),field=recovery_file)
+      let _ = struct.replace(state,lease,field=recovery_lease)
+    }else if own_slot == 2 {
+      let _ = struct.replace(state,string.copy(own_file),field=recovered_file)
+      let _ = struct.replace(state,lease,field=recovered_lease)
+    }
+    return result.err(string.copy("[GA_RECOVERY_CLEAR] Previous recovery could not be cleared; current project and owned snapshot are kept"))
+  }
+  if tracked {
+    let _ = struct.replace(state,string.copy(file),field=recovered_file)
+    let _ = struct.replace(state,lease,field=recovered_lease)
+  }
+  result.ok(snapshot)
 }
 fn short_name(name: str) -> string effects {alloc} {
   var end: u64 = if str.len(name) > 48 { 48 } else { str.len(name) }
@@ -165,7 +233,11 @@ pub fn record(state: ref<app.App>) -> result<unit, string> effects {alloc, fs.me
       let candidate: string = path.join(str.view(directory), str.view(text.concat(str.view(name), text.concat("-",
         text.concat(str.view(stamp), text.concat("-", text.concat(str.view(string.from_int(attempt)), ".air")))))))
       match files.write_new_text(str.view(candidate), "") {
-        ok(_) => { file = candidate
+        ok(_) => {
+          let lease: File = try lock_snapshot(candidate)
+          let _ = struct.replace(state,option.some(lease),field=recovery_lease)
+          let _ = struct.replace(state,string.copy(candidate),field=recovery_file)
+          file = candidate
           fresh = true
           break },
         err(error) => { if error.code != 3 { return result.err(string.copy("[GA_AUTOSAVE_RESERVE] Recovery file could not be reserved")) } },
@@ -173,17 +245,21 @@ pub fn record(state: ref<app.App>) -> result<unit, string> effects {alloc, fs.me
       attempt = attempt + 1
     }
   }
+  if not has_lease(struct.borrow(state,field=recovery_lease)) {
+    let lease: File = try lock_snapshot(file)
+    let _ = struct.replace(state,option.some(lease),field=recovery_lease)
+  }
   let temporary: string = text.concat(str.view(file), ".tmp")
   match files.write_atomic(str.view(file), str.view(temporary), str.view(data)) {
     ok(_) => { let _ = struct.replace(state, file, field=recovery_file)
       result.ok(()) },
-    err(_) => { if fresh { let _ = files.remove(str.view(file)) }
+    err(_) => { if fresh { let _ = clear_file(struct.borrow(state,field=recovery_file),struct.borrow(state,field=recovery_lease),"") }
       result.err(string.copy("[GA_AUTOSAVE_PUBLISH] Recovery could not be updated; the previous snapshot is preserved")) },
   }
 }
 
 // Newest valid snapshot wins. Corrupt/incomplete records are kept, never deleted.
-pub fn latest(state: ref<app.App>, include_active: bool) -> option<string> effects {alloc, fs.meta, fs.read} {
+pub fn latest(state: ref<app.App>, include_active: bool) -> option<string> effects {alloc, fs.meta, fs.read, fs.write} {
   let directory: string = root(state)
   var files_here: array<string> = match files.list_dir(str.view(directory)) {
     ok(value) => value, err(_) => array.new(),
@@ -206,8 +282,13 @@ pub fn latest(state: ref<app.App>, include_active: bool) -> option<string> effec
         err(_) => {}, ok(info) => {
           if info.is_file and info.size > 0 and info.size <= 67108864 and info.mtime_ns >= modified {
             match read(file) {
-              err(_) => {}, ok(_) => { newest = string.copy(file)
-                modified = info.mtime_ns },
+              err(_) => {}, ok(snapshot) => {
+                let available: bool = if not managed_snapshot(state,file,snapshot.autosave) or owned(state,file) {true}else{
+                  match lock_snapshot(file) {ok(_)=>true,err(_)=>false,}
+                }
+                if available {newest = string.copy(file)
+                  modified = info.mtime_ns}
+              },
             }
           }
         },

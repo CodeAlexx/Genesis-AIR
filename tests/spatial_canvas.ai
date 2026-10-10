@@ -1,0 +1,79 @@
+module genesis.tests.spatial_canvas
+import std.editor as editor
+import std.testing as test
+import std.text as text
+import "../src/timeline_media.ai" as media
+
+fn canvas(suite: ref<test.Suite>, doc: ref<editor.Document>, cache: ref<media.RenderCache>,
+          frame: i64, width: u32, height: u32, label: str)
+          -> unit effects {alloc,process,time} {
+  let _ = editor.seek(doc,frame)
+  media.configure_monitor_preview(doc,cache,480,270)
+  let _ = test.eq_u64(suite,cast.wrap(cache.width),cast.wrap(width),label)
+  let _ = test.eq_u64(suite,cast.wrap(cache.height),cast.wrap(height),label)
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,process,time} {
+  var suite: test.Suite = test.suite("Spatial transition preview canvases",true)
+  var fonts: array<string> = array.new()
+  var cache: media.RenderCache = media.render_cache(fonts)
+  var doc: editor.Document = editor.document(30.0,3840,2160)
+  let owner: u64 = doc.active
+  let source: u64 = editor.add_source(doc,"fixture.mkv","fixture",60,30.0)
+  let track: u64 = editor.add_track(doc,owner,editor.track_video(),"V1")
+  let _ = editor.place(doc,track,source,0,10,0)
+  let _ = editor.place(doc,track,source,10,10,10)
+  let _ = test.start(suite,"Requested seam position selects native pixels only for spatial kinds")
+  var kinds: array<string> = ["crossfade","dissolve","wipe_lr","wipe_rl","wipe_up",
+    "wipe_down","slide_lr","zoom","iris","clock","barn_door"]
+  var at: u64 = 0
+  loop {
+    if at >= array.len(kinds) {break}
+    let kind: str = str.view(array.borrow(kinds,at))
+    let _ = editor.add_transition(doc,track,10,6,kind)
+    canvas(suite,doc,cache,6,480,270,"Before the seam stays fitted")
+    canvas(suite,doc,cache,7,if at < 2 {480}else{3840},if at < 2 {270}else{2160},"First transition frame has the required canvas")
+    canvas(suite,doc,cache,12,if at < 2 {480}else{3840},if at < 2 {270}else{2160},"Last transition frame has the required canvas")
+    canvas(suite,doc,cache,13,480,270,"After the seam returns to fitted")
+    at=at+1
+  }
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Hidden, audio, and inactive lanes cannot enlarge the current picture")
+  let _ = editor.add_transition(doc,track,10,6,"wipe_lr")
+  let _ = editor.set_track_hidden(doc,track,true)
+  canvas(suite,doc,cache,10,480,270,"Hidden picture lane is ignored")
+  let _ = editor.set_track_hidden(doc,track,false)
+  let _ = editor.set_track_muted(doc,track,true)
+  canvas(suite,doc,cache,10,3840,2160,"Audio mute preserves the visible picture transition")
+  let _ = editor.remove_transition(doc,option.unwrap(editor.transition_at(doc,track,10)))
+  let audio: u64 = editor.add_track(doc,owner,editor.track_audio(),"A1")
+  let _ = editor.add_transition(doc,audio,10,6,"wipe_lr")
+  let inactive: u64 = editor.add_sequence(doc,"other",30.0,3840,2160)
+  let other: u64 = editor.add_track(doc,inactive,editor.track_video(),"other V1")
+  let _ = editor.add_transition(doc,other,10,6,"wipe_lr")
+  canvas(suite,doc,cache,10,480,270,"Audio and other sequence transitions are ignored")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Pointwise portrait preview retains exact aspect and even source fitting")
+  var portrait: editor.Document = editor.document(30.0,2160,3840)
+  let psource: u64 = editor.add_source(portrait,"portrait.mkv","portrait",60,30.0)
+  let ptrack: u64 = editor.add_track(portrait,portrait.active,editor.track_video(),"V1")
+  let _ = editor.place(portrait,ptrack,psource,0,10,0)
+  let _ = editor.place(portrait,ptrack,psource,10,10,10)
+  let _ = editor.add_transition(portrait,ptrack,10,6,"dissolve")
+  canvas(suite,portrait,cache,10,144,256,"Pointwise portrait uses an exact even9:16 canvas")
+  let _ = editor.add_transition(portrait,ptrack,10,6,"iris")
+  canvas(suite,portrait,cache,10,2160,3840,"Portrait hard mask keeps native integer sampling")
+  canvas(suite,portrait,cache,13,144,256,"Portrait recovers its smaller canvas after transition")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Small native and irreducible odd aspect canvases retain their bounds")
+  var small: editor.Document = editor.document(30.0,321,181)
+  canvas(suite,small,cache,0,321,181,"Small odd sequence is never enlarged or rounded")
+  var odd: editor.Document = editor.document(30.0,3841,2161)
+  canvas(suite,odd,cache,0,480,270,"Irreducible odd aspect keeps the bounded rounded fallback")
+  let _ = editor.add_transition(doc,track,10,6,"unknown_transition")
+  canvas(suite,doc,cache,10,3840,2160,"Unknown transition is conservative until planner refusal")
+  let _ = test.check(suite,match media.frame_line(doc,10,"ENC","") {ok(_)=>false,err(problem)=>text.contains(str.view(problem),"this transition kind is not rendered yet"),},"Unknown transition remains refused by media planning")
+  let _ = test.done(suite)
+  let report: string = if view.len(args)>1 {string.copy(view.get(args,1))}else{string.copy("spatial-canvas-tests.json")}
+  test.conclude(suite,report,20)
+}

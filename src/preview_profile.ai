@@ -25,7 +25,7 @@ pub fn run(state: ref<app.App>, report: str, width: u32, height: u32,
     io.write("[GA_PROFILE_ARGS] Use a 640x480..3840x2160 window and 1..120 samples\n")
     return 2
   }
-  let root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "profile")
+  let root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=media_scratch)), "profile")
   let _ = files.mkdirs(str.view(root))
   preview.reset(str.view(root))
   var transport: link.Link = match if file_pixels {link.open()}else{link.open_pixels()} {ok(value)=>value,err(problem)=>{io.write(str.view(problem))

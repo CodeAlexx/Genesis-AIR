@@ -323,7 +323,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   task.scope {
   var audio_jobs: array<task<bool>> = array.new()
   var preview_jobs: array<task<bool>> = array.new()
-  let audio_root: string = path.join(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)),"audio-playback")
+  let audio_root: string = path.join(provider.media_root(struct.borrow(state,field=provider)),"audio-playback")
   audio_playback.reset(str.view(audio_root))
   var audio_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
     return 1},}
@@ -334,7 +334,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     audio_playback.stop(str.view(audio_root))
     return 1},}
 
-  let preview_root: string = path.join(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)), "preview")
+  let preview_root: string = path.join(provider.media_root(struct.borrow(state,field=provider)),"preview")
   let _ = files.mkdirs(str.view(preview_root))
   preview.reset(str.view(preview_root))
   var preview_transport: preview_link.Link = match preview_link.open_pixels() {ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
@@ -350,7 +350,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let _ = preview_link.wake(audio_transport,true)
     return 1},}
   var pictures: picture_queue.Queue = picture_queue.queue()
-  let strip_root: string = path.join(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)),"timeline-strips")
+  let strip_root: string = path.join(provider.media_root(struct.borrow(state,field=provider)),"timeline-strips")
   let _ = files.mkdirs(str.view(strip_root))
   preview.reset(str.view(strip_root))
   var strip_transport: preview_link.Link = match preview_link.open() {ok(value)=>value,err(problem)=>{
@@ -588,7 +588,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               let chunk: i64 = cast.sat(fps * 5.0)
               audio_task_end = if audio_next + chunk > finish { finish } else { audio_next + chunk }
               let worker: string = provider.worker_path(struct.borrow(state, field=provider))
-              let scratch: string = string.copy(str.view(struct.borrow(struct.borrow(state, field=provider), field=scratch)))
+              let scratch: string = provider.media_root(struct.borrow(state,field=provider))
               audio_task_output = path.join(str.view(scratch), "playback-chunk.wav")
               let prepared: result<timeline_media.AudioPlan,string> = if source_playing {
                 timeline_media.source_audio_range(struct.borrow(state, field=document), str.view(worker), audio_next, audio_task_end, str.view(audio_task_output))
@@ -1061,8 +1061,34 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
   let force_fake: bool = verb == "demo" or match env.get("GENESIS_FAKE_PROVIDER") {
     some(value) => value == "1", none => false,
   }
-  var scratch: string = settings_root()
+  var scratch: string = match provider.resolve_scratch(settings_root()) {
+    ok(value)=>value,err(problem)=>{say(problem)
+      return 1},
+  }
+  // Reserve the caller's receipt before making a session or performing command
+  // work. Existing files (including other controllers' receipts) are refused.
+  var session_report: option<File> = match env.get("GENESIS_SESSION_REPORT") {
+    none=>option.none(),some(report)=>{
+      match fs.open(report,mode=create_new) {
+        ok(value)=>option.some(value),err(_)=>{say("[GA_MEDIA_SESSION_REPORT] Cannot reserve requested session report")
+          return 1},
+      }
+    },
+  }
   var engine: provider.Provider = choose_provider(str.view(scratch), force_fake)
+  match provider.isolate_media(engine) {ok(_)=>{},err(problem)=>{say(problem)
+    return 1},}
+  // A controller supplies its own receipt path; there is no shared latest-session
+  // pointer whose replacement could cancel a different process's export.
+  match ref.swap(session_report,option.none()) {
+    none=>{},some(report)=>{
+      let row: string = text.concat(provider.media_root(engine),"\n")
+      match fs.write_all(report,str.bytes(row)) {
+        ok(_)=>{},err(_)=>{say("[GA_MEDIA_SESSION_REPORT] Cannot write requested session report")
+          return 1},
+      }
+    },
+  }
   var state: app.App = app.app(engine)
   app.set_fonts(state, typeface.search_paths())
   load_theme(state, args, scratch)

@@ -38,16 +38,12 @@ fn apply(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.wri
     var changed: commands.Result = commands.open_project(state, str.view(target))
     result = commands.message(changed)
   } else if action == app.ProjectAction.Recover {
-    match recovery.read(str.view(target)) {
+    match recovery.recover(state,str.view(target)) {
       err(problem) => { result = problem },
       ok(snapshot) => {
         var restored: recovery.Snapshot = snapshot
-        let _ = recovery.clear_owned(state)
         commands.replace_project(state, struct.replace(restored, editor.document(30.0, 1920, 1080), field=document))
         app.set_project_path(state, "")
-        let tracked: string = if recovery.managed_snapshot(state, str.view(target), restored.autosave) {
-          string.copy(str.view(target)) } else { string.new() }
-        let _ = struct.replace(state, tracked, field=recovered_file)
         app.mark_dirty(state, true)
         result = string.copy("Recovered project; use Save as to keep the edits")
       },
@@ -126,7 +122,7 @@ pub fn advance_choice(state: ref<app.App>, backwards: bool) -> unit effects {} {
   }
   ()
 }
-pub fn offer_recovery(state: ref<app.App>) -> bool effects {alloc, fs.meta, fs.read} {
+pub fn offer_recovery(state: ref<app.App>) -> bool effects {alloc, fs.meta, fs.read, fs.write} {
   if pending(state) or app.dirty(state) { return false }
   let file: string = match recovery.latest(state, false) {none => { return false }, some(value) => value,}
   var snapshot: recovery.Snapshot = match recovery.read(str.view(file)) {err(_) => { return false }, ok(value) => value,}

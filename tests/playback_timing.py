@@ -19,6 +19,8 @@ import tempfile
 FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
+from media_session import session_env, session_root
+
 def run(argv, env=None, timeout=120):
     done = subprocess.run(list(map(str, argv)), env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout, creationflags=FLAGS)
@@ -43,6 +45,7 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
     report = root / f"{label}.tsv"
     env = dict(os.environ, GENESIS_GCOMPOSE=str(worker), GENESIS_SCRATCH=str(root / label))
     env.pop("GENESIS_FAKE_PROVIDER", None)
+    env, session_report = session_env(env, root)
     run([binary, "profile-playback", report, project, seconds] + (["--legacy"] if legacy else []) + (["--poll"] if sleep_poll else []),
         env, seconds+90)
     with report.open(encoding="utf-8", newline="") as file:
@@ -102,7 +105,7 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
                 phases[name].append(row[name]/1000000)
     paints = [row["paint_ns"]/1000000 for row in steady if row["paint_ns"]]
     waits = [row["wait_ns"]/1000000 for row in steady]
-    provider = root / label / "playback-profile" / "provider-profile.tsv"
+    provider = session_root(session_report) / "playback-profile" / "provider-profile.tsv"
     provider_phases = None
     if provider.exists():
         with provider.open(encoding="utf-8", newline="") as file:

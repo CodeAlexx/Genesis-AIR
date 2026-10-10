@@ -40,6 +40,8 @@ pub type Provider = struct {
   frames: array<CachedFrame>,
   envelopes: array<CachedEnvelope>,
   scratch: string,
+  // Shared settings/recovery/errors stay in scratch; transient media is session-owned.
+  media_scratch: string,
   calls: u64,
   failures: u64,
   last_error: string,
@@ -71,8 +73,38 @@ pub type Probe = struct {
 
 pub type Frame = struct { ok: bool, width: u32, height: u32, pixels: draw.Surface, detail: string }
 
+// Resolve shared storage once before constructing an application. Native pickers
+// return absolute paths, so relative storage must not create a different lease
+// identity for the same recovery file. Constructors keep explicit fixture roots.
+pub fn resolve_scratch_at(root: str, cwd: str) -> result<string,string> effects {alloc} {
+  let directory: string = path.normalize(cwd)
+  if not path.is_absolute(directory) {
+    return result.err(string.copy("[GA_STATE_ROOT] Cannot resolve the application storage directory"))
+  }
+  let clean: string = path.normalize(root)
+  if path.is_absolute(clean) {
+    // Windows also accepts drive-rooted /state and \\state. Resolve their drive
+    // from the actual cwd; POSIX absolute roots remain case-sensitive paths.
+    if str.starts_with(clean,"/") and not str.starts_with(clean,"//") and
+        str.len(directory) >= 3 and str.slice(directory,1,3) == ":/" {
+      return result.ok(text.concat(str.slice(directory,0,2),clean))
+    }
+    return result.ok(string.copy(clean))
+  }
+  // C:state depends on a separate per-drive cwd, not the supplied process cwd.
+  if str.len(clean) >= 2 and str.slice(clean,1,2) == ":" {
+    return result.err(string.copy("[GA_STATE_ROOT] Use an absolute or ordinary relative application storage path"))
+  }
+  result.ok(path.join(directory,clean))
+}
+pub fn resolve_scratch(root: str) -> result<string,string> effects {alloc,fs.read} {
+  let directory: string = match files.cwd() {
+    ok(value)=>value,err(_)=>{return result.err(string.copy("[GA_STATE_ROOT] Cannot read the current directory to resolve application storage"))},
+  }
+  resolve_scratch_at(root,directory)
+}
 pub fn fake(scratch: str) -> Provider effects {alloc} {
-  Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
+  Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch), media_scratch: string.copy(scratch),
     ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
     session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
@@ -83,7 +115,7 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
 pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta, fs.read} {
   let there: bool = match files.exists(worker) { ok(found) => found, err(problem) => false, }
   let probe: string = media_runtime.tool(worker, "ffprobe")
-  Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
+  Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch), media_scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
     session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
@@ -92,13 +124,45 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta, 
 // FFmpeg is a real-media backend, selected only when gcompose is absent.
 pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
-    scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
+    scratch: string.copy(scratch), media_scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
     session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
 }
+// Reserve a directory atomically, rather than trusting a timestamp or process ID to
+// be unique. Explicit constructor roots retain their fixture/task semantics until
+// the application calls this once, before any request or worker starts.
+pub fn isolate_media(state: ref<Provider>) -> result<unit,string> effects {alloc,fs.write,time} {
+  if str.view(struct.borrow(state,field=media_scratch)) != str.view(struct.borrow(state,field=scratch)) {return result.ok(())}
+  if state.calls != 0 or state.starts != 0 {return result.err(string.copy("[GA_MEDIA_SESSION] Reserve media before starting requests"))}
+  let parent: string = path.join(struct.borrow(state,field=scratch),"media")
+  match files.mkdirs(parent) {ok(_)=>{},err(_)=>{return result.err(string.copy("[GA_MEDIA_SESSION] Cannot create media session parent"))},}
+  let stamp: u64 = time.monotonic_ns()
+  var attempt: u64 = 0
+  loop {if attempt >= 128 {return result.err(string.copy("[GA_MEDIA_SESSION] Cannot reserve a private media directory"))}
+    var name: string = text.concat("session-",string.from_int(stamp))
+    string.append(name,"-")
+    string.append(name,string.from_int(attempt))
+    let root: string = path.join(parent,name)
+    match files.create_dir(root) {
+      err(problem)=>{if problem.code != 3 {return result.err(string.copy("[GA_MEDIA_SESSION] Cannot create private media directory"))}
+        attempt=attempt+1},
+      ok(_)=>{
+        match files.write_text(path.join(root,"session-root.txt"),text.concat(root,"\n")) {
+          err(_)=>{return result.err(string.copy("[GA_MEDIA_SESSION] Cannot publish media session receipt"))},ok(_)=>{},
+        }
+        let _ = struct.replace(state,string.copy(root),field=media_scratch)
+        return result.ok(())
+      },
+    }
+  }
+  result.err(string.copy("[GA_MEDIA_SESSION] Cannot reserve a private media directory"))
+}
+pub fn media_root(state: ref<Provider>) -> string effects {alloc} {
+  string.copy(struct.borrow(state,field=media_scratch))
+}
 pub fn set_profile(state: ref<Provider>, enabled: bool) -> unit effects {alloc,fs.write} {
   if enabled and not state.profile {
-    let _ = files.write_text(path.join(str.view(struct.borrow(state,field=scratch)),"provider-profile.tsv"),
+    let _ = files.write_text(path.join(str.view(struct.borrow(state,field=media_scratch)),"provider-profile.tsv"),
       "call\texchange_ns\tinput_ns\tread_ns\tcopy_ns\n")
   }
   struct.set(state,enabled,field=profile)
@@ -126,18 +190,18 @@ pub fn worker_path(state: ref<Provider>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(state, field=worker)))
 }
 pub fn preview_path(state: ref<Provider>) -> string effects {alloc} {
-  path.join(str.view(struct.borrow(state, field=scratch)), "program.rgba")
+  path.join(str.view(struct.borrow(state, field=media_scratch)), "program.rgba")
 }
 pub fn audition_path(state: ref<Provider>) -> string effects {alloc} {
-  path.join(str.view(struct.borrow(state, field=scratch)), "audition.wav")
+  path.join(str.view(struct.borrow(state, field=media_scratch)), "audition.wav")
 }
 // An export in progress watches the first file and reports whole percent to the second, so
 // the window, a script, or a test can follow or cancel it.
 pub fn export_cancel_path(state: ref<Provider>) -> string effects {alloc} {
-  path.join(str.view(struct.borrow(state, field=scratch)), "export.cancel")
+  path.join(str.view(struct.borrow(state, field=media_scratch)), "export.cancel")
 }
 pub fn export_progress_path(state: ref<Provider>) -> string effects {alloc} {
-  path.join(str.view(struct.borrow(state, field=scratch)), "export.progress")
+  path.join(str.view(struct.borrow(state, field=media_scratch)), "export.progress")
 }
 pub fn calls(state: ref<Provider>) -> u64 effects {} { state.calls }
 pub fn worker_starts(state: ref<Provider>) -> u64 effects {} { state.starts }
@@ -173,7 +237,7 @@ pub fn note_failure(state: ref<Provider>, detail: str) -> unit effects {alloc, f
 }
 
 fn scratch_file(state: ref<Provider>, name: str) -> string effects {alloc} {
-  path.join(str.view(struct.borrow(state, field=scratch)), name)
+  path.join(str.view(struct.borrow(state, field=media_scratch)), name)
 }
 
 // gcompose's positional wire decodes these escapes in the reverse order. Encode '%' first
@@ -278,7 +342,7 @@ fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {
     note_failure(state, "[GA_WORKER_MISSING] The gcompose worker is not present")
     return option.none()
   }
-  match files.mkdirs(str.view(struct.borrow(state, field=scratch))) {
+  match files.mkdirs(str.view(struct.borrow(state, field=media_scratch))) {
     ok(made) => { }, err(problem) => { },
   }
   var attempt: u64 = 0
@@ -348,7 +412,7 @@ type VideoInfo = struct {width: u32, height: u32, fps: f64, known: bool}
 
 fn ffprobe_text(state: ref<Provider>, source: str, stream: str, fields: str,
                 tag: str) -> option<string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  match files.mkdirs(str.view(struct.borrow(state, field=scratch))) {
+  match files.mkdirs(str.view(struct.borrow(state, field=media_scratch))) {
     ok(_) => { },
     err(problem) => { return option.none() },
   }
@@ -813,7 +877,7 @@ fn program_attempt(state: ref<Provider>, line: str, width: u32, height: u32, ret
     let completed: u64 = time.monotonic_ns()
     var values: array<string> = [string.from_int(state.calls),string.from_int(received-started),"0","0",string.from_int(completed-received)]
     let record: string = text.concat(text.join(values,"\t"),"\n")
-    let _ = files.append_text(path.join(str.view(struct.borrow(state,field=scratch)),"provider-profile.tsv"),record)
+    let _ = files.append_text(path.join(str.view(struct.borrow(state,field=media_scratch)),"provider-profile.tsv"),record)
   }
   match decoded {
     none=>{note_failure(state,"[GA_PROGRAM_SIZE] The worker picture could not be decoded")
@@ -927,7 +991,7 @@ fn native_frame(state: ref<Provider>, source: str, at: i64, width: u32, height: 
     }
     index = index + 1
   }
-  let _ = files.mkdirs(str.view(struct.borrow(state, field=scratch)))
+  let _ = files.mkdirs(str.view(struct.borrow(state, field=media_scratch)))
   let held: u64 = array.len(struct.borrow(state, field=frames))
   let slot: u64 = if held < 2 { held } else { state.calls % 2 }
   let out: string = scratch_file(state, text.concat(text.concat("preview-", string.from_int(slot)), ".rgba"))
@@ -1005,7 +1069,7 @@ pub fn envelope(state: ref<Provider>, source: str, buckets: u64) -> array<f64> e
       none => { return out }, some(value) => value,
     }
     if not info.audio { return out }
-    let _ = files.mkdirs(str.view(struct.borrow(state, field=scratch)))
+    let _ = files.mkdirs(str.view(struct.borrow(state, field=media_scratch)))
     let binary: string = if state.kind == kind_ffmpeg() { string.copy(str.view(struct.borrow(state, field=worker))) }
       else { media_runtime.tool(str.view(struct.borrow(state, field=worker)), "ffmpeg") }
     match ffmpeg.envelope(binary, source,

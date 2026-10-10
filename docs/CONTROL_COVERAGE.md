@@ -20,12 +20,12 @@ clicks. The separate 4K ProRes, portrait, multicam and 16-bit/HDR precision gate
 also passed. These checks exclude interactive native presentation and physical
 speaker latency; sustained smooth 4K60 remains open.
 
-The published root application SHA-256 is
+The October 9 root application SHA-256 was
 `9DD7F025134C146080232A633D3E23060CF441A3AC008DF3D32916F6372C577E`;
 the worker is `66EE15B507E15EEC67E69999411654C4893A0F9FF3EA8ACCBD1224CC5B62FD9C`.
 After the complete combined gate, two additional bounded paint fixes received
 the expanded 32-case/656-check native pixel gate and final application smoke.
-Root-file hashes match the accepted files, and its six shared-runtime process
+Its root-file hashes matched the accepted files, and its six shared-runtime process
 cases pass. The native playback timing below names its separately measured
 application hash; it is not a timing claim for every subsequent build.
 
@@ -35,7 +35,7 @@ application hash; it is not a timing claim for every subsequent build.
 | Project and control model | 153 saved application facts, three native file-drop checks, 749 dispatched clicks across four tabs, no enabled-control overlap |
 | Native media and project I/O | Ten cases / 105 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status, every fitted-memory RGBA/alpha byte, rejection of stale signatures, mismatched geometry and truncated buffers, Reload invalidation, and six small/odd/portrait/4K preview canvas formats preserving sequence/export dimensions and time. Actual fitting and letterboxing have separate worker pixel gates. |
 | Inspector and transport | Twenty cases / 174 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan/mute/solo, gain and video K/fader key editing with evaluated readings, unchanged project names during unkeyed gain display/planning, stable mix/strip signatures, equal-height RGB histogram bins, retained program-scope updates and completed-frame monitor/timeline time |
-| Project safety and recovery | Sixteen cases / 93 checks, including saved Program/Source In/Out marks and their Undo/Redo. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
+| Project safety and recovery | Sixteen cases / 94 checks, including saved Program/Source In/Out marks and their Undo/Redo. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, a panned file with a zero opposite meter, silent PCM with zero meters, immediate Stop |
 | Native audio clock and timing | 75 controlled ABI checks cover sample/byte/millisecond driver positions, repeated 32-bit rollover, backward observations, changing units, post-mix meter indexing, coded refusal/recovery and scoped timer lifecycle. Successful device opening requests a one-millisecond timer period; Stop, restart and guard destruction release it. Failed opening makes no request; timer refusal preserves audio availability and is inspectable. The twenty-second silent device gate checks uneven buffers, monotonic position, drained-queue hold, resume and reset. A separate three-minute device run completed 222 buffers with -2.98 ms interval drift and a 3.11 ms phase range versus monotonic time. This excludes picture presentation and physical speaker latency. |
 | Continuous playback audio | Four direct-worker and thirty-three editor/source/rate/mixer cases compare concatenated playback chunks against whole-range WAVs. All twenty audio effects, reverse, 2x speed, fractional sample endpoints, seek reset, source audition and embedded video audio are covered. Independent PCM checks verify the clip/track gain product, left/right pan, zero muted output and solo isolation; coded filter failure/recovery and idle Stop without a wake |
@@ -125,9 +125,11 @@ interactive evidence; it is not a sustained throughput or long-timeline sync mea
 Use the Windows reproduction commands in [README](../README.md#tests). Historical Unix
 X11 tests remain in `tests/window_file_picker.py` and `tests/window_playback.py`.
 
-The new Save/Discard/Cancel and recovery dialogs have headless rendered-image checks and
-use the same geometry for painting and pointer dispatch. Their native picker and close
-interaction has not received a new interactive Windows check in this checkpoint.
+The Save/Discard/Cancel and recovery dialogs have headless rendered-image checks and
+use the same geometry for painting and pointer dispatch. An October 10 interactive
+Win32 check verifies Cancel before New, native Save as with a Japanese filename,
+clean New and native Open restoring the saved gain and pictures. Native recovery,
+failed-save and dirty-close interaction remain separate acceptance gaps.
 
 The highest-impact remaining work is sustained playback,
 parameter/animation measurements for mapped effects, nested sequences,
@@ -234,7 +236,7 @@ Preview spatial resampling differs at edges; master transforms retain the refere
 | Area | Verified | Still required |
 |---|---|---|
 | Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; X11 import, V1 placement, ruler scrub, and save at 1× and 4K 2×; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have crossfade gates; incoming/outgoing Text, opacity keys, fades and independent grades have native preview/master pixel checks | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, measured sustained interactive throughput. Incoming transition Blend/PiP/Chroma key and transitions above the base lane currently fail explicitly. |
-| Project lifecycle | Save/Discard/Cancel for New/Open/Recover/Close, failed-save retry and preservation, isolated history/clipboard, independent paused autosave, separate snapshots, newest-valid and legacy recovery, Save as copy and atomic temporary collision checks | Native picker/modal interaction under an interactive Windows session; recovery ownership across simultaneous running processes. |
+| Project lifecycle | Save/Discard/Cancel for New/Open/Recover/Close, failed-save retry and preservation, isolated history/clipboard, independent paused autosave, separate snapshots, newest-valid and legacy recovery, Save as copy and atomic temporary collision checks; Win32 Cancel/New and Unicode Save as/Open; actual simultaneous-process lock, crash, claim-race and failed-cleanup checks on Windows/Linux | Native recovery, failed-save and dirty-close interaction under an interactive Windows session. |
 | Inspector and keyframes | Representative controls are clicked; focused drag/undo/cancel checks pass; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step; audio gain K/faders write local keys, show evaluated values and undo a drag together; gain curves have native PCM/AAC output gates | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and track/audio-filter automation. K/faders now refuse unsupported PiP/Blend/Chroma-key layers and transition sides, unknown fields, unsupported rotation and stale filter targets with codes. Keyed video faders display/edit evaluated values; held Blend mode switches are exact. |
 | Subtitles and text | Two timed caption cues, one Latin/Cyrillic/CJK, appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Complex-script shaping, right-to-left text, richer typography, and subtitle placement. |
 | Export and audio | Generated MP4 pixel/audio checks; WAV mix, spaced output path, X11 audio start/stop, continuous native playback decoder/filter history and bounded long reverse buffering with fractional-resample/AAC reference checks | Interactive native-display/speaker synchronization, sustained device playback of larger reversed projects, live scrub sound. A 180-second headless device/picture fixture now checks unique frame identities, 36 buffer boundaries and clock drift; 181-second fractional resample/filter/gain processing is bit-identical across 37 pulls and a resumed seek. |
@@ -266,7 +268,7 @@ are not established. Complex 4K effect-stack throughput is unmeasured.
 Refused source Insert/Overwrite preserves document bytes, selection, semantic
 revision and every undo/redo snapshot. Legal edits remain reversible. Program and
 Source In/Out marks now create saved edits with history; repeated identical marks
-create no extra history step. The project-safety gate has 16 cases and 93 checks.
+create no extra history step. The project-safety gate has 16 cases and 94 checks.
 Retained painting matches complete painting in 32 cases/656 checks, including held
 Source pixels, transparent same-size replacement, resize at all three UI scales,
 scrolled unkeyed Audio meters, and narrow/short windows. Two added cases exposed
@@ -296,3 +298,81 @@ audio. Median/p95 after-presentation lateness remains 16.68/33.37 ms. These
 measurements use fitted monitors and exclude physical display/speaker latency;
 fullscreen 4K remains deferred. See the [full timing and loss
 attribution](FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
+
+The published October 10 application also passed an interactive Win32 project
+workflow using an isolated copy of the supplied project. A gain edit from 1.00
+to 1.05 opened Save/Discard/Cancel before New; Escape kept the clip and gain.
+Ctrl+Shift+S opened the native Save project picker and saved a filename containing
+spaces and Japanese characters. New then opened a clean project, and Ctrl+O's
+native picker reopened the saved copy with its 1.05 gain, Source/Program pictures
+and timeline bitmaps. Independently reading the saved JSON confirmed the gain;
+hashes confirmed both the original and working project were unchanged. This
+closes the ordinary native picker/modal interaction gap, rather than proving
+multi-process recovery ownership. The sanitized receipt is
+`archive/native-project-lifecycle-2026-10-10.json` and names the checked application.
+
+## Concurrent sessions and transition fidelity on 2026-10-10
+
+Recovery now retains stable sidecar locks through atomic snapshot replacement.
+Actual process tests pass 70 Windows checks and 74 Linux checks: live-owner
+refusal preserves document and all history, forced exit releases the lock,
+competing orphan claims have one winner, and Save-before-own-Recover transfers
+the existing handle. Ordinary project files create no sidecars. Failed deletion
+retains its owned path and lock; Recover refuses installation with
+`GA_RECOVERY_CLEAR` until cleanup can succeed, preserving native alias spelling
+on refusal. The Linux run independently checks two case-distinct snapshot paths.
+Startup resolves relative state directories before constructing the application;
+absolute native-picker paths still identify live owners and refuse recovery.
+Drive-rooted Windows paths resolve against the current drive; ambiguous
+drive-relative paths and unavailable working directories report `GA_STATE_ROOT`.
+
+Two concurrent native media workers pass three rounds each, with six decoded
+pictures, six cache reads and six 9,600-frame stereo mixes checked against
+independent 440/880 Hz tone oracles. Preview/audio/strip resets and export
+cancellation remain private; shared settings, diagnostics and foreign recovery
+bytes stay intact. Caller-owned session reports are exclusive and refuse reuse.
+Retired private media directories currently remain for artifact inspection;
+automatic storage cleanup is still unfinished.
+
+Thirty-four whole-monitor comparisons against independently decoded native
+16-bit FFV1 masters pass with maximum error 1/255. They cover all eleven
+transition kinds in 4K landscape and portrait, with extra progress positions
+for iris, clock and barn-door masks. The former 22-case baseline fails 17
+comparisons. A four-case/107-check canvas gate verifies exact seam boundaries,
+hidden/inactive/audio lanes, portrait, small/odd sequences and unknown-kind
+refusal. Spatial seams use native sequence pixels; surrounding and pointwise
+frames retain fitted canvases. Native 4K seam throughput is unmeasured.
+Two persistent stream cases additionally reuse one immutable snapshot through
+seven frame commands each, including seam exit and reentry. Actual worker launch
+receipts show fitted/native/fitted/native/fitted dimensions; all 14 delivered
+RGB pictures match independently decoded native masters within 1/255. Encoded
+FFV1 RGB does not establish monitor alpha equivalence.
+
+The combined Windows gate passed with 749 control outcomes, both concurrent
+process gates, long audio/clock checks, HDR/readback and cancellation in all five
+worker phases (140–174 ms). The root application SHA-256 is
+`2A7872B732249F09391292016FA00DB0238C851002D30BC780709B03245FF6BF`;
+the unchanged worker is
+`66EE15B507E15EEC67E69999411654C4893A0F9FF3EA8ACCBD1224CC5B62FD9C`.
+This build reuses MM-AIR's media runtime.
+
+An interactive check of this exact root build used a relative state directory
+and recovered an isolated snapshot of the supplied project. It restored gain
+1.05, both pictures and timeline filmstrip. Playback advanced with active stereo
+output meters; Stop paused, and Start returned a visible first frame. Ruler
+scrubbing selected the snake at `00:00:07:14`, changing the histogram, RGB parade
+and luma waveform. The native Save picker wrote a separate Unicode filename;
+independent JSON/hash checks confirmed gain 1.05, cleanup of owned recovery
+records and no change to the original project. The receipt is
+`archive/native-session-ui-2026-10-10.json`. This proves interactive correctness;
+the earlier sustained timing measurement belongs to its separately named build.
+
+The broader generated-media workflow also passed on the same application and
+worker with Windows Segoe UI and Noto Sans JP fallback. Its final invalid audio
+filter case requires both `GA_EXPORT_WORKER` and `GA_AUDIO_RENDER_FILTER`, a
+nonzero exit and no output file. The prior text-only error assertion was stale.
+The sanitized 41-entry source/acceptance archive is
+`archive/session-safety-transitions-2026-10-10.tar.gz`, SHA-256
+`df0d1ea540f9c6d1fb1431b0c3897e4d82a17935b3e46909647a0e339ed1dbc0`.
+It includes numeric process/pixel evidence, the exact native UI receipt and the
+separate overlap-audio defect reproduction. It contains no executables or media.

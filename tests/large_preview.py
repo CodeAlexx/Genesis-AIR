@@ -22,6 +22,8 @@ MONITOR = (480, 270)
 SHAPES = {"landscape": (3840, 2160), "portrait": (2160, 3840)}
 
 
+from media_session import session_env, session_root
+
 def run(argv, env=None, timeout=180):
     completed = subprocess.run([str(item) for item in argv], env=env, capture_output=True,
                                timeout=timeout,
@@ -50,9 +52,9 @@ def profile_picture(binary, project, scratch, report, env):
     # This is the production preview task at its ordinary 480x270 monitor size.
     # One sample plus three warmups leaves a committed frame in its diagnostic
     # mailbox. A one-frame clip stays at frame zero through every request.
-    current = dict(env, GENESIS_SCRATCH=str(scratch))
+    current, session_report = session_env(dict(env, GENESIS_SCRATCH=str(scratch)), scratch.parent)
     run([binary, "profile-preview", report, project, "1600", "980", "1", "--file-pixels"], current)
-    mailbox = scratch / "profile"
+    mailbox = session_root(session_report) / "profile"
     generation = int((mailbox / "ready.id").read_text().strip())
     assert generation >= 4
     slot = generation % 2

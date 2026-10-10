@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import time
 from tempfile import TemporaryDirectory
+from media_session import session_env, session_root
 
 
 def run(argv, env=None, timeout=180, cwd=None):
@@ -211,12 +212,14 @@ def main():
         long_doc = json.loads(long_project.read_text())
         long_doc["clips"][0]["length"] = 600
         long_project.write_text(json.dumps(long_doc))
-        progress_file = root / "scratch" / "export.progress"
-        cancel_file = root / "scratch" / "export.cancel"
+        export_env, session_report = session_env(env, root)
         long_movie = root / "long.mp4"
         exporting = subprocess.Popen([str(args.binary), "export", str(long_movie),
-                                      str(long_project)], env=env, text=True,
+                                      str(long_project)], env=export_env, text=True,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        media_root = session_root(session_report, exporting)
+        progress_file = media_root / "export.progress"
+        cancel_file = media_root / "export.cancel"
         reported = 0
         deadline = time.monotonic() + 120
         while not reported and exporting.poll() is None and time.monotonic() < deadline:
@@ -1395,7 +1398,8 @@ def main():
         broken = subprocess.run([str(args.binary), "export", str(root / "broken-filter.mp4"),
                                  str(broken_project)], env=env, capture_output=True,
                                 text=True, timeout=30)
-        assert broken.returncode != 0 and "audio filter chain" in broken.stdout, broken.stdout
+        assert (broken.returncode != 0 and "[GA_EXPORT_WORKER]" in broken.stdout
+                and "[GA_AUDIO_RENDER_FILTER]" in broken.stdout), broken.stdout
         assert not (root / "broken-filter.mp4").exists()
         print(f"real media: purple preview {seen}, encoded {encoded}; "
               f"keyframed fade {first_color} to {middle_color}, "

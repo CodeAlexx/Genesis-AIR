@@ -1317,6 +1317,49 @@ fn monitor_independent(kind: str) -> bool effects {alloc} {
     kind == "white_balance" or kind == "lut3d"
 }
 
+// Transition kernels use working-pixel soft edges or round source/mask
+// coordinates before the final monitor fit. Only pointwise mixing is proven
+// independent of this canvas. Unknown kinds stay conservative and are still
+// refused by the authoritative frame planner.
+fn active_spatial_transition(doc: ref<editor.Document>) -> bool effects {alloc} {
+  var lanes: array<u64> = editor_view.lanes(doc,doc.active)
+  var at: u64 = 0
+  loop {
+    if at >= array.len(lanes) {break}
+    let track: u64 = array.get(lanes,at)
+    if editor.track_kind(doc,track) == editor.track_video() and editor.track_visible(doc,track) {
+      match editor.transition_at(doc,track,editor.playhead(doc)) {
+        none=>{},
+        some(id)=>{
+          match editor.transition(doc,id) {
+            none=>{return true},
+            some(value)=>{
+              let kind: string = editor.name_text(doc,value.kind)
+              if not str.eq(str.view(kind),"crossfade") and not str.eq(str.view(kind),"dissolve") {
+                return true
+              }
+            },
+          }
+        },
+      }
+    }
+    at=at+1
+  }
+  false
+}
+
+fn canvas_gcd(width: u32, height: u32) -> u32 effects {} {
+  var first: u32 = width
+  var second: u32 = height
+  loop {
+    if second == 0 {break}
+    let remainder: u32 = first % second
+    first=second
+    second=remainder
+  }
+  first
+}
+
 pub fn configure_monitor_preview(doc: ref<editor.Document>, cache: ref<RenderCache>,
     monitor_width: u32, monitor_height: u32) -> unit effects {alloc, process, time} {
   var native: bool = false
@@ -1330,6 +1373,7 @@ pub fn configure_monitor_preview(doc: ref<editor.Document>, cache: ref<RenderCac
     }
     index = index+1
   }
+  if not native {native=active_spatial_transition(doc)}
   match editor.sequence_slot(doc, doc.active) {
     none => {},
     some(slot) => {
@@ -1342,8 +1386,28 @@ pub fn configure_monitor_preview(doc: ref<editor.Document>, cache: ref<RenderCac
       let factor: f64 = if native {1.0} else {math.min(1.0,
         math.min(cast.float(monitor_width) / cast.float(seq.width),
           cast.float(monitor_height) / cast.float(seq.height)))}
-      let width: u32 = cast.sat(math.max(16.0, math.round(cast.float(seq.width) * factor)))
-      let height: u32 = cast.sat(math.max(16.0, math.round(cast.float(seq.height) * factor)))
+      var width: u32 = cast.sat(math.max(16.0, math.round(cast.float(seq.width) * factor)))
+      var height: u32 = cast.sat(math.max(16.0, math.round(cast.float(seq.height) * factor)))
+      if not native and factor < 1.0 {
+        // The decoder fits to even inner dimensions. An independently rounded
+        // canvas can introduce extra bars (portrait 152x270 -> inner150x270).
+        // Prefer exact aspect with both axes even, never enlarging the sequence.
+        // Irreducible large odd ratios may have no fitting unit; retain the
+        // existing bounded rounded canvas in that case.
+        let divisor: u32 = canvas_gcd(seq.width,seq.height)
+        if divisor != 0 {
+          let unit_width: u32 = seq.width / divisor
+          let unit_height: u32 = seq.height / divisor
+          var multiple: u32 = if unit_width != 0 and unit_height != 0 {
+            cast.sat(math.min(cast.float(monitor_width / unit_width),cast.float(monitor_height / unit_height)))
+          }else{0}
+          multiple=multiple-(multiple % 2)
+          if multiple >= 2 and unit_width*multiple >= 16 and unit_height*multiple >= 16 {
+            width=unit_width*multiple
+            height=unit_height*multiple
+          }
+        }
+      }
       struct.set(cache, width, field=width)
       struct.set(cache, height, field=height)
     },

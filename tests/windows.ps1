@@ -93,6 +93,10 @@ try {
     & python (Join-Path $PSScriptRoot 'large_preview.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $root 'large-preview.json')
     if ($LASTEXITCODE -ne 0) { throw 'Large-sequence preview geometry and physical effect-radius acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'spatial_transitions.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --stream-client (Join-Path $Bin 'genesis-preview-stream.exe') --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe') `
+      --report (Join-Path $root 'spatial-transitions.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Large-sequence spatial transition preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'filter_order.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $root 'filter-order.json')
     if ($LASTEXITCODE -ne 0) { throw 'Ordered and duplicate picture-filter preview/master acceptance failed.' }
@@ -118,8 +122,14 @@ try {
     & python (Join-Path $PSScriptRoot 'export_cancel.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --worker $worker --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Active export cancellation and retry acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'media_sessions.py') --fixture (Join-Path $Bin 'genesis-media-session.exe') `
+      --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') --report (Join-Path $root 'media-sessions.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Concurrent media session isolation acceptance failed.' }
   }
   Write-Host (Invoke-Native 'genesis-project-safety.exe' @($work)).TrimEnd()
+  & python (Join-Path $PSScriptRoot 'recovery_ownership.py') --binary (Join-Path $Bin 'genesis-recovery-ownership.exe') `
+    --report (Join-Path $root 'recovery-ownership.json')
+  if ($LASTEXITCODE -ne 0) { throw 'Concurrent recovery ownership acceptance failed.' }
   foreach ($artifact in @('project-safety-tests.json', 'project-decision.png', 'recovery-decision.png')) {
     Copy-Item -LiteralPath (Join-Path $work "project-safety/$artifact") -Destination (Join-Path $root $artifact) -Force
   }
@@ -127,6 +137,7 @@ try {
   Write-Host (Invoke-Native 'genesis-window-cache.exe' @((Join-Path $work 'window-cache'))).TrimEnd()
   Write-Host (Invoke-Native 'genesis-editor-trim.exe' @((Join-Path $work 'editor-trim'))).TrimEnd()
   Write-Host (Invoke-Native 'genesis-trim-history.exe' @((Join-Path $work 'trim-history'))).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-spatial-canvas.exe' @((Join-Path $root 'spatial-canvas-tests.json'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'editor-trim/editor-trim-tests.json') -Destination (Join-Path $root 'editor-trim-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'trim-history/trim-history-tests.json') -Destination (Join-Path $root 'trim-history-tests.json') -Force
   & python (Join-Path $PSScriptRoot 'window_timing_test.py')

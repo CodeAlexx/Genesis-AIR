@@ -1,0 +1,139 @@
+// Subprocess fixture: each App retains real portable recovery file handles.
+module genesis.tests.recovery_ownership
+import std.codec as codec
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/project_session.ai" as session
+import "../src/recovery.ai" as recovery
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn history(history: ref<editor.History>) -> string effects {alloc} {
+  var out: string = string.copy("undo\n")
+  var at: u64 = 0
+  loop {if at >= editor.undo_depth(history) {break}
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),at)))
+    string.append(out,"\n")
+    at=at+1}
+  string.append(out,"redo\n")
+  at=0
+  loop {if at >= editor.redo_depth(history) {break}
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),at)))
+    string.append(out,"\n")
+    at=at+1}
+  out
+}
+fn facts(state: ref<app.App>, control: str, id: u64, message: str) -> bool effects {alloc,fs.write} {
+  var writer: codec.Writer = codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer,"message",message)
+  codec.field_text(writer,"document",encoded(struct.borrow(state,field=document)))
+  codec.field_text(writer,"history",history(struct.borrow(state,field=history)))
+  codec.field_u64(writer,"revision",state.document_revision)
+  codec.field_u64(writer,"media_revision",state.media_revision)
+  codec.field_u64(writer,"project_epoch",state.project_epoch)
+  codec.field_u64(writer,"selected_filter",state.selected_filter)
+  codec.field_bool(writer,"dirty",app.dirty(state))
+  codec.field_bool(writer,"pending",session.pending(state))
+  codec.field_text(writer,"target",struct.borrow(struct.borrow(state,field=pending_project),field=target))
+  codec.field_text(writer,"project_path",struct.borrow(state,field=project_path))
+  codec.field_text(writer,"recovery_file",struct.borrow(state,field=recovery_file))
+  codec.field_text(writer,"recovered_file",struct.borrow(state,field=recovered_file))
+  codec.end_object(writer)
+  let data: string = match codec.finish(writer) {ok(value)=>value,err(_)=>{return false},}
+  let destination: string = path.join(control,text.concat(string.from_int(id),".json"))
+  match files.write_atomic(destination,text.concat(destination,".tmp"),data) {ok(_)=>true,err(_)=>false,}
+}
+fn seeded(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App = app.app(provider.fake(root))
+  var imported: commands.Result = commands.import_media(state,"fixture.mov","Independent process")
+  let added: commands.Result = commands.append_clip(state,app.default_video_track(state),imported.value,0,60)
+  let _ = commands.select_only(state,added.value)
+  let _ = commands.open_source(state,imported.value)
+  let _ = commands.rename_track(state,app.default_video_track(state),"Redo context one")
+  let _ = commands.rename_track(state,app.default_video_track(state),"Redo context two")
+  let _ = commands.undo(state)
+  let _ = commands.undo(state)
+  state
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 4 {return 2}
+  // Exercise the same startup resolver as the real application, independently
+  // of its environment selection and GUI. Invalid cwd never fabricates a root.
+  if match provider.resolve_scratch_at("state","relative-cwd") {ok(_)=>true,err(problem)=>not text.contains(problem,"GA_STATE_ROOT"),} {return 6}
+  if match provider.resolve_scratch_at("C:state","C:/work") {ok(_)=>true,err(problem)=>not text.contains(problem,"GA_STATE_ROOT"),} {return 6}
+  if match provider.resolve_scratch_at("\\state","C:/work") {ok(value)=>value != "C:/state",err(_)=>true,} {return 6}
+  if match provider.resolve_scratch_at("/Case/State","/work") {ok(value)=>value != "/Case/State",err(_)=>true,} {return 6}
+  let root: string = match provider.resolve_scratch(view.get(args,1)) {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 6},}
+  let control: str = view.get(args,2)
+  let _ = files.mkdirs(root)
+  let _ = files.mkdirs(control)
+  var state: app.App = if view.get(args,3) == "empty" {app.app(provider.fake(root))}else{seeded(root)}
+  if view.get(args,3) == "owner" {
+    match recovery.record(state) {ok(_)=>{},err(problem)=>{io.write(problem)
+      return 3},}
+  }
+  if not facts(state,control,0,"ready") {return 4}
+  var id: u64 = 1
+  let deadline: u64 = time.monotonic_ns()+120000000000
+  loop {
+    if time.monotonic_ns() >= deadline {return 5}
+    let command: string = path.join(control,text.concat("command-",text.concat(string.from_int(id),".txt")))
+    let data: string = match files.read_text(command) {ok(value)=>value,err(_)=>{time.sleep_ms(2)
+      continue},}
+    var parts: array<string> = text.split(data,"\n")
+    let action: string = text.trim(array.borrow(parts,0))
+    let target: string = if array.len(parts) >= 2 {string.copy(array.borrow(parts,1))}else{string.new()}
+    var message: string = string.copy("unknown command")
+    if action == "inspect" {message=string.copy("inspected")}
+    else if action == "edit" {
+      var result: commands.Result = commands.rename_track(state,app.default_video_track(state),target)
+      message=commands.message(result)
+    }else if action == "probe" {
+      message=match files.lock(recovery.owner_path(target)) {
+        ok(_)=>string.copy("free"),err(error)=>string.copy(if error.code == 8 {"busy"}else{"lock error"}),
+      }
+    }
+    else if action == "record" {
+      let _ = commands.rename_track(state,app.default_video_track(state),target)
+      message=match recovery.record(state) {ok(_)=>string.copy("recorded"),err(problem)=>problem,}
+    }else if action == "offer" {
+      message=string.copy(if session.offer_recovery(state) {"offered"}else{"none"})
+    }else if action == "cancel" {message=session.cancel(state)}
+    else if action == "request" {message=session.request(state,app.ProjectAction.Recover,target)}
+    else if action == "recover" {
+      message=session.request(state,app.ProjectAction.Recover,target)
+      if session.modal(state) {message=session.choose(state,1)}
+    }else if action == "choose" {
+      let selection: u64 = match text.parse_u64(target) {some(value)=>value,none=>2,}
+      message=session.choose(state,cast.sat(selection))
+    }else if action == "save" {
+      var result: commands.Result = commands.save_project(state,target)
+      message=commands.message(result)
+    }else if action == "new" {
+      var result: commands.Result = commands.new_project(state)
+      message=commands.message(result)
+    }else if action == "open" {
+      var result: commands.Result = commands.open_project(state,target)
+      message=commands.message(result)
+    }else if action == "clear" {message=string.copy(if recovery.clear_owned(state) {"cleared"}else{"retained"})}
+    else if action == "unowned" {
+      let _ = struct.replace(state,string.copy(target),field=recovered_file)
+      message=string.copy(if recovery.clear_owned(state) {"cleared"}else{"retained"})
+    }else if action == "quit" {
+      let _ = facts(state,control,id,"quitting")
+      return 0
+    }
+    if not facts(state,control,id,message) {return 4}
+    id=id+1
+  }
+  0
+}

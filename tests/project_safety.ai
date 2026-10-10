@@ -284,6 +284,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.start(suite, "Startup recovery skips corrupt records; Keep current retains the snapshot")
   let scratch: string = path.join(str.view(root), "separate")
   var startup: app.App = app.app(provider.fake(str.view(scratch)))
+  let _ = test.check(suite, not session.offer_recovery(startup), "A live editing session's snapshot is not offered as crash recovery")
+  other = app.app(provider.fake(str.view(scratch)))
   app.set_fonts(startup, typeface.search_paths())
   time.sleep_ms(2)
   let _ = files.write_text(str.view(path.join(str.view(recovery.root(startup)), "corrupt.air")), "broken JSON")

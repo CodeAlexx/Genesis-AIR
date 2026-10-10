@@ -213,8 +213,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",2,2) {none=>true,some(_)=>false,},"Reload retires the published fitted picture")
   let _ = test.done(suite)
   let _ = test.start(suite,"Preview preserves small sequences and bounds large working canvases")
+  // Portrait 9:16 uses the largest even aspect multiple within 1280x720:
+  // 9*44 x 16*44 = 396x704. Rounded 405x720 would be cropped by even blit fit.
   var formats: array<u32> = [320,180,320,180,641,361,641,361,480,640,480,640,
-    1280,720,1280,720,3840,2160,1280,720,1080,1920,405,720]
+    1280,720,1280,720,3840,2160,1280,720,1080,1920,396,704]
   var format: u64 = 0
   loop {if format >= array.len(formats) {break}
     let width: u32 = array.get(formats,format)

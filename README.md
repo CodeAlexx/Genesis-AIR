@@ -233,7 +233,24 @@ shared-runtime location file supplies MM-AIR's FFmpeg/ffprobe paths; legacy sibl
 and PATH discovery remain available. `GENESIS_FAKE_PROVIDER=1` selects the
 deterministic test provider; real preview and export require the compositor.
 `GENESIS_SCRATCH` overrides state storage, which defaults to `%LOCALAPPDATA%/GenesisAIR`
-on Windows. This holds recovery snapshots, preview mailboxes, export progress and `errors.jsonl`.
+on Windows. This holds shared settings, recovery snapshots and `errors.jsonl`.
+Startup resolves relative storage paths against the process's current directory
+so absolute native-picker paths refer to the same ownership namespace.
+Unavailable working directories and ambiguous drive-relative paths such as
+`C:state` report `GA_STATE_ROOT` before command work.
+Each invocation atomically reserves a private `media/session-<token>-<attempt>`
+directory for source/program frames, preview and audio mailboxes, timeline strips,
+export progress/cancellation and provider profiles. A second window cannot cancel
+the first window's export or replace its cached pictures.
+
+For scripts, set `GENESIS_SESSION_REPORT` to a unique nonexistent caller-owned file
+before launching. It receives that invocation's private media directory as one
+newline-terminated row. Read `export.cancel`, `export.progress`, `profile` and
+`playback-profile` relative to that directory. Existing or unwritable report files
+refuse the invocation with `GA_MEDIA_SESSION_REPORT` before command work;
+`GA_MEDIA_SESSION` identifies failure to reserve a directory. There is no shared
+latest-session pointer. Private cache directories currently remain after exit for
+artifact inspection; automatic cleanup of retired sessions remains unfinished.
 Coded `[GA_*]` errors appear in the status line and local structured diagnostics;
 Help > Show error details reports the diagnostics path.
 
@@ -250,7 +267,8 @@ its own 30-second timer, including while playback is paused with no further inpu
 Media/effect edits keep this interval; replacing the project allows its first snapshot
 immediately. Each editing session creates a separate `.air` snapshot in `recovery` below the scratch
 directory, retaining the original project path. Startup offers the newest readable
-snapshot; corrupt or incomplete records are skipped and kept. **Recover** opens a paused
+snapshot whose ownership is available; corrupt, incomplete or live foreign-session
+records are skipped and kept. **Recover** opens a paused
 copy for Save as, and **Keep current** leaves the snapshot available. File > Recover autosave
 opens the recovery picker, including this session's current snapshot. When Recover is
 pending, the autosave timer preserves the selected snapshot until the decision is
@@ -259,6 +277,12 @@ The previous plain-project `autosave.air` is still readable.
 Successful Save or an accepted Discard clears this session's managed snapshots; an
 ordinary project selected through Recover is never deleted. A failed autosave preserves
 the previous complete snapshot and reports a `GA_AUTOSAVE_*` error.
+Managed snapshots retain an OS file lock on a stable `.owner` sidecar while the
+session owns them, including across atomic snapshot updates. Recovery claims the
+lock and rereads the selected record before replacing the project. A competing
+live owner reports `GA_RECOVERY_BUSY` and preserves the current document/history;
+process exit releases ownership so an orphan becomes recoverable. Sidecars remain
+in place to preserve lock identity.
 
 The UI uses system Segoe UI through `std.font`, with proportional metrics and cached
 antialiased glyphs. Colors come from `std.application_theme` and `std.desktop_styles`;
@@ -293,6 +317,14 @@ grades, overlap, a short gap, titles and an upper layer, with audible audio of t
 exact master length. Incoming Blend/PiP/Chroma key and transitions above the base
 lane remain unsupported.
 
+Spatial transition windows compose at sequence resolution before fitting the
+ordinary monitor, preserving wipe softness and source/mask integer sampling.
+Crossfade, dissolve and surrounding frames retain small canvases. When feasible,
+the fitted canvas uses an even multiple of the exact sequence aspect ratio; a
+4K portrait sequence uses 144x256 inside a 480x270 monitor. Large irreducible odd
+ratios retain the bounded rounded fallback. Native 4K spatial-transition playback
+at 60 fps remains unmeasured; fullscreen 4K work remains deferred.
+
 Media decode retains 16-bit precision and composition/intermediate passes use FP32.
 The encoded format determines the final quantization. HDR sources are tone mapped to
 Rec.709 for the ordinary SDR preview; HDR masters retain PQ / BT.2020. This is not a
@@ -307,7 +339,8 @@ waiting for the encoder to exit. Cancellation is checked in 50 ms I/O steps;
 the export owner stops its worker before removing incomplete output. A final
 cancellation check precedes publication. Worker, cancellation, path and publication
 failures have `GA_EXPORT_*` codes; ordinary UI cancellation shows `export cancelled`.
-`export.progress` and `export.cancel` in the scratch directory expose the same scriptable
+`export.progress` and `export.cancel` in the private media directory reported by
+`GENESIS_SESSION_REPORT` expose the same scriptable
 progress and cancellation path.
 
 Windows playback prepares bounded five-second WAV chunks on one background thread and
@@ -687,7 +720,8 @@ reproduces the earlier sleep/poll diagnostic and its paint on every iteration.
 TSV reports include individual worker phases, paint/wait durations and the active
 timer request, so wait overhead can be distinguished from decoder work.
 Profiling also writes `provider-profile.tsv` under the preview task's scratch folder
-(`GENESIS_SCRATCH/profile` or `GENESIS_SCRATCH/playback-profile`). Its columns are
+(`profile` or `playback-profile` below the private directory returned through
+`GENESIS_SESSION_REPORT`). Its columns are
 `call`, `exchange_ns`, `input_ns`, `read_ns` and `copy_ns`: request/reply, reader
 open/rewind, bounded byte read and surface copy. A new diagnostic session resets
 the file; ordinary editing writes no rows. `tests/playback_timing.py` includes these
@@ -827,13 +861,19 @@ Generated-media requests check independent source/program seeking and decoded fr
 stamps, monitor size changes, rewind, Reload, a 32-request drag burst, strip extraction
 during playback, matching bitmap pixels after reverse/trim/2x rate, stale/incomplete
 strip refusal, absent monitor frame files and
-idle Stop. Project safety has 15 cases /
-84 checks for Save/Discard/Cancel, native close-request dispatch, failed-save retry,
+idle Stop. Project safety has 16 cases /
+94 checks for Save/Discard/Cancel, native close-request dispatch, failed-save retry,
 separate snapshots, paused final-edit autosave, atomic failure preservation, legacy
 recovery and selecting the active snapshot without replacing it while the decision is
 open. It verifies original files stay intact, including a normal project inside the
-recovery directory. Dialog images are rendered headlessly; the new picker/modal flow
-still needs an interactive Windows check. An additional 24-case / 444-check pixel gate
+recovery directory. An interactive Win32 check additionally verifies Cancel before
+New, native Save as with a Japanese filename, clean New and native Open restoring
+the saved gain and pictures; its receipt is
+`archive/native-project-lifecycle-2026-10-10.json`. A later root-build check also
+verifies native recovery, recovered gain, active stereo meters, nonblank rewind,
+ruler scrubbing, changing scopes and a separate Unicode Save as; its receipt is
+`archive/native-session-ui-2026-10-10.json`. Native failed-save dialog interaction
+still requires a separate check. An additional 24-case / 444-check pixel gate
 compares retained playback against the complete painter byte for byte:
 all four docks at 1x/1.5x/2x, changing images, forward seeks and rewind, fullscreen,
 resize, transport changes, alpha, themes, menus, prompts, keyed inspector values and
@@ -937,6 +977,14 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
+The current root application is the session-safety checkpoint described in
+[control coverage](docs/CONTROL_COVERAGE.md#concurrent-sessions-and-transition-fidelity-on-2026-10-10).
+Its combined Windows suite passed 749 control outcomes, recovery ownership,
+concurrent media isolation, spatial preview/master comparisons and the audio,
+HDR and cancellation gates. The supplied video also passed the native
+interactive workflow. Sustained timing below belongs to the earlier measured
+application; this checkpoint has no new sustained throughput measurement.
+
 The 2026-10-10 native-window recovery candidate delivers 59.87 distinct pictures/s
 over 131.88 seconds from the supplied 4K/59.94 AV1/PQ source, with live stereo
 audio and fitted 480x270 monitors on a 2560x1316 canvas. Eight frame positions are
@@ -959,7 +1007,10 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.
 - Nested sequence rendering, track/audio-filter automation, animated speed and some filter combinations
-  remain unfinished. Clip gain automation is covered above. The library has mappings for 31 video and
+  remain unfinished. An independent signed-overlap PCM test also reproduces
+  order-dependent audio levels from per-addition clipping; fixing the mixer to
+  preserve headroom until final output is pending.
+  Clip gain automation is covered above. The library has mappings for 31 video and
   20 audio effects; representative output checks do not establish every parameter value,
   ordering combination or keyframe behavior.
 - The source/program transport uses a Windows audio sample clock, but sustained preview

@@ -62,7 +62,7 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_p
   let _ = editor.seek(struct.borrow(state,field=document),0)
   let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
   app.set_dock_tab(state,chrome.tab_scopes())
-  let scratch: string = string.copy(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)))
+  let scratch: string = string.copy(str.view(struct.borrow(struct.borrow(state,field=provider),field=media_scratch)))
   let root: string = path.join(scratch,"playback-profile")
   let sound_root: string = path.join(scratch,"playback-profile-audio")
   let output: string = path.join(sound_root,"chunk.wav")

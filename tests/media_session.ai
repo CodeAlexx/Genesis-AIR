@@ -1,0 +1,70 @@
+// Two native processes share settings, while each repeatedly resets its own task
+// mailboxes and decodes distinct real audio/video through independent workers.
+module genesis.tests.media_session
+import std.editor as editor
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+import "../src/audio_playback.ai" as audio
+import "../src/preview.ai" as preview
+
+pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 6 {return 2}
+  let shared: str = view.get(args,1)
+  let source_path: str = view.get(args,2)
+  let worker: str = view.get(args,3)
+  let receipt: str = view.get(args,4)
+  let red: bool = view.get(args,5) == "red"
+  var engine: provider.Provider = provider.gcompose(worker,shared)
+  // Explicit fixtures remain at their supplied root until the application opts in.
+  if provider.media_root(engine) != shared {return 1}
+  match provider.isolate_media(engine) {ok(_)=>{},err(problem)=>{io.write(problem)
+    return 1},}
+  let root: string = provider.media_root(engine)
+  match provider.isolate_media(engine) {ok(_)=>{},err(_)=>{return 1},}
+  if provider.media_root(engine) != root or str.view(struct.borrow(engine,field=scratch)) != shared {return 1}
+  match files.write_new_text(receipt,text.concat(root,"\n")) {ok(_)=>{},err(_)=>{return 1},}
+  var doc: editor.Document = editor.document(30.0,320,180)
+  let source: u64 = editor.add_source(doc,source_path,"Concurrent",6,30.0)
+  let _ = editor.describe_source(doc,source,320,180,true,true,48000,2)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let _ = editor.append(doc,track,source,0,6)
+  var round: u64 = 0
+  loop {if round >= 3 {break}
+    let name: string = string.from_int(round)
+    let ready: string = path.join(root,text.concat("ready-",name))
+    let go: string = path.join(root,text.concat("go-",name))
+    let _ = files.write_text(ready,"ready\n")
+    let deadline: u64 = time.monotonic_ns()+20000000000
+    loop {if match files.exists(go) {ok(value)=>value,err(_)=>false,} {break}
+      if time.monotonic_ns() >= deadline {return 1}
+      time.sleep_ms(5)}
+    audio.reset(path.join(root,"audio-playback"))
+    preview.reset(path.join(root,"preview"))
+    preview.reset(path.join(root,"timeline-strips"))
+    provider.invalidate(engine)
+    var picture: provider.Frame = provider.source_frame(engine,source_path,0,160,90)
+    let color: draw.Color = match draw.surface_pixel(struct.borrow(picture,field=pixels),80,45) {some(value)=>value,none=>{return 1},}
+    if not picture.ok or (red and (color.r < 220 or color.b > 20)) or (not red and (color.b < 220 or color.r > 20)) {return 1}
+    let out: string = provider.audition_path(engine)
+    match media.prepare_audio(doc,worker,0,out) {ok(value)=>{if not value {return 1}},err(problem)=>{io.write(problem)
+      return 1},}
+    let _ = files.write_text(provider.export_progress_path(engine),if red {"17"}else{"43"})
+    if red {let _ = files.write_text(provider.export_cancel_path(engine),"cancel")}
+    let _ = files.write_text(path.join(root,text.concat("done-",name)),"done\n")
+    let next: string = path.join(root,text.concat("check-",name))
+    loop {if match files.exists(next) {ok(value)=>value,err(_)=>false,} {break}
+      if time.monotonic_ns() >= deadline {return 1}
+      time.sleep_ms(5)}
+    var held: provider.Frame = provider.source_frame(engine,source_path,0,160,90)
+    let seen: draw.Color = match draw.surface_pixel(struct.borrow(held,field=pixels),80,45) {some(value)=>value,none=>{return 1},}
+    if not held.ok or seen.r != color.r or seen.b != color.b {return 1}
+    round=round+1
+  }
+  provider.shutdown(engine)
+  io.write("Concurrent media session passed: 3 decoded/cached pictures and 3 audio mixes\n")
+  0
+}
