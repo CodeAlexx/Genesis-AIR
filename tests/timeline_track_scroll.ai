@@ -1,0 +1,198 @@
+// Many-track navigation must paint and hit-test the same shifted lane model.
+module genesis.tests.timeline_track_scroll
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.geometry as geometry
+import std.math as math
+import std.path as path
+import std.files as files
+import std.testing as test
+import std.timeline as timeline
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/view.ai" as painter
+
+fn encoded(state: ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn picture() -> draw.Surface effects {alloc} {
+  var canvas: draw.Canvas=draw.canvas(option.unwrap(draw.surface(80,45)))
+  draw.clear(canvas,draw.rgb(12,240,30))
+  draw.finish(canvas)
+}
+fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App=app.app(provider.fake(root))
+  var doc: editor.Document=editor.document(30.0,160,90)
+  let source: u64=editor.add_source(doc,"metadata-only.mov","Many-track source",240,30.0)
+  let _=editor.describe_source(doc,source,160,90,true,true,48000,2)
+  var count: u64=0
+  loop {if count==24 {break}
+    let track: u64=editor.add_track(doc,doc.active,editor.track_video(),"Reachable lane")
+    let _=editor.place(doc,track,source,0,60,0)
+    count=count+1
+  }
+  // Root id2/source3/first track4/first clip5 are fixed independently.
+  let _=editor.place(doc,4,source,60,60,60)
+  let _=editor.add_transition(doc,4,60,12,"crossfade")
+  let child: u64=editor.add_sequence(doc,"Short sequence",24.0,160,90)
+  let _=editor.add_track(doc,child,editor.track_video(),"Only lane")
+  let _=editor.seek(doc,7)
+  commands.replace_project(state,doc)
+  app.mark_dirty(state,false)
+  var peaks: array<f64> = [0.8,0.8,0.8,0.8,0.8,0.8]
+  app.set_waveform(state,5,peaks,0,59,state.media_revision)
+  let media_revision: u64=state.media_revision
+  let document_revision: u64=state.document_revision
+  array.push(struct.borrow(state,field=thumbnails),app.Thumbnail {clip:5,frame:0,source:3,
+    source_frame:0,revision:media_revision,document_revision:document_revision,pixels:picture()})
+  state
+}
+fn painted(state: ref<app.App>, width: u32, height: u32) -> draw.Surface effects {alloc} {
+  var canvas: draw.Canvas=draw.canvas(option.unwrap(draw.surface(width,height)))
+  var source: draw.Surface=draw.empty_surface()
+  var program: draw.Surface=draw.empty_surface()
+  painter.paint(state,canvas,cast.float(width),cast.float(height),source,program)
+  draw.finish(canvas)
+}
+fn pixel(surface: ref<draw.Surface>, x: f64, y: f64, wanted: draw.Color) -> bool effects {} {
+  match draw.surface_pixel(surface,cast.sat(x),cast.sat(y)) {
+    none=>false,some(found)=>found.r==wanted.r and found.g==wanted.g and found.b==wanted.b,
+  }
+}
+type Button = struct {area: layout.Rect,enabled: bool}
+fn button(state: ref<app.App>, frame: layout.Frame, action: u32) -> option<Button> effects {alloc} {
+  var model: timeline.Timeline=painter.timeline_model(state,frame.timeline)
+  var controls: array<chrome.Control> = chrome.track_controls(frame,state,model)
+  var at: u64=0
+  loop {if at>=array.len(controls) {break}
+    let found: ref<chrome.Control> = array.borrow(controls,at)
+    if found.action==action {return option.some(Button {area:found.area,enabled:found.enabled})}
+    at=at+1
+  }
+  option.none()
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=2 {return 2}
+  let root: str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite: test.Suite=test.suite("Timeline vertical track viewport",false)
+  var state: app.App=fixture(root)
+  let frame: layout.Frame=layout.frame(1600.0,980.0)
+  let original: string=encoded(state)
+  let revision: u64=state.document_revision
+  let _=test.start(suite,"Header wheel and discoverable controls scroll only the track viewport")
+  let down: Button=option.unwrap(button(state,frame,chrome.act_tracks_down()))
+  let up: Button=option.unwrap(button(state,frame,chrome.act_tracks_up()))
+  let _=test.check(suite,down.enabled and not up.enabled,"Down is enabled and Up disabled at the first lane")
+  let initial_focus: u32=app.focus(state)
+  var disabled_up: string=input.pointer_down(state,1600.0,980.0,(up.area.left+up.area.right)/2.0,(up.area.top+up.area.bottom)/2.0)
+  let _=test.check(suite,str.len(str.view(disabled_up))==0 and app.track_scroll(state)==0 and app.focus(state)==initial_focus,"Clicking disabled Up produces no action or view change")
+  let _=input.pointer_down(state,1600.0,980.0,(down.area.left+down.area.right)/2.0,(down.area.top+down.area.bottom)/2.0)
+  let _=test.eq_u64(suite,app.track_scroll(state),1,"Footer Down advances one lane")
+  let _=input.pointer_down(state,1600.0,980.0,(up.area.left+up.area.right)/2.0,(up.area.top+up.area.bottom)/2.0)
+  let _=test.eq_u64(suite,app.track_scroll(state),0,"Footer Up returns one lane")
+  let _=input.wheel(state,1600.0,980.0,frame.headers.left+10.0,frame.headers.top+10.0,true,1000,false)
+  let visible: u64=cast.sat(math.floor(layout.height_of(frame.timeline)/50.0))
+  let _=test.eq_u64(suite,app.track_scroll(state),24-visible,"Many wheel ticks clamp at the last full lane")
+  let last_down: Button=option.unwrap(button(state,frame,chrome.act_tracks_down()))
+  let _=test.check(suite,not last_down.enabled,"Down is disabled at the last lane")
+  let last_first: u64=app.track_scroll(state)
+  let last_focus: u32=app.focus(state)
+  var disabled_down: string=input.pointer_down(state,1600.0,980.0,(last_down.area.left+last_down.area.right)/2.0,(last_down.area.top+last_down.area.bottom)/2.0)
+  let _=test.check(suite,str.len(str.view(disabled_down))==0 and app.track_scroll(state)==last_first and app.focus(state)==last_focus,"Clicking disabled Down produces no action or view change")
+  let _=test.check(suite,encoded(state)==original and state.document_revision==revision and not app.dirty(state),"View navigation preserves authored state, transport and dirty/revision")
+  let horizontal: i64=app.scroll(state)
+  let _=input.wheel(state,1600.0,980.0,frame.timeline.left+20.0,frame.timeline.top+10.0,true,2,false)
+  let _=test.eq_i64(suite,app.scroll(state),horizontal+24,"Timeline body wheel preserves horizontal scrolling")
+  let first: u64=app.track_scroll(state)
+  let zoom: f64=app.zoom(state)
+  let _=input.wheel(state,1600.0,980.0,frame.headers.left+10.0,frame.headers.top+10.0,false,1,true)
+  let _=test.near_f64(suite,app.zoom(state),zoom*1.25,0.00001,"Ctrl wheel keeps timeline zoom")
+  let _=test.eq_u64(suite,app.track_scroll(state),first,"Ctrl zoom preserves lane offset")
+  let _=test.eq_u64(suite,app.track_scroll_max(state,100.0),22,"Two full lanes fit a100px body without requiring a trailing gap")
+  let _=test.eq_u64(suite,app.track_scroll_max(state,99.0),23,"A body shorter than two complete lanes exposes one")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Minimum window exposes and selects the formerly unreachable bottom track")
+  let _=ref.swap(state,fixture(root))
+  let small: layout.Frame=layout.frame(640.0,480.0)
+  let _=app.set_track_scroll(state,1000,layout.height_of(small.timeline))
+  var model: timeline.Timeline=painter.timeline_model(state,small.timeline)
+  let bottom: f64=timeline.track_top(model,23)
+  let _=test.check(suite,bottom>=small.timeline.top and bottom+46.0<=small.timeline.bottom,"Bottom lane fits the actual body at minimum size")
+  let _=input.pointer_down(state,640.0,480.0,timeline.frame_to_x(model,20),bottom+10.0)
+  let _=test.eq_u64(suite,app.current_clip(state),5,"Click selects the authored bottom-lane clip")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),7,"Selecting a lane does not scrub time")
+  app.end_gesture(state)
+  let prior: u64=app.current_clip(state)
+  let _=input.pointer_down(state,640.0,480.0,small.timeline.left+20.0,small.timeline.bottom+10.0)
+  let _=test.eq_u64(suite,app.current_clip(state),prior,"Lane footer accepts no clipped clip gesture")
+  var controls: array<chrome.Control> = chrome.track_controls(small,state,model)
+  var at: u64=0
+  var contained: bool=true
+  loop {if at>=array.len(controls) {break}
+    let entry: ref<chrome.Control> = array.borrow(controls,at)
+    if entry.domain==chrome.domain_track() {
+      contained=contained and entry.area.top>=small.headers.top and entry.area.bottom<=small.timeline.bottom
+    }
+    at=at+1
+  }
+  let _=test.check(suite,contained,"Every per-lane hit target is inside the visible header body")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Thumbnails, waveform peaks and transition pixels follow the same scrolled lane")
+  let _=ref.swap(state,fixture(root))
+  let _=app.set_track_scroll(state,1000,layout.height_of(frame.timeline))
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let y: f64=timeline.track_top(model,23)
+  var image: draw.Surface=painted(state,1600,980)
+  let _=test.check(suite,pixel(image,frame.timeline.left+30.0,y+40.0,draw.rgb(12,240,30)),"Cached thumbnail paints in the reached bottom lane")
+  let _=test.check(suite,pixel(image,frame.timeline.left+96.0,y+23.0,draw.rgb(150,224,196)),"Cached stereo waveform paints in the same reached lane")
+  let _=test.check(suite,pixel(image,timeline.frame_to_x(model,60),y+10.0,draw.rgb(206,122,74)),"Transition seam paints over its authored lane")
+  let header_body: f64=frame.timeline.bottom
+  let colors: painter.Theme = painter.theme(state)
+  let _=test.check(suite,pixel(image,frame.timeline.left+30.0,header_body+10.0,colors.background),"Clipped lane pixels do not paint into footer space")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Resize, sequence switch, hidden tracks and removal derive live clamped bounds")
+  let _=ref.swap(state,fixture(root))
+  let _=app.set_track_scroll(state,1000,layout.height_of(small.timeline))
+  let small_first: u64=app.track_scroll(state)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.check(suite,app.track_scroll(state)<small_first and app.track_scroll(state)==app.track_scroll_max(state,layout.height_of(frame.timeline)),"Larger window clamps an existing bottom scroll")
+  let _=editor.set_track_hidden(struct.borrow(state,field=document),4,true)
+  let hidden_first: u64=app.track_scroll(state)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.eq_u64(suite,app.track_scroll(state),hidden_first,"Hidden lanes retain reachable unhide controls")
+  let removed: commands.Result=commands.remove_track(state,4)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.check(suite,removed.ok and app.track_scroll(state)==app.track_scroll_max(state,layout.height_of(frame.timeline)),"Removing a bottom track clamps the live lane count")
+  let undone: commands.Result=commands.undo(state)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.check(suite,undone.ok and match editor.track_slot(struct.borrow(state,field=document),4) {some(_)=>true,none=>false,},"Undo restores the removed authored lane")
+  let before_add: u64=app.track_scroll_max(state,layout.height_of(frame.timeline))
+  let added: commands.Result=commands.add_track(state,editor.track_audio(),"Reachable new audio lane")
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.check(suite,added.ok and app.track_scroll_max(state,layout.height_of(frame.timeline))==before_add+1,"Adding an audio lane expands reachable live bounds")
+  let _=app.set_track_scroll(state,1000,layout.height_of(frame.timeline))
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.eq_u64(suite,app.track_scroll(state),before_add+1,"New bottom audio lane is reachable")
+  let undone_add: commands.Result=commands.undo(state)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.check(suite,undone_add.ok and app.track_scroll(state)==before_add,"Undoing added lane clamps the formerly valid bottom offset")
+  let child: u64=struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sequences),1),field=id)
+  let _=editor.set_active(struct.borrow(state,field=document),child)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.eq_u64(suite,app.track_scroll(state),0,"Switching to a short sequence resets lane navigation")
+  let _=test.eq_u64(suite,app.track_scroll_max(state,layout.height_of(frame.timeline)),0,"Short sequence has no unreachable lanes")
+  let _=editor.set_active(struct.borrow(state,field=document),2)
+  let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
+  let _=test.eq_u64(suite,app.track_scroll(state),0,"Returning to another sequence begins at its first lane")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"timeline-track-scroll-tests.json"),8)
+}

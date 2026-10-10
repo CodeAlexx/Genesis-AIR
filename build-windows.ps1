@@ -70,6 +70,8 @@ if ($RunTests) { $sources += ,@('nested-timeline-bitmaps', 'tests/nested_timelin
 if ($RunTests) { $sources += ,@('nested-picture-plan', 'tests/nested_picture_plan.ai') }
 if ($RunTests) { $sources += ,@('picture-memory', 'tests/picture_memory.ai') }
 if ($RunTests) { $sources += ,@('nested-waveforms', 'tests/nested_waveforms.ai') }
+if ($RunTests) { $sources += ,@('direct-waveforms', 'tests/direct_waveforms.ai') }
+if ($RunTests) { $sources += ,@('timeline-track-scroll', 'tests/timeline_track_scroll.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -103,6 +105,8 @@ if ($RunTests) { $targets += @('genesis-nested-timeline-bitmaps') }
 if ($RunTests) { $targets += @('genesis-nested-picture-plan', 'genesis-compound-canvas') }
 if ($RunTests) { $targets += @('genesis-picture-memory', 'genesis-picture-memory-lifecycle') }
 if ($RunTests) { $targets += @('genesis-nested-waveforms') }
+if ($RunTests) { $targets += @('genesis-direct-waveforms') }
+if ($RunTests) { $targets += @('genesis-timeline-track-scroll') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }

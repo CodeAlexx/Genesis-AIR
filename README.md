@@ -109,6 +109,9 @@ neighbouring cuts when Snap is on.
 
 The right inspector scrolls under the pointer with the mouse wheel. Its scrollbar supports
 track clicks for page movement and direct thumb dragging; it does not depend on prior focus.
+Scroll over the track headers to reach lower lanes, or use their Up/Down buttons.
+The wheel over the timeline body still moves along time; Ctrl-wheel changes zoom.
+Lane navigation preserves the project and playhead and clamps after resize or track edits.
 
 All of it is driven by project state, saved to and loaded from the AIR editor project schema.
 
@@ -1099,6 +1102,31 @@ was sanitized and read back against its manifest. Its SHA-256 is
 `fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. A cold launch of the installed
 root payload restored visible frame-zero pictures and the compound filmstrip.
 
+## Processed direct waveforms and track navigation
+
+Direct-source waveforms now show the processed stereo clip contribution, including
+trim, reverse, static speed, clip/track gain and pan, audio effects and gain/fade
+curves. Embedded video audio uses the same path. Peaks retain float headroom;
+disabled, muted, solo-excluded and held clips show silence. Animated audio effects,
+pan and speed refuse with coded diagnostics until their graph history is supported.
+Background strip requests schedule clips in the visible time range and reuse
+unchanged peaks. Changed bodies still require full audio processing and temporary
+storage; audio-only worker startup currently also initializes OpenCL.
+
+The shared AIR timeline now supports vertical lane navigation. Its headers,
+clips, bitmaps, waveforms, transitions and pointer targets use the same shifted
+model. Resize, sequence changes and track edits keep the view within live bounds.
+The native fixture exercises 24 lanes, including selection of the bottom clip and
+rendered bitmap/waveform/transition placement.
+
+See the [focused acceptance ledger](docs/CONTROL_COVERAGE.md#processed-direct-waveforms-and-vertical-tracks-on-2026-10-10)
+for exact scope and remaining performance limits. The native 4K HDR shader prototype
+remains private; this application checkpoint retains the accepted media worker.
+The fresh installed-root check covers playback meters, mute/unmute, Stop, rewind,
+paused scrubbing, changing scopes and direct filmstrip/peak publication. Windows
+acceptance retains the unchanged full-run media prefix and a passing control-tail
+rerun after repairing disabled-button diagnostics; 757 control outcomes pass.
+
 ## Known gaps
 
 The earlier published session-safety and
@@ -1151,7 +1179,7 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   improves serial preparation from 1.175 to 12.928 pictures/s, excluding audio and native
   presentation; responsive compound 4K60 remains unproved. Parent
   Stabilize refuses with `GA_VIDEO_NESTED_HISTORY` until group history is available.
-  Compound waveforms now show the processed stereo bus, including child mixing,
+  Direct and compound waveforms now show processed stereo audio, including child mixing,
   parent effects, trims and rate. Content changes invalidate peaks; viewport-only
   requests reuse them, and held pictures show silence. Cold changed buses still
   require background audio-cache construction. Track/audio-filter automation,

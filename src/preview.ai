@@ -146,8 +146,18 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
 }
 pub fn waveforms_for_request(state: ref<app.App>, root: str, id: u64) -> result<u64,string>
     effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  waveforms_in_range(state,root,id,false,0,0)
+}
+pub fn waveforms_for_viewport(state: ref<app.App>, root: str, id: u64, start: i64, span: i64)
+    -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  if start < 0 or span <= 0 or span > 9223372036854775807-start {
+    return result.err("[GA_TIMELINE_RANGE] Invalid waveform viewport")
+  }
+  waveforms_in_range(state,root,id,true,start,start+span)
+}
+fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, first: i64, last: i64)
+    -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var wanted: array<u64> = array.new()
-  var paths: array<string> = array.new()
   var widths: array<u64> = array.new()
   var document: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   var index: u64 = 0
@@ -156,28 +166,13 @@ pub fn waveforms_for_request(state: ref<app.App>, root: str, id: u64) -> result<
     match editor.clip_at(document, index) {
       none => { },
       some(value) => {
+        if visible and (editor.clip_end(value) <= first or value.start >= last) {index=index+1
+          continue}
         if value.owner == document.active and chrome.clip_has_audio(document, value.id) {
-          if value.nested != 0 {
-            array.push(wanted,value.id)
-            array.push(paths,string.new())
-            let widened: u64 = cast.sat(value.length)
-            let buckets: u64 = if widened/3 > 512 {512}else{widened/3}
-            array.push(widths,if buckets < 8 {8}else{buckets})
-            index=index+1
-            continue
-          }
-          match editor.source_slot(document, value.source) {
-            some(slot) => {
-              array.push(wanted, value.id)
-              array.push(paths, string.copy(str.view(struct.borrow(
-                array.borrow(struct.borrow(document, field=sources), slot), field=path))))
-              let span: i64 = if value.length < 8 { 8 } else { value.length }
-              let widened: u64 = cast.wrap(span)
-              let buckets: u64 = if widened / 3 > 512 { 512 } else { widened / 3 }
-              array.push(widths, if buckets < 8 { 8 } else { buckets })
-            },
-            none => { },
-          }
+          array.push(wanted,value.id)
+          let widened: u64 = cast.sat(value.length)
+          let buckets: u64 = if widened/3 > 512 {512}else{widened/3}
+          array.push(widths,if buckets < 8 {8}else{buckets})
         }
       },
     }
@@ -205,10 +200,11 @@ pub fn waveforms_for_request(state: ref<app.App>, root: str, id: u64) -> result<
         }
       },none=>{},
     }
-    if value.nested != 0 {
       let engine: ref<provider.Provider> = struct.borrow(state,field=provider)
-      var peaks: array<f64> = if timeline_media.effective_speed(document,value) == 0.0 {
-        // Held pictures have no advancing audio, just like ordinary playback.
+      var peaks: array<f64> = if not value.enabled or not editor.track_audible(document,value.track) or
+          timeline_media.effective_speed(document,value) == 0.0 {
+        // Waveforms show the authored clip's actual contribution, including
+        // mute/solo/disabled silence and held pictures without advancing sound.
         var silence: array<f64> = array.new()
         var k: u64 = 0
         loop {if k >= buckets {break}
@@ -217,46 +213,16 @@ pub fn waveforms_for_request(state: ref<app.App>, root: str, id: u64) -> result<
         }
         silence
       }else if engine.kind == provider.kind_fake() {
-        provider.envelope(engine,text.concat("compound:",string.from_int(value.id)),buckets)
+        provider.envelope(engine,text.concat("processed:",string.from_int(value.id)),buckets)
       }else{
-        if engine.kind != provider.kind_gcompose() {return result.err("[GA_AUDIO_NESTED_ENV] Compound waveforms require the native worker")}
-        try timeline_media.compound_envelope(document,value,buckets,provider.worker_path(engine),
+        if engine.kind != provider.kind_gcompose() {return result.err("[GA_AUDIO_CLIP_ENV] Processed stereo waveforms require the native worker")}
+        try timeline_media.clip_envelope(document,value,buckets,provider.worker_path(engine),
           provider.audition_path(engine),root,id)
       }
       app.set_waveform(state,value.id,peaks,timeline_media.source_frame(document,value,value.start),
         timeline_media.source_frame(document,value,value.start+value.length-1),state.media_revision)
       filled=filled+1
       at=at+1
-      continue
-    }
-    var peaks: array<f64> = provider.envelope(struct.borrow(state, field=provider),
-      str.view(array.borrow(paths, at)), 512)
-    if array.len(peaks) != 0 {
-      let clip_id: u64 = array.get(wanted, at)
-      match editor.clip(document, clip_id) { none => {}, some(clip) => {
-        let slot: u64 = match editor.source_slot(document, clip.source) { some(value) => value, none => 0, }
-        let fps: f64 = editor.sequence_fps(document, document.active)
-        let speed: f64 = timeline_media.effective_speed(document, clip)
-        let source: ref<editor.Source> = array.borrow(struct.borrow(document, field=sources), slot)
-        let duration: f64 = cast.float(source.frames) / source.fps
-        var shown: array<f64> = array.new()
-        let buckets: u64 = array.get(widths, at)
-        var k: u64 = 0
-        loop { if k >= buckets { break }
-          let along: f64 = cast.float(clip.length) * cast.float(k) / cast.float(buckets)
-          let local: f64 = if clip.reverse { cast.float(clip.length - 1) - along } else { along }
-          let seconds: f64 = (cast.float(clip.source_in) + local * speed) / fps
-          var position: u64 = cast.sat(seconds / duration * cast.float(array.len(peaks)))
-          if position >= array.len(peaks) { position = array.len(peaks) - 1 }
-          array.push(shown, array.get(peaks, position))
-          k = k + 1
-        }
-        app.set_waveform(state, clip_id, shown,timeline_media.source_frame(document,clip,clip.start),
-          timeline_media.source_frame(document,clip,clip.start+clip.length-1),state.media_revision)
-        filled = filled + 1
-      }, }
-    }
-    at = at + 1
   }
   result.ok(filled)
 }
@@ -736,7 +702,11 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
     if owned.strips_only {
-      match waveforms_for_request(state,str.view(root),id) {
+      let start: i64 = if array.len(dimensions) >= 3 {match text.parse_i64(array.borrow(dimensions,0)) {
+        some(value)=>value,none=>0,}}else{0}
+      let span: i64 = if array.len(dimensions) >= 3 {match text.parse_i64(array.borrow(dimensions,2)) {
+        some(value)=>value,none=>450,}}else{450}
+      match waveforms_for_viewport(state,str.view(root),id,start,span) {
         ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
           continue},
       }

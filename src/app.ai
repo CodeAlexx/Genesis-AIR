@@ -36,7 +36,8 @@ pub fn panel_menu() -> u32 effects {} { 9 }
 // are ordinary application state rather than a hidden second model. The NLE toolkit records
 // viewport policy as deliberately unported; this is where it lives until it is proved
 // generic enough to upstream.
-pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_height: f64 }
+pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_height: f64,
+  first_track: u64, track_sequence: u64 }
 
 // Peak data for one audio clip, keyed by the clip's STABLE id. The view reads this; only a
 // refresh step fills it, so painting never calls the media provider.
@@ -149,7 +150,8 @@ pub type App = struct {
 }
 
 pub fn viewport() -> Viewport effects {} {
-  Viewport {pixels_per_frame: 2.4, scroll_frames: 0, track_height: 46.0}
+  Viewport {pixels_per_frame: 2.4, scroll_frames: 0, track_height: 46.0,
+    first_track: 0, track_sequence: 0}
 }
 
 // A new, empty project with the track set an editor actually starts from.
@@ -502,6 +504,40 @@ pub fn scroll(state: ref<App>) -> i64 effects {} {
 }
 pub fn track_height(state: ref<App>) -> f64 effects {} {
   struct.get(struct.borrow(state, field=viewport), field=track_height)
+}
+pub fn track_gap() -> f64 effects {} {4.0}
+pub fn track_pitch(state: ref<App>) -> f64 effects {} {track_height(state)+track_gap()}
+// Lane navigation is view state. Hidden/muted lanes remain reachable so their
+// controls can restore them; resizing and edits derive bounds from live tracks.
+pub fn track_scroll_max(state: ref<App>, height: f64) -> u64 effects {} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  var count: u64 = 0
+  var at: u64 = 0
+  loop {if at >= editor.track_count(doc) {break}
+    if struct.get(array.borrow(struct.borrow(doc,field=tracks),at),field=owner) == doc.active {count=count+1}
+    at=at+1
+  }
+  let lane: f64 = track_pitch(state)
+  // The trailing inter-lane gap is not required to display the final lane.
+  let room: f64 = math.max(0.0,height-4.0)+track_gap()
+  let visible: u64 = if lane > 0.0 and room >= lane {cast.sat(math.floor(room/lane))}else{1}
+  if count > visible {count-visible}else{0}
+}
+pub fn track_scroll(state: ref<App>) -> u64 effects {} {
+  struct.get(struct.borrow(state,field=viewport),field=first_track)
+}
+pub fn set_track_scroll(state: ref<App>, value: u64, height: f64) -> u64 effects {} {
+  let maximum: u64 = track_scroll_max(state,height)
+  let next: u64 = if value > maximum {maximum}else{value}
+  let sequence: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  struct.set(struct.borrow(state,field=viewport),sequence,field=track_sequence)
+  struct.set(struct.borrow(state,field=viewport),next,field=first_track)
+  next
+}
+pub fn clamp_track_scroll(state: ref<App>, height: f64) -> u64 effects {} {
+  let sequence: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let same: bool = sequence == struct.get(struct.borrow(state,field=viewport),field=track_sequence)
+  set_track_scroll(state,if same {track_scroll(state)}else{0},height)
 }
 pub fn set_zoom(state: ref<App>, value: f64) -> f64 effects {} {
   var next: f64 = value

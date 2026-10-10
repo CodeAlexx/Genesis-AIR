@@ -116,6 +116,8 @@ pub fn act_track_solo() -> u32 effects {} { 53 }
 pub fn act_track_remove() -> u32 effects {} { 54 }
 pub fn act_add_video_track() -> u32 effects {} { 55 }
 pub fn act_add_audio_track() -> u32 effects {} { 56 }
+pub fn act_tracks_up() -> u32 effects {} { 57 }
+pub fn act_tracks_down() -> u32 effects {} { 58 }
 
 pub fn act_pool_pick() -> u32 effects {} { 60 }
 pub fn act_pool_relink() -> u32 effects {} { 61 }
@@ -1470,7 +1472,10 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
     if lane >= array.len(struct.borrow(model, field=tracks)) { break }
     let id: u64 = array.get(lanes, total - 1 - lane)
     let top: f64 = timeline.track_top(model, lane)
-    if top > area.bottom - 12.0 { break }
+    if top >= frame.timeline.bottom { break }
+    // Fully clipped controls must never intercept the ruler/monitor or footer.
+    if top+18.0 < area.top or top+36.0 > frame.timeline.bottom {lane=lane+1
+      continue}
     var hidden: bool = false
     var locked: bool = false
     var muted: bool = false
@@ -1515,6 +1520,16 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
   var add_audio: Control = button(act_add_audio_track(), "+A",
     layout.rect(area.left + 58.0, foot, area.left + 102.0, foot + 21.0), false)
   array.push(out, add_audio)
+  let first: u64 = app.track_scroll(state)
+  let maximum: u64 = app.track_scroll_max(state,layout.height_of(frame.timeline))
+  var up: Control = button(act_tracks_up(),"Up",
+    layout.rect(area.left+108.0,foot,area.left+143.0,foot+21.0),false)
+  struct.set(up,first > 0,field=enabled)
+  array.push(out,up)
+  var down: Control = button(act_tracks_down(),"Down",
+    layout.rect(area.left+148.0,foot,area.right-4.0,foot+21.0),false)
+  struct.set(down,first < maximum,field=enabled)
+  array.push(out,down)
   out
 }
 

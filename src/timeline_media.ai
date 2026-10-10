@@ -2908,6 +2908,68 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
   result.ok(lines)
 }
 
+// Direct-source clips use the same processed stereo leaf as continuous playback.
+// A neutral enclosing bus exposes its exact authored sample body to NESTENV;
+// no mono/downsampled source envelope or final program limiter is involved.
+pub fn clip_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buckets: u64, output: str)
+    -> result<array<string>,string> effects {alloc} {
+  if clip.nested != 0 {return compound_envelope_plan(doc,clip,buckets,output)}
+  if clip.source == 0 or buckets == 0 or buckets > 65536 {
+    return result.err("[GA_AUDIO_CLIP_ENV] Invalid processed clip envelope request")
+  }
+  let slot: u64 = match editor.source_slot(doc,clip.source) {some(value)=>value,
+    none=>{return result.err("[GA_AUDIO_CLIP_ENV] Processed clip source is missing")},}
+  let source: SourceInfo = source_info(doc,slot)
+  if not source.audio or not source.online {
+    return result.err("[GA_AUDIO_CLIP_ENV] Processed clip source is offline or has no audio")
+  }
+  // The current audio graph accepts complete gain/fade curves. Other audio
+  // automation needs a graph-history contract and must not be approximated.
+  var key_at: u64 = 0
+  loop {if key_at >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),key_at)
+    key_at=key_at+1
+    if key.clip != clip.id {continue}
+    let name: string = editor.name_text(doc,key.param)
+    if str.eq(name,"gain") or str.eq(name,"fade_in") or str.eq(name,"fade_out") {continue}
+    let canonical: string = filter_keys.canonical(name)
+    var family: array<string> = text.split(canonical,".")
+    if str.eq(canonical,"pan") or str.eq(canonical,"speed") or
+        (array.len(family) > 1 and (str.eq(array.borrow(family,0),"speed") or chrome.is_audio_kind(array.borrow(family,0)))) {
+      return result.err("[GA_AUDIO_CLIP_ENV] Animated audio effects, pan or speed need preserved graph history")
+    }
+  }
+  let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
+  if bounds.speed == 0.0 {return result.err("[GA_AUDIO_CLIP_ENV] Held clip has no progressing audio")}
+  var tree: NestedAudioTree = NestedAudioTree {lines:array.new(),nodes:0,disk_bytes:0.0,descriptor_bytes:0}
+  var ancestors: array<u64> = [clip.owner]
+  let instance: string = text.concat("n",string.from_int(clip.id))
+  let leaf: string = text.concat(instance,text.concat(".l",string.from_int(clip.id)))
+  try nested_audio_define(doc,clip,leaf,instance,ancestors,tree)
+  var neutral: array<string> = ["NESTBUS",string.copy(instance),"-",string.from_int(bounds.first),string.from_int(bounds.last),
+    string.from_int(bounds.first),string.from_int(bounds.last),"1","0","0",
+    string.from_float(cast.float(bounds.last-bounds.first)/48000.0),"-"]
+  try nested_audio_append(tree,neutral,cast.float(bounds.last-bounds.first)*16.0+256.0)
+  envelope_tree_lines(tree,instance,buckets,output)
+}
+
+fn envelope_tree_lines(tree: ref<NestedAudioTree>, instance: str, buckets: u64, output: str)
+    -> result<array<string>,string> effects {alloc} {
+  var lines: array<string> = [string.copy("NESTBEGIN -")]
+  var at: u64 = 0
+  loop {if at >= array.len(struct.borrow(tree,field=lines)) {break}
+    array.push(lines,string.copy(array.borrow(struct.borrow(tree,field=lines),at)))
+    at=at+1
+  }
+  array.push(lines,string.copy("NESTCOMMIT"))
+  var fields: array<string> = ["NESTENV",string.copy(instance),string.from_int(buckets),provider.wire_path(output)]
+  array.push(lines,text.join(fields," "))
+  if str.len(text.join(lines,"\n")) > 960000 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Processed waveform descriptor exceeds the mailbox")
+  }
+  result.ok(lines)
+}
+
 // Describe one complete authored compound bus, independent of program playback.
 pub fn compound_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buckets: u64, output: str)
     -> result<array<string>,string> effects {alloc} {
@@ -2919,19 +2981,7 @@ pub fn compound_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buck
   let instance: string = text.concat("n",string.from_int(clip.id))
   try nested_audio_define(doc,clip,instance,"-",ancestors,tree)
   if tree.nodes == 0 {return result.err("[GA_AUDIO_NESTED_ENV] Compound rate has no output")}
-  var lines: array<string> = [string.copy("NESTBEGIN -")]
-  var at: u64 = 0
-  loop {if at >= array.len(struct.borrow(tree,field=lines)) {break}
-    array.push(lines,string.copy(array.borrow(struct.borrow(tree,field=lines),at)))
-    at=at+1
-  }
-  array.push(lines,string.copy("NESTCOMMIT"))
-  var fields: array<string> = ["NESTENV",instance,string.from_int(buckets),provider.wire_path(output)]
-  array.push(lines,text.join(fields," "))
-  if str.len(text.join(lines,"\n")) > 960000 {
-    return result.err("[GA_AUDIO_NESTED_CAPACITY] Compound waveform descriptor exceeds the mailbox")
-  }
-  result.ok(lines)
+  envelope_tree_lines(tree,instance,buckets,output)
 }
 
 // Absolute boundaries prevent fractional-rate chunks accumulating roundoff.
@@ -3100,10 +3150,16 @@ pub fn shutdown_audio(session: AudioSession own) -> unit effects {alloc,fs.meta,
 pub fn compound_envelope(doc: ref<editor.Document>, clip: editor.Clip, buckets: u64,
     worker: str, scratch: str, root: str, id: u64) -> result<array<f64>,string>
     effects {alloc,fs.meta,fs.read,fs.write,process,time} {
-  let _ = try compound_envelope_plan(doc,clip,buckets,"envelope.f32")
+  if clip.nested == 0 {return result.err("[GA_AUDIO_NESTED_ENV] Compound envelope requires a nested clip")}
+  clip_envelope(doc,clip,buckets,worker,scratch,root,id)
+}
+pub fn clip_envelope(doc: ref<editor.Document>, clip: editor.Clip, buckets: u64,
+    worker: str, scratch: str, root: str, id: u64) -> result<array<f64>,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _ = try clip_envelope_plan(doc,clip,buckets,"envelope.f32")
   let cache: string = try nested_audio_reserve(scratch)
   let output: string = path.join(cache,"envelope.f32")
-  var lines: array<string> = match compound_envelope_plan(doc,clip,buckets,output) {
+  var lines: array<string> = match clip_envelope_plan(doc,clip,buckets,output) {
     ok(value)=>value,err(problem)=>{return result.err(nested_audio_failure(problem,nested_audio_cleanup(cache)))},
   }
   var argv: array<string> = [string.copy(worker),"--serve"]

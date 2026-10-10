@@ -10,6 +10,8 @@
 module genesis.controls
 
 import std.editor as editor
+import std.editor_io as editor_io
+import std.text as text
 import std.timeline as timeline
 import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
@@ -61,6 +63,26 @@ fn cell_u(name: str, value: u64) -> unit effects {io.write, alloc} {
 }
 fn cell_b(name: str, value: bool) -> unit effects {io.write, alloc} {
   cell(name, if value { "1" } else { "0" })
+}
+
+// Disabled chrome is still clicked and must remain inert. Give that expected
+// result an explicit diagnostic instead of confusing an empty note with an
+// enabled control whose action was never wired.
+fn inert_signature(state: ref<app.App>) -> string effects {alloc} {
+  var document: string = match editor_io.encode(struct.borrow(state,field=document)) {
+    ok(value)=>value,err(_)=>string.copy("encode failed"),
+  }
+  var status: string = app.status(state)
+  var fields: array<string> = [document,status,
+    string.from_int(app.scroll(state)),string.from_float(app.zoom(state)),
+    string.from_int(app.track_scroll(state)),string.from_float(app.dock_scroll(state)),
+    string.from_int(app.focus(state)),string.from_int(app.dock_tab(state)),
+    string.from_int(app.selected_filter(state)),string.from_int(app.pool_row(state)),
+    string.from_int(app.gesture_kind(state)),string.from_int(state.document_revision),
+    string.from_int(state.media_revision),string.copy(if app.dirty(state){"dirty"}else{"clean"}),
+    string.copy(if app.prompt_active(state){"prompt"}else{"no prompt"}),
+    string.copy(if app.has_clipboard(state){"clipboard"}else{"no clipboard"})]
+  text.join(fields,"\n")
 }
 
 // Everything a control could plausibly change, in one line.
@@ -296,6 +318,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
       if index >= array.len(controls) { break }
       let entry: ref<chrome.Control> = array.borrow(controls, index)
       let action: u32 = struct.get(entry, field=action)
+      let enabled: bool = struct.get(entry,field=enabled)
       let style: u32 = struct.get(entry, field=style)
       let area: layout.Rect = struct.get(entry, field=area)
       let named: string = chrome.label_of(entry)
@@ -310,7 +333,18 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
           area.left + layout.width_of(area) * 0.25
         } else { (area.left + area.right) * 0.5 }
       let at_y: f64 = (area.top + area.bottom) * 0.5
+      var before: string = if enabled {string.new()}else{inert_signature(state)}
       var note: string = input.pointer_down(state, width(), height(), at_x, at_y)
+      if not enabled {
+        var after: string = inert_signature(state)
+        if str.len(str.view(note)) != 0 or not str.eq(str.view(before),str.view(after)) {
+          say("[GA_CONTROLS_DISABLED_MUTATION] Disabled control accepted an action: ")
+          say(str.view(named))
+          say("\n")
+          return 1
+        }
+        let _ = ref.swap(note,string.copy("Disabled control (no action)"))
+      }
 
       let panel_named: string = panel_name(panel)
       io.write(str.view(panel_named))

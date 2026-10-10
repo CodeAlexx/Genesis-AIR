@@ -258,13 +258,16 @@ pub fn timeline_model(state: ref<app.App>, area: layout.Rect) -> timeline.Timeli
   let zoom: f64 = app.zoom(state)
   let scroll: i64 = app.scroll(state)
   let height: f64 = app.track_height(state)
+  let first: u64 = app.clamp_track_scroll(state,layout.height_of(area))
+  let pitch: f64 = app.track_pitch(state)
   let colours: editor_view.Palette = editor_view.dark()
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
   // Scrolling is expressed as a shifted origin, so frame `scroll` sits at the panel's left.
   let origin: f64 = area.left - cast.float(scroll) * zoom
   var model: timeline.Timeline = editor_view.view(document, sequence, colours, zoom, origin,
-    area.top + 4.0)
+    area.top + 4.0 - cast.float(first)*pitch)
+  struct.set(model,app.track_gap(),field=gap)
   struct.set(model,app.timeline_frame(state),field=playhead)
   var index: u64 = 0
   loop {
@@ -337,6 +340,11 @@ fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                  area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
   fill(canvas, area, colors.timeline)
+  let saved: draw.State = draw.state(canvas)
+  let bottom: f64 = area.bottom-layout.track_footer_height()
+  match geometry.rect(area.left,area.top,area.right,bottom) {
+    some(box)=>{let _ = draw.clip_rect(canvas,box)},none=>{},
+  }
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
   var lanes: array<u64> = editor_view.lanes(document, sequence)
@@ -349,7 +357,9 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     let id: u64 = array.get(lanes, pick)
     let top: f64 = timeline.track_top(model, lane)
     let height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=height)
-    if top > area.bottom { break }
+    if top >= bottom { break }
+    if top+height <= area.top {lane=lane+1
+      continue}
     fill_at(canvas, area.left, top, area.right, top + height, colors.lane)
     match geometry.rect(area.left, top, area.right, top + height) {
       some(box) => { draw.stroke_rect(canvas, box, colors.edge, 1.0) },
@@ -359,6 +369,7 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
       colors.text)
     lane = lane + 1
   }
+  draw.restore(canvas,saved)
   ()
 }
 

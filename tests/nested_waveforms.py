@@ -4,7 +4,8 @@ Native client calls preview.waveforms and dumps the owned application cache;
 neither application audition nor exported audio is an oracle. Authored PCM,
 sample-domain placement, float sums and envelope ramps are independent inputs.
 The shared command-line media tool is solely an offline DSP adapter on our own
-float arrays. Legacy flat mono/DC controls retain their existing source envelope.
+float arrays. Processed mono controls use the playback stereo rematrix; historical
+--expect-missing retains the old mono source-envelope control explicitly.
 """
 import argparse
 from array import array
@@ -447,7 +448,11 @@ def main():
                 clip=next(c for c in doc["clips"] if c["id"]==ident)
                 count=max(8,min(512,max(8,clip["length"])//3))
                 values=clip_signal(doc,ident,source_values,worker)
-                wanted=buckets(values,count) if clip["nested"] else [.25 if name=="flat-mono-dc" else 0.]*count
+                # The authored mono DC is .25. Playback's default equal-power
+                # mono->stereo matrix yields .25/sqrt(2) on each channel; the old
+                # source envelope measured mono before that rematrix.
+                mono_peak=.25 if args.expect_missing else f32(.25/math.sqrt(2))
+                wanted=buckets(values,count) if clip["nested"] else [mono_peak if name=="flat-mono-dc" else 0.]*count
                 prepared.append((name,doc,ident,wanted,len(values)//2))
                 manifest.append(f"{name}\t{ident}\n")
             manifest_file=root/"cases.tsv";manifest_file.write_text("".join(manifest),encoding="utf-8")

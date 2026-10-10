@@ -871,4 +871,90 @@ sloth/beach pictures. Fit publishes 23 compound bitmap rows and 512 finite proce
 peaks. The older unsaved user window is preserved. This uses 480x270 compound
 canvases and fitted scopes in the ordinary editor; it establishes no physical
 hearing/alignment, full native 4K scan or sustained 4K60 acceptance. Flat processed
-waveforms and larger interactive projects remain open.
+waveforms and larger interactive projects remain open at that historical checkpoint.
+
+## Processed direct waveforms and vertical tracks on 2026-10-10
+
+Direct clips now define a complete processed stereo leaf inside a neutral bus and
+query its exact clip-local 48 kHz body through the existing `NESTENV` protocol.
+This replaces the mono, downsampled source-envelope approximation. Trim, reverse,
+static rate, gain, pan, fades, static audio effects and complete gain/fade curves
+retain the same history as playback. There is no final device limiter in waveform
+peaks. Disabled, inaudible and held contributions are zero. Unsupported audio-filter,
+pan or speed automation returns `GA_AUDIO_CLIP_ENV` rather than an approximation.
+
+The focused native gate passes 33 authored cases and 153 checks. Independent
+stereo bucket maxima differ by at most `3.7252903e-9` under a `2e-6` threshold.
+Retained uneven playback pulls and full processed bodies agree within one PCM
+code across 3,433,248 channel samples. The independent DSP adapter reads the
+authored source file and trims native samples before resampling and `atempo`;
+repacketizing raw samples changes `atempo` output, so raw-file packet assumptions
+are not used as its oracle. Failed adapter receipts are preserved; tolerances
+are unchanged. The existing 23-case compound gate also passes with the direct
+mono control updated for playback's equal-power mono-to-stereo rematrix.
+
+Only clips intersecting the requested time viewport are scheduled. Matching
+cache entries remain usable with an unavailable worker; offscreen missing media
+is untouched. Stop and supersede interrupt real cache construction, join owned
+workers, remove their temporary data and recover with independently expected
+peaks. Cold changed clips still materialize a full body, and every audio-only
+worker currently performs OpenCL initialization. Per-clip semantic reuse after
+an unrelated document edit remains a performance opportunity.
+
+The vertical track viewport uses shared AIR state and the existing timeline
+model for both painting and pointer dispatch. Header wheel and Up/Down reach
+lower tracks; timeline-body horizontal navigation and Ctrl zoom retain their
+behavior. A reserved footer keeps lane pixels and hit targets clear of the
+navigation buttons. The native 24-track fixture passes four cases / 32 checks:
+bottom-lane pointer selection at 640x480, exact lane capacity, bitmap/waveform/
+transition pixels, document/time/revision preservation, resize, hidden tracks,
+sequence changes, add/remove and Undo.
+
+Windows acceptance combines the unchanged media/native prefix from the initial
+full run with a passing controls/media tail rerun. The initial run exited one
+because the diagnostic treated disabled Up/Down buttons as enabled controls.
+The repaired diagnostic actually clicks them and verifies unchanged state;
+all four tabs now report 757 outcomes, including eight disabled-button checks.
+`tests/windows.ps1 -ControlsOnly` reruns that tail without repeating the expensive
+unchanged prefix. The original failed log is retained alongside the passing
+resume log; this is not presented as a single full-suite exit-zero run.
+
+The installed root application SHA-256 is
+`0928f1c3feec847f88ea0b02be61ad40f6762766eaefe6c6132382af0d5edb4b`.
+Its [fresh native UI check](../archive/native-direct-tracks-root-ui-2026-10-10.json)
+uses a private 26-track project with the original 4K source and a 480x270 canvas.
+Header scrolling and footer buttons reach the direct V1 clip. Fit publishes
+23 frame bitmap rows and 512 finite processed peaks. Play advances picture,
+time and marker; embedded-audio mute clears the meters and unmute restores them.
+Stop clears meters; Start restores visible frame zero. Timeline and monitor
+drags settle at `00:00:19:03` and `00:00:03:12`, with matching Program timecode,
+status and marker. Histogram, RGB parade and luma waveform change with the frames.
+The original unsaved window and original project/media remain intact. This
+fitted-editor check establishes no sustained native 4K60 or physical audio alignment.
+
+Separate historical helpers frozen at `36d41fb` pass 13 whole-project semantic
+comparisons with 1,040 and 2,064 clips, including rejected Save/Open and history
+recovery. Their fake-provider compact preview/paint cycles have medians of
+4.115 and 5.260 ms; cold snapshots take 168.489 and 322.591 ms, and changed
+snapshots 184.015 and 350.813 ms. The larger snapshot is 1,849,607 bytes and
+is accepted. These are CPU/model measurements on that frozen helper, excluding
+real media, audio devices, native window presentation and this later scrolling
+build. Large interactive projects still need device/UI acceptance.
+
+Focused reproduction:
+
+```powershell
+python tests/direct_waveforms.py --client .\build-windows\native\bin\Release\genesis-direct-waveforms.exe --worker .\genesis-gcompose.exe --report .\build-windows\direct-waveforms.json
+.\build-windows\native\bin\Release\genesis-timeline-track-scroll.exe .\build-windows\track-scroll-check
+```
+
+Native 4K HDR shader work remains an independent private prototype. The accepted
+worker, shared MM-AIR runtime, original project and source media are preserved.
+This checkpoint does not establish sustained compound 4K60, physical audio latency,
+universal automation support or complete professional-editing acceptance.
+
+The sanitized 71-entry [direct-waveform/track checkpoint bundle](../archive/direct-waveforms-vertical-tracks-2026-10-10.tar.gz)
+was read back against every manifest entry. Its SHA-256 is
+`3058a55d97130ec83811780080af0b9a728a052118dba71974c52f902040438d`.
+It retains the failed initial diagnostic, passing resume, focused/native reports,
+tested source and payload hashes, and explicitly historical large-project helpers.

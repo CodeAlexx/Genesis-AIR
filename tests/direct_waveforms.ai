@@ -1,0 +1,160 @@
+module genesis.tests.direct_waveforms
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+
+fn processed_pcm(doc: ref<editor.Document>, clip: u64, worker: str, root: str)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let value: editor.Clip = option.unwrap(editor.clip(doc,clip))
+  var sounds: array<string> = try media.clip_envelope_plan(doc,value,8,"unused.f32")
+  let _ = array.pop(sounds)
+  let fps: f64 = editor.sequence_fps(doc,value.owner)
+  let first: i64 = media.audio_sample_frame(value.start,fps)
+  let last: i64 = media.audio_sample_frame(editor.clip_end(value),fps)
+  var fields: array<string> = ["NESTMIX",text.concat("n",string.from_int(clip)),string.from_int(first),string.from_int(last),"0"]
+  array.push(sounds,text.join(fields," "))
+  var plan: media.AudioPlan = media.AudioPlan {worker:string.copy(worker),output:path.join(root,"processed.wav"),
+    duration:cast.float(last-first)/48000.0,frames:cast.sat(last-first),sounds:sounds}
+  var job: media.AudioJob = media.audio_job(plan,option.none())
+  let session: media.AudioSession = try media.execute_playback_audio(job,"",0)
+  media.shutdown_audio_checked(session)
+}
+
+fn retained(doc: ref<editor.Document>, clip: u64, worker: str, root: str)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let value: editor.Clip = option.unwrap(editor.clip(doc,clip))
+  var held: option<media.AudioSession> = option.none()
+  var begin: i64 = value.start
+  var pass: u64 = 0
+  var manifest: string = string.new()
+  var failure: string = string.new()
+  loop {if begin >= editor.clip_end(value) {break}
+    let width: i64 = if pass%3 == 0 {3}else if pass%3 == 1 {5}else{7}
+    let finish: i64 = if begin+width < editor.clip_end(value) {begin+width}else{editor.clip_end(value)}
+    let filename: string = text.concat("pull-",text.concat(string.from_int(pass),".wav"))
+    let output: string = path.join(root,filename)
+    var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,begin,finish,output) {
+      ok(value)=>value,err(problem)=>{failure=problem
+        break},}
+    var job: media.AudioJob = media.audio_job(plan,ref.swap(held,option.none()))
+    match media.execute_playback_audio(job,"",0) {
+      ok(session)=>{let _ = ref.swap(held,option.some(session))},
+      err(problem)=>{failure=problem
+        break},
+    }
+    var row: array<string> = [filename,string.from_int(begin),string.from_int(finish)]
+    string.append(manifest,text.join(row,"\t"))
+    string.append(manifest,"\n")
+    begin=finish
+    pass=pass+1
+  }
+  match held {none=>{},some(session)=>{let _ = try media.shutdown_audio_checked(session)},}
+  if str.len(failure) != 0 {return result.err(failure)}
+  match files.write_text(path.join(root,"pulls.tsv"),manifest) {
+    ok(_)=>result.ok(()),err(_)=>result.err("Cannot publish retained PCM test manifest"),}
+}
+
+fn scheduling(suite: ref<test.Suite>, state: ref<app.App>, root: str, clip: u64)
+    -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _ = test.start(suite,"Current processed peaks survive viewport changes; edits invalidate")
+  let worker: string = struct.replace(struct.borrow(state,field=provider),path.join(root,"absent-worker.exe"),field=worker)
+  let _ = test.check(suite,match preview.waveforms_for_viewport(state,"",0,0,100) {
+    ok(value)=>value == 1,err(_)=>false,},"Visible current cache needs no worker")
+  let _ = test.check(suite,match preview.waveforms_for_viewport(state,"",0,500,100) {
+    ok(value)=>value == 0,err(_)=>false,},"Offscreen waveform is not scheduled")
+  app.document_changed(state)
+  let _ = test.check(suite,match preview.waveforms_for_viewport(state,"",0,0,100) {
+    ok(_)=>false,err(problem)=>text.contains(problem,"GA_AUDIO_NESTED_ENV"),},"A semantic edit refuses unavailable fresh audio")
+  let _ = struct.replace(struct.borrow(state,field=provider),worker,field=worker)
+  struct.set(state,41,field=document_revision)
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Offscreen missing audio is untouched; scrolling requests it")
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let original: editor.Clip = option.unwrap(editor.clip(doc,clip))
+  let source: u64 = editor.add_source(doc,path.join(root,"missing-offscreen.wav"),"Missing",60,30.0)
+  let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let distant: option<u64> = editor.place(doc,original.track,source,0,60,1000)
+  let _ = test.check(suite,option.is_some(distant),"Offscreen authored clip exists")
+  let _ = test.check(suite,match preview.waveforms_for_viewport(state,"",0,0,100) {
+    ok(value)=>value == 1,err(_)=>false,},"Offscreen missing source is never decoded")
+  let _ = test.check(suite,match preview.waveforms_for_viewport(state,"",0,1000,100) {
+    ok(_)=>false,err(problem)=>text.contains(problem,"GA_AUDIO_NESTED_RENDER"),},"Scrolling into missing source returns a coded refusal")
+  let _ = test.check(suite,option.is_some(app.waveform_slot(state,clip)),"Prior visible cache survives refusal")
+  let _ = test.done(suite)
+  ()
+}
+
+// OUT WORKER MANIFEST [REQUEST_ROOT REQUEST_ID]; rows NAME CLIP EXPECTED_CODE.
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 4 and view.len(args) != 6 {return 2}
+  let root: str = view.get(args,1)
+  let worker: str = view.get(args,2)
+  let manifest: str = view.get(args,3)
+  let request_root: string = if view.len(args) == 6 {string.copy(view.get(args,4))}else{string.new()}
+  let request_id: u64 = if view.len(args) == 6 {option.unwrap(text.parse_u64(view.get(args,5)))}else{0}
+  let _ = files.mkdirs(root)
+  let saved: string = match files.read_text(manifest) {ok(value)=>value,err(_)=>{return 2},}
+  var rows: array<string> = text.split(saved,"\n")
+  var suite: test.Suite = test.suite("Processed direct stereo waveform identity",true)
+  var at: u64 = 0
+  var scheduled: bool = false
+  loop {if at >= array.len(rows) {break}
+    var fields: array<string> = text.split(text.trim(array.borrow(rows,at)),"\t")
+    at=at+1
+    if array.len(fields) != 3 {continue}
+    let name: str = array.borrow(fields,0)
+    let clip: u64 = option.unwrap(text.parse_u64(array.borrow(fields,1)))
+    let expected: str = array.borrow(fields,2)
+    let data: string = match files.read_text(path.join(path.dirname(manifest),text.concat(name,".air"))) {
+      ok(value)=>value,err(_)=>{return 2},}
+    var document: editor.Document = match editor_io.decode(data) {ok(value)=>value,err(_)=>{return 2},}
+    let scratch: string = path.join(root,name)
+    var state: app.App = app.app(provider.gcompose(worker,scratch))
+    let _ = struct.replace(state,document,field=document)
+    struct.set(state,41,field=document_revision)
+    struct.set(state,7,field=media_revision)
+    let _ = test.start(suite,name)
+    var failure: string = string.new()
+    let count: u64 = match preview.waveforms_for_request(state,request_root,request_id) {
+      ok(value)=>value,err(problem)=>{failure=problem
+        0},}
+    if str.eq(expected,"ok") {
+      let _ = test.check(suite,count == 1,"Exactly one authored clip has processed peaks")
+      let _ = test.check(suite,option.is_some(app.waveform_slot(state,clip)),"Requested direct clip has actual stereo peaks")
+      let _ = test.check(suite,str.len(failure) == 0,"No fallback or media error")
+      if str.len(failure) == 0 and str.len(request_root) == 0 {
+        let _ = test.check(suite,match retained(struct.borrow(state,field=document),clip,worker,scratch) {
+          ok(_)=>true,err(problem)=>{io.write(problem)
+            false},},"Uneven flat playback pulls complete in one retained session")
+        let value: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),clip))
+        if value.enabled and editor.track_audible(struct.borrow(state,field=document),value.track) and
+            media.effective_speed(struct.borrow(state,field=document),value) != 0.0 {
+          let _ = test.check(suite,match processed_pcm(struct.borrow(state,field=document),clip,worker,scratch) {
+            ok(_)=>true,err(problem)=>{io.write(problem)
+              false},},"Processed authored bus exposes its complete PCM body")
+        }
+      }
+    }else{
+      let _ = test.check(suite,str.len(failure) != 0 and text.contains(failure,expected),"Unsupported audio context is coded")
+      let _ = test.check(suite,app.waveform_count(state) == 0,"Refusal publishes no approximate peaks")
+    }
+    let _ = files.mkdirs(scratch)
+    preview.write_waveforms(state,scratch)
+    let waves: string = match files.read_text(path.join(scratch,"waveforms.tsv")) {ok(value)=>value,err(_)=>{return 2},}
+    let _ = files.write_text(path.join(root,text.concat(name,"-waveforms.tsv")),waves)
+    let _ = files.write_text(path.join(root,text.concat(name,"-error.txt")),failure)
+    let _ = test.done(suite)
+    if not scheduled and str.eq(name,"anti-phase") and str.len(request_root) == 0 {
+      scheduling(suite,state,scratch,clip)
+      scheduled=true
+    }
+  }
+  test.conclude(suite,path.join(root,"direct-waveforms-tests.json"),120)
+}

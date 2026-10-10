@@ -446,8 +446,9 @@ The versioned waveform mailbox carries document and media revisions plus clip/ti
 mapping. Descendant edits retire stale peaks both on import and during painting;
 malformed, nonfinite and partial publications are refused without replacing current
 cache entries. Headerless legacy data is accepted only for direct-source clips.
-Flat waveforms retain their existing source-envelope behavior; this does not add
-post-effect flat-waveform accuracy. Full-history changed compound caches still
+At this compound-only checkpoint, flat waveforms retain their source-envelope
+behavior. The later direct-waveform checkpoint below replaces that approximation.
+Full-history changed compound caches still
 have startup and disk costs. See the
 [acceptance ledger](CONTROL_COVERAGE.md#compound-waveforms-and-native-upload-on-2026-10-10)
 and the [candidate UI receipt](../archive/native-waveform-u16-ui-2026-10-10.json)
@@ -461,3 +462,33 @@ histogram/parade/luma scopes are recorded in the
 The test retains fitted 480x270 compound canvases; it does not qualify native
 4K60. Full gate evidence and source/binary hashes are preserved in the
 [checkpoint bundle](../archive/compound-waveforms-native-upload-2026-10-10.tar.gz).
+
+## Processed direct waveforms and track viewport
+
+Direct-source clips now reuse the existing native processed-audio tree and
+`NESTENV` bucket query. A neutral root bus measures the clip's complete authored
+stereo body before the final program/device clamp. Gain, pan, supported audio DSP,
+trim/rate/reverse and gain/fade history follow playback. The maintained gate
+compares independent stereo peaks and uneven retained PCM; the mono control
+uses playback's equal-power stereo rematrix. Unsupported audio automation
+refuses with a coded error rather than fabricating an envelope.
+
+Strip requests select the visible time range before launching media work and
+reuse matching peak caches. Vertical track navigation changes the shared timeline
+model used for rendering and pointer dispatch. Neither change adds a new codec
+runtime. The accepted `4d9dfd6d...` compositor and shared MM-AIR manifest remain
+unchanged. See the [direct-waveform and track acceptance ledger](CONTROL_COVERAGE.md#processed-direct-waveforms-and-vertical-tracks-on-2026-10-10).
+
+Cold changed waveforms still materialize a full audio body. The current `--serve`
+worker eagerly initializes OpenCL even for audio-only work; lazy audio startup
+remains future optimization. Native-resolution HDR shader experiments remain
+private and are not part of this installed checkpoint. No new sustained native
+4K60 or physical audio-latency claim follows from these waveform/viewport checks.
+
+The installed direct-waveform app (`0928f1c3...`) also passes a fresh native check
+of Play, embedded-audio mute/unmute, Stop, frame-zero rewind, timeline/monitor
+scrubbing and changing fitted scopes. The 26-track test publishes 23 bitmap rows
+and 512 processed peaks. See the [UI receipt](../archive/native-direct-tracks-root-ui-2026-10-10.json)
+and [sanitized acceptance bundle](../archive/direct-waveforms-vertical-tracks-2026-10-10.tar.gz),
+which preserve the initial disabled-control diagnostic failure and passing tail
+rerun alongside the unchanged production/media prefix.

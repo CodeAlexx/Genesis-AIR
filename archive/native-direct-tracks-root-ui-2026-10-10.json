@@ -1,0 +1,39 @@
+{
+  "schema": "genesis.native_direct_tracks_ui.v1",
+  "date": "2026-10-10",
+  "root_binaries": {
+    "Genesis-AIR.exe": "0928f1c3feec847f88ea0b02be61ad40f6762766eaefe6c6132382af0d5edb4b",
+    "air-native-shell.dll": "0a54b0a6615af89a0b49dcf640bbb48ecb585347bf4e2984a4ee8519a14ba777",
+    "air-native-dialogs.dll": "18e46966639cd50bc8dddec2b3a03afd34bbc3dba6b783841f4a7e9816f35441",
+    "air-ui-host.dll": "5e17d6abcde34e006e40dbeaa2049f8e97d4bad4ed9ffbbd274391a2d2648156",
+    "genesis-native-audio.dll": "34067647878dd275c4c025f1447e18aa85542a3ae50f798c66a03e373ff32d5f",
+    "genesis-gcompose.exe": "4d9dfd6dd4d0f592d0cc3bcd90729eef95ad9715ce6d7cce4efd2a61b4cd0d7d",
+    "OpenCL.dll": "5414f6883ab8e4ae842c270cecd042663761d7b66403b702bdc70004c2895c7e"
+  },
+  "pid": 12348,
+  "window": 20843920,
+  "project": "private 26-track, one active direct-source clip; 480x270 canvas",
+  "source": "original 3840x2160 AV1/PQ 59.94 fps Costa Rica media",
+  "steps": [
+    "Reloaded installed root app in ordinary maximized editor; Source and Program show frame zero.",
+    "Header wheel reaches V4/V3/V2/V1/A1/A2; Up and Down shift one lane without changing time.",
+    "Fit publishes 23 direct frame bitmap rows and 512 finite processed waveform peaks.",
+    "Program Play advances picture, timeline marker and time; stereo output meters are active at 00:00:06:34.",
+    "Mute clears meters at 00:00:12:23 while video continues; unmute restores active meters by 00:00:23:47.",
+    "Stop holds 00:00:28:58 and clears meters; Start restores visible frame zero.",
+    "Timeline ruler drag settles at 00:00:19:03 with matching Program time, status and marker.",
+    "Program scrub drag settles at 00:00:03:12 with matching status and timeline marker.",
+    "Histogram, RGB parade and luma waveform change with the settled sloth and beach frames.",
+    "Private test project saved after reversing its temporary mute; original project and media unchanged."
+  ],
+  "bitmap_rows": 23,
+  "processed_peak_count": 512,
+  "finite_peaks": true,
+  "originals_preserved": true,
+  "original_unsaved_window_preserved": true,
+  "physical_hearing_or_alignment_verified": false,
+  "sustained_4k60_verified": false,
+  "full_native_4k_scopes_verified": false,
+  "fullscreen_tested": false,
+  "native_hdr_prototype_adopted": false
+}

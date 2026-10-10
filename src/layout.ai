@@ -54,6 +54,7 @@ pub fn toolbar_height() -> f64 effects {} { 42.0 }
 pub fn tbar_height() -> f64 effects {} { 36.0 }
 pub fn ruler_height() -> f64 effects {} { 24.0 }
 pub fn status_height() -> f64 effects {} { 32.0 }
+pub fn track_footer_height() -> f64 effects {} { 30.0 }
 pub fn tab_height() -> f64 effects {} { 34.0 }
 
 // Canvas pixels are physical pixels, while every panel and control below uses logical
@@ -114,7 +115,7 @@ pub fn frame(width: f64, height: f64) -> Frame effects {} {
     tbar: rect(4.0, tbar_top, work_right, tbar_bottom),
     ruler: rect(4.0 + header_width(), ruler_top, work_right, ruler_bottom),
     headers: rect(4.0, ruler_bottom, 4.0 + header_width(), status_top - 4.0),
-    timeline: rect(4.0 + header_width(), ruler_bottom, work_right, status_top - 4.0),
+    timeline: rect(4.0 + header_width(), ruler_bottom, work_right, status_top - 4.0 - track_footer_height()),
     status: rect(0.0, status_top, width, height),
     width: width, height: height}
 }

@@ -1,6 +1,7 @@
 param(
   [string]$Bin = (Join-Path $PSScriptRoot '../build-windows/native/bin/Release'),
-  [string]$Worker = (Join-Path $PSScriptRoot '../genesis-gcompose.exe')
+  [string]$Worker = (Join-Path $PSScriptRoot '../genesis-gcompose.exe'),
+  [switch]$ControlsOnly
 )
 $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -41,7 +42,11 @@ try {
     -c:v libx264 -pix_fmt yuv420p -c:a aac -t 2 $media
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate the real video fixture.' }
 
+  $env:GENESIS_GCOMPOSE = $Worker
+  if (-not $ControlsOnly) {
   Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-timeline-track-scroll.exe' @((Join-Path $work 'track-scroll'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'track-scroll/timeline-track-scroll-tests.json') -Destination (Join-Path $root 'timeline-track-scroll-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-audio-clock.exe' @()).TrimEnd()
   $waitResult = Invoke-Native 'genesis-process-wait.exe' @()
   Write-Host $waitResult.TrimEnd()
@@ -106,6 +111,10 @@ try {
       --client (Join-Path $Bin 'genesis-nested-waveforms.exe') --worker $worker `
       --report (Join-Path $root 'nested-waveforms.json')
     if ($LASTEXITCODE -ne 0) { throw 'Processed compound waveforms, stale publication and cancellation failed.' }
+    & python (Join-Path $PSScriptRoot 'direct_waveforms.py') `
+      --client (Join-Path $Bin 'genesis-direct-waveforms.exe') --worker $worker `
+      --report (Join-Path $root 'direct-waveforms.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Processed direct-source stereo waveforms, viewport scheduling and cancellation failed.' }
     & python (Join-Path $PSScriptRoot 'preview_fit.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker
@@ -237,6 +246,7 @@ try {
   foreach ($name in @('drop_imported', 'drop_order')) { if ($facts[$name] -ne 'true') { throw "Headless $name failed." } }
   if ($facts['drop_count'] -ne '2') { throw 'Headless native drop count failed.' }
   Write-Host "Headless: $checked saved application facts and 3 native-drop checks passed."
+  }
 
   $clicks = 0
   foreach ($tab in @('properties', 'filters', 'scopes', 'audio')) {

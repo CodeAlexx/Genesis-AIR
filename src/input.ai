@@ -289,6 +289,14 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   }
 
   // ---- tracks ----
+  if action == chrome.act_tracks_up() or action == chrome.act_tracks_down() {
+    let frame: layout.Frame = layout.frame(width,height)
+    let first: u64 = app.clamp_track_scroll(state,layout.height_of(frame.timeline))
+    let next: u64 = if action == chrome.act_tracks_down() {add.sat(first,1)}else if first > 0 {first-1}else{0}
+    let _ = app.set_track_scroll(state,next,layout.height_of(frame.timeline))
+    app.set_focus(state,app.panel_timeline())
+    return note("Tracks scrolled")
+  }
   if action == chrome.act_track_hidden() {
     var landed: commands.Result = commands.toggle_track_hidden(state, target)
     return commands.message(landed)
@@ -869,6 +877,14 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
     string.append(line, str.view(string.from_int(shown)))
     string.append(line, "%")
     return line
+  }
+  if layout.contains(frame.headers,x,y) {
+    app.set_focus(state,app.panel_timeline())
+    let first: u64 = app.clamp_track_scroll(state,layout.height_of(frame.timeline))
+    let step: u64 = if lines == 0 {1}else{cast.wrap(lines)}
+    let next: u64 = if down {add.sat(first,step)}else if step < first {first-step}else{0}
+    let _ = app.set_track_scroll(state,next,layout.height_of(frame.timeline))
+    return note("Tracks scrolled")
   }
   let rows: u32 = if lines == 0 { 1 } else { lines }
   let widened: i64 = cast.wrap(rows)
