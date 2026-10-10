@@ -1288,22 +1288,53 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
 // ---------------------------------------------------------------------------
 // Audio: a strip per audio track, plus the mix controls the mixer used to hold.
 
-pub fn clip_has_audio(doc: ref<editor.Document>, clip: u64) -> bool effects {alloc} {
-  match editor.clip(doc, clip) {
-    none => false,
-    some(value) => match editor.source_slot(doc, value.source) {
-      none => false,
-      some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=has_audio),
+// Availability is source metadata, not the current mix: muted, disabled and
+// offline sound must still expose the controls needed to restore or edit it.
+// Bound imported graphs independently of their playback validity.
+type AudioMetadataBudget = struct {remaining: u64}
+fn audio_metadata(doc: ref<editor.Document>, clip: editor.Clip,
+    ancestors: ref<array<u64>>, budget: ref<AudioMetadataBudget>) -> bool effects {alloc} {
+  match editor.source_slot(doc,clip.source) {
+    none=>{},some(slot)=>{
+      if struct.get(array.borrow(struct.borrow(doc,field=sources),slot),field=has_audio) {return true}
     },
   }
+  if clip.nested == 0 or array.len(ancestors) >= 16 or budget.remaining == 0 {return false}
+  match editor.sequence_slot(doc,clip.nested) {none=>{return false},some(_)=>{},}
+  var next: array<u64> = array.new()
+  var index: u64 = 0
+  loop {if index >= array.len(ancestors) {break}
+    let owner: u64 = array.get(ancestors,index)
+    if owner == clip.nested {return false}
+    array.push(next,owner)
+    index=index+1
+  }
+  array.push(next,clip.nested)
+  index=0
+  loop {if index >= editor.clip_count(doc) or budget.remaining == 0 {break}
+    let child: editor.Clip = match editor.clip_at(doc,index) {none=>{break},some(value)=>value,}
+    index=index+1
+    if child.owner != clip.nested {continue}
+    struct.set(budget,budget.remaining-1,field=remaining)
+    if audio_metadata(doc,child,next,budget) {return true}
+  }
+  false
+}
+pub fn clip_has_audio(doc: ref<editor.Document>, clip: u64) -> bool effects {alloc} {
+  let value: editor.Clip = match editor.clip(doc,clip) {none=>{return false},some(found)=>found,}
+  var ancestors: array<u64> = [value.owner]
+  var budget: AudioMetadataBudget = AudioMetadataBudget {remaining:4096}
+  audio_metadata(doc,value,ancestors,budget)
 }
 
 pub fn track_has_audio(doc: ref<editor.Document>, track: u64) -> bool effects {alloc} {
+  let slot: u64 = match editor.track_slot(doc,track) {none=>{return false},some(value)=>value,}
+  let owner: u64 = struct.get(array.borrow(struct.borrow(doc,field=tracks),slot),field=owner)
   var i: u64 = 0
   loop { if i >= editor.clip_count(doc) { break }
     match editor.clip_at(doc, i) {
       none => {}, some(value) => {
-        if value.owner == doc.active and value.track == track and clip_has_audio(doc, value.id) { return true }
+        if value.owner == owner and value.track == track and clip_has_audio(doc, value.id) { return true }
       },
     }
     i = i + 1

@@ -1,0 +1,149 @@
+module genesis.tests.audio_nested
+import std.curve as curve
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn file(root: str, name: str, suffix: str) -> string effects {alloc} {
+  path.join(root,text.concat(name,suffix))
+}
+fn cache_clear(root: str) -> bool effects {alloc,fs.meta} {
+  var names: array<string> = match files.list_dir(root) {ok(value)=>value,err(_)=>{return false},}
+  var at: u64 = 0
+  loop {if at >= array.len(names) {break}
+    let name: str = str.view(array.borrow(names,at))
+    at=at+1
+    if str.starts_with(name,".genesis-nested-") {return false}
+    let entry: string = path.join(root,name)
+    let info: fs.meta = match files.symlink_metadata(entry) {ok(value)=>value,err(_)=>{return false},}
+    if info.is_dir and not info.is_symlink and not cache_clear(entry) {return false}
+  }
+  true
+}
+fn pull(peer: ref<link.Link>, root: str, request: u64, generation: u64, plan: ref<media.AudioPlan>)
+    -> bool effects {alloc,fs.write,io.write,net,time} {
+  if not playback.request(root,request,generation,plan) {return false}
+  if not match link.wake(peer,false) {ok(_)=>true,err(_)=>false,} {return false}
+  match link.await_ready(peer,request,time.monotonic_ns()+30000000000) {
+    ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+      false},
+  }
+}
+fn model(doc: ref<editor.Document>, root: str) -> bool effects {alloc,fs.read,fs.write} {
+  let original: string = encoded(doc)
+  let before: string = media.audio_signature(doc)
+  if not text.contains(before,"NEST") {return false}
+  var history: editor.History = editor.history(16)
+  editor.capture(history,doc)
+  if not editor.set_key(doc,20,"gain",6,0.125,curve.hold()) {return false}
+  let keyed: string = media.audio_signature(doc)
+  if keyed == before or not text.contains(keyed,"NEST") {return false}
+  if not editor.undo(history,doc) or encoded(doc) != original or media.audio_signature(doc) != before {return false}
+  if not editor.redo(history,doc) or media.audio_signature(doc) != keyed {return false}
+  let checkpoint: string = encoded(doc)
+  let where: string = path.join(root,"model-roundtrip.air")
+  if not match files.write_text(where,checkpoint) {ok(_)=>true,err(_)=>false,} {return false}
+  let stored: string = match files.read_text(where) {ok(value)=>value,err(_)=>{return false},}
+  var reopened: editor.Document = match editor_io.decode(stored) {ok(value)=>value,err(_)=>{return false},}
+  if encoded(reopened) != checkpoint or media.audio_signature(reopened) != keyed {return false}
+  if not editor.set_key(reopened,20,"opacity",6,0.2,curve.linear()) {return false}
+  if media.audio_signature(reopened) != keyed {return false}
+  if not editor.undo(history,doc) or encoded(doc) != original {return false}
+  true
+}
+pub fn main(args: view<str>) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) != 3 {return 2}
+  let worker: str = view.get(args,1)
+  let root: str = view.get(args,2)
+  let native: string = path.join(root,"native")
+  let stream: string = path.join(native,"stream")
+  let _ = files.mkdirs(native)
+  let _ = files.mkdirs(stream)
+  playback.reset(stream)
+  let manifest: string = match files.read_text(path.join(root,"cases.tsv")) {
+    ok(value)=>value,err(_)=>{return 1},
+  }
+  var rows: array<string> = text.split(manifest,"\n")
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  let config: playback.Config = playback.Config {root:string.copy(stream),worker:string.copy(worker),events:link.ticket(peer)}
+  var good: bool = true
+  var request: u64 = 0
+  var index: u64 = 0
+  var checked: u64 = 0
+  var model_good: bool = false
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    good=match link.connect(peer) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+      false},}
+    loop {if index >= array.len(rows) or not good {break}
+      let row_value: string = text.trim(array.borrow(rows,index))
+      let row: str = str.view(row_value)
+      index=index+1
+      if str.len(row) == 0 {continue}
+      var fields: array<string> = text.split(row,"\t")
+      if array.len(fields) != 4 {good=false
+        break}
+      let name: str = str.view(array.borrow(fields,0))
+      let start: i64 = match text.parse_i64(str.view(array.borrow(fields,1))) {some(value)=>value,none=>{good=false
+        break},}
+      let finish: i64 = match text.parse_i64(str.view(array.borrow(fields,2))) {some(value)=>value,none=>{good=false
+        break},}
+      let seek: i64 = match text.parse_i64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>{good=false
+        break},}
+      let project: string = match files.read_text(file(root,name,".air")) {ok(value)=>value,err(_)=>{good=false
+        break},}
+      var doc: editor.Document = match editor_io.decode(project) {ok(value)=>value,err(_)=>{good=false
+        break},}
+      if checked == 0 {model_good=model(doc,native)
+        good=model_good and good}
+      if not good {io.write("[GA_TEST_AUDIO_NESTED_MODEL] Child key/signature/Undo/save-open/picture identity failed\n")
+        break}
+      good=match media.prepare_audio(doc,worker,0,file(native,name,"-whole.wav")) {
+        ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+          false},} and good
+      var pass: u64 = 0
+      loop {if pass == 2 or not good {break}
+        var at: i64 = if pass == 0 {start}else{seek}
+        var chunk: u64 = 0
+        loop {if at >= finish or not good {break}
+          let size: i64 = if chunk == 0 {3}else if chunk == 1 {5}else{7}
+          let end: i64 = if at+size > finish {finish}else{at+size}
+          let suffix: string = text.concat(if pass == 0 {"-chunks-"}else{"-seek-"},text.concat(string.from_int(chunk),".wav"))
+          var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,end,file(native,name,suffix)) {
+            ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+              good=false
+              break},}
+          request=request+1
+          good=pull(peer,stream,request,index*2+pass,plan) and good
+          chunk=chunk+1
+          at=end
+        }
+        pass=pass+1
+      }
+      if good {checked=checked+1
+        io.write(text.concat("Nested audio native whole/chunk/seek: ",text.concat(name,"\n")))}
+    }
+    playback.stop(stream)
+    let _ = link.wake(peer,true)
+    good=match tasks.join_next<bool>(jobs,10000) {some(value)=>value,none=>false,} and good
+    link.close_commands(peer)
+  }
+  let cleanup_good: bool = cache_clear(root)
+  good=cleanup_good and good
+  let summary: string = text.concat("checked_cases\t",text.concat(string.from_int(checked),
+    text.concat("\nchild_key_signature_undo_saveopen_picture\t",text.concat(if model_good {"true"}else{"false"},
+    text.concat("\nstop_join_no_owned_cache\t",if cleanup_good {"true\n"}else{"false\n"})))))
+  let _ = files.write_text(path.join(native,"model.tsv"),summary)
+  if good {0}else{io.write("[GA_TEST_AUDIO_NESTED] Recursive planning or worker rendering failed\n")
+    1}
+}

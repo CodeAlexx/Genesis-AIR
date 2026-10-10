@@ -1775,18 +1775,19 @@ fn export_command(child: ref<Child>, reader: ref<proc.LineReader>, line: str, ca
 }
 
 fn audio_session(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
-                 sounds: ref<array<string>>, closer: str)
+                 sounds: ref<array<string>>, closer: str, cache: str)
                  -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
-  audio_session_for_request(child,reader,opener,sounds,closer,"",0)
+  audio_session_for_request(child,reader,opener,sounds,closer,"",0,cache)
 }
 fn audio_session_for_request(child: ref<Child>, reader: ref<proc.LineReader>, opener: str,
-                 sounds: ref<array<string>>, closer: str, root: str, id: u64)
+                 sounds: ref<array<string>>, closer: str, root: str, id: u64, cache: str)
                  -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
   try command_for_request(child, reader, opener, root, id, "")
   var at: u64 = 0
   loop {
     if at >= array.len(sounds) { break }
-    try command_for_request(child, reader, str.view(array.borrow(sounds, at)), root, id, "")
+    let line: string = nested_audio_runtime_line(array.borrow(sounds,at),cache)
+    try command_for_request(child, reader, line, root, id, "")
     at = at + 1
   }
   try command_for_request(child, reader, closer, root, id, "")
@@ -2095,7 +2096,7 @@ fn audio_fade_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, end
   result.ok(text.join(fields,":"))
 }
 
-fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
+fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
                -> result<array<string>, string> effects {alloc} {
   var lines: array<string> = array.new()
   var at: u64 = 0
@@ -2216,6 +2217,284 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
   result.ok(lines)
 }
 
+// Nested sound is a tree of sequence INSTANCES, not a flattened list of sources.
+// A compound's filters and envelopes act on the child sum. The worker renders
+// each complete instance to an unclipped float cache, then slices destination
+// samples for playback, audition and export using the same cached history.
+type NestedAudioTree = struct {lines: array<string>, nodes: u64, disk_bytes: f64, descriptor_bytes: u64}
+type NestedAudioBounds = struct {first: i64, last: i64, fps: f64, speed: f64}
+
+fn nested_audio_bounds(doc: ref<editor.Document>, clip: editor.Clip)
+    -> result<NestedAudioBounds,string> effects {alloc} {
+  match editor.sequence_slot(doc,clip.owner) {
+    none=>{return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested clip owner is missing")},some(_)=>{},
+  }
+  let track: u64 = match editor.track_slot(doc,clip.track) {
+    none=>{return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested clip track is missing")},some(slot)=>slot,
+  }
+  if struct.get(array.borrow(struct.borrow(doc,field=tracks),track),field=owner) != clip.owner {
+    return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested track belongs to a different sequence")
+  }
+  let fps: f64 = editor.sequence_fps(doc,clip.owner)
+  let speed: f64 = effective_speed(doc,clip)
+  if not math.is_finite(fps) or fps <= 0.0 or
+      not math.is_finite(3.4028234663852886e38/fps) or
+      clip.start < 0 or clip.start > 9007199254740991 or
+      clip.length <= 0 or clip.length > 9007199254740991 or
+      clip.source_in < 0 or clip.source_in > 9007199254740991 or
+      not math.is_finite(speed) or (speed != 0.0 and (speed < 0.05 or speed > 16.0)) {
+    return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested clip time or rate")
+  }
+  let first: f64 = math.floor(cast.float(clip.start)*48000.0/fps+0.5)
+  let last: f64 = math.floor((cast.float(clip.start)+cast.float(clip.length))*48000.0/fps+0.5)
+  if not math.is_finite(first) or not math.is_finite(last) or
+      first > 9007199254740991.0 or last > 9007199254740991.0 or
+      last <= first or last-first > 1036800000.0 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested output exceeds exact samples or six hours")
+  }
+  result.ok(NestedAudioBounds {first:cast.sat(first),last:cast.sat(last),fps:fps,speed:speed})
+}
+
+fn nested_audio_chain(doc: ref<editor.Document>, clip: editor.Clip, speed: f64)
+    -> result<string,string> effects {alloc} {
+  var stages: array<string> = array.new()
+  if clip.reverse {array.push(stages,string.copy("areverse"))}
+  tempo_stages(stages,speed)
+  if not math.is_finite(clip.pan) or clip.pan < -1.0 or clip.pan > 1.0 {
+    return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested clip pan")
+  }
+  if clip.pan != 0.0 {
+    array.push(stages,text.concat("stereotools=balance_out=",string.from_float(clip.pan)))
+  }
+  let track_pan: f64 = editor.track_pan(doc,clip.track)
+  if not math.is_finite(track_pan) or track_pan < -1.0 or track_pan > 1.0 {
+    return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested track pan")
+  }
+  if track_pan != 0.0 {
+    array.push(stages,text.concat("stereotools=balance_out=",string.from_float(track_pan)))
+  }
+  var index: u32 = 0
+  loop {match editor.filter_at(doc,clip.id,index) {
+    none=>{break},some(filter)=>{
+      if editor.filter_enabled(doc,filter) {
+        let kind: string = editor.filter_kind(doc,filter)
+        if chrome.is_audio_kind(kind) {
+          match audio_filter_stage(doc,filter) {
+            some(stage)=>array.push(stages,stage),
+            none=>{return result.err("[GA_AUDIO_NESTED_RENDER] Nested clip uses an unsupported audio filter")},
+          }
+        }else if not str.eq(kind,"speed") and editor.track_kind(doc,clip.track) != editor.track_video() {
+          return result.err("[GA_AUDIO_NESTED_RENDER] A picture filter cannot render on an audio lane")
+        }
+      }
+    },}
+    index=index+1
+  }
+  result.ok(if array.len(stages) == 0 {string.copy("-")}else{text.join(stages,",")})
+}
+
+// Before the existing raw-frame gain serializer adds signed frame coordinates,
+// prove its arithmetic and exact sample domain for this recursively owned node.
+fn nested_gain_preflight(doc: ref<editor.Document>, clip: editor.Clip, fps: f64)
+    -> result<unit,string> effects {alloc} {
+  var index: u64 = 0
+  var count: u64 = 0
+  var previous: i64 = -9007199254740991
+  var previous_sample: f64 = -9007199254740991.0
+  loop {if index >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),index)
+    index=index+1
+    if key.clip != clip.id or not str.eq(editor.name_text(doc,key.param),"gain") {continue}
+    let absolute: f64 = cast.float(clip.start)+cast.float(key.frame)
+    let sample: f64 = math.floor(absolute*48000.0/fps+0.5)
+    if key.owner != clip.owner or key.frame < -9007199254740991 or key.frame > 9007199254740991 or
+        not math.is_finite(key.value) or key.value < 0.0 or key.value > 3.4028234e38 or key.interp >= 38 or
+        math.abs(absolute) > 9007199254740991.0 or not math.is_finite(sample) or
+        math.abs(sample) > 9007199254740991.0 or count >= 65536 or
+        (count != 0 and (key.frame <= previous or sample <= previous_sample)) {
+      return result.err("[GA_AUDIO_GAIN_KEYS] Invalid nested clip gain keyframe")
+    }
+    previous=key.frame
+    previous_sample=sample
+    count=count+1
+  }
+  result.ok(())
+}
+
+fn nested_audio_append(tree: ref<NestedAudioTree>, fields: ref<array<string>>, bytes: f64)
+    -> result<unit,string> effects {alloc} {
+  if tree.nodes >= 4096 or not math.is_finite(bytes) or bytes < 0.0 or
+      tree.disk_bytes+bytes > 34359738368.0 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested audio exceeds node or float cache limits")
+  }
+  let row: string = text.join(fields," ")
+  let size: u64 = str.len(row)+1
+  if tree.descriptor_bytes+size > 960000 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested audio descriptor exceeds the playback mailbox")
+  }
+  array.push(struct.borrow(tree,field=lines),row)
+  struct.set(tree,tree.nodes+1,field=nodes)
+  struct.set(tree,tree.disk_bytes+bytes,field=disk_bytes)
+  struct.set(tree,tree.descriptor_bytes+size,field=descriptor_bytes)
+  result.ok(())
+}
+
+fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: str, parent: str,
+    ancestors: ref<array<u64>>, tree: ref<NestedAudioTree>)
+    -> result<unit,string> effects {alloc} {
+  if array.len(ancestors) > 16 or str.len(instance) > 256 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested audio exceeds depth or instance path limits")
+  }
+  let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
+  if bounds.speed == 0.0 {return result.ok(())}
+  let chain: string = try nested_audio_chain(doc,clip,bounds.speed)
+  try nested_gain_preflight(doc,clip,bounds.fps)
+  let gain_keys: string = try audio_gain_keys(doc,clip,clip.start,bounds.fps)
+  let fade_keys: string = try audio_fade_keys(doc,clip,clip.start,editor.clip_end(clip),bounds.fps,false)
+  let gain: f64 = if str.len(gain_keys) == 0 {editor.effective_gain(doc,clip.id)}else{editor.track_gain(doc,clip.track)}
+  if not math.is_finite(gain) or gain < 0.0 or gain > 3.4028234663852886e38 or
+      clip.fade_in < 0 or clip.fade_out < 0 {
+    return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested gain or scalar fade")
+  }
+  var fields: array<string> = array.new()
+  var disk_bytes: f64 = cast.float(bounds.last-bounds.first)*8.0+128.0
+  if clip.nested == 0 {
+    let source_slot: u64 = match editor.source_slot(doc,clip.source) {
+      some(slot)=>slot,none=>{return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf source is missing")},
+    }
+    var source: SourceInfo = source_info(doc,source_slot)
+    if not source_range_ok(doc,clip) {return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf exceeds its source frames")}
+    let source_s: f64 = cast.float(clip.source_in)/bounds.fps
+    var duration_s: f64 = cast.float(clip.length)*bounds.speed/bounds.fps
+    if source.frames > 0 and source.fps > 0.0 {
+      let remaining: f64 = cast.float(source.frames)/source.fps-source_s
+      if duration_s > remaining {duration_s=remaining}
+    }
+    if not math.is_finite(source_s) or not math.is_finite(duration_s) or
+        duration_s <= 0.0 or duration_s > 21600.0 {
+      return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested leaf source span is invalid or exceeds six hours")
+    }
+    fields=[string.copy("NESTLEAF"),string.copy(instance),string.copy(parent),
+      string.from_int(bounds.first),string.from_int(bounds.last),provider.wire_path(source.path),
+      string.from_float(source_s),string.from_float(duration_s)]
+  }else{
+    if clip.source != 0 {return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested clip also references a media source")}
+    match editor.sequence_slot(doc,clip.nested) {
+      none=>{return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested sequence is missing")},some(_)=>{},
+    }
+    var next_ancestors: array<u64> = array.new()
+    var at: u64 = 0
+    loop {if at >= array.len(ancestors) {break}
+      let sequence: u64 = array.get(ancestors,at)
+      if sequence == clip.nested {return result.err("[GA_AUDIO_NESTED_CYCLE] Nested sequence has a composition cycle")}
+      array.push(next_ancestors,sequence)
+      at=at+1
+    }
+    array.push(next_ancestors,clip.nested)
+    let child_fps: f64 = editor.sequence_fps(doc,clip.nested)
+    if not math.is_finite(child_fps) or child_fps <= 0.0 {
+      return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested sequence frame rate is invalid")
+    }
+    let child_length: i64 = editor.sequence_duration(doc,clip.nested)
+    let child_limit: f64 = math.floor(cast.float(child_length)*48000.0/child_fps+0.5)
+    let selected_first: f64 = math.floor(cast.float(clip.source_in)*48000.0/bounds.fps+0.5)
+    let logical_last: f64 = math.floor((cast.float(clip.source_in)+cast.float(clip.length-1)*bounds.speed)*child_fps/bounds.fps)
+    let selected_end: f64 = math.floor((cast.float(clip.source_in)+cast.float(clip.length)*bounds.speed)*48000.0/bounds.fps+0.5)
+    // An empty sequence is a valid source in the SDK. Materialize its requested
+    // span as silence so an enclosing filter can still operate on that sum.
+    let selected_last: f64 = if child_length == 0 {selected_end}
+      else if selected_end > child_limit {child_limit}else{selected_end}
+    if not math.is_finite(child_limit) or child_limit > 9007199254740991.0 or
+        not math.is_finite(selected_first) or not math.is_finite(selected_last) or
+        selected_first > 9007199254740991.0 or selected_last > 9007199254740991.0 or
+        selected_first < 0.0 or selected_last <= selected_first or selected_last-selected_first > 1036800000.0 or
+        not math.is_finite(logical_last) or (child_length != 0 and logical_last >= cast.float(child_length)) {
+      return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested source span exceeds its sequence")
+    }
+    let child_first: i64 = cast.sat(selected_first)
+    let child_last: i64 = cast.sat(selected_last)
+    at=0
+    loop {if at >= editor.clip_count(doc) {break}
+      let child: editor.Clip = match editor.clip_at(doc,at) {none=>{break},some(value)=>value,}
+      at=at+1
+      if child.owner != clip.nested or not child.enabled or not editor.track_audible(doc,child.track) {continue}
+      if child.nested == 0 {
+        let slot: u64 = match editor.source_slot(doc,child.source) {none=>{continue},some(value)=>value,}
+        let source: SourceInfo = source_info(doc,slot)
+        if not source.audio or not source.online {continue}
+      }
+      let child_begin_sample: f64 = math.floor(cast.float(child.start)*48000.0/child_fps+0.5)
+      let child_end_sample: f64 = math.floor((cast.float(child.start)+cast.float(child.length))*48000.0/child_fps+0.5)
+      if child_end_sample <= cast.float(child_first) or child_begin_sample >= cast.float(child_last) {continue}
+      let child_bounds: NestedAudioBounds = try nested_audio_bounds(doc,child)
+      if child_bounds.speed == 0.0 or child_bounds.last <= child_first or child_bounds.first >= child_last {continue}
+      let child_path: string = text.concat(instance,text.concat(if child.nested == 0 {".l"}else{".n"},string.from_int(child.id)))
+      let _ = try nested_audio_define(doc,child,child_path,instance,next_ancestors,tree)
+    }
+    disk_bytes=disk_bytes+cast.float(child_last-child_first)*8.0+128.0
+    fields=[string.copy("NESTBUS"),string.copy(instance),string.copy(parent),
+      string.from_int(bounds.first),string.from_int(bounds.last),string.from_int(child_first),string.from_int(child_last)]
+  }
+  array.push(fields,string.from_float(gain))
+  array.push(fields,string.from_float(cast.float(clip.fade_in)/bounds.fps))
+  array.push(fields,string.from_float(cast.float(clip.fade_out)/bounds.fps))
+  array.push(fields,string.from_float(cast.float(clip.length)/bounds.fps))
+  array.push(fields,chain)
+  if str.len(gain_keys) != 0 {array.push(fields,gain_keys)}
+  if str.len(fade_keys) != 0 {array.push(fields,fade_keys)}
+  nested_audio_append(tree,fields,disk_bytes)
+}
+
+fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
+    -> result<array<string>,string> effects {alloc} {
+  var tree: NestedAudioTree = NestedAudioTree {lines:array.new(),nodes:0,disk_bytes:0.0,descriptor_bytes:0}
+  var slices: array<string> = array.new()
+  let origin: i64 = audio_sample_frame(start,fps)
+  let finish_sample: i64 = audio_sample_frame(finish,fps)
+  var ancestors: array<u64> = [doc.active]
+  var at: u64 = 0
+  loop {if at >= editor.clip_count(doc) {break}
+    let clip: editor.Clip = match editor.clip_at(doc,at) {none=>{break},some(value)=>value,}
+    at=at+1
+    if clip.owner != doc.active or not clip.enabled or clip.nested == 0 or
+        not editor.track_audible(doc,clip.track) {continue}
+    if editor.clip_end(clip) <= start or clip.start >= finish {continue}
+    let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
+    if bounds.speed == 0.0 or bounds.last <= origin or bounds.first >= finish_sample {continue}
+    let instance: string = text.concat("n",string.from_int(clip.id))
+    try nested_audio_define(doc,clip,instance,"-",ancestors,tree)
+    let begin: i64 = if bounds.first > origin {bounds.first}else{origin}
+    let end: i64 = if bounds.last < finish_sample {bounds.last}else{finish_sample}
+    var fields: array<string> = [string.copy("NESTMIX"),instance,string.from_int(begin),string.from_int(end),string.from_int(begin-origin)]
+    array.push(slices,text.join(fields," "))
+  }
+  var flat: array<string> = try flat_audio_lines(doc,start,finish,fps,streaming)
+  if tree.nodes == 0 {return result.ok(flat)}
+  var lines: array<string> = [string.copy("NESTBEGIN -")]
+  at=0
+  loop {if at >= array.len(struct.borrow(tree,field=lines)) {break}
+    array.push(lines,string.copy(array.borrow(struct.borrow(tree,field=lines),at)))
+    at=at+1
+  }
+  array.push(lines,string.copy("NESTCOMMIT"))
+  at=0
+  loop {if at >= array.len(flat) {break}
+    array.push(lines,string.copy(array.borrow(flat,at)))
+    at=at+1
+  }
+  at=0
+  loop {if at >= array.len(slices) {break}
+    array.push(lines,string.copy(array.borrow(slices,at)))
+    at=at+1
+  }
+  // The retained app request mailbox is bounded to one MiB, including its
+  // header and output path. Reject explicitly before publishing a larger tree.
+  if str.len(text.join(lines,"\n")) > 960000 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested audio descriptor exceeds the playback mailbox")
+  }
+  result.ok(lines)
+}
+
 // Absolute sample boundaries keep fractional-rate chunk lengths from accumulating
 // an extra rounded sample on every device buffer.
 pub fn audio_sample_frame(frame: i64, fps: f64) -> i64 effects {} {
@@ -2258,6 +2537,9 @@ pub fn audio_plan_range(doc: ref<editor.Document>, worker: str, start: i64, fini
   let fps: f64 = editor.sequence_fps(doc, doc.active)
   if not math.is_finite(fps) or fps <= 0.0 or start < 0 or finish <= start { return result.err("[GA_AUDIO_RANGE] Invalid playback range") }
   var sounds: array<string> = try audio_lines(doc, start, finish, fps, true)
+  if nested_audio_requested(sounds) and str.len(text.join(sounds,"\n"))+str.len(provider.wire_path(output))+128 > 1048576 {
+    return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested audio request exceeds the playback mailbox")
+  }
   result.ok(AudioPlan {worker: string.copy(worker), output: string.copy(output),
     duration: cast.float(finish - start) / fps, frames: cast.sat(audio_sample_frame(finish,fps)-audio_sample_frame(start,fps)), sounds: sounds})
 }
@@ -2287,18 +2569,92 @@ pub fn source_audio_range(doc: ref<editor.Document>, worker: str, start: i64, fi
 
 // One background owner retains the pipe/reader between requests. These resource
 // handles stay on that thread; seeks and actual mix edits discard the old session.
-pub type AudioSession = struct {child: option<Child>, reader: proc.LineReader}
+fn nested_audio_runtime_line(line: str, cache: str) -> string effects {alloc} {
+  if str.eq(line,"NESTBEGIN -") {return text.concat("NESTBEGIN ",provider.wire_path(cache))}
+  string.copy(line)
+}
+fn nested_audio_requested(lines: ref<array<string>>) -> bool effects {} {
+  array.len(lines) != 0 and str.eq(array.borrow(lines,0),"NESTBEGIN -")
+}
+fn nested_audio_reserve(output: str) -> result<string,string> effects {alloc,fs.read,fs.write,time} {
+  let parent: string = try provider.resolve_scratch(path.dirname(output))
+  match files.mkdirs(parent) {ok(_)=>{},err(_)=>{return result.err("[GA_AUDIO_NESTED_CACHE] Cannot create audio cache parent")},}
+  let stamp: u64 = time.monotonic_ns()
+  var attempt: u64 = 0
+  loop {if attempt >= 128 {break}
+    let name: string = text.concat(".genesis-nested-",text.concat(string.from_int(stamp),text.concat("-",string.from_int(attempt))))
+    let cache: string = path.join(parent,name)
+    match files.create_dir(cache) {
+      ok(_)=>{return result.ok(cache)},
+      err(problem)=>{if problem.code != 3 {return result.err("[GA_AUDIO_NESTED_CACHE] Cannot reserve a private audio cache")}},
+    }
+    attempt=attempt+1
+  }
+  result.err("[GA_AUDIO_NESTED_CACHE] Cannot reserve a unique audio cache")
+}
+// Only the exclusively created, caller-owned flat directory reaches this
+// helper. Join/terminate its worker first; never follow links or recurse.
+fn nested_audio_cleanup(cache: str) -> result<unit,string> effects {alloc,fs.meta,fs.write} {
+  if str.len(cache) == 0 {return result.ok(())}
+  let root: fs.meta = match files.symlink_metadata(cache) {
+    ok(value)=>value,err(problem)=>{if problem.code == 1 {return result.ok(())}
+      return result.err("[GA_AUDIO_NESTED_CACHE] Cannot inspect owned audio cache")},
+  }
+  if not root.is_dir or root.is_symlink {return result.err("[GA_AUDIO_NESTED_CACHE] Owned audio cache is no longer a directory")}
+  var names: array<string> = match files.list_dir(cache) {
+    ok(value)=>value,err(_)=>{return result.err("[GA_AUDIO_NESTED_CACHE] Cannot list owned audio cache")},
+  }
+  var index: u64 = 0
+  var failed: bool = false
+  loop {if index >= array.len(names) {break}
+    let file: string = path.join(cache,array.borrow(names,index))
+    index=index+1
+    match files.symlink_metadata(file) {
+      err(problem)=>{if problem.code != 1 {failed=true}},
+      ok(info)=>{if info.is_dir and not info.is_symlink {failed=true}else{
+        match files.remove(file) {ok(_)=>{},err(_)=>{failed=true},}
+      }},
+    }
+  }
+  if failed {return result.err("[GA_AUDIO_NESTED_CACHE] Cannot remove owned audio cache files")}
+  match files.remove(cache) {
+    ok(_)=>result.ok(()),err(_)=>result.err("[GA_AUDIO_NESTED_CACHE] Cannot remove owned audio cache directory"),
+  }
+}
+fn nested_audio_failure(primary: str, cleanup: result<unit,string> own) -> string effects {alloc} {
+  match cleanup {
+    ok(_)=>string.copy(primary),
+    err(problem)=>text.concat(primary,text.concat("\n",problem)),
+  }
+}
+fn nested_audio_stop(child: Child own, cache: str) -> result<unit,string>
+    effects {alloc,fs.meta,fs.write,process,time} {
+  var worker: Child = child
+  var stopped: bool = match proc.terminate(worker,100) {ok(_)=>true,err(_)=>false,}
+  var close_failed: bool = false
+  match proc.close(worker) {ok(_)=>{stopped=true},err(_)=>{close_failed=true},}
+  if not stopped {
+    return result.err("[GA_AUDIO_NESTED_CACHE] Worker exit is unconfirmed; owned audio cache was retained")
+  }
+  let cleaned: result<unit,string> = nested_audio_cleanup(cache)
+  if close_failed {return result.err(nested_audio_failure("[GA_AUDIO_NESTED_CACHE] Cannot release audio worker",cleaned))}
+  cleaned
+}
+pub type AudioSession = struct {child: option<Child>, reader: proc.LineReader, cache: string}
 pub type AudioJob = struct {plan: AudioPlan, session: option<AudioSession>}
 pub fn audio_job(plan: AudioPlan own, session: option<AudioSession> own) -> AudioJob effects {} {
   AudioJob {plan: plan, session: session}
 }
-pub fn shutdown_audio(session: AudioSession own) -> unit effects {process, time} {
+pub fn shutdown_audio_checked(session: AudioSession own) -> result<unit,string>
+    effects {alloc,fs.meta,fs.write,process,time} {
   var owned: AudioSession = session
   match struct.replace(owned,option.none(),field=child) {
-    none=>{},some(value)=>{ var child: Child = value
-      let _ = proc.terminate(child,100)
-      let _ = proc.close(child) },
+    none=>nested_audio_cleanup(struct.borrow(owned,field=cache)),
+    some(value)=>nested_audio_stop(value,struct.borrow(owned,field=cache)),
   }
+}
+pub fn shutdown_audio(session: AudioSession own) -> unit effects {alloc,fs.meta,fs.write,process,time} {
+  let _ = shutdown_audio_checked(session)
   ()
 }
 pub fn execute_playback_audio(job: ref<AudioJob>, root: str, id: u64) -> result<AudioSession,string>
@@ -2312,13 +2668,18 @@ pub fn execute_playback_audio(job: ref<AudioJob>, root: str, id: u64) -> result<
         ok(value) => value,
         err(problem) => { return result.err(text.concat("[GA_AUDIO_STREAM_START] ",fs.error.message(problem))) },
       }
-      AudioSession {child: option.some(child), reader: proc.line_reader(65536)}
+      AudioSession {child: option.some(child), reader: proc.line_reader(65536), cache:string.new()}
     },
   }
   match files.mkdirs(str.view(path.dirname(str.view(plan.output)))) {
-    err(problem) => { shutdown_audio(session)
-      return result.err("[GA_AUDIO_STREAM_PATH] Audio scratch directory could not be created") },
+    err(problem) => {return result.err(nested_audio_failure("[GA_AUDIO_STREAM_PATH] Audio scratch directory could not be created",shutdown_audio_checked(session)))},
     ok(_) => {},
+  }
+  if nested_audio_requested(struct.borrow(plan,field=sounds)) and str.len(struct.borrow(session,field=cache)) == 0 {
+    let cache: string = match nested_audio_reserve(struct.borrow(plan,field=output)) {
+      ok(value)=>value,err(problem)=>{return result.err(nested_audio_failure(problem,shutdown_audio_checked(session)))},
+    }
+    let _ = struct.replace(session,cache,field=cache)
   }
   let target: string = provider.wire_path(str.view(plan.output))
   var opener: string = text.concat("PLAYWAVE ",str.view(target))
@@ -2327,7 +2688,7 @@ pub fn execute_playback_audio(job: ref<AudioJob>, root: str, id: u64) -> result<
   let closer: string = text.concat("WAVECLOSE ",str.view(target))
   var child: Child = option.unwrap(struct.replace(session,option.none(),field=child))
   var reader: proc.LineReader = struct.replace(session,proc.line_reader(65536),field=reader)
-  var answer: result<unit,string> = audio_session_for_request(child,reader,str.view(opener),struct.borrow(plan,field=sounds),str.view(closer),root,id)
+  var answer: result<unit,string> = audio_session_for_request(child,reader,str.view(opener),struct.borrow(plan,field=sounds),str.view(closer),root,id,struct.borrow(session,field=cache))
   match audio_request_current(root,id) {
     ok(current)=>{if not current {answer=result.err("[GA_AUDIO_STREAM_CANCELLED] Playback request was superseded")}},
     err(problem)=>{answer=result.err(problem)},
@@ -2335,10 +2696,11 @@ pub fn execute_playback_audio(job: ref<AudioJob>, root: str, id: u64) -> result<
   let _ = struct.replace(session,option.some(child),field=child)
   let _ = struct.replace(session,reader,field=reader)
   match answer {
-    err(problem) => { shutdown_audio(session)
+    err(problem) => {
+      let combined: string = nested_audio_failure(problem,shutdown_audio_checked(session))
       let _ = files.remove(str.view(plan.output))
-      return result.err(if str.starts_with(str.view(problem),"[GA_") {problem}
-        else {text.concat("[GA_AUDIO_STREAM_REPLY] ",str.view(problem))}) },
+      return result.err(if str.starts_with(combined,"[GA_") {combined}
+        else {text.concat("[GA_AUDIO_STREAM_REPLY] ",combined)}) },
     ok(_) => result.ok(session),
   }
 }
@@ -2350,9 +2712,12 @@ pub fn execute_audio_plan(plan: ref<AudioPlan>) -> result<bool, string>
     err(problem) => { return result.err("audio scratch directory could not be created") },
     ok(_) => { },
   }
+  let cache: string = if nested_audio_requested(struct.borrow(plan,field=sounds)) {
+    try nested_audio_reserve(struct.borrow(plan,field=output))
+  }else{string.new()}
   var argv: array<string> = [string.copy(str.view(plan.worker)), string.copy("--serve")]
   var child: Child = match proc.spawn_piped_merged(argv) {
-    err(problem) => { return result.err(text.concat("start audio worker: ", fs.error.message(problem))) },
+    err(problem) => {return result.err(nested_audio_failure(text.concat("start audio worker: ",fs.error.message(problem)),nested_audio_cleanup(cache)))},
     ok(value) => value,
   }
   let target: string = provider.wire_path(str.view(plan.output))
@@ -2361,27 +2726,26 @@ pub fn execute_audio_plan(plan: ref<AudioPlan>) -> result<bool, string>
   string.append(opener, " ")
   string.append(opener, str.view(string.from_float(plan.duration)))
   var closer: string = text.concat("WAVECLOSE ", str.view(target))
-  match audio_session(child, reader, str.view(opener), plan.sounds, str.view(closer)) {
+  match audio_session(child, reader, str.view(opener), plan.sounds, str.view(closer),cache) {
     err(problem) => {
-      let _ = proc.terminate(child, 100)
-      let _ = proc.close(child)
-      return result.err(problem)
+      return result.err(nested_audio_failure(problem,nested_audio_stop(child,cache)))
     },
     ok(_) => { },
   }
   let _ = proc.close_stdin(child)
   let finished: process.status = match proc.wait(child, proc.deadline_in(30000)) {
     err(problem) => {
-      let _ = proc.terminate(child, 100)
-      let _ = proc.close(child)
-      return result.err("audio worker did not finish")
+      return result.err(nested_audio_failure("audio worker did not finish",nested_audio_stop(child,cache)))
     },
     ok(value) => value,
   }
-  let _ = proc.close(child)
-  if not proc.success(finished) {
-    return result.err("audio worker exited unsuccessfully")
+  match proc.close(child) {
+    ok(_)=>{},err(problem)=>{return result.err(nested_audio_failure(text.concat("close audio worker: ",fs.error.message(problem)),nested_audio_cleanup(cache)))},
   }
+  if not proc.success(finished) {
+    return result.err(nested_audio_failure("audio worker exited unsuccessfully",nested_audio_cleanup(cache)))
+  }
+  try nested_audio_cleanup(cache)
   result.ok(true)
 }
 
@@ -2412,6 +2776,11 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   let width: u32 = sequence.width
   let height: u32 = sequence.height
   if not (fps > 0.0) { return result.err("[GA_EXPORT_FPS] the sequence frame rate is invalid") }
+  // Resolve the complete recursive audio descriptor before starting an encoder
+  // or creating partial output. Invalid nested projects must not render pictures
+  // for hours before the audio planner discovers the error.
+  var sounds: array<string> = try audio_lines(doc,range.mark_in,range.mark_out,fps,false)
+  let cache: string = if nested_audio_requested(sounds) {try nested_audio_reserve(output)}else{string.new()}
   var argv: array<string> = [string.copy(worker), string.copy("--serve"), string.copy("--size"),
     string.from_int(width), string.from_int(height)]
   // Preview resampling may differ at edges. Every export retains the master
@@ -2421,22 +2790,21 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   // Merge diagnostics into the bounded line reader so a chatty encoder cannot fill an
   // unread stderr pipe and stall a long export.
   var child: Child = match proc.spawn_piped_merged(argv) {
-    err(problem) => { return result.err(text.concat("[GA_EXPORT_START] start worker: ", fs.error.message(problem))) },
+    err(problem) => {return result.err(nested_audio_failure(text.concat("[GA_EXPORT_START] start worker: ",fs.error.message(problem)),nested_audio_cleanup(cache)))},
     ok(value) => value,
   }
   var reader: proc.LineReader = proc.line_reader(65536)
   // This thread owns the child until the session finishes. Stop it before the
   // caller removes partial output, including failures inside a borrowed helper.
-  match render_session(doc,child,reader,output,fonts,cancel,progress,profile,width,height,fps) {
+  match render_session(doc,child,reader,output,fonts,cancel,progress,profile,width,height,fps,sounds,cache) {
     err(problem)=>{
-      let _ = proc.terminate(child,100)
-      let _ = proc.close(child)
-      result.err(problem)
+      result.err(nested_audio_failure(problem,nested_audio_stop(child,cache)))
     },
     ok(_)=>{
       match proc.close(child) {
-        err(problem)=>result.err(text.concat("[GA_EXPORT_EXIT] close worker: ",fs.error.message(problem))),
-        ok(status)=>if proc.success(status) {result.ok(())}else{result.err("[GA_EXPORT_EXIT] worker exited unsuccessfully")},
+        err(problem)=>result.err(nested_audio_failure(text.concat("[GA_EXPORT_EXIT] close worker: ",fs.error.message(problem)),nested_audio_cleanup(cache))),
+        ok(status)=>{if proc.success(status) {nested_audio_cleanup(cache)}else{
+          result.err(nested_audio_failure("[GA_EXPORT_EXIT] worker exited unsuccessfully",nested_audio_cleanup(cache)))}},
       }
     },
   }
@@ -2444,7 +2812,8 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
 
 fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc.LineReader>,
                   output: str, fonts: ref<array<string>>, cancel: str, progress: str,
-                  profile: u32, width: u32, height: u32, fps: f64)
+                  profile: u32, width: u32, height: u32, fps: f64,
+                  sounds: ref<array<string>>, cache_directory: str)
                   -> result<unit,string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   let range: editor.Transport = editor.export_range(doc)
   let fractional: bool = math.abs(fps - 30000.0 / 1001.0) < 0.001 or
@@ -2463,6 +2832,15 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
     string.from_float(fps)
   ]
   try export_command(child, reader, str.view(text.join(open_fields, " ")), cancel)
+  var warm: u64 = 0
+  if nested_audio_requested(sounds) {
+    loop {if warm >= array.len(sounds) {break}
+      let line: string = nested_audio_runtime_line(array.borrow(sounds,warm),cache_directory)
+      try export_command(child,reader,line,cancel)
+      warm=warm+1
+      if str.eq(line,"NESTCOMMIT") {break}
+    }
+  }
   var cache: RenderCache = render_cache(fonts)
   struct.set(cache, width, field=width)
   struct.set(cache, height, field=height)
@@ -2485,11 +2863,11 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
     }
     frame = frame + 1
   }
-  var sounds: array<string> = try audio_lines(doc, range.mark_in, range.mark_out, fps, false)
-  var at: u64 = 0
+  var at: u64 = warm
   loop {
     if at >= array.len(sounds) { break }
-    try export_command(child, reader, str.view(array.borrow(sounds, at)), cancel)
+    let line: string = nested_audio_runtime_line(array.borrow(sounds,at),cache_directory)
+    try export_command(child, reader, line, cancel)
     at = at + 1
   }
   try export_command(child, reader, "CLOSE", cancel)

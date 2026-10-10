@@ -50,12 +50,26 @@ pub fn discard(root: str, id: u64, generation: u64) -> bool effects {alloc,fs.wr
 }
 pub fn stop(root: str) -> unit effects {alloc,fs.write} {let _ = files.write_text(path.join(root,"stop"),"stop")
   ()}
+fn close_session(session: media.AudioSession own, root: str, peer: ref<link.Peer>, id: u64)
+    -> bool effects {alloc,fs.meta,fs.write,net,process,time} {
+  match media.shutdown_audio_checked(session) {
+    ok(_)=>true,
+    err(problem)=>{
+      // Keep cleanup failures locally even when transport generations move on.
+      // This task's scratch root is separate from the refused cache directory.
+      let _ = publish(root,"audio-cleanup-error.txt",str.view(problem))
+      if id != 0 {link.fail(peer,id,str.view(problem))}
+      false
+    },
+  }
+}
 pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,net,process,time} {
   var owned: Config = config
   var peer: link.Peer = match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}
   var session: option<media.AudioSession> = option.none()
   var transport: u64 = 0
   var seen: u64 = 0
+  var good: bool = true
   loop {
     if tasks.requested_at(path.join(str.view(owned.root),"stop")) {break}
     if not link.next(peer) {break}
@@ -82,8 +96,12 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
     let frames: u64 = u64_or(str.view(array.borrow(header,2)),18446744073709551615)
     if snapshot != id or number(str.view(owned.root),"request.id") != id {continue}
     if generation != transport or frames == 0 {
-      match ref.swap(session,option.none()) {none=>{},some(value)=>media.shutdown_audio(value),}
+      let closed: bool = match ref.swap(session,option.none()) {
+        none=>true,some(value)=>close_session(value,str.view(owned.root),peer,id),
+      }
       transport=generation
+      if not closed {good=false
+        continue}
     }
     if frames == 0 {let _ = link.notify(peer,1,id)
       continue}
@@ -100,13 +118,19 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
       output:decoded(str.view(array.borrow(lines,1))),duration:cast.float(frames)/48000.0,frames:frames,sounds:sounds}
     var job: media.AudioJob = media.audio_job(plan,ref.swap(session,option.none()))
     match media.execute_playback_audio(job,str.view(owned.root),id) {
-      err(problem)=>{if not str.starts_with(str.view(problem),"[GA_AUDIO_STREAM_CANCELLED]") {
+      err(problem)=>{
+        if text.contains(str.view(problem),"[GA_AUDIO_NESTED_CACHE]") {
+          let _ = publish(str.view(owned.root),"audio-cleanup-error.txt",str.view(problem))
+        }
+        if not str.starts_with(str.view(problem),"[GA_AUDIO_STREAM_CANCELLED]") {
         link.fail(peer,id,str.view(problem))}},
       ok(value)=>{session=option.some(value)
         let _ = link.notify(peer,1,id)},
     }
   }
-  match ref.swap(session,option.none()) {none=>{},some(value)=>media.shutdown_audio(value),}
+  good=match ref.swap(session,option.none()) {
+    none=>true,some(value)=>close_session(value,str.view(owned.root),peer,seen),
+  } and good
   link.finish(peer,seen)
-  true
+  good
 }

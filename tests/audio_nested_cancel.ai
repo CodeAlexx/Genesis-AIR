@@ -1,0 +1,155 @@
+// Interrupt genuine full-history nested warming, then start a fresh audio owner.
+module genesis.tests.audio_nested_cancel
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+
+fn read_doc(root: str, name: str) -> result<editor.Document,string> effects {alloc,fs.read} {
+  let value: string = match files.read_text(path.join(root,name)) {
+    ok(value)=>value,err(_)=>{return result.err("[GA_TEST_NESTED_CANCEL] Cannot read authored project")},
+  }
+  match editor_io.decode(value) {ok(doc)=>result.ok(doc),err(_)=>result.err("[GA_TEST_NESTED_CANCEL] Cannot decode authored project"),}
+}
+fn witness(root: str, inside: bool) -> string effects {alloc,fs.meta} {
+  var names: array<string> = match files.list_dir(root) {ok(value)=>value,err(_)=>{return string.new()},}
+  var at: u64 = 0
+  loop {if at >= array.len(names) {break}
+    let name: str = str.view(array.borrow(names,at))
+    at=at+1
+    let entry: string = path.join(root,name)
+    let info: fs.meta = match files.symlink_metadata(entry) {ok(value)=>value,err(_)=>{continue},}
+    if info.is_symlink {continue}
+    if info.is_dir {
+      let found: string = witness(entry,inside or str.starts_with(name,".genesis-nested-"))
+      if str.len(found) != 0 {return found}
+    }else if inside and text.ends_with(name,".rf64") {return entry}
+  }
+  string.new()
+}
+fn cache_clear(root: str) -> bool effects {alloc,fs.meta} {
+  var names: array<string> = match files.list_dir(root) {ok(value)=>value,err(_)=>{return false},}
+  var at: u64 = 0
+  loop {if at >= array.len(names) {break}
+    let name: str = str.view(array.borrow(names,at))
+    at=at+1
+    if str.starts_with(name,".genesis-nested-") {return false}
+    let entry: string = path.join(root,name)
+    let info: fs.meta = match files.symlink_metadata(entry) {ok(value)=>value,err(_)=>{return false},}
+    if info.is_dir and not info.is_symlink and not cache_clear(entry) {return false}
+  }
+  true
+}
+pub fn main(args: view<str>) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) < 3 or view.len(args) > 4 {return 2}
+  let worker: str = view.get(args,1)
+  let root: str = view.get(args,2)
+  let shutdown: bool = view.len(args) == 4 and str.eq(view.get(args,3),"shutdown")
+  var long_doc: editor.Document = match read_doc(root,"long.air") {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 1},}
+  var short_doc: editor.Document = match read_doc(root,"short.air") {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 1},}
+  let stream: string = path.join(root,"stream")
+  let _ = files.mkdirs(stream)
+  let cancelled: string = path.join(root,"cancelled.wav")
+  let recovered: string = path.join(root,"recovered.wav")
+  var good: bool = true
+  var warm: bool = false
+  var join_ns: u64 = 0
+  var discard_ns: u64 = 0
+  var phase: u64 = 0
+  let phases: u64 = if shutdown {2}else{1}
+  loop {if phase == phases or not good {break}
+    playback.reset(stream)
+    var peer: link.Link = match link.open() {ok(value)=>value,err(problem)=>{io.write(problem)
+      return 1},}
+    let config: playback.Config = playback.Config {root:string.copy(stream),worker:string.copy(worker),events:link.ticket(peer)}
+    var plan: media.AudioPlan = match if phase == 0 {media.audio_plan_range(long_doc,worker,0,3,cancelled)}
+        else {media.audio_plan_range(short_doc,worker,0,3,recovered)} {ok(value)=>value,err(problem)=>{io.write(problem)
+        return 1},}
+    task.scope {
+      var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+      good=match link.connect(peer) {ok(_)=>true,err(problem)=>{io.write(problem)
+        false},}
+      if good {good=playback.request(stream,1,1,plan)}
+      if good {good=match link.wake(peer,false) {ok(_)=>true,err(_)=>false,}}
+      if phase == 0 and good {
+        let deadline: u64 = time.monotonic_ns()+10000000000
+        loop {
+          let found: string = witness(root,false)
+          if str.len(found) != 0 {
+            let _ = files.write_text(path.join(root,"warm.tsv"),found)
+            warm=true
+            break
+          }
+          link.poll(peer)
+          if peer.ready >= 1 or peer.error_generation != 0 or time.monotonic_ns() >= deadline {good=false
+            break}
+          time.sleep_ms(2)
+        }
+        let release_deadline: u64 = time.monotonic_ns()+5000000000
+        loop {if not good {break}
+          if match files.exists(path.join(root,"cancel.release")) {ok(value)=>value,err(_)=>false,} {break}
+          if time.monotonic_ns() >= release_deadline {good=false
+            break}
+          time.sleep_ms(2)
+        }
+        // Seeing an actual RF64 stage must precede completed NESTCOMMIT/mix.
+        link.poll(peer)
+        if peer.ready >= 1 or peer.error_generation != 0 {good=false}
+      }else if good {
+        good=match link.await_ready(peer,1,time.monotonic_ns()+10000000000) {ok(_)=>true,err(problem)=>{io.write(problem)
+          false},}
+      }
+      if not shutdown and good {
+        // Native Stop is a generation-changing discard in the existing owner.
+        // It must retire NESTCOMMIT and acknowledge before a fresh Play.
+        let began: u64 = time.monotonic_ns()
+        good=playback.discard(stream,2,2)
+        if good {good=match link.wake(peer,false) {ok(_)=>true,err(_)=>false,}}
+        if good {good=match link.await_ready(peer,2,began+2500000000) {ok(_)=>true,err(problem)=>{io.write(problem)
+          false},}}
+        discard_ns=time.monotonic_ns()-began
+        if discard_ns > 2500000000 {good=false}
+        good=cache_clear(root) and good
+        if match files.exists(cancelled) {ok(value)=>value,err(_)=>true,} {good=false}
+        let _ = files.write_text(path.join(root,"discard.tsv"),if good {"warm_discard_ack\ttrue\n"}else{"warm_discard_ack\tfalse\n"})
+      }
+      if not shutdown and good {
+        var fresh: media.AudioPlan = match media.audio_plan_range(short_doc,worker,0,3,recovered) {
+          ok(value)=>value,err(problem)=>{io.write(problem)
+            good=false
+            plan},
+        }
+        if good {good=playback.request(stream,3,2,fresh)}
+        if good {good=match link.wake(peer,false) {ok(_)=>true,err(_)=>false,}}
+        if good {good=match link.await_ready(peer,3,time.monotonic_ns()+10000000000) {ok(_)=>true,err(problem)=>{io.write(problem)
+          false},}}
+      }
+      let began: u64 = time.monotonic_ns()
+      playback.stop(stream)
+      if not shutdown or phase != 0 {let _ = link.wake(peer,true)}
+      good=match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,} and good
+      let elapsed: u64 = time.monotonic_ns()-began
+      if elapsed > 2500000000 {good=false}
+      if phase == 0 {join_ns=elapsed}
+      link.close_commands(peer)
+    }
+    good=cache_clear(root) and good
+    if phase == 0 and match files.exists(cancelled) {ok(value)=>value,err(_)=>true,} {good=false}
+    phase=phase+1
+  }
+  let receipt: string = text.concat("warm_observed\t",text.concat(if warm {"true"}else{"false"},
+    text.concat("\ndiscard_ns\t",text.concat(string.from_int(discard_ns),
+    text.concat("\nstop_join_ns\t",text.concat(string.from_int(join_ns),
+    text.concat("\nfresh_short_request\t",if good and phase == phases {"true\n"}else{"false\n"})))))))
+  let _ = files.write_text(path.join(root,"cancel.tsv"),receipt)
+  if good and warm {0}else{io.write("[GA_TEST_NESTED_CANCEL] Genuine warm interruption, cleanup or fresh request failed\n")
+    1}
+}

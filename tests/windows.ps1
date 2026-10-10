@@ -43,6 +43,9 @@ try {
 
   Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
   Write-Host (Invoke-Native 'genesis-audio-clock.exe' @()).TrimEnd()
+  $waitResult = Invoke-Native 'genesis-process-wait.exe' @()
+  Write-Host $waitResult.TrimEnd()
+  Set-Content -LiteralPath (Join-Path $root 'process-wait-windows.log') -Value $waitResult
   & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
     --report (Join-Path $root 'native-audio-clock.json')
   if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
@@ -127,6 +130,13 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_fade_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-fade-keys.exe') `
       --report (Join-Path $root 'audio-fade-keys.json')
     if ($LASTEXITCODE -ne 0) { throw 'Clip fade automation SDK/PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_nested.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --client (Join-Path $Bin 'genesis-audio-nested.exe') --worker $worker `
+      --report (Join-Path $root 'audio-nested.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Recursive nested audio audition/playback/master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_nested_cancel.py') --client (Join-Path $Bin 'genesis-audio-nested-cancel.exe') `
+      --worker $worker --report (Join-Path $root 'audio-nested-cancel.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Active nested audio warm cancellation and recovery acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_continuity.py') --worker $worker --report (Join-Path $root 'audio-continuity.json')
     if ($LASTEXITCODE -ne 0) { throw 'Long fractional-rate audio continuity and resumed-seek acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_reverse.py') --worker $worker --report (Join-Path $root 'reverse-audio-profile.json')
@@ -163,6 +173,9 @@ try {
   $fadeControls = Join-Path $work 'fade-controls'
   Write-Host (Invoke-Native 'genesis-fade-controls.exe' @($fadeControls)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $fadeControls 'fade-controls-tests.json') -Destination (Join-Path $root 'fade-controls-tests.json') -Force
+  $nestedControls = Join-Path $work 'nested-audio-controls'
+  Write-Host (Invoke-Native 'genesis-nested-audio-controls.exe' @($nestedControls)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $nestedControls 'nested-audio-controls-tests.json') -Destination (Join-Path $root 'nested-audio-controls-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'native-tests.json') -Destination (Join-Path $root 'native-tests.json') -Force
 
   $headless = Invoke-Native 'genesis-headless.exe' @($work, (Join-Path $work 'project.air'), (Join-Path $work 'frame.png'))

@@ -1,0 +1,189 @@
+module genesis.tests.nested_audio_controls
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+
+fn contains(values: ref<array<u64>>, wanted: u64) -> bool effects {} {
+  var index: u64 = 0
+  loop {if index >= array.len(values) {break}
+    if array.get(values,index) == wanted {return true}
+    index=index+1
+  }
+  false
+}
+fn parameter(controls: ref<array<chrome.Control>>, domain: u32, target: u64, name: str,
+    frame: layout.Frame) -> bool effects {alloc} {
+  var index: u64 = 0
+  loop {if index >= array.len(controls) {break}
+    let control: ref<chrome.Control> = array.borrow(controls,index)
+    index=index+1
+    if control.action == chrome.act_param_set() and control.domain == domain and control.target == target {
+      let named: string = chrome.name_of(control)
+      if str.eq(named,name) {return control.enabled and control.area.bottom > control.area.top and
+        control.area.top >= frame.dock_body.top and control.area.bottom <= frame.dock_body.bottom}
+    }
+  }
+  false
+}
+fn toggle(controls: ref<array<chrome.Control>>, action: u32, target: u64,
+    frame: layout.Frame) -> bool effects {} {
+  var index: u64 = 0
+  loop {if index >= array.len(controls) {break}
+    let control: ref<chrome.Control> = array.borrow(controls,index)
+    index=index+1
+    if control.action == action and control.domain == chrome.domain_track() and control.target == target {
+      return control.enabled and control.area.bottom > control.area.top and
+        control.area.top >= frame.dock_body.top and control.area.bottom <= frame.dock_body.bottom
+    }
+  }
+  false
+}
+fn panel_checks(suite: ref<test.Suite>, doc: ref<editor.Document>, track: u64, clip: u64) -> unit effects {alloc} {
+  var state: app.App = app.app(provider.fake(""))
+  let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{
+    let _ = test.check(suite,false,"Panel fixture encodes")
+    return ()},}
+  let copied: editor.Document = match editor_io.decode(encoded) {ok(value)=>value,err(_)=>{
+    let _ = test.check(suite,false,"Panel fixture decodes")
+    return ()},}
+  let _ = struct.replace(state,copied,field=document)
+  app.set_dock_tab(state,chrome.tab_audio())
+  let _ = editor.select_only(struct.borrow(state,field=document),clip)
+  let frame: layout.Frame = layout.frame(1600.0,1400.0)
+  var controls: array<chrome.Control> = chrome.audio_panel(frame,state)
+  let _ = test.check(suite,parameter(controls,chrome.domain_track(),track,"gain",frame),"Parent track Gain exists, enabled and visible")
+  let _ = test.check(suite,parameter(controls,chrome.domain_track(),track,"pan",frame),"Parent track Pan exists, enabled and visible")
+  let _ = test.check(suite,toggle(controls,chrome.act_track_mute(),track,frame),"Parent track Mute exists, enabled and visible")
+  let _ = test.check(suite,toggle(controls,chrome.act_track_solo(),track,frame),"Parent track Solo exists, enabled and visible")
+  let _ = test.check(suite,parameter(controls,chrome.domain_clip(),clip,"gain",frame),"Selected compound Gain exists, enabled and visible")
+  let _ = test.check(suite,parameter(controls,chrome.domain_clip(),clip,"pan",frame),"Selected compound Pan exists, enabled and visible")
+  ()
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,time} {
+  let scratch: string = if view.len(args) > 1 {string.copy(view.get(args,1))}else{string.copy("build-windows/nested-audio-controls")}
+  match files.mkdirs(scratch) {ok(_)=>{},err(_)=>{io.write("[GA_TEST_NESTED_AUDIO_CONTROLS] Cannot create report directory\n")
+    return 1},}
+  var suite: test.Suite = test.suite("Nested sequence audio controls",false)
+  var doc: editor.Document = editor.document(30.0,640,360)
+  let parent: u64 = doc.active
+  let audio: u64 = editor.add_track(doc,parent,editor.track_audio(),"Compound A1")
+  let video: u64 = editor.add_track(doc,parent,editor.track_video(),"Compound V1")
+  let child: u64 = editor.add_sequence(doc,"Child",30.0,640,360)
+  let child_track: u64 = editor.add_track(doc,child,editor.track_audio(),"Child A1")
+  let source: u64 = editor.add_source(doc,"metadata-only.aac","AAC",120,30.0)
+  let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let leaf: u64 = option.unwrap(editor.append(doc,child_track,source,0,60))
+  let compound: u64 = option.unwrap(editor.place_nested(doc,audio,child,0,30,0))
+  let embedded: u64 = option.unwrap(editor.place_nested(doc,video,child,0,30,0))
+
+  let _ = test.start(suite,"Nested parent tracks and selected clip expose audio controls")
+  let _ = test.check(suite,chrome.clip_has_audio(doc,leaf),"Direct source audio metadata remains available")
+  let _ = test.check(suite,chrome.clip_has_audio(doc,compound),"Parent discovers nested audio")
+  let _ = test.check(suite,chrome.track_has_audio(doc,child_track),"Inactive child owner track still has audio metadata")
+  var tracks: array<u64> = chrome.audio_tracks(doc)
+  let _ = test.check(suite,contains(tracks,audio) and contains(tracks,video),"Audio and embedded video parent strips are present")
+  let _ = test.check(suite,not contains(tracks,child_track),"Inactive child strips do not leak into parent panel")
+  panel_checks(suite,doc,audio,compound)
+  panel_checks(suite,doc,video,embedded)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Availability survives mix suppression and source offline state")
+  let _ = editor.set_track_muted(doc,child_track,true)
+  let _ = editor.set_track_hidden(doc,child_track,true)
+  let _ = editor.set_clip_enabled(doc,leaf,false)
+  let _ = editor.set_source_offline(doc,source)
+  let _ = editor.set_track_muted(doc,audio,true)
+  let _ = editor.set_clip_enabled(doc,compound,false)
+  let _ = test.check(suite,chrome.clip_has_audio(doc,leaf) and chrome.clip_has_audio(doc,compound),"Disabled offline metadata is still editable")
+  panel_checks(suite,doc,audio,compound)
+  let _ = editor.set_active(doc,child)
+  var child_tracks: array<u64> = chrome.audio_tracks(doc)
+  let _ = test.check(suite,contains(child_tracks,child_track) and not contains(child_tracks,audio),"Owner switch shows only child's audio strip")
+  panel_checks(suite,doc,child_track,leaf)
+  let _ = editor.set_active(doc,parent)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Empty, missing and imported cyclic graphs terminate safely")
+  let empty: u64 = editor.add_sequence(doc,"Empty",30.0,640,360)
+  let empty_clip: u64 = option.unwrap(editor.place_nested(doc,audio,empty,0,30,40))
+  let _ = test.check(suite,not chrome.clip_has_audio(doc,empty_clip),"Empty child has no sound metadata")
+  let entry: u64 = option.unwrap(editor.clip_slot(doc,empty_clip))
+  struct.set(array.borrow(struct.borrow(doc,field=clips),entry),999999,field=nested)
+  let _ = test.check(suite,not chrome.clip_has_audio(doc,empty_clip),"Missing child is safe")
+  struct.set(array.borrow(struct.borrow(doc,field=clips),entry),parent,field=nested)
+  let _ = test.check(suite,not chrome.clip_has_audio(doc,empty_clip),"Self-cycle cannot borrow sound from its owner")
+  let child_entry: u64 = option.unwrap(editor.clip_slot(doc,leaf))
+  struct.set(array.borrow(struct.borrow(doc,field=clips),child_entry),0,field=source)
+  struct.set(array.borrow(struct.borrow(doc,field=clips),child_entry),parent,field=nested)
+  let _ = test.check(suite,not chrome.clip_has_audio(doc,compound),"Multi-sequence cycle terminates without sound")
+  let _ = test.check(suite,not chrome.clip_has_audio(doc,999999) and not chrome.track_has_audio(doc,999999),"Missing clip and track are safe")
+  struct.set(array.borrow(struct.borrow(doc,field=clips),child_entry),source,field=source)
+  struct.set(array.borrow(struct.borrow(doc,field=clips),child_entry),0,field=nested)
+  let _ = test.check(suite,chrome.clip_has_audio(doc,compound),"A later query recovers real audio after a cyclic query")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Depth limit includes leaf and resets independently for each query")
+  var deep: editor.Document = editor.document(30.0,640,360)
+  var owner: u64 = deep.active
+  var first_clip: u64 = 0
+  var second_clip: u64 = 0
+  var depth: u64 = 0
+  loop {if depth >= 15 {break}
+    let lane: u64 = editor.add_track(deep,owner,editor.track_audio(),"Nested")
+    let next_owner: u64 = editor.add_sequence(deep,"Next",30.0,640,360)
+    let placed: u64 = option.unwrap(editor.place_nested(deep,lane,next_owner,0,1,0))
+    if depth == 0 {first_clip=placed}
+    if depth == 1 {second_clip=placed}
+    owner=next_owner
+    depth=depth+1
+  }
+  let last_track: u64 = editor.add_track(deep,owner,editor.track_audio(),"Leaf")
+  let deep_source: u64 = editor.add_source(deep,"metadata-only.wav","Deep",120,30.0)
+  let _ = editor.describe_source(deep,deep_source,0,0,false,true,48000,2)
+  let deep_leaf: u64 = option.unwrap(editor.append(deep,last_track,deep_source,0,1))
+  let _ = test.check(suite,chrome.clip_has_audio(deep,first_clip),"Sixteen-node depth exposes supported sound")
+  let beyond: u64 = editor.add_sequence(deep,"Beyond",30.0,640,360)
+  let beyond_track: u64 = editor.add_track(deep,beyond,editor.track_audio(),"Beyond leaf")
+  let _ = editor.append(deep,beyond_track,deep_source,0,1)
+  let deep_slot: u64 = option.unwrap(editor.clip_slot(deep,deep_leaf))
+  struct.set(array.borrow(struct.borrow(deep,field=clips),deep_slot),0,field=source)
+  struct.set(array.borrow(struct.borrow(deep,field=clips),deep_slot),beyond,field=nested)
+  let _ = test.check(suite,not chrome.clip_has_audio(deep,first_clip),"Seventeen-node graph stops at the depth bound")
+  let _ = test.check(suite,chrome.clip_has_audio(deep,second_clip),"A shorter owner path independently finds the same sound")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Traversal budget is bounded and independent between queries")
+  var wide: editor.Document = editor.document(30.0,640,360)
+  let wide_parent: u64 = editor.add_track(wide,wide.active,editor.track_audio(),"Wide parent")
+  let wide_child: u64 = editor.add_sequence(wide,"Wide child",30.0,640,360)
+  let wide_track: u64 = editor.add_track(wide,wide_child,editor.track_audio(),"Wide leaves")
+  let wide_clip: u64 = option.unwrap(editor.place_nested(wide,wide_parent,wide_child,0,1,0))
+  let silent: u64 = editor.add_source(wide,"metadata-only-silent.wav","Silent",10000,30.0)
+  let audible: u64 = editor.add_source(wide,"metadata-only-audible.wav","Audible",10000,30.0)
+  let _ = editor.describe_source(wide,silent,0,0,false,false,48000,2)
+  let _ = editor.describe_source(wide,audible,0,0,false,true,48000,2)
+  var visited: u64 = 0
+  var early: u64 = 0
+  loop {if visited >= 4095 {break}
+    let placed: u64 = option.unwrap(editor.append(wide,wide_track,silent,0,1))
+    if visited == 0 {early=placed}
+    visited=visited+1
+  }
+  let last_leaf: u64 = option.unwrap(editor.append(wide,wide_track,audible,0,1))
+  let _ = test.check(suite,chrome.clip_has_audio(wide,wide_clip),"The final permitted descendant is inspected")
+  let last_slot: u64 = option.unwrap(editor.clip_slot(wide,last_leaf))
+  struct.set(array.borrow(struct.borrow(wide,field=clips),last_slot),silent,field=source)
+  let _ = editor.append(wide,wide_track,audible,0,1)
+  let _ = test.check(suite,not chrome.clip_has_audio(wide,wide_clip),"A sound beyond the descendant budget is not traversed")
+  let early_slot: u64 = option.unwrap(editor.clip_slot(wide,early))
+  struct.set(array.borrow(struct.borrow(wide,field=clips),early_slot),audible,field=source)
+  let _ = test.check(suite,chrome.clip_has_audio(wide,wide_clip),"A subsequent bounded query restores early metadata")
+  let _ = test.done(suite)
+  test.conclude(suite,path.join(scratch,"nested-audio-controls-tests.json"),8)
+}

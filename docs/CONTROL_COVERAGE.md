@@ -132,7 +132,7 @@ clean New and native Open restoring the saved gain and pictures. Native recovery
 failed-save and dirty-close interaction remain separate acceptance gaps.
 
 The highest-impact remaining work is sustained playback,
-parameter/animation measurements for mapped effects, nested sequences,
+parameter/animation measurements for mapped effects, nested pictures,
 complex-script text, track/audio-filter automation and measured sustained audio/video synchronization.
 
 The latest native worker checkpoint retains the audio, histogram and frame-identity
@@ -473,9 +473,9 @@ the keyed Fade controls showed 150/30; a fader edit saved a frame-local value of
 151 with interpolation 2, and Undo restored the value and key count. The original
 project bytes remained unchanged; Genesis was left paused at frame zero.
 
-The installed application has SHA-256
+At this fade checkpoint, the installed application had SHA-256
 `7ebfe8eb2ddebf3ad15090e1baeaab37df7d92905e7960f79627f4df5a4f13f5`;
-the installed worker is
+the installed worker was
 `a98f186ca7fb872c6a4c113510f3b8728d3b85df80149b732adeca8a455edd9b`.
 The canonical worker migration preserved the other six source files and passed
 the maintained overlay reverse check. The 27-entry sanitized acceptance bundle
@@ -485,6 +485,106 @@ The [native UI receipt](../archive/native-audio-fade-ui-2026-10-10.json) records
 the observed values and original-project hashes. The earlier app/worker fail the
 same saved-project fade test with a 7,200-unit PCM error; that baseline is archived.
 MM-AIR's shared media runtime is reused, with no separate Genesis FFmpeg bundle.
-Nested sequence audio can still be silently omitted; explicit refusal and recursive
-mixing remain open. This stage does not establish complete professional editing
-acceptance.
+At this fade checkpoint, nested sequence audio could still be silently omitted;
+explicit refusal and recursive mixing remained open. The later nested-audio stage
+below addresses that omission. The fade checkpoint does not establish complete
+professional editing acceptance.
+
+## Recursive nested audio on 2026-10-10
+
+Nested audio now sums each child sequence before applying its enclosing clip's
+pan and static audio filter chain, then parent gain and fade envelopes. Float
+headroom survives every intermediate bus; final output applies the existing
+limiter. Parent mute/solo and child mute/solo are evaluated in their own sequences.
+Nested `source_in` uses the owner's frame units, while child placement and
+automation use the child's frame rate. Reverse and speed act on the selected
+child span without flattening child automation into a parent curve.
+
+Each placed instance builds private IEEE-float RF64 caches for complete decoder
+and DSP history. Child DSP precedes selection and retiming; parent DSP follows
+the child sum. Uneven chunks and fresh seeks read exact absolute sample slices
+from that history. Program playback, audition and export use the same recursive
+plan. A descendant audio change invalidates its root signature; picture-only keys
+leave the signature unchanged. Valid empty child sequences produce zeros through
+the parent chain. Missing sequences and cycles are coded failures.
+
+| Gate | Accepted evidence |
+|---|---|
+| Authored nested projects | 18 independently authored projects compare every intended audition WAV, independently decoded lossless master, native whole WAV, uneven retained chunk and fresh-seek sample. Cases cover child sums; parent/child gain, mute and solo; nonlinear parent compression on the sum; unclipped intermediate `1.6 × 0.5 = 0.8`; repeated child instances with separate DSP state; source trim, owner/child fps including 59.94/24 fps, reverse and 2x; child/parent gain and fade automation; two-level recursion; empty-child silence and recovery. The independent compressor oracle separates parent-on-sum from per-leaf filtering by 0.1783. Sources and authored saved-project bytes remain unchanged. |
+| Model and encoded audio | Child gain keys change the recursive signature; Undo restores document and signature exactly, Redo restores the keys, save/open preserves both, and a picture-only key leaves audio unchanged. Four AAC amplitude windows verify the child held-gain change against independent authored PCM and a lossless master. All decoded float values must be finite. |
+| Refusal and transaction safety | Seven saved-project cases check cycle, missing sequence, missing online child source, six-hour span, depth, instance count and prospective disk limits. Audition/export report the expected `GA_AUDIO_NESTED_*` code, publish no output or partial, leave no owned cache and preserve project bytes. Five direct malformed worker transactions preserve the accepted cache. Separate capacity probes refuse both prospective and old-plus-replacement cache overflow before writing. |
+| Real warm cancellation | Two cases use an actual 30-minute sparse PCM source and compressor DSP, observing RF64 stage writes before cancellation. Stop/discard acknowledges in about 151 ms and a fresh Play succeeds in the same background owner; active task shutdown joins in about 158 ms, followed by a fresh owner/request. Both stay within the 2.5-second bound, confirm the exact observed worker identity exited, remove owned caches/partials and check every fresh short PCM sample. Source/project bytes remain unchanged. No fake stalled worker is used. |
+| RF64 and retained history | Direct worker checks preserve float headroom, match whole/chunk/seek PCM exactly, handle empty buses and clean float files on normal exit. A sparse RF64 source declaring more than 4 GiB of data verifies the 64-bit size path and exact bounded PCM read. |
+
+The planner bounds depth to 16, instances to 4,096 and source/output spans to
+six hours. Prospective float storage per worker is capped at 32 GiB, including an accepted
+cache and its replacement. The app also bounds descriptor expansion to 960,000
+bytes before the one-MiB playback mailbox; the worker has its own 32-MiB descriptor
+bound. Planner structural refusal precedes worker/cache creation and export encoding.
+Runtime decode failures report `GA_AUDIO_NESTED_RENDER`; malformed descriptors,
+ordering, cycles, capacity and ownership/cleanup failures have separate codes.
+Workers exit before caller-owned flat caches are removed. An unconfirmed exit or
+failed deletion reports `GA_AUDIO_NESTED_CACHE` and retains ownership for diagnosis.
+
+Full-history warming can delay the first chunk and requires disk space proportional
+to duration and placed instances. The native headless 300-second supplied-source
+probe measured 0.635 seconds to the first forward/fresh-seek chunk, about 0.48 ms
+median warm 50 ms pulls and about 346 MB of float caches. A changed root rebuilt
+in about 0.534 seconds. Reverse first-chunk preparation took about 0.750 seconds.
+The source bytes stayed unchanged and tested slices matched reference PCM exactly.
+OS file caching was warm, native OpenCL initialization was included and root Windows
+acceptance ran concurrently. These measurements exclude GUI presentation, audio
+devices, speaker latency and sustained playback cadence; preparation stays in the
+background audio owner.
+
+The older fade checkpoint's omission is independently reproduced: a saved project
+with direct 440 Hz and nested 880 Hz audio rendered only the direct tone, while a
+nested-only project failed audition as having no audible audio. The new authored
+gate checks actual recursive output instead of accepting a successful reply.
+MM-AIR's shared codec runtime remains reused; Genesis adds no separate FFmpeg bundle.
+
+The final combined Windows suite passed the existing 749 control outcomes and
+media/project gates, the 18 nested projects, seven refusals, four AAC windows,
+real warm cancellation, and the new five-case/43-check nested Audio-panel gate.
+That panel finds sound on the requested track's owner and keeps parent and selected
+clip controls editable when descendants are muted, disabled or offline. Cycle,
+16/17-depth and 4,096/4,097-visit boundaries are covered on Windows and Linux.
+The broader generated-media workflow passed preview/master comparisons, titles,
+all transition kinds, encoded audio, cancellation and shared-worker recovery.
+It used the shipping Windows font defaults and bundled Japanese fallback without
+changing any image threshold.
+
+The native window exercised a 30-second nested AAC compound and a separate flat
+video track from the supplied 4K/59.94 AV1/PQ source. Stereo meters were active
+during Play and restarted after Stop; Stop paused the picture and cleared the
+meters. Parent Gain changed 1.00 to 0.95, Pan changed 0.00 to 0.05, Mute and Solo
+toggled, and Undo restored each value. Rewind returned to a visible frame zero.
+Scrubbing showed matching playhead/program times at 00:00:05:04 and 00:00:09:04,
+corresponding filmstrip scenes, and changed histogram/parade/luma displays.
+Only the private QA copy was saved; the original project and video hashes remained
+unchanged. The [native UI receipt](../archive/native-audio-nested-ui-2026-10-10.json)
+records this scope. It adds no sustained cadence or physical-hearing claim.
+
+The installed app SHA-256 is
+`07334d3b14302cdb67688df1f4e6f1c9d00e94c90644f6d3be187a856b1417bd`;
+the worker is
+`26ae94ea70ca67ec855af58a490e21a27fd7eff119f42d240d23ed793a6ad397`.
+Canonical worker migration preserved the other six source files and passed the
+maintained overlay reverse check. The 36-entry
+[sanitized acceptance bundle](../archive/audio-nested-2026-10-10.tar.gz) has SHA-256
+`f5340dac1e587fe3d8f83087a9c5ea7bb47f1bd81a71da36a88c31c4b20f8b83`;
+every entry was read back against its manifest. Earlier loaded runtime images
+and source were preserved in private backups.
+
+The Windows process provider also receives a maintained SDK overlay. A deadline
+can expire just before the child exits; the immediate recheck must collect that
+exit instead of reporting I/O failure. A deterministic test fails on the pinned
+provider and passes with the overlay, covering six cases and three repeated-status
+checks. Timeouts and genuine wait/status failures retain their error codes. This
+fix addresses the reproduced provider race; the precise timing of the earlier
+intermittent generated-media export failure was not captured.
+
+Nested pictures and compound waveforms remain unavailable. Track/audio-filter automation, animated speed,
+larger interactive nested-project acceptance, sustained A/V synchronization and
+complete professional editing acceptance remain open. Animated fade trim/Split
+refusals retain their existing `GA_TRIM_CONTEXT` / `GA_SPLIT_CONTEXT` safeguards.

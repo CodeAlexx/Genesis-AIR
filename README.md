@@ -813,6 +813,43 @@ python tests/audio_fade_keys.py --worker .\genesis-gcompose.exe --client .\build
 python tests/audio_fade_project.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --report .\build-windows\audio-fade-project.json
 ```
 
+Nested sequence audio now mixes recursively. Each child sequence is summed with
+float headroom before its enclosing clip's pan and audio effects, then parent
+gain and fades are applied. Each placed instance retains its own decoder/filter
+history in private IEEE-float RF64 caches; uneven playback chunks and fresh seeks
+slice that processed history. Program audio, audition WAV and export share the
+recursive plan. Empty child sequences produce silence, while missing sequences,
+cycles, invalid source ranges and resource limits fail with codes before export
+publishes output. Nested pictures remain unavailable.
+
+The nested gate checks 18 independently authored projects at every intended WAV,
+lossless-master and native whole/chunk/seek sample. It covers child sums, parent
+and child gain/mute/solo, a nonlinear parent compressor applied to the sum,
+`1.6 × 0.5 = 0.8` intermediate headroom, repeated instances, owner/child frame-rate
+mapping, trims, reverse, speed, automation and empty-child recovery. Seven malformed
+or unavailable-source projects refuse audition and export without output, partials
+or retained owned caches. Four AAC amplitude windows check child automation.
+Two genuine 30-minute warm-cancellation cases verify Stop followed by Play in the
+same background owner, task shutdown, exited worker identities, cleanup and an
+independently checked fresh short request. Source and project bytes stay unchanged.
+
+Limits are depth 16, 4,096 instances, six-hour source/output spans and 32 GiB of
+prospective float caches per worker, including old and replacement transactions. Full-history
+warming costs time and disk space before the first chunk. A headless native run on
+the supplied 300-second source measured about 0.635 seconds to the first chunk and
+0.48 ms median warm 50 ms pulls. OS file caching was warm, OpenCL initialization was
+included, and the combined Windows gate ran concurrently. These measurements
+exclude native presentation, audio devices and physical hearing. The combined Windows
+suite and broader preview/export workflow passed. A native window check confirmed
+nested stereo meters, Stop/restart, parent controls and Undo, frame-zero rewind,
+scrubbed picture/time, filmstrip scenes and updated scopes. See the
+[nested audio ledger](docs/CONTROL_COVERAGE.md#recursive-nested-audio-on-2026-10-10).
+
+```powershell
+python tests/audio_nested.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-nested.exe --report .\build-windows\audio-nested.json
+python tests/audio_nested_cancel.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-nested-cancel.exe --report .\build-windows\audio-nested-cancel.json
+```
+
 The Windows gate also checks a lossless fixture with a different RGB color on every
 frame, independently decoded by FFmpeg. Forty-four source/program picture pairs and
 their time stamps, plus 128 actual timeline bitmaps, match the expected native frames.
@@ -1016,13 +1053,16 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
-The current root application includes the session-safety checkpoint and the
-[final-output audio mixer fix](docs/CONTROL_COVERAGE.md#overlapping-audio-headroom-on-2026-10-10).
-Its combined Windows suite passed 749 control outcomes, recovery ownership,
+The earlier published session-safety and
+[audio headroom checkpoints](docs/CONTROL_COVERAGE.md#overlapping-audio-headroom-on-2026-10-10)
+passed a combined Windows suite with 749 control outcomes, recovery ownership,
 concurrent media isolation, spatial preview/master comparisons and the audio,
 HDR and cancellation gates. The supplied video also passed the native
 interactive workflow. Sustained timing below belongs to the earlier measured
-application; this checkpoint has no new sustained throughput measurement.
+application; the installed recursive-audio checkpoint has no new sustained throughput
+measurement. Its combined Windows suite, broader generated-media workflow and native
+window check passed. Exact installed hashes and archived receipts are in the
+[nested audio ledger](docs/CONTROL_COVERAGE.md#recursive-nested-audio-on-2026-10-10).
 
 The 2026-10-10 native-window recovery candidate delivers 59.87 distinct pictures/s
 over 131.88 seconds from the supplied 4K/59.94 AV1/PQ source, with live stereo
@@ -1045,9 +1085,16 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
 - Compressed-source seek startup can differ
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.
-- Nested sequence rendering, track/audio-filter automation, animated speed and some filter combinations
-  remain unfinished. Imported nested audio can be silently omitted and needs
-  an explicit refusal until recursive sequence mixing is implemented.
+- The Windows build applies `patches/air-process-wait-windows.patch` to the pinned
+  SDK. A child that exits between a deadline and the immediate status recheck now
+  returns its exit status. The native regression preserves timeout, genuine I/O
+  failures and repeated-wait behavior.
+- Custom Windows build destinations receive the bundled Noto Sans JP fallback and
+  its license. Titles use normal Windows faces first, with Noto covering missing glyphs.
+- Nested sequence pictures and compound waveforms, track/audio-filter automation, animated speed and some filter combinations
+  remain unfinished. Recursive nested audio now has independent mixing, output,
+  refusal and cancellation gates; larger projects still need interactive/device
+  acceptance, and full-history caches have startup and disk costs.
   Overlapping signed audio now retains float headroom until final output, so
   rearranging clip storage no longer changes levels through intermediate clipping.
   Clip gain automation is covered above. The library has mappings for 31 video and

@@ -36,6 +36,20 @@ try {
 } finally {
   $PSNativeCommandUseErrorActionPreference = $previousNativePreference
 }
+$processPatch = Join-Path $here 'patches/air-process-wait-windows.patch'
+if (-not (Test-Path -LiteralPath $processPatch)) { throw '[GA_SDK_PROCESS_PATCH_MISSING] The Windows process overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $processPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $processPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PROCESS_PATCH_BASE] The process overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $processPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PROCESS_PATCH_APPLY] Could not apply the Windows process overlay.' }
+  }
+} finally {
+  $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+}
 $buildRoot = Join-Path $here 'build-windows'
 $generated = if ($GeneratedDirectory) { [IO.Path]::GetFullPath($GeneratedDirectory) } else { Join-Path $buildRoot 'generated' }
 New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
@@ -50,7 +64,7 @@ if ($LASTEXITCODE -ne 0) { throw '[GA_TOOLCHAIN] Build the matching AIR compiler
 $sources = ,@('main', 'src/main.ai')
 if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai'), @('audio-device', 'tests/audio_device.ai'), @('audio-playback', 'tests/audio_playback.ai'), @('audio-cancel', 'tests/audio_cancel.ai'), @('preview-async', 'tests/preview_async.ai'), @('preview-stream', 'tests/preview_stream.ai'), @('preview-input', 'tests/preview_input.ai'), @('inspector', 'tests/inspector.ai'), @('live-paint', 'tests/live_paint.ai'), @('project-safety', 'tests/project_safety.ai'), @('picture-queue', 'tests/picture_queue.ai')) }
 if ($RunTests) { $sources += @(@('keyed-video', 'tests/keyed_video.ai'), @('window-cache', 'tests/window_cache.ai'), @('editor-trim', 'tests/editor_trim.ai'), @('trim-history', 'tests/trim_history.ai'), @('recovery-ownership', 'tests/recovery_ownership.ai'), @('media-session', 'tests/media_session.ai'), @('spatial-canvas', 'tests/spatial_canvas.ai')) }
-if ($RunTests) { $sources += @(@('fade-controls', 'tests/fade_controls.ai'), @('audio-fade-keys', 'tests/audio_fade_keys.ai')) }
+if ($RunTests) { $sources += @(@('fade-controls', 'tests/fade_controls.ai'), @('audio-fade-keys', 'tests/audio_fade_keys.ai'), @('audio-nested', 'tests/audio_nested.ai'), @('audio-nested-cancel', 'tests/audio_nested_cancel.ai'), @('nested-audio-controls', 'tests/nested_audio_controls.ai')) }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -76,7 +90,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
 $targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio')
 if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-audio-clock', 'genesis-audio-playback', 'genesis-audio-cancel', 'genesis-preview-async', 'genesis-preview-stream', 'genesis-preview-input', 'genesis-inspector', 'genesis-ui-pixels', 'genesis-live-paint', 'genesis-project-safety', 'genesis-picture-queue') }
 if ($RunTests) { $targets += @('genesis-keyed-video', 'genesis-window-cache', 'genesis-editor-trim', 'genesis-trim-history', 'genesis-recovery-ownership', 'genesis-media-session', 'genesis-spatial-canvas') }
-if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys') }
+if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys', 'genesis-audio-nested', 'genesis-audio-nested-cancel', 'genesis-nested-audio-controls') }
+if ($RunTests) { $targets += @('genesis-process-wait') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'
@@ -95,6 +110,15 @@ foreach ($name in @('Genesis-AIR.exe', 'air-native-shell.dll', 'air-native-dialo
     Move-Item -LiteralPath $targetFile -Destination $backupFile
     Copy-Item -LiteralPath $sourceFile -Destination $targetFile
   }
+}
+$fontOutput = Join-Path $Destination 'fonts'
+New-Item -ItemType Directory -Force -Path $fontOutput | Out-Null
+foreach ($fontName in @('NotoSansJP.ttf', 'OFL.txt')) {
+  $fontSource = Join-Path $here ('fonts/' + $fontName)
+  $fontTarget = Join-Path $fontOutput $fontName
+  if ((Test-Path -LiteralPath $fontTarget) -and
+      (Get-FileHash -LiteralPath $fontSource).Hash -eq (Get-FileHash -LiteralPath $fontTarget).Hash) { continue }
+  Copy-Item -LiteralPath $fontSource -Destination $fontTarget -Force
 }
 $executable = Join-Path (Resolve-Path -LiteralPath $Destination).Path 'Genesis-AIR.exe'
 if (-not $SkipSmoke) {

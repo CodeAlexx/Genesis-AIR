@@ -1,0 +1,52 @@
+{
+  "parent_mute_toggle_and_undo": true,
+  "stop_positions": [
+    "00:00:23:11",
+    "00:00:20:10"
+  ],
+  "original_project_sha256": "480D82E310BA6F231FAB2C0C0DB9945DAB193D63073CB63FE053019A13AEB143",
+  "histogram_rgb_parade_luma_change_with_program_picture": true,
+  "nested_stereo_meters_active": true,
+  "original_source_sha256": "bff7165e6704e7188fee82b990e5128fe87c3ce9c5ef7eeb85bd1bb0da42c6da",
+  "active_program_positions": [
+    "00:00:14:25",
+    "00:00:08:29"
+  ],
+  "private_project_saved_sha256": "42ED49AF4EF46A21124559A67C9F87BB45E77B23641C3EE2A9A31BB47A9F3BB6",
+  "complete_professional_editing_acceptance": false,
+  "parent_gain_write_and_undo": [
+    1,
+    0.95,
+    1
+  ],
+  "original_project_unchanged": true,
+  "schema": "genesis.native_nested_audio_ui.v1",
+  "private_project_initial_sha256": "d0cceb227d544bcc1b81789a0b44eb2e738251e38206f26e197837c3bf3b9750",
+  "parent_solo_toggle_and_undo": true,
+  "parent_pan_write_and_undo": [
+    0,
+    0.05,
+    0
+  ],
+  "video_filmstrip_visible_and_scene_matches_scrub": true,
+  "scope_sampled_pixels": 21600,
+  "final_private_state": "Paused at frame zero, stereo meters silent, changes saved only to private QA copy",
+  "excluded_claims": [
+    "Physical hearing and speaker latency",
+    "New sustained native-window cadence measurement",
+    "Native-resolution fullscreen 4K",
+    "Nested picture composition and compound waveform generation"
+  ],
+  "restart_after_stop_stereo_active": true,
+  "worker_sha256": "26AE94EA70CA67EC855AF58A490E21A27FD7EFF119F42D240D23ED793A6AD397",
+  "scrub_program_and_playhead_times": [
+    "00:00:05:04",
+    "00:00:09:04"
+  ],
+  "stop_paused_and_silent": true,
+  "app_sha256": "07334D3B14302CDB67688DF1F4E6F1C9D00E94C90644F6D3BE187A856B1417BD",
+  "saved_private_copy_controls_restored": true,
+  "scope": "Native Windows ordinary editor; fitted 480x270 monitors; authored 30-second nested AAC compound plus independent flat picture from supplied 4K AV1/PQ source",
+  "rewind_frame_zero_picture_nonblank": true,
+  "parent_and_selected_clip_controls_visible": true
+}

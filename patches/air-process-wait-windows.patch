@@ -1,0 +1,20 @@
+diff --git a/runtime/windows/air_proc_pipe_win32.c b/runtime/windows/air_proc_pipe_win32.c
+index c4e7897..fc1af2e 100644
+--- a/runtime/windows/air_proc_pipe_win32.c
++++ b/runtime/windows/air_proc_pipe_win32.c
+@@ -398,9 +398,12 @@ air_result_proc air_process_wait(air_child *child, uint64_t deadline_ns) {
+     if (child == NULL || child->impl == NULL) return status_error(AIR_FS_INVALID_STATE);
+     child_state *state = (child_state *)child->impl;
+     if (!collect_status(state, deadline_wait(deadline_ns))) {
+-        if (WaitForSingleObject(state->process, 0u) == WAIT_TIMEOUT)
+-            return status_error(AIR_FS_TIMEOUT);
+-        return status_error(AIR_FS_IO);
++        DWORD completion = WaitForSingleObject(state->process, 0u);
++        if (completion == WAIT_TIMEOUT) return status_error(AIR_FS_TIMEOUT);
++        /* A deadline may expire just before the child exits. The zero-time
++         * recheck can observe that exit; collect it rather than invent IO. */
++        if (completion != WAIT_OBJECT_0 || !collect_status(state, 0u))
++            return status_error(AIR_FS_IO);
+     }
+     air_result_proc result;
+     result.tag = AIR_TAG_OK;
