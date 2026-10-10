@@ -5,6 +5,7 @@ import "chrome.ai" as chrome
 import std.draw as draw
 import std.editor as editor
 import std.editor_io as editor_io
+import std.editor_view as editor_view
 import std.files as files
 import std.math as math
 import std.path as path
@@ -146,34 +147,135 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
 }
 pub fn waveforms_for_request(state: ref<app.App>, root: str, id: u64) -> result<u64,string>
     effects {alloc,fs.meta,fs.read,fs.write,process,time} {
-  waveforms_in_range(state,root,id,false,0,0)
+  waveforms_in_range(state,root,id,false,0,0,StripView {limited:false,first:0,height:0.0})
 }
 pub fn waveforms_for_viewport(state: ref<app.App>, root: str, id: u64, start: i64, span: i64)
     -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   if start < 0 or span <= 0 or span > 9223372036854775807-start {
     return result.err("[GA_TIMELINE_RANGE] Invalid waveform viewport")
   }
-  waveforms_in_range(state,root,id,true,start,start+span)
+  waveforms_in_range(state,root,id,true,start,start+span,StripView {limited:false,first:0,height:0.0})
 }
-fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, first: i64, last: i64)
+pub fn waveforms_for_strip_geometry(state: ref<app.App>, root: str, id: u64, geometry: str)
     -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
-  var wanted: array<u64> = array.new()
+  let view: StripGeometry = try strip_geometry(geometry)
+  waveforms_in_range(state,root,id,true,view.start,view.start+view.span,view.lanes)
+}
+pub type StripView = struct {limited:bool,first:u64,height:f64}
+pub type StripGeometry = struct {start:i64,zoom:f64,span:i64,lanes:StripView}
+// The existing 3/5/6/7-field callers retain their complete-track semantics.
+// Native requests append the first displayed lane and logical body height.
+pub fn strip_geometry(geometry: str) -> result<StripGeometry,string> effects {alloc} {
+  var fields: array<string> = text.split(geometry,"\t")
+  let count: u64 = array.len(fields)
+  if count != 3 and count != 5 and count != 6 and count != 7 and count != 9 {
+    return result.err("[GA_TIMELINE_RANGE] Invalid strip viewport field count")
+  }
+  let first: i64 = match text.parse_i64(array.borrow(fields,0)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid strip start")},}
+  let zoom: f64 = match text.parse_f64(array.borrow(fields,1)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid strip zoom")},}
+  let span: i64 = match text.parse_i64(array.borrow(fields,2)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid strip span")},}
+  if first < 0 or span <= 0 or span > 9223372036854775807-first or not math.is_finite(zoom) or zoom <= 0.0 {
+    return result.err("[GA_TIMELINE_RANGE] Invalid strip time viewport")
+  }
+  var lanes: StripView = StripView {limited:false,first:0,height:0.0}
+  if count == 9 {
+    let lane: u64 = match text.parse_u64(array.borrow(fields,7)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid first strip lane")},}
+    let height: f64 = match text.parse_f64(array.borrow(fields,8)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid strip body height")},}
+    if lane > 9007199254740991 or not math.is_finite(height) or height <= 0.0 or height > 32768.0 {
+      return result.err("[GA_TIMELINE_RANGE] Invalid strip lane viewport")
+    }
+    lanes=StripView {limited:true,first:lane,height:height}
+  }
+  result.ok(StripGeometry {start:first,zoom:zoom,span:span,lanes:lanes})
+}
+// This uses the same sorted/reversed SDK lane identities as paint and hit-test.
+// It includes the partially visible final lane; the footer is excluded by the
+// caller's body height. No second timeline model is created.
+pub fn strip_lanes(state: ref<app.App>, view: StripView) -> result<array<u64>,string> effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  var bottom: array<u64> = editor_view.lanes(doc,doc.active)
+  var out: array<u64> = array.new()
+  let count: u64 = array.len(bottom)
+  if view.limited and ((count == 0 and view.first != 0) or (count > 0 and view.first >= count)) {
+    return result.err("[GA_TIMELINE_RANGE] First strip lane is outside the active sequence")
+  }
+  let pitch: f64 = app.track_pitch(state)
+  let height: f64 = app.track_height(state)
+  var lane: u64 = if view.limited {view.first}else{0}
+  loop {if lane >= count {break}
+    let top: f64 = 4.0+cast.float(lane-if view.limited {view.first}else{0})*pitch
+    if view.limited and top >= view.height {break}
+    if not view.limited or top+height > 0.0 {array.push(out,array.get(bottom,count-1-lane))}
+    lane=lane+1
+  }
+  result.ok(out)
+}
+fn strip_clip_matches(doc: ref<editor.Document>, clip: editor.Clip, video: bool) -> bool effects {alloc} {
+  if clip.owner != doc.active {return false}
+  if not video {return chrome.clip_has_audio(doc,clip.id)}
+  if editor.track_kind(doc,clip.track) != editor.track_video() {return false}
+  if clip.nested != 0 {return true}
+  match editor.source_slot(doc,clip.source) {none=>false,some(slot)=>{
+    let source: ref<editor.Source> = array.borrow(struct.borrow(doc,field=sources),slot)
+    source.has_video and source.online
+  },}
+}
+// One eligible clip per visible lane per round keeps a dense top lane from
+// consuming the complete bounded bitmap budget before lower lanes get a turn.
+pub fn strip_targets(state: ref<app.App>, first: i64, last: i64, visible: bool,
+    view: StripView, video: bool) -> result<array<u64>,string> effects {alloc} {
+  var lanes: array<u64> = try strip_lanes(state,view)
+  var out: array<u64> = array.new()
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  if not view.limited {
+    var at: u64=0
+    loop {if at >= editor.clip_count(doc) {break}
+      let clip: editor.Clip=option.unwrap(editor.clip_at(doc,at))
+      at=at+1
+      if visible and (editor.clip_end(clip) <= first or clip.start >= last) {continue}
+      if strip_clip_matches(doc,clip,video) {array.push(out,clip.id)}
+    }
+    return result.ok(out)
+  }
+  var cursors: array<u64> = array.new()
+  var lane: u64=0
+  loop {if lane >= array.len(lanes) {break}
+    array.push(cursors,0)
+    lane=lane+1}
+  loop {
+    var found: bool=false
+    lane=0
+    loop {if lane >= array.len(lanes) {break}
+      var at: u64=array.get(cursors,lane)
+      loop {if at >= editor.clip_count(doc) {break}
+        let clip: editor.Clip=option.unwrap(editor.clip_at(doc,at))
+        at=at+1
+        if clip.track != array.get(lanes,lane) or
+            (visible and (editor.clip_end(clip) <= first or clip.start >= last)) {continue}
+        if strip_clip_matches(doc,clip,video) {array.push(out,clip.id)
+          found=true
+          break}
+      }
+      array.set(cursors,lane,at)
+      lane=lane+1
+    }
+    if not found {break}
+  }
+  result.ok(out)
+}
+fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, first: i64, last: i64, view: StripView)
+    -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var wanted: array<u64> = try strip_targets(state,first,last,visible,view,false)
   var widths: array<u64> = array.new()
   var document: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   var index: u64 = 0
   loop {
-    if index >= editor.clip_count(document) { break }
-    match editor.clip_at(document, index) {
-      none => { },
-      some(value) => {
-        if visible and (editor.clip_end(value) <= first or value.start >= last) {index=index+1
-          continue}
-        if value.owner == document.active and chrome.clip_has_audio(document, value.id) {
-          array.push(wanted,value.id)
+    if index >= array.len(wanted) { break }
+    match editor.clip(document,array.get(wanted,index)) {
+      none => { },some(value) => {
           let widened: u64 = cast.sat(value.length)
           let buckets: u64 = if widened/3 > 512 {512}else{widened/3}
           array.push(widths,if buckets < 8 {8}else{buckets})
-        }
       },
     }
     index = index + 1
@@ -182,6 +284,9 @@ fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, fi
   var at: u64 = 0
   loop {
     if at >= array.len(wanted) { break }
+    if id != 0 and str.len(root) != 0 and number(root,"request.id") != id {
+      return result.err("[GA_AUDIO_STREAM_CANCELLED] Strip viewport was superseded")
+    }
     let value: editor.Clip = option.unwrap(editor.clip(document,array.get(wanted,at)))
     let buckets: u64 = array.get(widths,at)
     // The strip worker retains its cache across viewport requests. Only a
@@ -298,6 +403,19 @@ pub fn request_revision(root: str, document: str, generation: u64, start: i64, z
 pub fn request_document_revision(root: str, document: str, generation: u64, start: i64, zoom: f64,
     span: i64, width: u32, height: u32, media_revision: u64, document_revision: u64)
     -> bool effects {alloc, fs.write} {
+  request_geometry(root,document,generation,start,zoom,span,width,height,media_revision,document_revision,"")
+}
+pub fn request_strips(root: str, document: str, generation: u64, start: i64, zoom: f64,
+    span: i64, width: u32, height: u32, media_revision: u64, document_revision: u64,
+    first_lane: u64, body_height: f64) -> bool effects {alloc,fs.write} {
+  if start < 0 or span <= 0 or span > 9223372036854775807-start or not math.is_finite(zoom) or zoom <= 0.0 or
+      first_lane > 9007199254740991 or not math.is_finite(body_height) or body_height <= 0.0 or body_height > 32768.0 {return false}
+  let lanes: string = text.concat(string.from_int(first_lane),text.concat("\t",string.from_float(body_height)))
+  request_geometry(root,document,generation,start,zoom,span,width,height,media_revision,document_revision,str.view(lanes))
+}
+fn request_geometry(root: str, document: str, generation: u64, start: i64, zoom: f64,
+    span: i64, width: u32, height: u32, media_revision: u64, document_revision: u64, lanes: str)
+    -> bool effects {alloc,fs.write} {
   let geometry: string = text.concat(str.view(string.from_int(start)), text.concat("\t",
     text.concat(str.view(string.from_float(zoom)), text.concat("\t", str.view(string.from_int(span))))))
   let sized: string = text.concat(str.view(geometry), text.concat("\t", text.concat(str.view(string.from_int(width)),
@@ -305,6 +423,8 @@ pub fn request_document_revision(root: str, document: str, generation: u64, star
   var versioned: string = text.concat(str.view(sized), text.concat("\t", str.view(string.from_int(media_revision))))
   string.append(versioned,"\t")
   string.append(versioned,string.from_int(document_revision))
+  if str.len(lanes) != 0 {string.append(versioned,"\t")
+    string.append(versioned,lanes)}
   // Document, viewport, quality and revision are one atomic snapshot. A reader
   // cannot pair an old generation with the next drag's geometry or document.
   let generation_text: string = string.from_int(generation)
@@ -398,6 +518,15 @@ pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs
   out
 }
 pub fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.write} {
+  var selected: array<u64> = array.new()
+  let _ = write_selected_waveforms(state,root,false,selected)
+  ()
+}
+fn write_strip_waveforms(state: ref<app.App>, root: str, viewport: StripGeometry) -> result<unit,string> effects {alloc,fs.write} {
+  var selected: array<u64> = try strip_targets(state,viewport.start,viewport.start+viewport.span,true,viewport.lanes,false)
+  write_selected_waveforms(state,root,viewport.lanes.limited,selected)
+}
+fn write_selected_waveforms(state: ref<app.App>, root: str, limited: bool, selected: ref<array<u64>>) -> result<unit,string> effects {alloc,fs.write} {
   var lines: string = text.concat("WAVEFORMS 2\t",string.from_int(state.document_revision))
   string.append(lines,"\t")
   string.append(lines,string.from_int(state.media_revision))
@@ -405,6 +534,16 @@ pub fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, f
   var i: u64 = 0
   loop { if i >= array.len(struct.borrow(state, field=waveforms)) { break }
     let wave: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), i)
+    if limited {
+      var wanted: bool=false
+      var k: u64=0
+      loop {if k >= array.len(selected) {break}
+        if array.get(selected,k)==wave.clip {wanted=true
+          break}
+        k=k+1}
+      if not wanted {i=i+1
+        continue}
+    }
     string.append(lines, str.view(string.from_int(wave.clip)))
     var mapping: array<string> = [string.from_int(wave.source),string.from_int(wave.length),string.from_int(wave.first),string.from_int(wave.last),string.from_int(wave.revision),string.from_int(wave.document_revision)]
     string.append(lines,"\t")
@@ -418,9 +557,14 @@ pub fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, f
     string.append(lines, "\n")
  i = i + 1
   }
-  publish(root, "waveforms.tsv", str.view(lines))
+  if not publish_checked(root, "waveforms.tsv", str.view(lines)) {
+    return result.err("[GA_TIMELINE_PUBLISH] Cannot publish waveform data")
+  }
+  result.ok(())
 }
 pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {alloc, fs.read} {
+  let requested: u64 = number(root,"request.id")
+  if requested != 0 and requested != id {return false}
   if number(root,"waveforms.id") != id {return false}
   let content: string = match files.read_text(str.view(path.join(root, "waveforms.tsv"))) { ok(value) => value, err(_) => { return false }, }
   if number(root,"waveforms.id") != id {return false}
@@ -467,7 +611,7 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
     }
     i = i + 1
   }
-  if number(root,"waveforms.id") != id {return false}
+  if number(root,"waveforms.id") != id or (number(root,"request.id") != 0 and number(root,"request.id") != id) {return false}
   i=0
   loop {if i >= array.len(incoming) {break}
     let wave: ref<app.Waveform> = array.borrow(incoming,i)
@@ -498,11 +642,11 @@ pub fn compound_thumbnail(state: ref<app.App>, document: ref<editor.Document>,
 
 fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> result<unit,string> effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   var fields: array<string> = text.split(geometry, "\t")
-  if array.len(fields) < 3 { return result.ok(()) }
-  let start: i64 = match text.parse_i64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
-  let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
-  let span: i64 = match text.parse_i64(str.view(array.borrow(fields, 2))) {some(value) => value, none => 450,}
-  if zoom <= 0.0 or span <= 0 { return result.ok(()) }
+  let viewport: StripGeometry = try strip_geometry(geometry)
+  let start: i64 = viewport.start
+  let zoom: f64 = viewport.zoom
+  let span: i64 = viewport.span
+  var wanted: array<u64> = try strip_targets(state,start,start+span,true,viewport.lanes,true)
   // Reserve the strip before reusing a slot. Readers keep the previous owned
   // pictures until the complete manifest and matching generation are committed.
   if not publish_checked(root,"thumbnails.id","0") {return result.err("[GA_TIMELINE_PUBLISH] Cannot reserve thumbnail generation")}
@@ -514,28 +658,49 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> r
   var lines: string = string.new()
   var total: u64 = 0
   var i: u64 = 0
-  loop { if i >= editor.clip_count(doc) or total >= 32 { break }
-    let clip: editor.Clip = option.unwrap(editor.clip_at(doc, i))
+  var next_frames: array<i64> = array.new()
+  loop {if i >= array.len(wanted) {break}
+    let clip: editor.Clip=option.unwrap(editor.clip(doc,array.get(wanted,i)))
+    let begin: i64=if start > clip.start {start}else{clip.start}
+    array.push(next_frames,clip.start+((begin-clip.start)/step)*step)
     i = i + 1
-    if clip.owner != doc.active or editor.track_kind(doc, clip.track) != editor.track_video() { continue }
+  }
+  i=0
+  var exhausted: u64=0
+  loop {if total >= 32 or array.len(wanted) == 0 {break}
+    let clip: editor.Clip=option.unwrap(editor.clip(doc,array.get(wanted,i)))
+    let last: i64=if start+span < clip.start+clip.length {start+span}else{clip.start+clip.length}
+    let at: i64=array.get(next_frames,i)
+    if at >= last {
+      exhausted=exhausted+1
+      if exhausted >= array.len(wanted) {break}
+      i=if i+1 >= array.len(wanted) {0}else{i+1}
+      continue
+    }
+    exhausted=0
     var filename: string = string.new()
     if clip.nested == 0 {
-      let source_slot: u64 = match editor.source_slot(doc, clip.source) {none => { continue }, some(value) => value,}
+      let source_slot: u64 = match editor.source_slot(doc, clip.source) {none => {
+        array.set(next_frames,i,last)
+        i=if i+1 >= array.len(wanted) {0}else{i+1}
+        continue }, some(value) => value,}
       let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), source_slot)
-      if not source.has_video or not source.online { continue }
+      if not source.has_video or not source.online {
+        array.set(next_frames,i,last)
+        i=if i+1 >= array.len(wanted) {0}else{i+1}
+        continue }
       let _ = ref.swap(filename,string.copy(str.view(struct.borrow(source, field=path))))
     }
-    let last: i64 = if start + span < clip.start + clip.length { start + span } else { clip.start + clip.length }
-    var at: i64 = if start > clip.start { start } else { clip.start }
-    // Anchor the strip to the clip so a small scroll reuses the same samples.
-    at = clip.start + ((at - clip.start) / step) * step
-    loop { if at >= last or total >= 32 { break }
       if number(root, "request.id") != id { return result.ok(()) }
       let sample: i64 = timeline_media.source_frame(doc, clip, at)
       var shot: provider.Frame = if clip.nested != 0 {
         try compound_thumbnail(state,doc,clip,at)
       }else{provider.source_frame(struct.borrow(state, field=provider), str.view(filename), sample, 80, 45)}
       if number(root,"request.id") != id {return result.ok(())}
+      if not shot.ok {
+        return result.err(text.concat("[GA_TIMELINE_SOURCE] Cannot decode timeline bitmap: ",
+          str.view(struct.borrow(shot,field=detail))))
+      }
       if shot.ok {
         let name: string = text.concat("thumb-", text.concat(str.view(string.from_int(id % 2)), text.concat("-", str.view(string.from_int(total)))))
         var pixels: draw.Surface = provider.take_pixels(shot)
@@ -560,8 +725,12 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> r
         string.append(lines, "\n")
         total = total + 1
       }
-      at = at + step
-    }
+      // The step may saturate for a tiny legacy zoom. Clamp to the checked
+      // viewport/clip endpoint before addition, so the next time cannot wrap.
+      array.set(next_frames,i,if step >= last-at {last}else{at+step})
+      // Legacy snapshots keep their historical clip-first filmstrip. Native
+      // lane snapshots give every eligible clip a turn before a second tile.
+      if viewport.lanes.limited {i=if i+1 >= array.len(wanted) {0}else{i+1}}
   }
   if number(root,"request.id") != id {return result.ok(())}
   if not publish_checked(root,"thumbnails.tsv",str.view(lines)) or
@@ -571,6 +740,8 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> r
   result.ok(())
 }
 pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects {alloc, fs.read} {
+  let requested: u64 = number(root,"request.id")
+  if requested != 0 and requested != id {return false}
   if number(root,"thumbnails.id") != id {return false}
   let content: string = match files.read_text(path.join(root, "thumbnails.tsv")) {ok(value) => value, err(_) => { return false },}
   var rows: array<string> = text.split(str.view(content), "\n")
@@ -599,7 +770,7 @@ pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects 
     array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, source:source, source_frame:source_frame,
       revision:revision,document_revision:document_revision,pixels: pixels})
   }
-  if number(root,"thumbnails.id") != id {return false}
+  if number(root,"thumbnails.id") != id or (number(root,"request.id") != 0 and number(root,"request.id") != id) {return false}
   let _ = struct.replace(state, thumbs, field=thumbnails)
   true
 }
@@ -702,17 +873,27 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
     if owned.strips_only {
-      let start: i64 = if array.len(dimensions) >= 3 {match text.parse_i64(array.borrow(dimensions,0)) {
-        some(value)=>value,none=>0,}}else{0}
-      let span: i64 = if array.len(dimensions) >= 3 {match text.parse_i64(array.borrow(dimensions,2)) {
-        some(value)=>value,none=>450,}}else{450}
-      match waveforms_for_viewport(state,str.view(root),id,start,span) {
+      let viewport: StripGeometry = match strip_geometry(str.view(geometry)) {
+        err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
+          continue},ok(value)=>value,
+      }
+      match waveforms_in_range(state,str.view(root),id,true,viewport.start,viewport.start+viewport.span,viewport.lanes) {
         ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
           continue},
       }
-      publish(str.view(root),"waveforms.id","0")
-      write_waveforms(state,str.view(root))
-      publish(str.view(root),"waveforms.id",str.view(string.from_int(id)))
+      if number(str.view(root),"request.id") != id {continue}
+      if not publish_checked(str.view(root),"waveforms.id","0") {
+        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot reserve waveform generation")
+        continue
+      }
+      match write_strip_waveforms(state,str.view(root),viewport) {ok(_)=>{},err(problem)=>{
+        let _=fail_current(wake,str.view(root),id,problem)
+        continue},}
+      if number(str.view(root),"request.id") != id {continue}
+      if not publish_checked(str.view(root),"waveforms.id",str.view(string.from_int(id))) {
+        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot commit waveform generation")
+        continue
+      }
       if not link.notify(wake,2,id) {break}
       match write_thumbnails(state,str.view(root),id,str.view(geometry)) {
         err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
@@ -779,9 +960,19 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
         ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
           continue},
       }
-      publish(str.view(root), "waveforms.id", "0")
-      write_waveforms(state, str.view(root))
-      publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))
+      if not publish_checked(str.view(root),"waveforms.id","0") {
+        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot reserve waveform generation")
+        continue
+      }
+      var selected: array<u64> = array.new()
+      match write_selected_waveforms(state,str.view(root),false,selected) {ok(_)=>{},err(problem)=>{
+        let _=fail_current(wake,str.view(root),id,problem)
+        continue},}
+      if number(str.view(root),"request.id") != id {continue}
+      if not publish_checked(str.view(root),"waveforms.id",str.view(string.from_int(id))) {
+        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot commit waveform generation")
+        continue
+      }
       if not link.notify(wake,2,id) { break }
       match write_thumbnails(state,str.view(root),id,str.view(geometry)) {
         err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))

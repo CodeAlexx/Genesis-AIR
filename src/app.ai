@@ -14,6 +14,7 @@ import std.files as files
 import std.path as path
 import std.math as math
 import std.draw as draw
+import std.font as font
 import std.text as text
 import std.editor as editor
 import std.editor_io as editor_io
@@ -78,7 +79,7 @@ pub type Clipboard = struct { source: u64, source_in: i64, length: i64, filled: 
 // A one-line prompt. There is no file dialog on this platform's canvas window, so the
 // actions that need a path ask for one in the status line. The prompt holds the action it
 // will run when the line is committed, so a keystroke cannot be misrouted.
-pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string }
+pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string, selected_all: bool }
 
 // A deferred project replacement belongs to the session, never to the document.
 pub type ProjectAction = enum { None, New, Open, Recover, Close }
@@ -171,7 +172,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
     clipboard: Clipboard {source: 0, source_in: 0, length: 0, filled: false},
     gesture: drag(),
-    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
+    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), selected_all: false},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     recovery_lease: option.none(), recovered_lease: option.none(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
@@ -458,25 +459,46 @@ pub fn prompt_label(state: ref<App>) -> string effects {alloc} {
 pub fn prompt_text(state: ref<App>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(struct.borrow(state, field=prompt), field=buffer)))
 }
+pub fn prompt_selected_all(state: ref<App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=prompt), field=selected_all)
+}
+pub fn prompt_select_all(state: ref<App>) -> unit effects {} {
+  if prompt_active(state) { struct.set(struct.borrow(state, field=prompt), true, field=selected_all) }
+  ()
+}
+pub fn prompt_delete_selection(state: ref<App>) -> unit effects {alloc} {
+  if not prompt_active(state) or not prompt_selected_all(state) { return () }
+  let asking: ref<Prompt> = struct.borrow(state, field=prompt)
+  let _ = ref.swap(struct.borrow(asking, field=buffer), string.new())
+  struct.set(asking, false, field=selected_all)
+  ()
+}
 pub fn begin_prompt(state: ref<App>, action: u32, label: str, seed: str) -> unit effects {alloc} {
   let asking: ref<Prompt> = struct.borrow(state, field=prompt)
   struct.set(asking, true, field=active)
   struct.set(asking, action, field=action)
+  struct.set(asking, false, field=selected_all)
   let _ = ref.swap(struct.borrow(asking, field=label), string.copy(label))
   let _ = ref.swap(struct.borrow(asking, field=buffer), string.copy(seed))
   ()
 }
 pub fn prompt_push(state: ref<App>, text: str) -> unit effects {alloc} {
   if not prompt_active(state) { return () }
+  if str.len(text) == 0 { return () }
+  prompt_delete_selection(state)
   string.append(struct.borrow(struct.borrow(state, field=prompt), field=buffer), text)
   ()
 }
 pub fn prompt_backspace(state: ref<App>) -> unit effects {alloc} {
   if not prompt_active(state) { return () }
+  if prompt_selected_all(state) {
+    prompt_delete_selection(state)
+    return ()
+  }
   var held: string = prompt_text(state)
   let count: u64 = str.len(str.view(held))
   if count == 0 { return () }
-  var shorter: string = string.copy(str.slice(str.view(held), 0, count - 1))
+  var shorter: string = string.copy(str.slice(str.view(held), 0, font.cluster_before(str.view(held), count)))
   let _ = ref.swap(struct.borrow(struct.borrow(state, field=prompt), field=buffer), shorter)
   ()
 }
@@ -484,6 +506,7 @@ pub fn end_prompt(state: ref<App>) -> unit effects {alloc} {
   let asking: ref<Prompt> = struct.borrow(state, field=prompt)
   struct.set(asking, false, field=active)
   struct.set(asking, 0, field=action)
+  struct.set(asking, false, field=selected_all)
   let _ = ref.swap(struct.borrow(asking, field=buffer), string.new())
   ()
 }

@@ -8,6 +8,7 @@ $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $root = Join-Path $project 'build-windows'
 $work = Join-Path $root ('test-' + [guid]::NewGuid().ToString('N'))
 $previousWorker = $env:GENESIS_GCOMPOSE
+$previousNativeColor = $env:GENESIS_NATIVE_HDR_COLOR
 New-Item -ItemType Directory -Path $work | Out-Null
 function Invoke-Native([string]$Name, [string[]]$Arguments, [int]$Expected = 0) {
   $start = [System.Diagnostics.ProcessStartInfo]::new()
@@ -34,6 +35,9 @@ function Invoke-Native([string]$Name, [string[]]$Arguments, [int]$Expected = 0) 
   $text
 }
 try {
+  # Existing exact color contracts retain their reference path. The dedicated
+  # native HDR gate below resets this override in every candidate child.
+  $env:GENESIS_NATIVE_HDR_COLOR = '0'
   $media = Join-Path $work 'real clip 日本語.mp4'
   & ffmpeg -nostdin -y -v error -f lavfi -i 'color=c=red:s=640x360:r=30:d=1' `
     -f lavfi -i 'color=c=blue:s=640x360:r=30:d=1' `
@@ -45,8 +49,20 @@ try {
   $env:GENESIS_GCOMPOSE = $Worker
   if (-not $ControlsOnly) {
   Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
+  $clipboardResult = Invoke-Native 'genesis-ui-clipboard.exe' @()
+  Write-Host $clipboardResult.TrimEnd()
+  Set-Content -LiteralPath (Join-Path $root 'ui-clipboard-windows.log') -Value $clipboardResult
   Write-Host (Invoke-Native 'genesis-timeline-track-scroll.exe' @((Join-Path $work 'track-scroll'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'track-scroll/timeline-track-scroll-tests.json') -Destination (Join-Path $root 'timeline-track-scroll-tests.json') -Force
+  $previousStripFixture = $env:GENESIS_TEST_STRIP_INPUT
+  try {
+    $env:GENESIS_TEST_STRIP_INPUT = Join-Path $work 'strip-viewport/strip-worker.txt'
+    Write-Host (Invoke-Native 'genesis-strip-viewport.exe' @((Join-Path $work 'strip-viewport'), (Join-Path $Bin 'genesis-worker-wrapper.exe'))).TrimEnd()
+  } finally {
+    if ($null -eq $previousStripFixture) { Remove-Item Env:GENESIS_TEST_STRIP_INPUT -ErrorAction SilentlyContinue }
+    else { $env:GENESIS_TEST_STRIP_INPUT = $previousStripFixture }
+  }
+  Copy-Item -LiteralPath (Join-Path $work 'strip-viewport/strip-viewport-tests.json') -Destination (Join-Path $root 'strip-viewport-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-audio-clock.exe' @()).TrimEnd()
   $waitResult = Invoke-Native 'genesis-process-wait.exe' @()
   Write-Host $waitResult.TrimEnd()
@@ -63,6 +79,13 @@ try {
   & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
     --report (Join-Path $root 'native-audio-clock.json')
   if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
+  $identityResults = @(
+    (Invoke-Native 'genesis-native-hdr-runtime.exe' @('idle', 'ignored')),
+    (Invoke-Native 'genesis-native-hdr-runtime.exe' @('cpu', 'ignored')),
+    (Invoke-Native 'genesis-native-hdr-runtime.exe' @('identity', (Join-Path $work 'native-hdr-identity')))
+  )
+  $identityResults | Set-Content -LiteralPath (Join-Path $root 'native-hdr-runtime.log')
+  Write-Host ($identityResults -join '')
   $native = Invoke-Native 'genesis-native.exe' @($work, $media)
   Write-Host $native.TrimEnd()
   $previousInputFixture = $env:GENESIS_TEST_PREVIEW_INPUT
@@ -87,6 +110,9 @@ try {
   Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd()
   $env:GENESIS_GCOMPOSE = $Worker
   if (Test-Path -LiteralPath $worker) {
+    & python (Join-Path $PSScriptRoot 'lazy_gpu.py') --worker $worker `
+      --fault-shim (Join-Path $Bin 'lazy-gpu-fault/OpenCL.dll') --report (Join-Path $root 'lazy-gpu.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Lazy OpenCL initialization, retained history and failure cleanup failed.' }
     if (Test-Path -LiteralPath (Join-Path (Split-Path $worker -Parent) 'genesis-media-runtime.txt')) {
       & python (Join-Path $PSScriptRoot 'shared_media_runtime.py') --worker $worker
       if ($LASTEXITCODE -ne 0) { throw 'Shared MM-AIR media runtime acceptance failed.' }
@@ -119,6 +145,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'Native video readback pixel acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'native_hdr_color.py') --worker $worker `
+      --require-qualified --report (Join-Path $root 'native-hdr-color.json') --scratch (Join-Path $work 'native-hdr-color')
+    if ($LASTEXITCODE -ne 0) { throw 'Qualified native HDR color, exact fallback and runtime identity failed.' }
     & python (Join-Path $PSScriptRoot 'hdr_preview.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'Native HDR preview color, precision and frame selection acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'odd_hdr_preview.py') --worker $worker --report (Join-Path $root 'odd-hdr-preview.json')
@@ -281,6 +310,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'real.png') -Destination (Join-Path $root 'real-media.png') -Force
   Write-Host 'Real Windows media/Unicode paths, source/program preview and failure exit codes passed.'
 } finally {
+  if ($null -eq $previousNativeColor) { Remove-Item Env:GENESIS_NATIVE_HDR_COLOR -ErrorAction SilentlyContinue }
+  else { $env:GENESIS_NATIVE_HDR_COLOR = $previousNativeColor }
   if ($null -eq $previousWorker) { Remove-Item Env:GENESIS_GCOMPOSE -ErrorAction SilentlyContinue }
   else { $env:GENESIS_GCOMPOSE = $previousWorker }
   $resolved = (Resolve-Path -LiteralPath $work).Path

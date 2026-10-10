@@ -13,6 +13,7 @@ import std.draw as draw
 import std.editor as editor
 import std.editor_view as editor_view
 import std.geometry as geometry
+import std.font as font
 import std.math as math
 import std.timeline as timeline
 import std.text as text
@@ -532,12 +533,20 @@ fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   var whole: string = app.prompt_text(state)
   let count: u64 = str.len(str.view(whole))
   let capacity: u64 = fits(layout.width_of(field) - 24.0, type_body())
-  let first: u64 = if count > capacity { count - capacity } else { 0 }
+  let first: u64 = if count > capacity { font.cluster_start(str.view(whole), count - capacity) } else { 0 }
   var visible: string = string.copy(str.slice(str.view(whole), first, count))
+  let shown: f64 = math.min(layout.width_of(field) - 16.0,
+    ui_text.width(struct.borrow(state, field=typography), str.view(visible), type_body()))
+  if app.prompt_selected_all(state) and count > 0 {
+    fill_at(canvas, field.left + 7.0, field.top + 7.0, field.left + 9.0 + shown,
+      field.bottom - 7.0, colors.focus)
+  }
   label(canvas, struct.borrow(state, field=typography), field.left + 8.0, field.top + 11.0, str.view(visible),
     type_body(), colors.text)
-  let caret: f64 = field.left + 10.0 + ui_text.width(struct.borrow(state, field=typography), str.view(visible), type_body())
-  fill_at(canvas, caret, field.top + 8.0, caret + 2.0, field.bottom - 7.0, colors.accent)
+  let caret: f64 = field.left + 8.0 + shown
+  if not app.prompt_selected_all(state) {
+    fill_at(canvas, caret, field.top + 8.0, caret + 2.0, field.bottom - 7.0, colors.accent)
+  }
   label(canvas, struct.borrow(state, field=typography), box.left + 18.0, box.bottom - 28.0,
     "Enter to accept    Escape to cancel", type_small(), colors.dim)
   ()

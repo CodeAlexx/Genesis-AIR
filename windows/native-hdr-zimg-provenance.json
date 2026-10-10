@@ -1,0 +1,8 @@
+{
+  "sha": "75ad930ee74f9c2aaf96bbbc0810f5fc1e42e698",
+  "html_url": "https://github.com/sekrit-twc/zimg/commit/75ad930ee74f9c2aaf96bbbc0810f5fc1e42e698",
+  "path": "src/zimg/colorspace/x86/gamma_constants_avx512.cpp",
+  "source_sha256": "a711aa18f8c3ce73df410dbb02c571fece81449ad19946ecb1192d82bc06969a",
+  "license": "WTFPL version 2",
+  "scope": "ST2084 EOTF and Rec1886 inverse EOTF coefficient tables; preserve AVX512 FMA evaluation order"
+}

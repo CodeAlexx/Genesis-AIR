@@ -62,8 +62,9 @@ including range excursions that previously turned limiting white black.
 The fast path requires D3D11, P010, PQ, BT.2020 nonconstant luminance, limited
 range and left/unspecified chroma siting. Both fitted dimensions must be smaller
 than the source, at least two pixels, with at most 32:1 shrink in each dimension.
-Other formats, Vulkan/software frames, native-size renders and explicit HDR
-masters use the reference CPU graph. Every application export also passes
+Other formats, Vulkan/software frames, native-size renders outside the qualified
+candidate path below, and explicit HDR masters use the reference CPU graph.
+Every application export also passes
 `--reference-color`, preserving that graph for downscaled SDR sequences even
 when `GENESIS_GPU_PREVIEW=1` is set. Resource/shader failure reports
 `GA_GPU_COLOR` and falls back. `GENESIS_GPU_PREVIEW=0` disables this preview path.
@@ -479,10 +480,10 @@ model used for rendering and pointer dispatch. Neither change adds a new codec
 runtime. The accepted `4d9dfd6d...` compositor and shared MM-AIR manifest remain
 unchanged. See the [direct-waveform and track acceptance ledger](CONTROL_COVERAGE.md#processed-direct-waveforms-and-vertical-tracks-on-2026-10-10).
 
-Cold changed waveforms still materialize a full audio body. The current `--serve`
-worker eagerly initializes OpenCL even for audio-only work; lazy audio startup
-remains future optimization. Native-resolution HDR shader experiments remain
-private and are not part of this installed checkpoint. No new sustained native
+Cold changed waveforms still materialize a full audio body. At this historical
+direct-waveform checkpoint, `--serve` eagerly initialized OpenCL even for
+audio-only work, and native-resolution HDR experiments were private.
+The newer candidate below changes those paths. No new sustained native
 4K60 or physical audio-latency claim follows from these waveform/viewport checks.
 
 The installed direct-waveform app (`0928f1c3...`) also passes a fresh native check
@@ -492,3 +493,119 @@ and 512 processed peaks. See the [UI receipt](../archive/native-direct-tracks-ro
 and [sanitized acceptance bundle](../archive/direct-waveforms-vertical-tracks-2026-10-10.tar.gz),
 which preserve the initial disabled-control diagnostic failure and passing tail
 rerun alongside the unchanged production/media prefix.
+
+## Qualified native HDR candidate on 2026-10-10
+
+The combined candidate app `AD8985B431...` and worker `378685335B...` pass the
+full Windows gate as the initial staged build. The later published root guard's
+combined acceptance is recorded below. This evidence is separate from
+the earlier installed direct-waveform checkpoint and its prefix/tail rerun.
+Shared MM-AIR runtime selection and the absence of a separate Genesis FFmpeg
+bundle remain unchanged.
+
+`windows/native-hdr.c` and `native-hdr.hlsl` implement a selected-frame RGBA16
+preview path for even, full-native-canvas D3D11 P010, limited-range BT.2020
+nonconstant-luminance / ST2084 PQ with supported chroma placement. This is not
+a replacement for the fitted scaler, SDR/HLG conversion or HDR master graph.
+The shader adapts zimg coefficient tables pinned in
+[`native-hdr-zimg-provenance.json`](../windows/native-hdr-zimg-provenance.json),
+including their FMA evaluation order; the accompanying license is retained.
+
+Qualification requires AVX512/AVX2/FMA3 and checks the exact loaded avutil,
+avfilter and swscale reference modules: file fingerprints, loaded images and
+retained file handles. An unknown runtime or forced CPU/reference path declines
+the shader. Unsupported formats/dimensions, HDR working output and allocation,
+resource or readback failures keep reference fallback. The Windows shader
+compiler is loaded from System32. No shader-compiler DLL or additional codec
+runtime is packaged. `GENESIS_NATIVE_HDR_COLOR=0` disables this native-size
+path; `GENESIS_GPU_PREVIEW=0` disables preview acceleration by default.
+
+The maintained gate passes 12 authored qualification/fallback cases. Native
+channels differ by at most 1.9999695 u16 codes under the existing five-code
+bound; reference, HDR-master, fitted, disabled, CPU, unknown-runtime and fault
+paths remain byte-exact. The additional real-source gate selects eight
+3840x2160 Costa Rica frames `[0,1,2,100,500,1000,18807,0]`, observes eight
+shader entries and compares 265,420,800 channels with the same maximum below
+two u16 codes. All values are finite and the source hash is unchanged.
+Native-u16/snapshot lifecycle validation separately passes 810,083 checks.
+
+Four private paired headless runs each measure 12 warmed samples with three
+warmups, not 12 seconds. Serial native-4K compound pipeline means are
+90.304/64.147 ms for the reference pair and 38.356/38.317 ms for the shader
+pair. These measurements use 480x270 monitors in a 1280x720 headless painter,
+exclude audio/native presentation and do not establish sustained paced playback
+or compound 4K60. Their protected inputs and historical baseline are retained.
+
+## Lazy compositor and current native-window scope
+
+Audio-only commands and CPU thumbnail/source-count requests no longer construct
+OpenCL at worker startup. The first composition operation initializes it;
+later audio commands preserve retained picture/scopes history. Fault gates
+prove coded `GA_COMPOSE_GPU_INIT`/`GA_COMPOSE_GPU_CHECK`, cache cleanup, retained
+published envelopes and absence of encoder output on failure. CPU source-frame
+requests remain usable after failed compositor initialization.
+
+The current 15-second regular 1080p60 device/headless run delivers 899 pictures
+with no early pictures or observed audio underruns, two audio-buffer boundaries
+and -0.2447 ms interval drift over 13.988 seconds. It excludes native display,
+speaker latency and per-picture pixel identity. A separate actual native window
+uses a 2560x1316 surface and fitted 480x270 monitors: its first 60.147-second
+playing epoch shows 3,591 changed pictures at 59.74/s, eight skipped positions
+and two observed drained-queue presentations at startup/EOF. Excluding exactly
+the first second and final half-second produces 3,502 changes at 59.88/s over
+58.463 seconds, six skips, no observed drain and a 29.55 ms maximum picture gap.
+Steady device drift is -0.9881 ms; after-presentation metadata lag is generally
+two frames (33.33 ms). The complete epoch is retained; no photon/speaker latency
+or independent source-pixel alignment claim follows.
+
+Native EOF, rewind, seeks, changing histogram/time/marker, fitted filmstrip and
+processed peaks, mute/unmute and Stop are observed. The 1,032-placement private
+project reaches lower busy lanes and plays paired AAC for 21 seconds while
+scrolling remains responsive. A separate input candidate repairs title Text
+dispatch; actual Ctrl+A highlighting and physical-key replacement are observed.
+Its reusable AIR Win32 clipboard overlay passes 1,044 injected-adapter CPU checks
+for committed Unicode events, bounded reads and clipboard ownership. It changes
+no media decoder, color shader, shared MM-AIR runtime or FFmpeg packaging.
+The separate `C524` native window accepts paste/title preview, filter-order
+Undo/Redo and full-graph Save/Open with zero unexplained changes. A 240-frame
+export cancels at 58% with output/sidecar cleanup. After an intentionally retained
+silent-source retry failure, a second private 12-frame audible retry passes
+independent source-frame, title, grade-order and processed-AAC checks.
+These results are bounded workflow acceptance, separate from the `AD8985`
+playback profile. The final `80A6` candidate independently verifies plain header
+wheel after a native picker, lower-lane strips, native title paste/cancel and
+settled scopes/time/marker seeks. Its fresh regular-source native epoch measures
+59.73 changed pictures/s raw. Explicit startup1s/tail0.5s exclusions give 59.884/s
+with six skipped positions, two four-frame jumps and a 34.90 ms maximum gap;
+no early or over-two-frame stale pictures, observed steady audio drain or packet
+overwrite occurs. Steady device drift is -0.9696 ms and after-present metadata lag
+is two frames. The full raw epoch remains preserved, including startup/EOF.
+The main-only `52A6` secondary-button guard is now published with targeted
+757-control/probe/failure and actual native acceptance after the complete `80A6`
+Windows suite. The `80A6` timing, prior `AD8985` profile and `C524` workflow
+receipts retain their own app identities. A separate final-root profile below
+measures the published binary directly. No fullscreen 4K,
+zero-drop cadence, sustained compound 4K60 or complete professional-project
+acceptance follows. See the
+[current ledger](CONTROL_COVERAGE.md#visible-strips-lazy-gpu-and-qualified-hdr-candidate-on-2026-10-10)
+for the bounded viewport/publication tests and remaining scope.
+
+### Published root playback scope
+
+The installed `52A6` application has a distinct native first-epoch profile on the
+full 76,701-frame regular source. The epoch ends with manual Stop at `01:15:33`,
+not authored EOF: 75.711 wall seconds, 4,521 changed pictures, 59.75/s raw and
+13 skipped positions. Startup1s and observed-Stop-tail0.5s exclusions yield
+4,434 changes at 59.885/s over 74.025 seconds, eight skips, two five-frame jumps
+and a 48.58 ms maximum gap. No early, over-two-frame stale or steady drained
+queue is observed; device drift is -1.2236 ms and after-present metadata lag
+is two frames. This measurement applies to the published root binary directly.
+Earlier profiles retain their own identities, and no full 21-minute cadence or
+physical speaker/photon alignment is claimed.
+
+Stop/Start, settled scopes and a frame12773 (`03:32:53`) seek align picture,
+time and marker in the actual window. Fit populates filmstrip/processed peaks,
+but the 0.05 px/frame minimum zoom prevents fitting the entire long clip;
+only about its first 5.5 minutes is visible in that surface. Fixed 512 peaks on
+this source have about 2.5-second bucket resolution. Those timeline limitations
+need separate professional-editing work and are not decoder/color acceptance.

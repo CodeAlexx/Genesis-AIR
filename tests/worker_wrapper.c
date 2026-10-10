@@ -178,8 +178,43 @@ static int stall_export(const wchar_t *marker) {
     return 3;
 }
 
+/* CPU-only strip producer: coded refusal and retained-session recovery, without
+ * starting the media runtime. The opt-in value is the exact command receipt. */
+static int strip_input(const wchar_t *receipt) {
+    FILE *record=_wfopen(receipt,L"wb");if(!record)return 2;
+    fprintf(record,"PID %lu\n",GetCurrentProcessId());fflush(record);
+    char line[16384];
+    while(fgets(line,sizeof(line),stdin)) {
+        fprintf(record,"%s",line);fflush(record);
+        char source[4096],output[4096];long long frame;unsigned width,height;
+        if(sscanf_s(line,"THUMB %4095s %lld %u %u %4095s",source,(unsigned)sizeof(source),
+            &frame,&width,&height,output,(unsigned)sizeof(output))!=5 || width!=80 || height!=45) {
+            fputs("[GA_TEST_STRIP_PROTOCOL] Unexpected CPU strip command\nERR\n",stdout);fflush(stdout);continue;
+        }
+        if(strstr(source,"missing")) {
+            fputs("[GA_TEST_THUMB_SOURCE] Authored unreadable source\nERR\n",stdout);fflush(stdout);continue;
+        }
+        char decoded[4096];size_t at=0;
+        for(size_t i=0;output[i];i++) {
+            if(output[i]=='%'&&output[i+1]&&output[i+2]) {
+                unsigned value;if(sscanf_s(output+i+1,"%2x",&value)!=1){fclose(record);return 2;}
+                decoded[at++]=(char)value;i+=2;
+            }else decoded[at++]=output[i];
+        }
+        decoded[at]=0;wchar_t path[4096];
+        if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,decoded,-1,path,4096)){fclose(record);return 2;}
+        FILE *pixels=_wfopen(path,L"wb");if(!pixels){fclose(record);return 2;}
+        unsigned char pixel[4]={17,91,(unsigned char)(frame%256),255};
+        for(unsigned i=0;i<width*height;i++)if(fwrite(pixel,1,4,pixels)!=4){fclose(pixels);fclose(record);return 2;}
+        fclose(pixels);fputs("DONE\n",stdout);fflush(stdout);
+    }
+    fclose(record);return 0;
+}
+
 /* Exercise recovery through a real process, inheriting the AIR worker pipes. */
 int wmain(int argc, wchar_t **argv) {
+    wchar_t strip_receipt[32768];
+    if(GetEnvironmentVariableW(L"GENESIS_TEST_STRIP_INPUT",strip_receipt,32768))return strip_input(strip_receipt);
     wchar_t preview_mode[16];
     if (GetEnvironmentVariableW(L"GENESIS_TEST_PREVIEW_INPUT", preview_mode, 16)) return preview_input();
     wchar_t starts[32768], crash[32768], worker[32768], command[32768];

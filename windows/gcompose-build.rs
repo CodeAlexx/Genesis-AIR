@@ -30,6 +30,16 @@ fn main() {
     build.include(generated).file(&preview);
     println!("cargo:rerun-if-changed={}", preview.display());
     println!("cargo:rerun-if-changed={}", shader.display());
+    let native_preview = PathBuf::from(&compatibility).parent().unwrap().join("native-hdr.c");
+    let native_shader = native_preview.with_extension("hlsl");
+    let mut native_source = fs::read(&native_shader).unwrap(); native_source.push(0);
+    fs::write(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("genesis-native-hdr-shader.h"), format!("static const unsigned char genesis_native_hdr_shader[] = {{{}}};\n",native_source.iter().map(|b|b.to_string()).collect::<Vec<_>>().join(","))).unwrap();
+    build.file(&native_preview);
+    let native_runtime = native_preview.with_file_name("native-hdr-runtime.c");
+    build.file(&native_runtime);
+    println!("cargo:rerun-if-changed={}",native_runtime.display());
+    println!("cargo:rerun-if-changed={}",native_preview.display());
+    println!("cargo:rerun-if-changed={}",native_shader.display());
     build.compile("fpxengine");
     let imports = env::var("GENESIS_FFMPEG_IMPORTS").expect("GENESIS_FFMPEG_IMPORTS");
     println!("cargo:rerun-if-env-changed=GENESIS_FFMPEG_IMPORTS");

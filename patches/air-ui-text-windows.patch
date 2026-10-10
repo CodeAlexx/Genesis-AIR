@@ -1,0 +1,72 @@
+--- a/runtime/windows/air_ui_win32.c
++++ b/runtime/windows/air_ui_win32.c
+@@ -19,6 +19,7 @@
+ #include "air_video.h"
+ 
+ #define AIR_WIN_EVENT_CAPACITY 128u
++#define AIR_WIN_CLIPBOARD_UNITS_LIMIT 524288u
+ 
+ typedef struct air_win_window air_win_window;
+ 
+@@ -155,6 +156,46 @@
+     ++window->event_count;
+ }
+ 
++/* Canvas editing policy belongs to AIR. Paste transfers committed scalars through
++   the same ordered, growing queue as WM_CHAR; it never edits a widget or document. */
++static int queue_clipboard_text(air_win_window *window, const WCHAR *wide, SIZE_T capacity) {
++    if (wide == NULL) return 0;
++    SIZE_T length = 0;
++    while (length < capacity && length <= AIR_WIN_CLIPBOARD_UNITS_LIMIT && wide[length] != 0)
++        ++length;
++    if (length == capacity || length > AIR_WIN_CLIPBOARD_UNITS_LIMIT) return 0;
++    if (length == 0) return 1;
++    if (window->pending_surrogate != 0)
++        push_event(window, 10u, 0xfffdu, window->pending_text_modifiers);
++    window->pending_surrogate = 0;
++    for (SIZE_T index = 0; index < length; ++index) {
++        uint32_t scalar = wide[index];
++        if (scalar >= 0xd800u && scalar <= 0xdbffu) {
++            if (index + 1 < length && wide[index + 1] >= 0xdc00u && wide[index + 1] <= 0xdfffu) {
++                scalar = 0x10000u + ((scalar - 0xd800u) << 10u) + (wide[++index] - 0xdc00u);
++            } else scalar = 0xfffdu;
++        } else if (scalar >= 0xdc00u && scalar <= 0xdfffu) scalar = 0xfffdu;
++        push_event(window, 10u, scalar, 0u);
++    }
++    return 1;
++}
++
++static void paste_clipboard(air_win_window *window) {
++    if (!OpenClipboard(window->handle)) return;
++    HGLOBAL memory = (HGLOBAL)GetClipboardData(CF_UNICODETEXT);
++    if (memory != NULL) {
++        SIZE_T bytes = GlobalSize(memory);
++        if (bytes >= sizeof(WCHAR) && bytes % sizeof(WCHAR) == 0) {
++            const WCHAR *wide = (const WCHAR *)GlobalLock(memory);
++            if (wide != NULL) {
++                (void)queue_clipboard_text(window, wide, bytes / sizeof(WCHAR));
++                (void)GlobalUnlock(memory);
++            }
++        }
++    }
++    (void)CloseClipboard();
++}
++
+ static void push_accessibility_event(air_win_window *window, uint8_t kind,
+                                      uint64_t target, uint64_t value) {
+     push_event(window, kind, (uint32_t)target, (uint32_t)(target >> 32u));
+@@ -467,6 +508,14 @@
+         push_event(window, window->canvas ? 9u : 4u,
+                    window->canvas ? portable_key(wparam) : 0u,
+                    window->canvas ? modifiers() : portable_key(wparam));
++        if (window->canvas &&
++            ((wparam == 'V' && (modifiers() & 6u) == 2u) ||
++             (wparam == VK_INSERT && (modifiers() & 7u) == 1u)))
++            paste_clipboard(window);
++        return 0;
++    case WM_PASTE:
++        if (!window->canvas) return DefWindowProcW(handle, message, wparam, lparam);
++        paste_clipboard(window);
+         return 0;
+     case WM_SYSKEYDOWN:
+         if (window->canvas && wparam == VK_MENU) {

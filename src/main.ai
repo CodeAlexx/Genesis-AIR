@@ -294,8 +294,6 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var autosave_timer: recovery.Timer = recovery.timer()
   var pointer_x: f64 = 0.0
   var pointer_y: f64 = 0.0
-  var control: bool = false
-  var shift: bool = false
   var clock_ns: u64 = clock.start()
   var frame_clock: transport_clock.Clock = transport_clock.Clock {remainder: 0.0}
   var audio_library: option<CAbiLibrary> = match native_audio.open() {
@@ -374,6 +372,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var strip_scroll: i64 = -1
   var strip_zoom: f64 = 0.0
   var strip_span: i64 = 0
+  var strip_first_lane: u64 = 0
+  var strip_body_height: f64 = 0.0
   var strip_error: string = string.new()
   var preview_requested: u64 = 0
   var preview_seen: u64 = 0
@@ -416,7 +416,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     }
     preview_link.poll(preview_transport)
     preview_link.poll(strip_transport)
-    let strip_problem: string = string.copy(str.view(struct.borrow(strip_transport,field=error)))
+    let strip_problem: string = match preview.current_failure(strip_transport,strip_transport.error_generation==strip_requested) {
+      none=>string.new(),some(detail)=>detail,
+    }
     if str.len(str.view(strip_problem)) != 0 and not str.eq(str.view(strip_problem),str.view(strip_error)) {
       app.set_status(state,str.view(strip_problem))
       dirty=true
@@ -799,15 +801,18 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     if dirty {
       let view_frame: layout.Frame = layout.frame(logical_width, logical_height)
       let span: i64 = cast.sat(layout.width_of(view_frame.timeline) / app.zoom(state))
+      let body_height: f64 = layout.height_of(view_frame.timeline)
+      let first_lane: u64 = app.clamp_track_scroll(state,body_height)
       if not strip_initialized or strip_document_revision != state.document_revision or
-          strip_revision != state.media_revision or strip_scroll != app.scroll(state) or strip_zoom != app.zoom(state) or strip_span != span {
+          strip_revision != state.media_revision or strip_scroll != app.scroll(state) or strip_zoom != app.zoom(state) or strip_span != span or
+          strip_first_lane != first_lane or strip_body_height != body_height {
         let signature_begin: u64 = window_profile.stamp(window_measure)
         // Encode only a real content/viewport change, never a moving heard clock.
         let signature: string = match editor_io.encode(struct.borrow(state,field=document)) {
           ok(value)=>value,err(_)=>string.new(),
         }
         strip_requested=strip_requested+1
-        if preview.request_document_revision(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision,state.document_revision) {
+        if preview.request_strips(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision,state.document_revision,first_lane,body_height) {
           let _ = preview_link.wake(strip_transport,false)
           strip_document_revision=state.document_revision
           strip_initialized=true
@@ -815,6 +820,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           strip_scroll=app.scroll(state)
           strip_zoom=app.zoom(state)
           strip_span=span
+          strip_first_lane=first_lane
+          strip_body_height=body_height
         }else{app.set_status(state,"[GA_TIMELINE_REQUEST] Cannot publish timeline bitmap request")}
         struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
       }
@@ -869,8 +876,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         some(signal) => {
           match signal {
             PointerDown(point) => {
-              let at_x: u64 = cast.wrap(point.x)
-              let at_y: u64 = cast.wrap(point.y)
+              if not widgets.point_secondary(point) {
+              let at: widgets.Point = widgets.point_coordinates(point)
+              let at_x: u64 = cast.wrap(at.x)
+              let at_y: u64 = cast.wrap(at.y)
               pointer_x = cast.float(at_x) / ui_scale
               pointer_y = cast.float(at_y) / ui_scale
               var note: string = input.pointer_down(state, logical_width, logical_height,
@@ -878,10 +887,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               repaint_all = true
               dirty = true
+              }
             },
             PointerMove(point) => {
-              let mx: u64 = cast.wrap(point.x)
-              let my: u64 = cast.wrap(point.y)
+              let at: widgets.Point = widgets.point_coordinates(point)
+              let mx: u64 = cast.wrap(at.x)
+              let my: u64 = cast.wrap(at.y)
               pointer_x = cast.float(mx) / ui_scale
               pointer_y = cast.float(my) / ui_scale
               if input.pointer_hover(state, logical_width, logical_height, pointer_x, pointer_y) {
@@ -899,18 +910,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               }
             },
             Scroll(wheel) => {
-              let wheel_x: u64 = cast.wrap(wheel.x)
-              let wheel_y: u64 = cast.wrap(wheel.y)
-              var note: string = input.wheel(state, logical_width, logical_height,
-                cast.float(wheel_x) / ui_scale, cast.float(wheel_y) / ui_scale,
-                wheel.down, wheel.lines, control)
+              var note: string = input.wheel_event(state, logical_width, logical_height, wheel, ui_scale)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
               repaint_all = true
               dirty = true
             },
             Key(press) => {
-              control = press.control
-              shift = press.shift
               // The window owns the canvas, so a committed "render" prompt is performed
               // here rather than in the input layer.
               if input.prompt_is_render(state) and press.code == widgets.key_return() {
@@ -937,8 +942,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               dirty = true },
             Tick => { },
             PointerUp(point) => {
-              let ux: u64 = cast.wrap(point.x)
-              let uy: u64 = cast.wrap(point.y)
+              if not widgets.point_secondary(point) {
+              let at: widgets.Point = widgets.point_coordinates(point)
+              let ux: u64 = cast.wrap(at.x)
+              let uy: u64 = cast.wrap(at.y)
               pointer_x = cast.float(ux) / ui_scale
               pointer_y = cast.float(uy) / ui_scale
               if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) {
@@ -950,8 +957,14 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
                 repaint_all = true
                 dirty = true
               }
+              }
             },
-            Text(entry) => { },
+            Text(entry) => {
+              var note: string = input.text(state, entry)
+              if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
+              repaint_all = true
+              dirty = true
+            },
             Progress(step) => { },
             MenuAccess(code) => {
               var note: string = input.menu_access(state, code)

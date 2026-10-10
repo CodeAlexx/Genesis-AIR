@@ -9,6 +9,7 @@ param(
   [string]$Worker = (Join-Path $PSScriptRoot 'genesis-gcompose.exe'),
   [switch]$Launch,
   [switch]$SkipSmoke,
+  [switch]$SkipTestRun,
   [switch]$RunTests
 )
 $ErrorActionPreference = 'Stop'
@@ -51,6 +52,20 @@ try {
 } finally {
   $PSNativeCommandUseErrorActionPreference = $previousNativePreference
 }
+$textPatch = Join-Path $here 'patches/air-ui-text-windows.patch'
+if (-not (Test-Path -LiteralPath $textPatch)) { throw '[GA_SDK_TEXT_PATCH_MISSING] The Windows text overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $textPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $textPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_TEXT_PATCH_BASE] The text overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $textPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_TEXT_PATCH_APPLY] Could not apply the Windows text overlay.' }
+  }
+} finally {
+  $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+}
 $buildRoot = Join-Path $here 'build-windows'
 $generated = if ($GeneratedDirectory) { [IO.Path]::GetFullPath($GeneratedDirectory) } else { Join-Path $buildRoot 'generated' }
 New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
@@ -72,6 +87,7 @@ if ($RunTests) { $sources += ,@('picture-memory', 'tests/picture_memory.ai') }
 if ($RunTests) { $sources += ,@('nested-waveforms', 'tests/nested_waveforms.ai') }
 if ($RunTests) { $sources += ,@('direct-waveforms', 'tests/direct_waveforms.ai') }
 if ($RunTests) { $sources += ,@('timeline-track-scroll', 'tests/timeline_track_scroll.ai') }
+if ($RunTests) { $sources += ,@('strip-viewport', 'tests/strip_viewport.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -101,12 +117,16 @@ if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-
 if ($RunTests) { $targets += @('genesis-keyed-video', 'genesis-window-cache', 'genesis-editor-trim', 'genesis-trim-history', 'genesis-recovery-ownership', 'genesis-media-session', 'genesis-spatial-canvas') }
 if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys', 'genesis-audio-nested', 'genesis-audio-nested-cancel', 'genesis-nested-audio-controls') }
 if ($RunTests) { $targets += @('genesis-process-wait') }
+if ($RunTests) { $targets += @('genesis-ui-clipboard') }
 if ($RunTests) { $targets += @('genesis-nested-timeline-bitmaps') }
 if ($RunTests) { $targets += @('genesis-nested-picture-plan', 'genesis-compound-canvas') }
 if ($RunTests) { $targets += @('genesis-picture-memory', 'genesis-picture-memory-lifecycle') }
 if ($RunTests) { $targets += @('genesis-nested-waveforms') }
 if ($RunTests) { $targets += @('genesis-direct-waveforms') }
 if ($RunTests) { $targets += @('genesis-timeline-track-scroll') }
+if ($RunTests) { $targets += @('genesis-strip-viewport') }
+if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
+if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
@@ -162,6 +182,6 @@ if (-not $SkipSmoke) {
       -not (Test-Path -LiteralPath (Join-Path $smoke 'genesis-demo.air'))) { throw '[GA_BUILD_SMOKE] Missing demo output.' }
   Write-Host 'Genesis AIR native render smoke passed.'
 }
-if ($RunTests) { & (Join-Path $here 'tests/windows.ps1') -Bin $bin -Worker $Worker }
+if ($RunTests -and -not $SkipTestRun) { & (Join-Path $here 'tests/windows.ps1') -Bin $bin -Worker $Worker }
 Write-Output "Genesis AIR: $executable"
 if ($Launch) { Start-Process -FilePath $executable -WorkingDirectory $Destination -WindowStyle Normal }

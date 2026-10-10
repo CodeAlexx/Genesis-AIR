@@ -1,0 +1,301 @@
+// Actual persistent fake-provider strip task; no native window or GPU worker.
+module genesis.tests.strip_viewport
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.testing as test
+import std.text as text
+import std.timeline as timeline
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/preview.ai" as preview
+import "../src/preview_link.ai" as link
+import "../src/provider.ai" as provider
+import "../src/view.ai" as painter
+
+fn fixture(root: str, dense: bool) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App=app.app(provider.fake(root))
+  var doc: editor.Document=editor.document(30.0,160,90)
+  let source: u64=editor.add_source(doc,"viewport-coded.mov","Visible coded source",2000,30.0)
+  let _=editor.describe_source(doc,source,160,90,true,true,48000,2)
+  if dense {
+    let missing: u64=editor.add_source(doc,"offscreen-must-not-be-requested.mov","Offscreen source",2000,30.0)
+    let _=editor.describe_source(doc,missing,160,90,true,true,48000,2)
+    let hidden: u64=editor.add_track(doc,doc.active,editor.track_video(),"Offscreen")
+    let _=editor.place(doc,hidden,missing,0,1200,0)
+    let lower: u64=editor.add_track(doc,doc.active,editor.track_video(),"Reached lower")
+    let _=editor.place(doc,lower,source,0,1200,0)
+    let upper: u64=editor.add_track(doc,doc.active,editor.track_video(),"Dense upper")
+    var at: u64=0
+    loop {if at==40 {break}
+      let _=editor.place(doc,upper,source,cast.sat(at*24),24,cast.sat(at*24))
+      at=at+1}
+  }else{
+    var at: u64=0
+    loop {if at==24 {break}
+      let lane: u64=editor.add_track(doc,doc.active,editor.track_video(),"Scrollable lane")
+      let _=editor.place(doc,lane,source,cast.sat(at),1200,0)
+      at=at+1}
+  }
+  commands.replace_project(state,doc)
+  app.mark_dirty(state,false)
+  state
+}
+fn geometry(first: u64, height: f64) -> string effects {alloc} {
+  var fields: array<string> = ["0","2.4","960","480","270","0","1",string.from_int(first),string.from_float(height)]
+  text.join(fields,"\t")
+}
+fn refusal(value: str) -> bool effects {alloc} {
+  match preview.strip_geometry(value) {ok(_)=>false,err(problem)=>text.contains(problem,"GA_TIMELINE_RANGE"),}
+}
+fn has_thumbnail(state: ref<app.App>, clip: u64) -> bool effects {} {
+  var at: u64=0
+  loop {if at >= array.len(struct.borrow(state,field=thumbnails)) {break}
+    if struct.get(array.borrow(struct.borrow(state,field=thumbnails),at),field=clip)==clip {return true}
+    at=at+1}
+  false
+}
+fn all_thumbnails(state: ref<app.App>, first: u64, second: u64) -> bool effects {} {
+  var at: u64=0
+  loop {if at >= array.len(struct.borrow(state,field=thumbnails)) {break}
+    let id: u64=struct.get(array.borrow(struct.borrow(state,field=thumbnails),at),field=clip)
+    if id != first and id != second {return false}
+    at=at+1}
+  true
+}
+fn publish(state: ref<app.App>, root: str, transport: ref<link.Link>, id: u64,
+    limited: bool, first: u64, height: f64) -> bool effects {alloc,fs.write,io.write,net,time} {
+  var encoded: string=match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>{return false},}
+  let sent: bool=if limited {
+    preview.request_strips(root,encoded,id,0,2.4,960,480,270,state.media_revision,state.document_revision,first,height)
+  }else{preview.request_document_revision(root,encoded,id,0,2.4,960,480,270,state.media_revision,state.document_revision)}
+  if not sent {return false}
+  match link.wake(transport,false) {ok(_)=>{},err(_)=>{return false},}
+  match link.await_event(transport,3,id,time.monotonic_ns()+10000000000) {ok(_)=>true,err(problem)=>{
+    io.write(text.concat(problem,"\n"))
+    false},}
+}
+fn strip_case(suite: ref<test.Suite>, root: str, dense: bool) -> bool
+    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App=fixture(root,dense)
+  let revision_before: u64=state.document_revision
+  let media_before: u64=state.media_revision
+  var transport: link.Link=match link.open() {ok(value)=>value,err(_)=>{return false},}
+  var config: preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=strips_only)
+  var good: bool=true
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=publish(state,root,transport,1,false,0,100.0) and good
+    good=preview.read_thumbnails(state,root,1) and good
+    let starved: u64=if dense {8}else{51}
+    let _=test.check(suite,array.len(struct.borrow(state,field=thumbnails))==32 and not has_thumbnail(state,starved),"Legacy clip-first request reproduces offscreen32-tile starvation")
+    good=publish(state,root,transport,2,true,0,100.0) and good
+    good=preview.read_thumbnails(state,root,2) and preview.read_waveforms(state,root,2) and good
+    let _=test.eq_u64(suite,array.len(struct.borrow(state,field=thumbnails)),32,"Visible bitmap publication retains explicit32-tile cap")
+    if dense {
+      // IDs are independent of storage: source3/missing4, offscreen5/6,
+      // lower7/8, upper9 with clips10..49.
+      let _=test.check(suite,has_thumbnail(state,8) and has_thumbnail(state,10) and has_thumbnail(state,40) and not has_thumbnail(state,41),"Dense upper lane gets31first tiles and lower lane gets its own tile")
+      let _=test.check(suite,not has_thumbnail(state,6),"Missing offscreen source is excluded from decoded bitmap requests")
+      let _=test.eq_u64(suite,array.len(struct.borrow(state,field=waveforms)),41,"Only41time-and-lane-visible clip envelopes are published")
+      let _=test.check(suite,match app.waveform_slot(state,6) {some(_)=>false,none=>true,},"Missing offscreen source is excluded from processed audio requests")
+    }else{
+      let _=test.check(suite,all_thumbnails(state,51,49) and has_thumbnail(state,51) and has_thumbnail(state,49),"Both visible top lanes receive bounded tiles")
+      let frame: layout.Frame=layout.frame(640.0,480.0)
+      let _=input.wheel(state,640.0,480.0,frame.headers.left+8.0,frame.headers.top+8.0,true,1000,false)
+      var model: timeline.Timeline=painter.timeline_model(state,frame.timeline)
+      let reached: u64=app.track_scroll(state)
+      good=publish(state,root,transport,3,true,reached,layout.height_of(frame.timeline)) and good
+      let _=test.check(suite,not preview.read_thumbnails(state,root,2) and not preview.read_waveforms(state,root,2),"Old viewport publications cannot replace current caches at unchanged content revision")
+      good=preview.read_thumbnails(state,root,3) and preview.read_waveforms(state,root,3) and good
+      let _=test.check(suite,has_thumbnail(state,5) and not has_thumbnail(state,51),"Header scroll publishes the formerly unreachable bottom clip")
+      let _=test.check(suite,state.document_revision==revision_before and state.media_revision==media_before,"Scrolling preserves semantic and media revisions")
+      var expected: provider.Frame=provider.source_frame(struct.borrow(state,field=provider),"viewport-coded.mov",0,80,45)
+      var checked: bool=false
+      var at: u64=0
+      loop {if at>=array.len(struct.borrow(state,field=thumbnails)) {break}
+        let thumb: ref<app.Thumbnail> =array.borrow(struct.borrow(state,field=thumbnails),at)
+        if thumb.clip==5 and thumb.frame==0 {
+          let actual: draw.Color=option.unwrap(draw.surface_pixel(struct.borrow(thumb,field=pixels),10,10))
+          let reference: draw.Color=option.unwrap(draw.surface_pixel(struct.borrow(expected,field=pixels),10,10))
+          checked=thumb.source==3 and thumb.source_frame==0 and thumb.pixels.width==80 and thumb.pixels.height==45 and
+            actual.r==reference.r and actual.g==reference.g and actual.b==reference.b and actual.a==reference.a
+        }
+        at=at+1}
+      let _=test.check(suite,checked,"Actual80x45pixels retain selected source/frame identity after scroll")
+    }
+    // Exercise malformed metadata through the actual retained task/channel.
+    // Previously published caches remain owned until a valid recovery commits.
+    var encoded: string=match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+    var broken: string=text.concat("4\t0\t2.4\t960\t480\t270\t",string.from_int(state.media_revision))
+    string.append(broken,text.concat("\t",string.from_int(state.document_revision)))
+    string.append(broken,"\t0\t0\n")
+    string.append(broken,encoded)
+    let _=files.write_text(path.join(root,"request.air"),broken)
+    let _=files.write_text(path.join(root,"request.id"),"4")
+    let _=link.wake(transport,false)
+    let refused: bool=match link.await_event(transport,3,4,time.monotonic_ns()+10000000000) {
+      ok(_)=>false,err(problem)=>text.contains(problem,"GA_TIMELINE_RANGE"),
+    }
+    let _=test.check(suite,refused and preview.thumbnails_completed(root)<4,"Malformed9field body is refused before bitmap generation")
+    good=publish(state,root,transport,5,true,0,100.0) and good
+    let _=test.check(suite,preview.read_thumbnails(state,root,5) and match preview.current_failure(transport,transport.error_generation==5) {none=>true,some(_)=>false,},"Fresh valid viewport recovers and retires prior request error on the same task/channel")
+    var prior: string=match files.read_text(path.join(root,"waveforms.tsv")) {ok(value)=>value,err(_)=>string.new(),}
+    let blocker: string=path.join(root,"waveforms.tsv.tmp")
+    let _=files.mkdirs(blocker)
+    let _=files.write_text(path.join(blocker,"foreign.txt"),"preserve")
+    encoded=match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+    good=preview.request_strips(root,encoded,6,0,2.4,960,480,270,state.media_revision,state.document_revision,0,100.0) and good
+    let _=link.wake(transport,false)
+    let blocked: bool=match link.await_event(transport,2,6,time.monotonic_ns()+10000000000) {
+      ok(_)=>false,err(problem)=>text.contains(problem,"GA_TIMELINE_PUBLISH"),
+    }
+    let unchanged: bool=match files.read_text(path.join(root,"waveforms.tsv")) {ok(value)=>str.view(value)==str.view(prior),err(_)=>false,}
+    let foreign: bool=match files.read_text(path.join(blocker,"foreign.txt")) {ok(value)=>str.view(value)=="preserve",err(_)=>false,}
+    let _=test.check(suite,blocked and preview.waveforms_completed(root)==0 and preview.thumbnails_completed(root)==5 and unchanged and foreign,"Blocked waveform publication reports failure without committing new data or touching foreign bytes")
+    let _=files.rename(blocker,path.join(root,"retired-waveform-blocker"))
+    good=publish(state,root,transport,7,true,0,100.0) and good
+    let _=test.check(suite,preview.read_waveforms(state,root,7) and preview.read_thumbnails(state,root,7),"Same persistent strip task recovers after publication path is repaired")
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,5000) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  provider.shutdown(struct.borrow(state,field=provider))
+  good
+}
+fn source_failure(suite: ref<test.Suite>, root: str, wrapper: str, receipt: str) -> bool
+    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App=app.app(provider.gcompose(wrapper,root))
+  var doc: editor.Document=editor.document(30.0,160,90)
+  let source: u64=editor.add_source(doc,"missing.mov","Unreadable online source",2000,30.0)
+  let _=editor.describe_source(doc,source,160,90,true,false,0,0)
+  let lane: u64=editor.add_track(doc,doc.active,editor.track_video(),"Failed bitmap")
+  let placed: u64=option.unwrap(editor.place(doc,lane,source,0,1200,0))
+  commands.replace_project(state,doc)
+  var transport: link.Link=match link.open() {ok(value)=>value,err(_)=>{return false},}
+  var config: preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=strips_only)
+  var good: bool=true
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    var encoded: string=match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+    good=preview.request_strips(root,encoded,1,0,2.4,960,480,270,state.media_revision,state.document_revision,0,100.0) and good
+    let _=link.wake(transport,false)
+    let refused: bool=match link.await_event(transport,3,1,time.monotonic_ns()+10000000000) {
+      ok(_)=>false,err(problem)=>text.contains(problem,"GA_TIMELINE_SOURCE") and text.contains(problem,"GA_TEST_THUMB_SOURCE"),
+    }
+    var commands_before: string=match files.read_text(receipt) {ok(value)=>value,err(_)=>string.new(),}
+    var requests: array<string> =text.split(commands_before,"THUMB ")
+    let _=test.check(suite,refused and array.len(requests)==2 and preview.thumbnails_completed(root)==0,"First failed online decode is coded and bounded to one attempted sample; no bitmap generation commits")
+    let _=editor.relink_source(struct.borrow(state,field=document),source,"valid.mov",2000)
+    struct.set(state,state.document_revision+1,field=document_revision)
+    good=publish(state,root,transport,2,true,0,100.0) and good
+    good=preview.read_thumbnails(state,root,2) and good
+    var checked: bool=false
+    if array.len(struct.borrow(state,field=thumbnails))==32 {
+      let thumb: ref<app.Thumbnail> =array.borrow(struct.borrow(state,field=thumbnails),0)
+      let pixel: draw.Color=option.unwrap(draw.surface_pixel(struct.borrow(thumb,field=pixels),10,10))
+      checked=thumb.clip==placed and thumb.frame==0 and thumb.source_frame==0 and pixel.r==17 and pixel.g==91 and pixel.b==0 and pixel.a==255
+    }
+    var commands_after: string=match files.read_text(receipt) {ok(value)=>value,err(_)=>string.new(),}
+    var starts: array<string> =text.split(commands_after,"PID ")
+    let _=test.check(suite,checked and array.len(starts)==2 and str.starts_with(commands_after,commands_before),"Same retained CPU worker survives refusal and returns exact recovered bitmap pixels")
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,5000) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  provider.shutdown(struct.borrow(state,field=provider))
+  good
+}
+fn near_endpoint(root: str) -> bool effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App=app.app(provider.fake(root))
+  var doc: editor.Document=editor.document(30.0,160,90)
+  let source: u64=editor.add_source(doc,"endpoint.mov","Endpoint source",24,30.0)
+  let _=editor.describe_source(doc,source,160,90,true,false,0,0)
+  let lane: u64=editor.add_track(doc,doc.active,editor.track_video(),"Endpoint")
+  let placed: option<u64> =editor.place(doc,lane,source,0,20,9223372036854775787)
+  match placed {none=>{return false},some(_)=>{},}
+  commands.replace_project(state,doc)
+  var transport: link.Link=match link.open() {ok(value)=>value,err(_)=>{return false},}
+  var config: preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=strips_only)
+  var good: bool=true
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    var encoded: string=match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+    good=preview.request_document_revision(root,encoded,1,9223372036854775787,1e-300,20,480,270,state.media_revision,state.document_revision) and good
+    let _=link.wake(transport,false)
+    good=match link.await_event(transport,3,1,time.monotonic_ns()+10000000000) {ok(_)=>true,err(problem)=>{io.write(problem)
+      false},} and good
+    good=preview.read_thumbnails(state,root,1) and good
+    good=array.len(struct.borrow(state,field=thumbnails))==1 and good
+    if array.len(struct.borrow(state,field=thumbnails))==1 {
+      let thumb: ref<app.Thumbnail> =array.borrow(struct.borrow(state,field=thumbnails),0)
+      good=thumb.frame==9223372036854775787 and thumb.source_frame==0 and good
+    }
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,5000) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args)!=2 and view.len(args)!=3 {return 2}
+  let root: str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite: test.Suite=test.suite("Visible timeline strip scheduling",false)
+  let _=test.start(suite,"Geometry preserves legacy callers and refuses invalid lane/time metadata")
+  let _=test.check(suite,match preview.strip_geometry("0\t2.4\t960\t480\t270\t3\t7") {ok(value)=>not value.lanes.limited,err(_)=>false,},"Legacy7field snapshot preserves full-track behavior")
+  var malformed: array<string> = ["0\t2.4\t960\t480\t270\t0\t1\t0","-1\t2.4\t960\t480\t270\t0\t1\t0\t100",
+    "9223372036854775800\t2.4\t960\t480\t270\t0\t1\t0\t100","0\tNaN\t960\t480\t270\t0\t1\t0\t100",
+    "0\t2.4\t960\t480\t270\t0\t1\t-1\t100","0\t2.4\t960\t480\t270\t0\t1\t0\t0",
+    "0\t2.4\t960\t480\t270\t0\t1\t0\tNaN","0\t2.4\t960\t480\t270\t0\t1\t0\t32769"]
+  var at: u64=0
+  loop {if at>=array.len(malformed) {break}
+    let _=test.check(suite,refusal(array.borrow(malformed,at)),"Malformed viewport has coded refusal")
+    at=at+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"SDK lane order and partial-row/body-footer geometry select exact stable clip IDs")
+  var state: app.App=fixture(root,false)
+  var targets: array<u64> =match preview.strip_targets(state,0,960,true,preview.StripView {limited:true,first:22,height:100.0},true) {ok(value)=>value,err(_)=>array.new(),}
+  let _=test.check(suite,array.len(targets)==2 and array.get(targets,0)==7 and array.get(targets,1)==5,"Two complete bottom lanes use reversed SDK identities")
+  let _=ref.swap(targets,match preview.strip_targets(state,0,960,true,preview.StripView {limited:true,first:21,height:105.0},true) {ok(value)=>value,err(_)=>array.new(),})
+  let _=test.check(suite,array.len(targets)==3 and array.get(targets,2)==5,"Partially visible last lane receives data before footer")
+  let _=ref.swap(targets,match preview.strip_targets(state,1300,1400,true,preview.StripView {limited:true,first:0,height:100.0},true) {ok(value)=>value,err(_)=>array.new(),})
+  let _=test.eq_u64(suite,array.len(targets),0,"Horizontal time intersection still excludes ended clips")
+  let _=test.check(suite,match preview.strip_lanes(state,preview.StripView {limited:true,first:24,height:100.0}) {ok(_)=>false,err(problem)=>text.contains(problem,"GA_TIMELINE_RANGE"),},"Lane outside active sequence is explicitly refused")
+  let _=test.done(suite)
+  let _=test.start(suite,"Persistent mailbox repairs bitmap starvation and follows actual header scrolling")
+  let _=test.check(suite,strip_case(suite,path.join(root,"scroll"),false),"Persistent strip task joins normally after scroll")
+  let _=test.done(suite)
+  let _=test.start(suite,"Dense clips receive fair bounded tiles and offscreen envelopes are never requested")
+  let _=test.check(suite,strip_case(suite,path.join(root,"dense"),true),"Persistent dense strip task joins normally")
+  let _=test.done(suite)
+  let _=test.start(suite,"Legacy tiny zoom saturates time steps without wrapping near signed endpoint")
+  let _=test.check(suite,near_endpoint(path.join(root,"endpoint")),"Neari64max viewport publishes one selected frame and joins within deadline")
+  let _=test.done(suite)
+  if view.len(args)==3 {
+    let _=test.start(suite,"Failed source decode is bounded, coded and recovers on the retained CPU worker")
+    let _=test.check(suite,source_failure(suite,path.join(root,"decoder"),view.get(args,2),path.join(root,"strip-worker.txt")),"Failed-source persistent task joins normally")
+    let _=test.done(suite)
+  }
+  test.conclude(suite,path.join(root,"strip-viewport-tests.json"),8)
+}

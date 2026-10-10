@@ -9,6 +9,7 @@ import std.path as path
 import std.files as files
 import std.testing as test
 import std.timeline as timeline
+import std.widgets as widgets
 import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
@@ -19,6 +20,32 @@ import "../src/view.ai" as painter
 
 fn encoded(state: ref<app.App>) -> string effects {alloc} {
   match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn authored(state: ref<app.App>) -> string effects {alloc} {
+  var out: string=encoded(state)
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,"/")
+  string.append(out,string.from_int(state.media_revision))
+  string.append(out,if app.dirty(state) {"/dirty/"}else{"/clean/"})
+  string.append(out,string.from_int(app.current_clip(state)))
+  let history: ref<editor.History> = struct.borrow(state,field=history)
+  var index: u64=0
+  loop {if index>=array.len(struct.borrow(history,field=undo)) {break}
+    string.append(out,"/undo/")
+    match editor_io.encode(array.borrow(struct.borrow(history,field=undo),index)) {
+      ok(value)=>{string.append(out,value)},err(_)=>{string.append(out,"encode failed")},
+    }
+    index=index+1
+  }
+  index=0
+  loop {if index>=array.len(struct.borrow(history,field=redo)) {break}
+    string.append(out,"/redo/")
+    match editor_io.encode(array.borrow(struct.borrow(history,field=redo),index)) {
+      ok(value)=>{string.append(out,value)},err(_)=>{string.append(out,"encode failed")},
+    }
+    index=index+1
+  }
+  out
 }
 fn picture() -> draw.Surface effects {alloc} {
   var canvas: draw.Canvas=draw.canvas(option.unwrap(draw.surface(80,45)))
@@ -116,6 +143,52 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.eq_u64(suite,app.track_scroll(state),first,"Ctrl zoom preserves lane offset")
   let _=test.eq_u64(suite,app.track_scroll_max(state,100.0),22,"Two full lanes fit a100px body without requiring a trailing gap")
   let _=test.eq_u64(suite,app.track_scroll_max(state,99.0),23,"A body shorter than two complete lanes exposes one")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Wheel metadata owns modifier state after native file shortcuts")
+  var wheel_state: app.App=fixture(root)
+  let _=commands.select_only(wheel_state,5)
+  let _=commands.set_clip_field(wheel_state,5,"opacity",0.5)
+  let _=commands.undo(wheel_state)
+  app.mark_dirty(wheel_state,false)
+  let _=test.check(suite,array.len(struct.borrow(struct.borrow(wheel_state,field=history),field=redo))>0,"Navigation starts with a real Redo snapshot to preserve")
+  let wheel_authored: string=authored(wheel_state)
+  let scale: f64=2.0
+  let header_x: u32=cast.sat((frame.headers.left+10.0)*scale)
+  let header_y: u32=cast.sat((frame.headers.top+10.0)*scale)
+  var shortcut: u64=0
+  loop {if shortcut==2 {break}
+    let _=input.key(wheel_state,if shortcut==0 {115}else{111},true,false)
+    let _=test.check(suite,app.prompt_active(wheel_state),"Ctrl+S/Open reaches the native picker prompt")
+    // The native picker consumes Return and closes without an AIR KeyUp event.
+    app.end_prompt(wheel_state)
+    let before_lane: u64=app.track_scroll(wheel_state)
+    let before_zoom: f64=app.zoom(wheel_state)
+    let plain: widgets.Wheel=widgets.Wheel {x:header_x,y:header_y,down:true,lines:1}
+    let _=input.wheel_event(wheel_state,1600.0,980.0,plain,scale)
+    let _=test.eq_u64(suite,app.track_scroll(wheel_state),before_lane+1,"Plain wheel scrolls headers despite the last Ctrl shortcut")
+    let _=test.near_f64(suite,app.zoom(wheel_state),before_zoom,0.0,"No stale Ctrl state leaks into timeline zoom")
+    shortcut=shortcut+1
+  }
+  let shift_first: u64=app.track_scroll(wheel_state)
+  let zoom_before: f64=app.zoom(wheel_state)
+  let shifted: widgets.Wheel=widgets.Wheel {x:header_x,y:or(header_y,widgets.shift_pointer_flag()),down:true,lines:1}
+  let _=input.wheel_event(wheel_state,1600.0,980.0,shifted,scale)
+  let _=test.eq_u64(suite,app.track_scroll(wheel_state),shift_first+1,"Packed Shift metadata is removed before header hit testing")
+  let _=test.near_f64(suite,app.zoom(wheel_state),zoom_before,0.0,"Shift metadata never impersonates Ctrl zoom")
+  let zoom_first: u64=app.track_scroll(wheel_state)
+  let controlled: widgets.Wheel=widgets.Wheel {x:header_x,y:or(header_y,widgets.control_pointer_flag()),down:false,lines:1}
+  let _=input.wheel_event(wheel_state,1600.0,980.0,controlled,scale)
+  let _=test.near_f64(suite,app.zoom(wheel_state),zoom_before*1.25,0.00001,"Current Ctrl wheel deliberately zooms at the cleaned logical position")
+  let _=test.eq_u64(suite,app.track_scroll(wheel_state),zoom_first,"Intentional Ctrl zoom leaves lane offset intact")
+  let dock_before: f64=app.dock_scroll(wheel_state)
+  let dock_zoom: f64=app.zoom(wheel_state)
+  let dock: widgets.Wheel=widgets.Wheel {x:cast.sat((frame.dock_body.left+10.0)*scale),
+    y:or(cast.sat((frame.dock_body.top+10.0)*scale),widgets.control_pointer_flag()),down:true,lines:3}
+  let _=input.wheel_event(wheel_state,1600.0,980.0,dock,scale)
+  let _=test.near_f64(suite,app.dock_scroll(wheel_state),dock_before+72.0,0.0,"Dock precedence keeps Ctrl wheel as inspector scrolling")
+  let _=test.near_f64(suite,app.zoom(wheel_state),dock_zoom,0.0,"Dock Ctrl wheel never changes timeline zoom")
+  let _=test.eq_str(suite,authored(wheel_state),wheel_authored,"Every wheel path preserves complete project, dirty/revisions, selection and all Undo/Redo snapshots")
   let _=test.done(suite)
 
   let _=test.start(suite,"Minimum window exposes and selects the formerly unreachable bottom track")

@@ -1,6 +1,7 @@
 module genesis.inspector_tests
 import std.draw as draw
 import std.editor as editor
+import std.editor_io as editor_io
 import std.font as font
 import std.geometry as geometry
 import std.math as math
@@ -36,6 +37,12 @@ fn flat(color: draw.Color) -> draw.Surface effects {alloc} {
   var canvas: draw.Canvas = draw.canvas(option.unwrap(draw.surface(64,64)))
   draw.clear(canvas,color)
   draw.finish(canvas)
+}
+fn prompt_document(state: ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state,field=document)) {
+    ok(value) => value,
+    err(_) => string.copy("encode failed"),
+  }
 }
 fn histogram_pixel(surface: ref<draw.Surface>, frame: layout.Frame, bucket: u64, channel: u64) -> draw.Color effects {} {
   let column: f64 = (layout.width_of(frame.dock_body)-12.0)/64.0
@@ -325,6 +332,82 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = input.key(state, 111, true, false)
   let _ = test.check(suite, app.prompt_active(state) and app.prompt_action(state) == chrome.act_open(), "Ctrl+O opens the project picker")
   let _ = input.key(state, widgets.key_escape(), false, false)
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Committed prompt text, selection, Unicode deletion and title transactions")
+  var typing: app.App = fixture(scratch)
+  let title_filter: commands.Result = commands.add_filter(typing,app.current_clip(typing),"text")
+  let _ = commands.set_filter_text_param(typing,title_filter.value,"content","PRIVATE CUT0")
+  app.set_selected_filter(typing,title_filter.value)
+  let prompt_before: string = prompt_document(typing)
+  let prompt_revision: u64 = typing.document_revision
+  let prompt_undos: u64 = array.len(struct.borrow(struct.borrow(typing,field=history),field=undo))
+  app.begin_prompt(typing,chrome.act_filter_value(),"Title text","PRIVATE CUT0")
+  let _ = input.key(typing,69,false,true)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"PRIVATE CUT0","Physical letter waits for a committed text event")
+  var removed: u64 = 0
+  loop {if removed == 5 {break}
+    let _ = input.key(typing,widgets.key_backspace(),false,false)
+    let _ = input.text(typing,8)
+    removed=removed+1}
+  let _ = test.eq_str(suite,app.prompt_text(typing),"PRIVATE","Backspace key and its WM_CHAR delete only once")
+  let _ = input.key(typing,widgets.key_a(),true,false)
+  let _ = input.text(typing,1)
+  let _ = test.check(suite,app.prompt_selected_all(typing),"Ctrl+A retains selection despite its control-character text event")
+  let _ = test.eq_str(suite,app.prompt_text(typing),"PRIVATE","Select All preserves the text until replacement")
+  var prompt_image: painter.Renderer = painter.renderer()
+  var blank_picture: draw.Surface = flat(draw.rgb(0,0,0))
+  var blank_program: draw.Surface = flat(draw.rgb(0,0,0))
+  let _ = painter.render(typing,prompt_image,1600,980,true,blank_picture,blank_program)
+  let prompt_box: layout.Rect = layout.prompt_panel(1600.0,980.0)
+  let selected_color: draw.Color = option.unwrap(draw.surface_pixel(struct.borrow(prompt_image,field=surface),cast.sat(prompt_box.left+26.0),cast.sat(prompt_box.top+56.0)))
+  let wanted_color: draw.Color = painter.theme(typing).focus
+  let _ = test.check(suite,selected_color.r == wanted_color.r and selected_color.g == wanted_color.g and selected_color.b == wanted_color.b,"Select All paints an actual selection highlight")
+  let _ = input.text(typing,69)
+  let _ = input.text(typing,68)
+  let _ = input.text(typing,73)
+  let _ = input.text(typing,84)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"EDIT","Committed characters replace selection then append exactly once")
+  let _ = test.check(suite,not app.prompt_selected_all(typing),"Typing clears the transient selection")
+  let _ = input.text(typing,13)
+  let _ = input.text(typing,22)
+  let _ = input.text(typing,127)
+  let _ = input.text(typing,55296)
+  let _ = input.text(typing,1114112)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"EDIT","Shortcut controls and invalid Unicode cannot pollute a title")
+  let _ = test.eq_str(suite,prompt_document(typing),prompt_before,"Draft typing never mutates the project")
+  let _ = test.eq_u64(suite,typing.document_revision,prompt_revision,"Draft typing never changes project revision")
+  let _ = test.eq_u64(suite,array.len(struct.borrow(struct.borrow(typing,field=history),field=undo)),prompt_undos,"Draft typing never creates Undo snapshots")
+  let _ = input.key(typing,widgets.key_return(),false,false)
+  let _ = test.eq_str(suite,editor.filter_text_param(struct.borrow(typing,field=document),title_filter.value,"content",""),"EDIT","Enter commits the authored title through the controller")
+  let _ = test.eq_u64(suite,array.len(struct.borrow(struct.borrow(typing,field=history),field=undo)),prompt_undos+1,"Title commit creates exactly one Undo")
+  let _ = commands.undo(typing)
+  let _ = test.eq_str(suite,prompt_document(typing),prompt_before,"Undo restores complete pre-edit project bytes")
+  let _ = commands.redo(typing)
+  let edited_project: string = path.join(scratch,"prompt-title.air")
+  let _ = commands.save_project(typing,edited_project)
+  let _ = commands.open_project(typing,edited_project)
+  let _ = test.eq_str(suite,editor.filter_text_param(struct.borrow(typing,field=document),title_filter.value,"content",""),"EDIT","Save/Open retains the committed Unicode-capable title")
+  app.begin_prompt(typing,chrome.act_filter_value(),"Title text","日本😀")
+  let _ = input.key(typing,widgets.key_backspace(),false,false)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"日本","Backspace removes an entire supplementary Unicode scalar")
+  let _ = input.key(typing,widgets.key_backspace(),false,false)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"日","Backspace never leaves a partial CJK UTF-8 sequence")
+  app.begin_prompt(typing,chrome.act_filter_value(),"Title text","xé")
+  let _ = input.key(typing,widgets.key_backspace(),false,false)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"x","Backspace removes a base and its combining marks together")
+  let _ = input.key(typing,widgets.key_a(),true,false)
+  app.prompt_push(typing,"日本😀")
+  let _ = test.eq_str(suite,app.prompt_text(typing),"日本😀","Bulk committed Unicode text replaces the selected value")
+  let _ = input.key(typing,widgets.key_a(),true,false)
+  let _ = input.key(typing,widgets.key_delete(),false,false)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"","Delete clears selected text without committing an empty title")
+  let cancelled_project: string = prompt_document(typing)
+  let _ = input.key(typing,widgets.key_escape(),false,false)
+  let _ = test.check(suite,not app.prompt_active(typing) and not app.prompt_selected_all(typing),"Escape clears prompt and selection state")
+  let _ = test.eq_str(suite,prompt_document(typing),cancelled_project,"Cancelling a draft preserves complete project bytes")
+  let _ = input.text(typing,88)
+  let _ = test.eq_str(suite,app.prompt_text(typing),"","Late committed text cannot edit a closed prompt")
   let _ = test.done(suite)
 
   let _ = test.start(suite, "Audio gain K and sliders edit clip-local keys with one undo")
@@ -658,5 +741,5 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.near_f64(suite, ui_text.width(book, "WWW", 12.0), wide, 2.0, "Logical widths remain stable at 2x scale")
   let _ = test.check(suite, font.pixel_size(array.borrow(struct.borrow(book, field=faces), 2)) >= 32, "2x text rasterizes at physical resolution")
   let _ = test.done(suite)
-  test.conclude(suite, path.join(scratch, "inspector-tests.json"), 32)
+  test.conclude(suite, path.join(scratch, "inspector-tests.json"), 33)
 }

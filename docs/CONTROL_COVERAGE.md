@@ -958,3 +958,291 @@ was read back against every manifest entry. Its SHA-256 is
 `3058a55d97130ec83811780080af0b9a728a052118dba71974c52f902040438d`.
 It retains the failed initial diagnostic, passing resume, focused/native reports,
 tested source and payload hashes, and explicitly historical large-project helpers.
+
+## Visible strips, lazy GPU and qualified HDR candidate on 2026-10-10
+
+The combined candidate passes one complete exit-zero Windows run, separately
+from the previous direct-waveform checkpoint's prefix plus repaired tail.
+Its application SHA-256 is
+`AD8985B4311EA74A673A615893B9ADE3491C065575AF97F518E909CE0ED7A5EC`;
+the worker is
+`378685335B4C17AE44B5A03C892F0008B85C172CFBE6EA57FB20339BB377552F`.
+The root now publishes the `52A6` secondary-button guard. Acceptance combines a
+complete Windows suite on `80A6` with targeted controls/probes/failures and native
+checks on `52A6`, plus its separate root playback below. It does not claim a full
+suite rerun on the final binary. The `C524` large-project workflow and earlier
+media/viewport candidate retain their exact identities and bounded scope.
+
+| Path | Evidence and scope |
+|---|---|
+| Visible strips | Nine-field native requests add first displayed lane and logical body height while retaining legacy 3/5/6/7-field APIs. Shared reversed SDK lane order and horizontal intersection select clips; a partial last lane receives data. Vertical scrolling and resize reschedule without changing authored time or revisions. |
+| Bitmap budget | At most 32 tiles commit. Visible lanes/clips get turns before their next tile; dense upper clips cannot consume every first turn before a lower visible lane. More than 32 visible clips receive a bounded deterministic subset. Source/frame/time metadata and 80x45 pixels remain aligned. |
+| Processed peaks | Only visible clips are constructed/published. Matching retained peaks are reused; current offscreen entries are omitted from the publication. Changed visible clips still materialize their full bodies. Unrelated semantic edits can still invalidate otherwise reusable entries. |
+| Strip failures | Waveform reserve/data/generation writes are checked before success. `GA_TIMELINE_PUBLISH` preserves prior owned cache/foreign bytes on blocked publication. The first failed bitmap returns `GA_TIMELINE_SOURCE` plus worker detail and stops further timepoint attempts. Bad metadata returns `GA_TIMELINE_RANGE`. Same task/retained CPU process recovery and request-generation error retirement pass. |
+| Lazy OpenCL | Audio-only commands and CPU thumbnail/source-count work start without compositor initialization. First picture composition initializes once; later CPU/audio commands preserve picture/scopes history. Initialization/readback fault recovery uses coded errors, removes owned caches and publishes no encoder output. |
+| Qualified HDR | Supported even full-native P010/PQ D3D11 previews use a shader only after qualification of CPU capabilities and actual loaded shared color modules. Master/reference, unsupported/fitted dimensions, unknown runtime and resource faults retain exact fallback. This preserves the shared MM-AIR runtime boundary. |
+
+The persistent CPU-only strip task/channel gate passes six cases / 40 checks.
+It reproduces legacy offscreen 32-tile starvation, exercises actual nine-field
+files, header-wheel scrolling, dense two-lane fairness, partial-row selection
+and same-revision stale-result rejection. It reads committed bitmap pixels and
+checks selected source/frame mapping. A blocked waveform temporary path keeps
+the old TSV and foreign sentinel, commits no new generation and recovers when
+repaired. An opt-in CPU process wrapper refuses one source decode with an owned
+diagnostic, then returns exact pixels through the same retained process/PID.
+Tiny legacy zoom near the signed endpoint remains bounded without time wrapping.
+This gate does not constitute native-media or native-window acceptance.
+
+Lazy-GPU validation includes 21 malformed audio commands, 512 exact PCM channels
+with zero OpenCL initialization, real CPU thumbnail pixels, retained audio and
+scopes after picture initialization, nested-cache cleanup and injected init/read
+failures. The full suite retains HDR/master, shared-runtime, source-sample,
+waveform, stream, cancellation and 757-control checks.
+
+The shader's zimg coefficient provenance/license is maintained beside its
+source. Qualification checks AVX512/AVX2/FMA3, module file fingerprints and
+loaded-image identity while retaining the qualified files. Twelve authored
+cases preserve the existing five-u16-code bound; accelerated maxima are below
+two codes, all values finite, and fallback paths byte-exact. Eight selected
+real 4K frames, including EOF/rewind, add 265,420,800 channel comparisons and eight
+actual shader entries with the same maximum. Native-u16/snapshot ownership,
+resource refusal and recovery separately pass 810,083 checks. Selected-frame
+color correctness does not establish sustained native 4K60.
+
+Four private paired headless runs measure 12 warmed samples each (three warmups).
+Reference serial compound means are 90.304/64.147 ms; native shader means are
+38.356/38.317 ms. Those native 3840x2160-canvas measurements exclude audio,
+native presentation and sustained pacing; the ordinary monitor is 480x270.
+
+The fresh actual regular 1080p60 window uses a 2560x1316 surface and fitted 480x270
+monitors. The first playing epoch spans 60.147 seconds and shows 3,591 changed
+pictures at 59.74/s, eight skipped positions and two startup/EOF drained-queue
+presentations. The complete profile remains retained. Excluding exactly the
+first 1.0 second and final 0.5 second gives 3,502 changed pictures over 58.463 seconds
+at 59.88/s, six skipped positions, no observed drain and a 29.55 ms maximum gap.
+Steady device drift is -0.9881 ms and after-presentation metadata lag is generally
+two frames / 33.33 ms. No early or over-two-frame stale pictures are observed.
+These are native handoff/EndDraw and device sample-clock observations, excluding
+speaker/photon latency and independent identity of every source pixel.
+
+EOF retains a visible picture; Start restores frame zero. Paused seeks to frames
+266 and 1777 align Program time, marker and histogram. Fit publishes 32 bitmap rows
+and 512 processed peaks; embedded mute/unmute and Stop change audio meters.
+The larger private project has 1,032 placements, 32 root tracks, 24 compounds,
+8,192 keys, 1,600 filters and 64 titles. Visible Busy V1/A1 lower-lane bitmaps and
+peaks publish, and 21 seconds of paired-AAC playback with responsive lane scrolling
+are observed. Every clip is two seconds and at most one video/audio pair is
+active; this does not test 1,032 simultaneous decodes.
+
+That native large-project check found a title-text dispatch defect. The repaired
+input candidate's native typing/selection observations and the separate
+clipboard adapter checks are recorded below, followed by the `C524` native paste,
+history, whole-graph roundtrip and bounded cancellation/retry receipt. The final
+wheel-modifier repair's separate native observations follow, then the published
+secondary-button guard's combined acceptance and root profile.
+Historical 36d41fb model timings and 15a148c receipts retain their earlier scope.
+No fullscreen 4K, zero-drop 60fps, physical audio alignment,
+sustained compound 4K60 or complete professional-editing acceptance is claimed.
+
+### Native prompt text and Windows clipboard candidate
+
+The native Text event now reaches the shared prompt controller instead of being
+discarded. Physical key actions and committed Unicode text use separate paths:
+letters append once, while shortcut/control-character text cannot duplicate
+Backspace, Return or Ctrl+A. Ctrl+A selects the seeded value and paints a visible
+highlight; subsequent text replaces it. Backspace removes complete UTF-8
+characters, including supplementary characters and a base with combining marks.
+Draft text creates no document revision or Undo entry; Enter commits through the
+controller, and Escape discards the draft.
+
+The focused inspector suite passes 21 cases / 197 checks, including 23 prompt
+checks: rendered selection, Unicode deletion, one title transaction, complete
+Undo/Redo restoration, private Save/Open and cancelled-draft preservation. These
+are native CPU/painter/controller checks, separate from interactive acceptance
+of the larger project.
+
+In the actual large-project window, the private input candidate beginning
+`70CA` opens filter `100002`'s title prompt, Ctrl+A highlights `PRIVATE CUT0`,
+and physical Shift+E replaces it with `E`. Escape cancels; the private fixture's
+SHA-256 remains `4CCE055803E5E8DEA02025A75FD4F374A4CAAAAAF3DDD752C797B89C192E480E`.
+Automated bulk text injection did not enter text in that window, so this observation
+establishes physical typing/selection only.
+
+`patches/air-ui-text-windows.patch` extends the reusable AIR Win32 canvas adapter.
+Ctrl+V, Shift+Insert and WM_PASTE borrow CF_UNICODETEXT and enqueue committed
+Unicode scalars through the same ordered event queue; Genesis keeps text-editing
+policy in the shared application source. The adapter bounds reads to 524,288
+UTF-16 units and the clipboard allocation, rejects missing terminators/oversize
+input before partial publication, replaces malformed surrogate sequences and
+balances clipboard lock/close operations.
+
+`tests/ui_clipboard_windows.c` passes 1,044 CPU checks against the patched adapter
+with injected clipboard APIs. It covers Latin/CJK/supplementary Unicode,
+1,000-scalar queue growth and event order, Shift+Insert, AltGr exclusion, surrogate
+state, unavailable/malformed clipboard data and borrowed-byte preservation.
+The test opens no actual window and accesses no user clipboard. The overlay is
+registered in the Windows build/test path. Actual paste acceptance is recorded
+separately below, followed by the published root guard's acceptance.
+
+### Native large-project text, roundtrip and export on C524
+
+`native-text-export-ui.json` records the application
+`c524a472bee8c13c6e42d080702d3e48cd4d5b810ed835a111c2de00d2e57fc3`
+and worker `378685335b4c17ae44b5a03c892f0008b85c172cfbe6ea57fb20339bb377552f`.
+In the actual private large-project window, Ctrl+A selects `PRIVATE CUT 0`;
+native paste replaces it with `PRIVATE EDIT CONFIRMED`. Enter commits, and the
+asynchronous Program preview renders the complete replacement title. Moving
+Brightness Down places it below Contrast. Two Undo actions restore the title
+and order; two Redo actions restore both edits.
+
+Native Save As, Open and a second Save As compare the complete independently
+declared graph with zero unexplained differences: 1,032 clips, 8,192 keys,
+1,600 filters, 64 titles and all other saved fields. The comparison resolves
+parameter IDs through each document's own name pool, retains the complete pool
+and preserves array order except canonical key storage order. Only explicit
+transport/selection state has a separate ledger. Ctrl+S after the export tests
+again produces zero graph differences. Protected inputs remain unchanged.
+
+The actual native Render range uses an exclusive mark-out. Exporting `[0,240)`
+reaches 58%; Escape acknowledges cancellation, the export child exits, and the
+partial movie, nested sidecars and cancellation signals are removed while the
+preview child remains. A `[0,12)` retry completes, but its original source frames
+0..11 are silent, so the strict audible-content oracle refuses that result.
+That failure remains in the evidence.
+
+A second private copy changes only the first video/audio source-in to 600. Its
+12-frame retry independently matches source frames 600..611, title-glyph
+interiors and outside-title grade-order math. Processed AAC is compared with
+native source samples `[441000,449820)` under the authored compressor/key/track
+gains: 9,600 output sample frames, zero-shift correlation 0.99997586 and RMSE
+0.00056555. No output-derived alignment or gain correction is used. The video
+oracle uses fixed lossy bounds and glyph interiors, rather than claiming exact
+anti-alias raster equality.
+
+The audible oracle preserves a bounded byte ledger: its project hash is
+`e29d8d61a5544608f1b0673fb900ad44e4d940121dacdf2db9abcce9c47bc6c2` before and
+after decoding. Subsequent native Ctrl+S has a separate serialization hash,
+`f7be82889d1a3e428ae9613dbdb47bd7a11d80d81a26d00a94783f330673bab0`.
+The post-export comparison records zero graph differences and equal canonical
+graph hash `f3ec44843b1e40b2d42fa1cbe8c7a72eb36167275d7cc2d529528a71afc0eb06`.
+Oracle-input immutability and later native save are separate steps; the later
+serialization is not claimed byte-identical to the oracle input.
+
+Input-plus-immediate-capture acknowledgements are 162 ms for paste, 249 ms for
+title commit, 237 ms for reorder, 293 ms for Save As, 473 ms for reopen, 291 ms
+for the reopened save and 166 ms for cancellation. These single observations
+include automation/capture overhead; they exclude asynchronous picture
+completion and photon latency and are not a latency distribution.
+
+The same run exposes stale Ctrl state after a native picker: a plain header
+wheel zooms instead of scrolling. An event-local modifier/pointer-coordinate
+repair is independently observed in `80A6` below. Its full suite passes before
+the main-only `52A6` guard is accepted by targeted/native gates and published.
+`C524` workflow acceptance and `AD8985` playback
+measurements retain their own scope. Initial project open also briefly clears
+monitors while the asynchronous preview arrives. The source's full 21-minute
+body, full large-project playback cadence, physical A/V alignment and fullscreen
+4K remain outside this bounded acceptance.
+
+### Final event candidate native playback and wheel checks
+
+The final event candidate is application
+`80A6F2C1423BE6DBD591CB98463A3391900DE96CBB2073266110709C16591F38`, with the
+same worker `378685335B4C17AE44B5A03C892F0008B85C172CFBE6EA57FB20339BB377552F`.
+Its own first-epoch snapshot and `analysis.json` belong to the
+`native-regular-event-1080p-ef7ec3885ad8453ab895f932174d6fb1` run. The snapshot
+hash is `446C5AD63ABACF4E0B38FBE2308C81B2BC93A0A89938401C9A4593B8CBDCCFD2`.
+The original `AD8985` profile above remains historical.
+
+The actual surface is 2560x1316 with ordinary fitted 480x270 monitors. The first
+contiguous playing epoch spans 60.164 seconds: 3,590 changed pictures at 59.73/s,
+eight skipped positions, one repeated presentation and two startup/EOF drained
+presentations. Its maximum raw gap is 157.72 ms. Explicitly excluding the first
+1.0 second of device samples and final 0.5 second of authored duration gives
+3,502 changes over 58.463 seconds at 59.884/s, six skipped positions and no
+observed drained queue. Two four-frame jumps are 1500→1504 and 2964→2968; the
+maximum steady picture gap is 34.90 ms and p95 is 16.94 ms. There are no early,
+over-two-frame stale or overwritten pictures. Device interval drift is -0.9696 ms;
+median paint is 1.2448 ms and present is 14.1318 ms. After-presentation metadata
+lag remains two frames / 33.33 ms. The raw epoch and exclusions are retained;
+these rates do not establish zero-drop 60fps or physical speaker/photon alignment.
+
+The actual window retains EOF at `00:00:59:59` and a nonblank Start frame zero.
+Settled scopes at frame zero, seek 266 (`00:00:04:26`) and Fit/seek 1768
+(`00:00:29:28`) align Program picture, time, marker, RGB histogram/parade and luma
+waveform. Fit publishes 32 filmstrip tiles and processed waveform peaks. Live
+mute produces silent meter peaks; unmute restores them. Stop remains nonblank
+at `00:00:59:18`, Start returns to frame zero, and a private Ctrl+S/close succeeds.
+These are settled asynchronous observations, not synchronous seek-latency proof.
+
+In the 1,032-placement private project, plain header-wheel inputs of 800 and 600
+after Ctrl+O and the native picker scroll Tracks while the ruler remains 0..7.
+Lower-lane bitmap/waveform data is visible and complete. Ctrl+A and native paste
+replace the title with `FINAL PASTE CHECK`; Escape preserves the original value.
+This validates the event-local wheel-modifier repair in that bounded native path.
+A subsequent source review finds that pointer-metadata masking can turn a
+secondary-button Down/Up into a primary control action. A shared main-loop guard
+now excludes secondary Down/Up from primary actions. Its published `52A6`
+acceptance is recorded below. The 80A6 profile/UI observations are historical for
+that exact binary; neither its performance nor the C524 export workflow is
+relabeled as a final-binary measurement.
+
+### Published root guard and manually stopped playback
+
+`viewport-hdr-final-publication.json` records installed root application
+`52A63D75EFF8750091BD33AB576A30A71939E7DF4897B28BDB16377ECAA020C9`
+and unchanged worker `378685335B4C17AE44B5A03C892F0008B85C172CFBE6EA57FB20339BB377552F`.
+The complete Windows suite exits zero on `80A6`
+(`viewport-hdr-event-full-windows.log`). Only `src/main.ai` changes afterward;
+27 other frozen production/test source hashes remain identical. The final `52A6`
+ControlsOnly run passes 757 control outcomes plus probes/failure checks
+(`viewport-hdr-final-controls.log`). Those two gates and final native checks form
+the combined acceptance. No complete full-suite run on `52A6` is claimed.
+Loaded old images are moved safely to an exact backup; no user process is killed.
+The root retains the shared MM-AIR manifest and packages no separate FFmpeg copy.
+
+Actual `52A6` native right-click Mute and Save have no action. Primary Mute is a
+positive control: it changes selected/dirty state and removes processed peaks;
+right-click leaves that selected state unchanged, and primary unmute restores it.
+Private Ctrl+S compares the whole graph with zero differences. After the native
+Open picker, plain header-wheel input reaches populated lower-lane bitmaps and
+waveforms while the 0..7-second ruler stays unchanged. Ctrl+A/paste becomes
+`GUARDED PASTE CHECK`; Escape retains the original title and clean project.
+`viewport-hdr-final-ui.json` keeps these separate from historical export evidence.
+
+The actual published-root launch opens `Regular 1080p60.air`, SHA-256
+`7d9e045225e1a236237b85c22342f612c1be92e2cfd298e47df58df8014c9ba0`.
+Its 76,701-frame / 1,278.35-second source is measured only through manual Stop
+at `00:01:15:33`. The immutable first-epoch snapshot in
+`viewport-final-root-launch-21d65d55b308488aafa26f0b35cf0b08` has SHA-256
+`D1C85B34E42599F4FABD8C0C92BA192E1B610815F8C490FD8B24CE924EAE1E32`;
+its separate `analysis-launch.json` preserves the original launch receipt.
+
+The raw 75.711-second playing epoch has 4,521 changed pictures at 59.75/s,
+13 skipped positions, one repeated presentation and one startup drained-queue
+presentation. Maximum raw gap is 150.69 ms. Explicitly excluding device startup
+1.0 second and the final 0.5 second before the observed manual Stop gives 4,434
+changes over 74.025 seconds at 59.885/s, eight skips and two five-frame jumps
+(707→712 and 2002→2007). Maximum steady gap is 48.58 ms and p95 is 16.95 ms;
+no early, over-two-frame stale, drained-queue or overwritten-packet observations
+occur in that interval. Device drift is -1.2236 ms; median paint/present costs
+are 1.2486/14.1638 ms. After-presentation metadata lag is two frames / 33.33 ms.
+This is a manual Stop boundary, not an authored EOF or a full 21-minute cadence
+measurement. Raw startup/late-Stop skips remain retained.
+
+Stop leaves the picture visible and meters zero. Start restores a nonblank frame
+zero and scopes. Fit populates 32 filmstrip tiles and the processed waveform;
+a settled ruler seek to frame 12773 (`00:03:32:53`) aligns marker, Program time,
+picture, histogram, parade and luma waveform. Start restores frame zero again.
+The personal project bytes remain unchanged. Fit currently clamps zoom at
+0.05 px/frame: this full clip exposes only about the first 5.5 minutes in the
+current window even though status says Fitted. Its fixed 512 waveform buckets
+represent roughly 2.5 seconds each. Full-duration Fit and finer/zoom-responsive
+waveform detail remain concrete professional-editing gaps. No fullscreen 4K,
+zero-drop cadence, physical A/V alignment or full large-project acceptance follows.
+Acceptance bundle location: `archive/viewport-lazy-native-color-input-2026-10-10.tar.gz`.
+The sanitized source/receipt manifest retains exact app identities, original and
+sanitized hashes, explicit exclusions and per-member readback verification; its
+local bundle receipt records the archive hash. Media, QA pixel buffers, codec DLLs
+and application binaries are excluded. This bundle records the bounded evidence
+above, not complete professional-editing acceptance.

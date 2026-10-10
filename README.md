@@ -34,8 +34,10 @@ executable or codec DLL set. An optional native Vulkan decoder is available with
 `GENESIS_VIDEO_BACKEND=vulkan`; D3D11 remains the default. Downscaled P010
 BT.2020/PQ previews now use native D3D11 compute color conversion and scaling,
 with FP32 intermediate math and 16-bit channel quantization. Set
-`GENESIS_GPU_PREVIEW=0` to use the reference CPU transform. Native-size and HDR
-masters retain that reference transform. Sustained interactive 4K60 remains
+`GENESIS_GPU_PREVIEW=0` to use the reference CPU transform. Masters retain that
+reference transform. The current validated candidate also has a runtime-qualified
+native-size P010/PQ preview shader; unsupported configurations use the reference.
+Sustained interactive 4K60 remains
 unfinished; [measured results and restrictions](docs/FFMPEG_GPU_PREVIEW.md) distinguish
 headless preparation from actual display performance.
 
@@ -1109,9 +1111,10 @@ trim, reverse, static speed, clip/track gain and pan, audio effects and gain/fad
 curves. Embedded video audio uses the same path. Peaks retain float headroom;
 disabled, muted, solo-excluded and held clips show silence. Animated audio effects,
 pan and speed refuse with coded diagnostics until their graph history is supported.
-Background strip requests schedule clips in the visible time range and reuse
-unchanged peaks. Changed bodies still require full audio processing and temporary
-storage; audio-only worker startup currently also initializes OpenCL.
+At this earlier direct-waveform checkpoint, background strip requests selected
+the visible time range and reused unchanged peaks. Changed bodies still required
+full audio processing and temporary storage, and audio-only startup initialized
+OpenCL. The following candidate extends lane selection and defers GPU startup.
 
 The shared AIR timeline now supports vertical lane navigation. Its headers,
 clips, bitmaps, waveforms, transitions and pointer targets use the same shifted
@@ -1120,12 +1123,82 @@ The native fixture exercises 24 lanes, including selection of the bottom clip an
 rendered bitmap/waveform/transition placement.
 
 See the [focused acceptance ledger](docs/CONTROL_COVERAGE.md#processed-direct-waveforms-and-vertical-tracks-on-2026-10-10)
-for exact scope and remaining performance limits. The native 4K HDR shader prototype
-remains private; this application checkpoint retains the accepted media worker.
+for exact scope and remaining performance limits. At that historical checkpoint,
+the native 4K HDR shader prototype remained private and the accepted media worker
+was unchanged.
 The fresh installed-root check covers playback meters, mute/unmute, Stop, rewind,
 paused scrubbing, changing scopes and direct filmstrip/peak publication. Windows
 acceptance retains the unchanged full-run media prefix and a passing control-tail
 rerun after repairing disabled-button diagnostics; 757 control outcomes pass.
+
+## Visible strips and qualified HDR candidate (2026-10-10)
+
+The combined candidate passes the full Windows gate with 757 control outcomes.
+Its application hash is `AD8985B431...` and worker hash is `378685335B...`;
+this was the initial staged build; the published `52A6` scope is recorded below.
+Timeline strips now follow visible lanes as well as time.
+Scrolling to lower tracks requests their processed waveforms and frame bitmaps.
+The 32-bitmap budget rotates through visible lanes/clips before sampling their
+next tiles; more than 32 visible clips still receive a bounded subset. Failed
+waveform publication and the first unreadable bitmap report coded errors, then
+a valid request recovers on the retained task. Six CPU-only cases / 40 checks
+cover actual mailbox files/pixels, scroll generations, fairness and recovery.
+
+Audio-only work no longer constructs OpenCL until picture composition requires
+it. Supported even full-native P010/PQ D3D11 previews can use a shader qualified
+against the actual loaded shared color modules. Unknown runtime identities,
+unsupported/fitted dimensions, HDR masters and resource faults retain reference
+fallback. Eight selected frames of the supplied 4K source pass 265,420,800
+channel comparisons with differences below two u16 codes; this is color
+acceptance, not sustained 4K60 playback.
+
+A fresh native-window run of the regular 1080p60 H264/stereo-AAC source uses a
+2560x1316 editor surface and fitted 480x270 monitors. Its first playing epoch
+has 3,591 changed pictures at 59.74/s over 60.147 seconds. With the first second
+and final half-second explicitly excluded, 3,502 changed pictures deliver
+59.88/s with six skipped positions, a 29.55 ms maximum gap and no observed
+drained queue. The full epoch retains startup/EOF effects; this is not zero-drop
+60fps, physical A/V alignment or an independent check of every source pixel.
+EOF stays visible; Start restores frame zero; seek, marker, histogram, fitted
+strips, embedded mute/unmute and Stop respond in the actual window.
+
+The larger private fixture has 1,032 placements, 32 root tracks, 8,192 keys,
+1,600 filters and 64 titles. Lower-lane bitmaps/waveforms and 21 seconds of
+paired-AAC playback with responsive lane scrolling have been observed. The
+repaired input candidate visibly selects the entire title with Ctrl+A and a
+physical key replaces that selection. Shared prompts accept committed Unicode
+text and delete complete characters. A reusable AIR Windows clipboard overlay
+adds Ctrl+V, Shift+Insert and WM_PASTE; 1,044 CPU checks exercise its ordered
+Unicode events and bounded clipboard ownership. A separate native `C524` run
+pastes and previews the replacement title, checks filter order with Undo/Redo,
+and saves/reopens the full 1,032-clip / 8,192-key graph with zero unexplained
+changes. A 240-frame export cancels at 58% and removes its partial output and
+nested sidecars; a 12-frame audible private retry passes independent video,
+title, grade-order and processed-AAC checks. These bounded workflow results
+belong to that build. The final `80A6` candidate separately verifies plain
+header-wheel scrolling after a native picker and native paste/selection with
+Escape preserving the original title. Its fresh 60-second regular-source window
+run measures 59.73 changed pictures/s raw and 59.884/s after explicit startup/EOF
+exclusions: six steady skipped positions, two four-frame jumps and a 34.9 ms
+maximum gap. EOF, rewind, settled scopes/seeks, strips and mute/unmute respond.
+The root now publishes `52A6` with the secondary-button guard: right-click Mute
+and Save have no action, while primary mixer controls, picker/header-wheel
+scrolling and native prompt paste/cancel pass. Acceptance combines the complete
+Windows suite on `80A6` with targeted controls/probes/failures and actual native
+checks on `52A6`; it does not claim a complete suite rerun on the final app.
+A separate published-root playback observes 75.711 wall seconds of the full
+21-minute source. It measures 59.75 changed pictures/s raw and 59.885/s after
+explicit startup/manual-Stop exclusions, with eight steady skips and a 48.58 ms
+maximum gap. This is bounded near-60 playback, not zero-drop or full-source cadence.
+Fit currently stops at 0.05 px/frame, so the full clip cannot fit in this window;
+its 512 peak buckets also limit waveform detail to about 2.5 seconds per bucket.
+Earlier results retain
+their own scope. See the [current acceptance scope](docs/CONTROL_COVERAGE.md#visible-strips-lazy-gpu-and-qualified-hdr-candidate-on-2026-10-10)
+and [color/performance restrictions](docs/FFMPEG_GPU_PREVIEW.md#qualified-native-hdr-candidate-on-2026-10-10).
+
+Acceptance bundle location: [viewport/lazy/native-color/input evidence](archive/viewport-lazy-native-color-input-2026-10-10.tar.gz).
+Its sanitized source/receipt manifest preserves each build identity and bounded
+scope; media, pixel buffers, codec DLLs and application binaries are excluded.
 
 ## Known gaps
 

@@ -850,6 +850,17 @@ pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
   commands.message(landed)
 }
 
+// Host wheel modifiers describe this event, independently of earlier shortcuts
+// or keys consumed by a native file dialog. Strip packed metadata before hit testing.
+pub fn wheel_event(state: ref<app.App>, width: f64, height: f64,
+                   entry: widgets.Wheel, scale: f64) -> string effects {alloc} {
+  let at: widgets.Point = widgets.wheel_position(entry)
+  let x: u64 = cast.wrap(at.x)
+  let y: u64 = cast.wrap(at.y)
+  wheel(state, width, height, cast.float(x) / scale, cast.float(y) / scale,
+    entry.down, entry.lines, widgets.wheel_control(entry))
+}
+
 // A wheel: over the dock it scrolls the inspector; over the timeline it zooms with control
 // held and scrolls otherwise.
 pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
@@ -1015,6 +1026,14 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     app.end_parameter_drag(state)
   }
   if app.prompt_active(state) {
+    if control and code == widgets.key_a() {
+      app.prompt_select_all(state)
+      return note("")
+    }
+    if code == widgets.key_delete() {
+      app.prompt_delete_selection(state)
+      return note("")
+    }
     if code == widgets.key_escape() {
       if session.saving(state) { return session.cancel(state) }
       app.end_prompt(state)
@@ -1160,6 +1179,9 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
 // that deliver a key-down followed by a text event.
 pub fn text(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
   if not app.prompt_active(state) { return note("") }
+  // Ctrl+letter, Backspace and Return also generate WM_CHAR control codes.
+  // Their physical key events already own those actions.
+  if scalar < 32 or scalar == 127 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343) { return note("") }
   var raw: array<byte> = unicode.encode(scalar)
   match str.from_bytes(array.view(raw)) {
     some(entry) => { app.prompt_push(state, entry) },

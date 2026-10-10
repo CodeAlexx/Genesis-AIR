@@ -35,6 +35,13 @@ static void fill(float v){for(int i=0;i<64*64;i++){input[i*4]=v;input[i*4+1]=.6f
 static int compose(void){fpx_gpu_track1(-1,0,4);fpx_gpu_pip(0,0,0,0,1,1);fpx_gpu_grade(0,1,1);return 0;}
 int main(void){
  CHECK(fpx_gpu_set_size(64,64)==0);CHECK(fpx_gpu_init()==0);CHECK(fpx_gpu_canvas(64,64,1)==0);
+ CHECK(fpx_gpu_external_bytes()==0);
+ CHECK(fpx_gpu_external_reserve(0)==-2);
+ CHECK(fpx_gpu_external_reserve(1024*1024)==0);
+ CHECK(fpx_gpu_external_bytes()==1024*1024);
+ CHECK(fpx_gpu_external_reserve(FPX_CANVAS_BYTES_LIMIT)==-2);
+ CHECK(fpx_gpu_external_bytes()==1024*1024);
+ fpx_gpu_external_release(1024*1024);CHECK(fpx_gpu_external_bytes()==0);
  // Every 16-bit value and each slot, with immediate caller-buffer reuse.
  CHECK(fpx_gpu_canvas(256,256,1)==0);
  uint16_t*codes=malloc(256*256*4*sizeof(uint16_t));float*converted=malloc(256*256*4*sizeof(float));
@@ -79,6 +86,10 @@ int main(void){
   int at=(y*80+x)*4;int inside=x>=16&&x<64;
   CHECK(fabsf(out[at]-(inside?.15f:0))<1e-6);CHECK(out[at+3]==1);
  }
+ uint64_t reserve=FPX_CANVAS_BYTES_LIMIT-g_canvases[g_canvas_active].bytes-g_snapshot_bytes-(g_snapshot_status?sizeof(cl_int):0);
+ CHECK(fpx_gpu_external_reserve(reserve)==0);CHECK(fpx_gpu_external_bytes()==reserve);
+ CHECK(fpx_gpu_picture_store(1,3,0)==-2);CHECK(fpx_gpu_picture_check(1,2,1)==0);
+ fpx_gpu_external_release(reserve);CHECK(fpx_gpu_external_bytes()==0);
  uint64_t actual=g_snapshot_bytes;int count=alloc_attempts;held_m=mem_live;
  g_snapshot_bytes=FPX_CANVAS_BYTES_LIMIT;
  CHECK(canvas_make_room(4)!=0);CHECK(fpx_gpu_picture_store(1,3,0)==-2);CHECK(alloc_attempts==count);
