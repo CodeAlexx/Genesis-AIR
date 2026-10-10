@@ -397,5 +397,67 @@ adds no new sustained native-display or physical-hearing measurement. The
 45-entry [checkpoint archive](../archive/picture-memory-audio-boundaries-2026-10-10.tar.gz)
 was sanitized and read back against its manifest; SHA-256 is
 `fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. The installed root payload
-matches the final hashes above, and a cold ordinary-window launch restored
+matched these earlier checkpoint hashes, and a cold ordinary-window launch restored
 frame-zero pictures and the compound filmstrip.
+
+## Native 16-bit upload and processed compound waveforms
+
+Even, full-source native canvases can now upload the decoder's existing RGBA64
+color-transform result directly. A blocking OpenCL transfer consumes the borrowed
+view before the decoder can reuse it, then expands it into the usual FP32 source
+slot using the identical `f32(1/65535)` factor. The expansion uses existing budgeted
+scratch storage. A native 4K upload falls from 132,710,400 to 66,355,200 bytes;
+canvas size, decoder frame selection, reference HDR/color transform and subsequent
+compositor math are unchanged. Fitted, odd-sized and spatially incompatible paths
+retain the FP32 upload. `GENESIS_NATIVE_U16_UPLOAD=0` explicitly disables the seam.
+`GENESIS_GPU_PHASE_LOG` is opt-in local command/decode/upload diagnostics.
+
+The maintained native harness checks every 16-bit code across all three source
+slots, immediate host-buffer reuse and resource lifetime. The worker oracle compares
+15 native/fitted/odd/RGB/PQ/HLG cases against forced FP32 and software decoding,
+checks frame identities and verifies actual fast-path entry. Its optional
+`--reference-worker` also compares an accepted older worker. These tests establish
+pixel accuracy, not playback cadence.
+
+A short alternating ABBA headless comparison uses the accepted worker
+`C2947D934F00EC9CFA0509F9215015BFE4D19AC3CF814A8C9F2B55B3A62FBEAB`
+and the upload-only candidate
+`B237C452ED9E15F1FBD6BB2764EAE49CE28B28ADE8F14F462616ECBE4537C558`,
+with app `2DD0C3938EDD3DE5C061B91839092179EC016F5F8F1175CCEFD8B1075B892912`.
+Each of two runs per worker has three warmup and twelve measured pictures, native
+3840x2160 compound canvases, fitted 480x270 monitors and a 1280x720 ordinary editor
+canvas. Mean whole serial latency is **73.19 to 67.28 ms**, about 8.1% lower;
+reciprocal mean throughput is **13.66 to 14.86 pictures/s**. Individual runs vary
+substantially. This excludes audio, native presentation and sustained paced playback;
+it is not a measurement of the final combined app/worker. Native decode and reference
+HDR/color processing remain substantial; sustained compound 4K60 remains unfinished.
+
+Compound waveforms now use `NESTENV` on a complete processed nested stereo bus.
+Each bucket takes the maximum absolute channel value in
+`[floor(k*N/B), floor((k+1)*N/B))`; empty buckets are zero. Intermediate headroom
+above one survives until the painter's display scaling. Peaks cover clip-local
+audio after child mixing and authored parent processing, rather than a leaf source
+envelope. Changed buses are constructed on the background strip worker and their
+exclusive temporary cache is removed only after worker shutdown. Stop and supersede
+poll the request markers during pipe waits. Held pictures produce silent peaks
+without opening a media worker. Viewport-only requests reuse matching peaks.
+
+The versioned waveform mailbox carries document and media revisions plus clip/time
+mapping. Descendant edits retire stale peaks both on import and during painting;
+malformed, nonfinite and partial publications are refused without replacing current
+cache entries. Headerless legacy data is accepted only for direct-source clips.
+Flat waveforms retain their existing source-envelope behavior; this does not add
+post-effect flat-waveform accuracy. Full-history changed compound caches still
+have startup and disk costs. See the
+[acceptance ledger](CONTROL_COVERAGE.md#compound-waveforms-and-native-upload-on-2026-10-10)
+and the [candidate UI receipt](../archive/native-waveform-u16-ui-2026-10-10.json)
+for evidence and the exact limits of the cold reload test.
+
+The final integrated root app (`73f8f7da...`) and worker (`4d9dfd6d...`) pass the
+complete Windows suite and a subsequent fresh native root reload. Playback audio
+meters, Stop, rewind, paused seek/drag, filmstrip/waveform publication and changing
+histogram/parade/luma scopes are recorded in the
+[root UI receipt](../archive/native-waveform-u16-root-ui-2026-10-10.json).
+The test retains fitted 480x270 compound canvases; it does not qualify native
+4K60. Full gate evidence and source/binary hashes are preserved in the
+[checkpoint bundle](../archive/compound-waveforms-native-upload-2026-10-10.tar.gz).

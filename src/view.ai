@@ -381,6 +381,7 @@ fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state
       none => { },
       some(value) => {
         if entry.source != value.source or entry.length != value.length or entry.revision != state.media_revision or
+            entry.document_revision != state.document_revision or
             timeline_media.source_frame(document,value,value.start) != entry.first or
             timeline_media.source_frame(document,value,value.start+value.length-1) != entry.last {index=index+1
           continue}

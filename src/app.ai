@@ -40,7 +40,7 @@ pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_he
 
 // Peak data for one audio clip, keyed by the clip's STABLE id. The view reads this; only a
 // refresh step fills it, so painting never calls the media provider.
-pub type Waveform = struct {clip: u64, source: u64, length: i64, first: i64, last: i64, revision: u64, peaks: array<f64>}
+pub type Waveform = struct {clip: u64, source: u64, length: i64, first: i64, last: i64, revision: u64, document_revision: u64, peaks: array<f64>}
 pub type Thumbnail = struct {clip: u64, frame: i64, source: u64, source_frame: i64,
   revision: u64, document_revision: u64, pixels: draw.Surface}
 
@@ -575,7 +575,7 @@ pub fn default_audio_track(state: ref<App>) -> u64 effects {} {
 pub fn set_waveform(state: ref<App>, clip: u64, peaks: array<f64> own, first: i64, last: i64, revision: u64) -> unit effects {alloc} {
   var incoming: array<f64> = peaks
   let value: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{return ()},}
-  var updated: Waveform = Waveform {clip:clip,source:value.source,length:value.length,first:first,last:last,revision:revision,peaks:incoming}
+  var updated: Waveform = Waveform {clip:clip,source:value.source,length:value.length,first:first,last:last,revision:revision,document_revision:state.document_revision,peaks:incoming}
   var index: u64 = 0
   loop {
     if index >= array.len(struct.borrow(state, field=waveforms)) { break }

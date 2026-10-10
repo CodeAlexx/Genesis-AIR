@@ -785,3 +785,90 @@ Focused acceptance commands:
 python tests/picture_memory_pixels.py --worker .\genesis-gcompose.exe --report .\build-windows\picture-memory-pixels.json
 python tests/audio_source_boundaries.py --binary .\Genesis-AIR.exe --client .\build-windows\native\bin\Release\genesis-audio-nested.exe --worker .\genesis-gcompose.exe --report .\build-windows\audio-source-boundaries.json
 ```
+
+## Compound waveforms and native upload on 2026-10-10
+
+Compound clips now display processed stereo peaks alongside their filmstrip.
+The strip worker defines the complete child/parent audio tree and queries one
+root bus through `NESTENV`. This includes child sums, track/clip gain and pan,
+fades, audio effects, trim, reverse, rate, repeated instances and mixed FPS.
+Bucket boundaries are exact floor partitions of the complete clip-local 48 kHz
+output. Peaks retain raw float headroom above one; a held picture produces silence.
+
+Document and media revisions travel in `WAVEFORMS 2` publications and are checked
+again by the painter. A descendant edit invalidates peaks even when the root's
+source ID, length and endpoints stay unchanged. Invalid/nonfinite data and incomplete
+generation markers cannot replace current entries. Matching content/time/bucket
+metadata reuses peaks on zoom/scroll requests, so viewport navigation does not
+reconstruct unchanged audio. Cold changed buses still require full background
+materialization and temporary disk storage; large interactive project latency
+remains open. Flat waveforms retain the existing source-envelope approximation.
+
+| Gate | Evidence and scope |
+|---|---|
+| Historical omission | An immutable `df5a887` client with the accepted worker omits all 20 compound waveform rows; both direct-source DC/silence controls pass. |
+| Independent actual cache | 23 authored cases compare exact processed stereo bucket maxima and mapped endpoints. Cases include cancellation/antiphase, spikes, raw headroom, parent-on-sum compression, trim/rate/reverse, mixed FPS, mute/solo, repeated instances, automation and a held fractional-rate compound. The oracle starts from authored sample arrays, not Genesis audio output. |
+| Publication and display | 26 native cases / 84 checks cover actual cache population, descendant retirement, pixel evidence of current versus stale painted waves, malformed/partial refusal, reuse with an unavailable worker, content invalidation and held silence without a worker. |
+| Envelope protocol | Four exact partitions include one bucket, uneven three, more buckets than samples and 65,536. Eleven refusal/recovery stages cover invalid roots/counts, output ownership, pending transactions and nonfinite/truncated caches. Successful peak files remain caller-owned after worker close. |
+| Real cancellation | Stop and supersede interrupt genuine long RF64 cache construction, leave no owned worker/cache/partial peaks, and a fresh request recovers with independently expected peaks. The focused final run joins in 0.173/0.180 seconds. |
+| Native upload | The OpenCL harness performs 810,071 checks across all 65,536 u16 codes in all three slots, immediate host-buffer overwrite and resource lifecycle. Fifteen worker cases compare 12,029,256 FP32 channels exactly, require actual fast-path entry, and cover RGB/NV12/PQ/HLG, fitted/odd fallback, seek/EOF/rewind and software/forced-FP32 controls. |
+
+The upload borrows the decoder's existing reference-color-transformed RGBA64 buffer,
+finishes a blocking transfer, and expands it with the same FP32 conversion constant.
+It uses existing budgeted GPU scratch; no extra native canvas buffer or lower-resolution
+effect calculation is introduced. Fitted/odd/spatially incompatible frames retain the
+previous path. `GENESIS_NATIVE_U16_UPLOAD=0` selects that path explicitly.
+
+The separate short ABBA prototype benchmark reduces mean serial native-4K compound
+latency from 73.19 to 67.28 ms, about 8.1%, or 13.66 to 14.86 reciprocal pictures/s.
+Run variation is substantial; audio, native presentation and sustained paced cadence
+are excluded. These timings belong to the upload-only candidate hashes documented
+in [GPU preview notes](FFMPEG_GPU_PREVIEW.md#native-16-bit-upload-and-processed-compound-waveforms),
+not a fresh timing of the combined waveform build. Native decode and reference
+HDR/color processing remain major costs; responsive compound 4K60 is still unproved.
+
+The [cold candidate UI receipt](../archive/native-waveform-u16-ui-2026-10-10.json)
+records visible compound peaks/filmstrip, advancing Play and stereo meters, silent
+Stop, visible rewind to frame zero and a completed distant seek at `00:00:12:26`.
+The user stopped desktop testing with Escape. The later held/cache fixes have native
+regression evidence; this earlier UI binary does not establish their interactive
+behavior or add a new scopes observation. The older unsaved user window was preserved.
+
+Focused acceptance commands:
+
+```powershell
+python tests/nested_waveforms.py --client .\build-windows\native\bin\Release\genesis-nested-waveforms.exe --worker .\genesis-gcompose.exe --report .\build-windows\nested-waveforms.json
+.\build-windows\native\bin\Release\genesis-native-u16-upload.exe
+python tests/native_u16_upload.py --worker .\genesis-gcompose.exe --report .\build-windows\native-u16-upload.json
+```
+
+The final full Windows build/test suite passed with exit zero, including the
+130 source-audio cases / 664 checks, 749 control actions, async waveform/bitmap
+publication, native audio clock/cancellation, titles and transitions. The installed
+root application SHA-256 is
+`73f8f7daf2a0d153c90a6a82ae069ed6cf406123f0f4c4c55e9ddc4a8ff6b03c`;
+worker SHA-256 is
+`4d9dfd6dd4d0f592d0cc3bcd90729eef95ad9715ce6d7cce4efd2a61b4cd0d7d`.
+The maintained overlay is
+`e92df242cda5c7eb7a7d8153a13fdcce2c070f3b292d5b417bc50035031a5881`.
+Canonical migration preserves the three unrelated worker files byte for byte and
+passes the reverse patch check. MM-AIR runtime configuration, OpenCL and protected
+original project/media retain their hashes.
+
+The sanitized 47-entry [checkpoint bundle](../archive/compound-waveforms-native-upload-2026-10-10.tar.gz)
+was read back against every manifest entry; its SHA-256 is
+`8856361491f9f3b69ab183ea2e95f62fa706813561c015e6dd5507c1dac6ebfa`.
+The manifest records both LF-normalized Git source hashes and raw tested worktree
+hashes. A fresh root headless process produces a visible 640x360 beach preview.
+
+After the user requested a reload, a fresh **installed root** process also passed
+the [native UI check](../archive/native-waveform-u16-root-ui-2026-10-10.json):
+Play advances picture/time/playhead with responsive stereo meters; Stop clears
+meters; rewind restores frame zero. A paused seek settles at `00:00:18:51` and a
+drag settles at `00:00:02:10`, with matching program timecode, status and marker.
+The histogram, RGB parade and luma waveform visibly change with the corresponding
+sloth/beach pictures. Fit publishes 23 compound bitmap rows and 512 finite processed
+peaks. The older unsaved user window is preserved. This uses 480x270 compound
+canvases and fitted scopes in the ordinary editor; it establishes no physical
+hearing/alignment, full native 4K scan or sustained 4K60 acceptance. Flat processed
+waveforms and larger interactive projects remain open.

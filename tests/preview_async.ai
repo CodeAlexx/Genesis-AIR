@@ -20,7 +20,8 @@ import "../src/preview_link.ai" as link
 
 fn publish(state: ref<app.App>, transport: ref<link.Link>, root: str, id: u64) -> bool effects {alloc, fs.write, net, time} {
   let document: string = match editor_io.encode(struct.borrow(state, field=document)) { ok(value) => value, err(_) => { return false }, }
-  if not preview.request(root, str.view(document), id) {return false}
+  if not preview.request_document_revision(root,str.view(document),id,0,2.4,450,480,270,
+      state.media_revision,state.document_revision) {return false}
   match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
 }
 fn await_image(transport: ref<link.Link>, root: str, id: u64, blue: bool) -> bool effects {alloc, fs.read, net, time} {

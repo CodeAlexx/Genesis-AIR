@@ -52,6 +52,9 @@ try {
   $pictureMemoryResult = Invoke-Native 'genesis-picture-memory-lifecycle.exe' @()
   Write-Host $pictureMemoryResult.TrimEnd()
   Set-Content -LiteralPath (Join-Path $root 'picture-memory-windows.log') -Value $pictureMemoryResult
+  $nativeU16Result = Invoke-Native 'genesis-native-u16-upload.exe' @()
+  Write-Host $nativeU16Result.TrimEnd()
+  Set-Content -LiteralPath (Join-Path $root 'native-u16-upload-windows.log') -Value $nativeU16Result
   & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
     --report (Join-Path $root 'native-audio-clock.json')
   if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
@@ -86,6 +89,9 @@ try {
     & python (Join-Path $PSScriptRoot 'compound_pixels.py') --worker $worker `
       --report (Join-Path $root 'compound-pixels.json')
     if ($LASTEXITCODE -ne 0) { throw 'Independent compound compositor pixels and recovery failed.' }
+    & python (Join-Path $PSScriptRoot 'native_u16_upload.py') --worker $worker `
+      --report (Join-Path $root 'native-u16-upload.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Native 16-bit upload, frame identity and exact pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'picture_memory_pixels.py') --worker $worker `
       --report (Join-Path $root 'picture-memory-pixels.json')
     if ($LASTEXITCODE -ne 0) { throw 'Immutable GPU picture lifetime and pixel acceptance failed.' }
@@ -96,6 +102,10 @@ try {
       --client (Join-Path $Bin 'genesis-nested-timeline-bitmaps.exe') --worker $worker `
       --report (Join-Path $root 'nested-timeline-bitmap-pixels.json')
     if ($LASTEXITCODE -ne 0) { throw 'Actual asynchronous compound timeline bitmaps and recovery failed.' }
+    & python (Join-Path $PSScriptRoot 'nested_waveforms.py') `
+      --client (Join-Path $Bin 'genesis-nested-waveforms.exe') --worker $worker `
+      --report (Join-Path $root 'nested-waveforms.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Processed compound waveforms, stale publication and cancellation failed.' }
     & python (Join-Path $PSScriptRoot 'preview_fit.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker

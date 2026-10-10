@@ -1,0 +1,27 @@
+{
+  "schema": "genesis.native_waveform_u16_ui.v1",
+  "date": "2026-10-10",
+  "scope": "Cold candidate Windows launch with a private 30-second compound copy, supplied 4K AV1/PQ/AAC source, 480x270 child/root and ordinary maximized editor",
+  "candidate_application_sha256": "15249f7232964a7ed8e8ea6ae3decfebcfe093ed471b7c596797f4577547b8a8",
+  "candidate_worker_sha256": "4d9dfd6dd4d0f592d0cc3bcd90729eef95ad9715ce6d7cce4efd2a61b4cd0d7d",
+  "fresh_process": true,
+  "fresh_workers": true,
+  "root_payload_tested": false,
+  "observations": [
+    "Source and program show beach pictures at frame zero after cold launch.",
+    "Timeline Fit displays the complete 30-second compound filmstrip and its low-level waveform; processed waveform publication contains 512 finite peaks for nested source-zero clip 103.",
+    "Play advances program picture/timecode and timeline playhead to 00:00:06:10; stereo meters respond and Audio playing is visible.",
+    "Stop pauses at 00:00:15:26, clears both meters and displays Stopped / silent.",
+    "Rewind restores a visible beach program picture and zero timecode/playhead.",
+    "Paused ruler seek completes at 00:00:12:26 with matching program timecode, bottom status, marker and sloth picture; Source remains at frame zero."
+  ],
+  "older_unsaved_user_window_preserved": true,
+  "original_project_and_media_modified": false,
+  "desktop_testing_stopped_by_user_escape": true,
+  "limits": [
+    "Later held-clip silence and viewport-cache reuse edits were verified by native regressions, not this earlier UI app binary.",
+    "This session's scope-tab observation was interrupted; it adds no new histogram/RGB-parade/luma-waveform acceptance beyond the previous checkpoint.",
+    "No physical-hearing, native-resolution fullscreen, sustained 60fps, zero-drop cadence or speaker/display alignment claim."
+  ],
+  "complete_professional_editing_acceptance": false
+}

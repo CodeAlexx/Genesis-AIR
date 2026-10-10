@@ -1151,8 +1151,11 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   improves serial preparation from 1.175 to 12.928 pictures/s, excluding audio and native
   presentation; responsive compound 4K60 remains unproved. Parent
   Stabilize refuses with `GA_VIDEO_NESTED_HISTORY` until group history is available.
-  Compound waveforms, track/audio-filter automation, animated speed and some filter combinations
-  remain unfinished. Recursive nested audio has independent mixing, output,
+  Compound waveforms now show the processed stereo bus, including child mixing,
+  parent effects, trims and rate. Content changes invalidate peaks; viewport-only
+  requests reuse them, and held pictures show silence. Cold changed buses still
+  require background audio-cache construction. Track/audio-filter automation,
+  animated speed and some filter combinations remain unfinished. Recursive nested audio has independent mixing, output,
   refusal and cancellation gates; larger projects still need interactive/device
   acceptance, and full-history caches have startup and disk costs.
   Overlapping signed audio now retains float headroom until final output, so

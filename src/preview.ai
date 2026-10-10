@@ -139,6 +139,13 @@ fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: boo
 // Fill the waveform cache for every clip with audio, including video clips. This is the only place the application asks
 // the provider for envelopes, so painting never does media work.
 pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  match waveforms_for_request(state,"",0) {
+    ok(value)=>value,err(problem)=>{provider.note_failure(struct.borrow(state,field=provider),problem)
+      0},
+  }
+}
+pub fn waveforms_for_request(state: ref<app.App>, root: str, id: u64) -> result<u64,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var wanted: array<u64> = array.new()
   var paths: array<string> = array.new()
   var widths: array<u64> = array.new()
@@ -150,6 +157,15 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
       none => { },
       some(value) => {
         if value.owner == document.active and chrome.clip_has_audio(document, value.id) {
+          if value.nested != 0 {
+            array.push(wanted,value.id)
+            array.push(paths,string.new())
+            let widened: u64 = cast.sat(value.length)
+            let buckets: u64 = if widened/3 > 512 {512}else{widened/3}
+            array.push(widths,if buckets < 8 {8}else{buckets})
+            index=index+1
+            continue
+          }
           match editor.source_slot(document, value.source) {
             some(slot) => {
               array.push(wanted, value.id)
@@ -171,6 +187,48 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
   var at: u64 = 0
   loop {
     if at >= array.len(wanted) { break }
+    let value: editor.Clip = option.unwrap(editor.clip(document,array.get(wanted,at)))
+    let buckets: u64 = array.get(widths,at)
+    // The strip worker retains its cache across viewport requests. Only a
+    // content/media generation or changed time mapping needs new audio work.
+    match app.waveform_slot(state,value.id) {
+      some(slot)=>{
+        let cached: ref<app.Waveform> = array.borrow(struct.borrow(state,field=waveforms),slot)
+        if cached.document_revision == state.document_revision and cached.revision == state.media_revision and
+            cached.source == value.source and cached.length == value.length and
+            cached.first == timeline_media.source_frame(document,value,value.start) and
+            cached.last == timeline_media.source_frame(document,value,value.start+value.length-1) and
+            array.len(struct.borrow(cached,field=peaks)) == buckets {
+          filled=filled+1
+          at=at+1
+          continue
+        }
+      },none=>{},
+    }
+    if value.nested != 0 {
+      let engine: ref<provider.Provider> = struct.borrow(state,field=provider)
+      var peaks: array<f64> = if timeline_media.effective_speed(document,value) == 0.0 {
+        // Held pictures have no advancing audio, just like ordinary playback.
+        var silence: array<f64> = array.new()
+        var k: u64 = 0
+        loop {if k >= buckets {break}
+          array.push(silence,0.0)
+          k=k+1
+        }
+        silence
+      }else if engine.kind == provider.kind_fake() {
+        provider.envelope(engine,text.concat("compound:",string.from_int(value.id)),buckets)
+      }else{
+        if engine.kind != provider.kind_gcompose() {return result.err("[GA_AUDIO_NESTED_ENV] Compound waveforms require the native worker")}
+        try timeline_media.compound_envelope(document,value,buckets,provider.worker_path(engine),
+          provider.audition_path(engine),root,id)
+      }
+      app.set_waveform(state,value.id,peaks,timeline_media.source_frame(document,value,value.start),
+        timeline_media.source_frame(document,value,value.start+value.length-1),state.media_revision)
+      filled=filled+1
+      at=at+1
+      continue
+    }
     var peaks: array<f64> = provider.envelope(struct.borrow(state, field=provider),
       str.view(array.borrow(paths, at)), 512)
     if array.len(peaks) != 0 {
@@ -200,7 +258,7 @@ pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, f
     }
     at = at + 1
   }
-  filled
+  result.ok(filled)
 }
 
 
@@ -373,13 +431,16 @@ pub fn read_images(root: str, id: u64) -> array<draw.Surface> effects {alloc, fs
   if number(root,str.view(marker)) != id {return array.new()}
   out
 }
-fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.write} {
-  var lines: string = string.new()
+pub fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, fs.write} {
+  var lines: string = text.concat("WAVEFORMS 2\t",string.from_int(state.document_revision))
+  string.append(lines,"\t")
+  string.append(lines,string.from_int(state.media_revision))
+  string.append(lines,"\n")
   var i: u64 = 0
   loop { if i >= array.len(struct.borrow(state, field=waveforms)) { break }
     let wave: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), i)
     string.append(lines, str.view(string.from_int(wave.clip)))
-    var mapping: array<string> = [string.from_int(wave.source),string.from_int(wave.length),string.from_int(wave.first),string.from_int(wave.last),string.from_int(wave.revision)]
+    var mapping: array<string> = [string.from_int(wave.source),string.from_int(wave.length),string.from_int(wave.first),string.from_int(wave.last),string.from_int(wave.revision),string.from_int(wave.document_revision)]
     string.append(lines,"\t")
     string.append(lines,str.view(text.join(mapping,"\t")))
     var k: u64 = 0
@@ -398,6 +459,14 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
   let content: string = match files.read_text(str.view(path.join(root, "waveforms.tsv"))) { ok(value) => value, err(_) => { return false }, }
   if number(root,"waveforms.id") != id {return false}
   var rows: array<string> = text.split(str.view(content), "\n")
+  let versioned: bool = str.starts_with(content,"WAVEFORMS 2\t")
+  if versioned {
+    var header: array<string> = text.split(array.borrow(rows,0),"\t")
+    if array.len(header) != 3 {return false}
+    if match text.parse_u64(array.borrow(header,1)) {some(value)=>value != state.document_revision,none=>true,} or
+       match text.parse_u64(array.borrow(header,2)) {some(value)=>value != state.media_revision,none=>true,} {return false}
+  }
+  var incoming: array<app.Waveform> = array.new()
   var i: u64 = 0
   loop { if i >= array.len(rows) { break }
     var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
@@ -408,21 +477,36 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
       let first: i64 = match text.parse_i64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>-1,}
       let last: i64 = match text.parse_i64(str.view(array.borrow(fields,4))) {some(value)=>value,none=>-1,}
       let revision: u64 = match text.parse_u64(str.view(array.borrow(fields,5))) {some(value)=>value,none=>0,}
+      let document_revision: u64 = if versioned {
+        if array.len(fields) <= 7 {return false}
+        match text.parse_u64(array.borrow(fields,6)) {some(value)=>value,none=>{return false},}
+      }else{state.document_revision}
       let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{i=i+1
         continue},}
-      if revision != state.media_revision or current.source != source or current.length != length or
+      if revision != state.media_revision or document_revision != state.document_revision or
+          (not versioned and current.nested != 0) or current.source != source or current.length != length or
           timeline_media.source_frame(struct.borrow(state,field=document),current,current.start) != first or
           timeline_media.source_frame(struct.borrow(state,field=document),current,current.start+current.length-1) != last {i=i+1
         continue}
       var peaks: array<f64> = array.new()
- var k: u64 = 6
+ var k: u64 = if versioned {7}else{6}
       loop { if k >= array.len(fields) { break }
-        array.push(peaks, match text.parse_f64(str.view(array.borrow(fields, k))) { some(value) => value, none => 0.0, })
+        let peak: f64 = match text.parse_f64(str.view(array.borrow(fields,k))) {some(value)=>value,none=>{return false},}
+        if not math.is_finite(peak) or peak < 0.0 {return false}
+        array.push(peaks,peak)
  k = k + 1
       }
-      if clip != 0 { app.set_waveform(state, clip, peaks,first,last,revision) }
+      if clip != 0 {array.push(incoming,app.Waveform {clip:clip,source:source,length:length,first:first,last:last,
+        revision:revision,document_revision:document_revision,peaks:peaks})}
     }
     i = i + 1
+  }
+  if number(root,"waveforms.id") != id {return false}
+  i=0
+  loop {if i >= array.len(incoming) {break}
+    let wave: ref<app.Waveform> = array.borrow(incoming,i)
+    app.set_waveform(state,wave.clip,struct.replace(wave,array.new(),field=peaks),wave.first,wave.last,wave.revision)
+    i=i+1
   }
   true
 }
@@ -643,6 +727,8 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       let _ = ref.swap(held_source,string.new())
     }
     struct.set(state,revision,field=media_revision)
+    struct.set(state,if array.len(dimensions) >= 7 {match text.parse_u64(array.borrow(dimensions,6)) {
+      some(value)=>value,none=>0,}}else{0},field=document_revision)
     // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
     if width == 0 or height == 0 or width > 1280 or height > 720 {
       let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
@@ -650,7 +736,10 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
     if owned.strips_only {
-      let _ = waveforms(state)
+      match waveforms_for_request(state,str.view(root),id) {
+        ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
+          continue},
+      }
       publish(str.view(root),"waveforms.id","0")
       write_waveforms(state,str.view(root))
       publish(str.view(root),"waveforms.id",str.view(string.from_int(id)))
@@ -716,7 +805,10 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }
     if not owned.pixel_stream and not editor.playing(struct.borrow(state, field=document)) and
         not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) {
-      let _ = waveforms(state)
+      match waveforms_for_request(state,str.view(root),id) {
+        ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
+          continue},
+      }
       publish(str.view(root), "waveforms.id", "0")
       write_waveforms(state, str.view(root))
       publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))

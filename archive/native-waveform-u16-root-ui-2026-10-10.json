@@ -1,0 +1,36 @@
+{
+  "schema": "genesis.native_waveform_u16_root_ui.v1",
+  "date": "2026-10-10",
+  "scope": "Fresh root process, private 30-second compound with supplied 4K source and 480x270 child/root canvases, ordinary maximized editor",
+  "application_sha256": "73f8f7daf2a0d153c90a6a82ae069ed6cf406123f0f4c4c55e9ddc4a8ff6b03c",
+  "worker_sha256": "4d9dfd6dd4d0f592d0cc3bcd90729eef95ad9715ce6d7cce4efd2a61b4cd0d7d",
+  "root_payload_tested": true,
+  "fresh_process": true,
+  "fresh_workers": true,
+  "waveform_publication": {
+    "header": "WAVEFORMS 2\t1\t1",
+    "clip": 103,
+    "buckets": 512,
+    "maximum": 0.17680871486663818
+  },
+  "timeline_bitmap_rows": 23,
+  "observations": [
+    "Both monitors show the beach at frame zero after root reload.",
+    "Fit displays the full 30-second compound filmstrip and processed waveform.",
+    "Play advances program picture, time and playhead to 00:00:05:33; both meters respond and Audio playing is visible.",
+    "Stop pauses and clears both meters with Stopped / silent.",
+    "Rewind restores visible beach, zero program timecode and zero playhead.",
+    "Paused seek completes at 00:00:18:51 with sloth picture, matching program timecode, status and marker; Source remains zero.",
+    "Scopes displays histogram, RGB parade and luma waveform for the sloth.",
+    "Dragging the playhead to 00:00:02:10 completes with the beach picture, matching time/status/marker and changed histogram, parade and luma waveform."
+  ],
+  "older_unsaved_user_window_preserved": true,
+  "original_project_and_media_modified": false,
+  "limits": [
+    "Scope sampling is from the fitted 480x270 program frame, not a full native 4K scan.",
+    "Transient pending seeks retain the previous presented picture until the new frame arrives.",
+    "No physical-hearing, speaker/display alignment, fullscreen native-resolution, sustained 60fps or zero-drop cadence claim.",
+    "Held and viewport-cache behavior have native regression evidence; this UI exercise uses an ordinary moving compound."
+  ],
+  "complete_professional_editing_acceptance": false
+}

@@ -1,0 +1,174 @@
+module genesis.tests.nested_waveforms
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+import "../src/view.ai" as painter
+
+fn painted(state: ref<app.App>) -> draw.Surface effects {alloc} {
+  var canvas: draw.Canvas = draw.canvas(option.unwrap(draw.surface(1280,720)))
+  var source: draw.Surface = draw.empty_surface()
+  var program: draw.Surface = draw.empty_surface()
+  painter.paint(state,canvas,1280.0,720.0,source,program)
+  draw.finish(canvas)
+}
+fn same(a: ref<draw.Surface>, b: ref<draw.Surface>) -> bool effects {} {
+  if a.width != b.width or a.height != b.height {return false}
+  let x: view<byte> = array.view(struct.borrow(a,field=pixels))
+  let y: view<byte> = array.view(struct.borrow(b,field=pixels))
+  if view.len(x) != view.len(y) {return false}
+  var at: u64 = 0
+  loop {if at >= view.len(x) {break}
+    if view.get(x,at) != view.get(y,at) {return false}
+    at=at+1
+  }
+  true
+}
+fn publication(suite: ref<test.Suite>, state: ref<app.App>, root: str, clip: u64)
+    -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
+  let _ = test.start(suite,"Descendant edits retire peaks even when root endpoints are unchanged")
+  preview.write_waveforms(state,root)
+  let original: string = match files.read_text(path.join(root,"waveforms.tsv")) {
+    ok(value)=>value,err(_)=>{let _ = test.check(suite,false,"Publication can be read")
+      return ()},
+  }
+  let _ = files.write_text(path.join(root,"waveforms.id"),"11")
+  let before: i64 = cast.sat(app.waveform_count(state))
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let compound: editor.Clip = option.unwrap(editor.clip(doc,clip))
+  var at: u64 = 0
+  var changed: bool = false
+  loop {if at >= editor.clip_count(doc) {break}
+    let child: editor.Clip = option.unwrap(editor.clip_at(doc,at))
+    if child.owner == compound.nested {
+      struct.set(array.borrow(struct.borrow(doc,field=clips),at),0.25,field=gain)
+      changed=true
+      break
+    }
+    at=at+1
+  }
+  let _ = test.check(suite,changed,"A child edit is applied without moving root endpoints")
+  app.document_changed(state)
+  let _ = test.check(suite,not preview.read_waveforms(state,root,11),"Old descendant generation is refused")
+  let _ = test.eq_i64(suite,cast.sat(app.waveform_count(state)),before,"Refusal preserves owned cache without relabeling")
+  var stale: draw.Surface = painted(state)
+  let slot: u64 = option.unwrap(app.waveform_slot(state,clip))
+  struct.set(array.borrow(struct.borrow(state,field=waveforms),slot),state.document_revision,field=document_revision)
+  var current: draw.Surface = painted(state)
+  let _ = test.check(suite,not same(stale,current),"Current waveform paints on its timeline lane")
+  let _ = struct.replace(state,array.new(),field=waveforms)
+  var empty: draw.Surface = painted(state)
+  let _ = test.check(suite,same(stale,empty),"Stale waveform contributes no painted pixels")
+  let revised: string = text.replace(original,"WAVEFORMS 2\t41\t7","WAVEFORMS 2\t42\t7")
+  let updated: string = text.replace(revised,"\t7\t41\t","\t7\t42\t")
+  let _ = files.write_text(path.join(root,"waveforms.tsv"),updated)
+  let _ = test.check(suite,preview.read_waveforms(state,root,11),"Matching generation is accepted")
+  let _ = test.eq_i64(suite,cast.sat(app.waveform_count(state)),before,"All current waveform rows are restored")
+  let _ = files.write_text(path.join(root,"waveforms.id"),"0")
+  let _ = test.check(suite,not preview.read_waveforms(state,root,11),"Incomplete slot is refused")
+  let _ = files.write_text(path.join(root,"waveforms.id"),"11")
+  var invalid: string = text.trim(updated)
+  string.append(invalid,"\tnan\n")
+  let _ = files.write_text(path.join(root,"waveforms.tsv"),invalid)
+  let _ = test.check(suite,not preview.read_waveforms(state,root,11),"Invalid peak publication is refused")
+  let _ = test.eq_i64(suite,cast.sat(app.waveform_count(state)),before,"Invalid publication preserves current cache")
+  let _ = test.done(suite)
+  ()
+}
+fn reuse(suite: ref<test.Suite>, state: ref<app.App>, root: str, clip: u64)
+    -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _ = test.start(suite,"Viewport-only requests reuse peaks; content changes require fresh audio")
+  let worker: string = struct.replace(struct.borrow(state,field=provider),path.join(root,"absent-worker.exe"),field=worker)
+  let before: u64 = app.waveform_count(state)
+  let _ = test.check(suite,match preview.waveforms_for_request(state,"",0) {
+    ok(count)=>count == before,err(_)=>false,},"Current peaks survive an unavailable worker")
+  app.document_changed(state)
+  let _ = test.check(suite,match preview.waveforms_for_request(state,"",0) {
+    err(problem)=>text.contains(problem,"GA_AUDIO_NESTED_ENV"),ok(_)=>false,},"Changed content cannot reuse old peaks")
+  struct.set(state,41,field=document_revision)
+  let _ = struct.replace(struct.borrow(state,field=provider),worker,field=worker)
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Held compound pictures have silent waveforms without media work")
+  var document: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+  let slot: u64 = option.unwrap(editor.clip_slot(document,clip))
+  struct.set(array.borrow(struct.borrow(document,field=clips),slot),0.0,field=speed)
+  var held: app.App = app.app(provider.gcompose(path.join(root,"absent-worker.exe"),root))
+  let _ = struct.replace(held,document,field=document)
+  let count: u64 = preview.waveforms(held)
+  let _ = test.check(suite,count > 0,"Held compound fills its waveform cache")
+  var silent: bool = true
+  match app.waveform_slot(held,clip) {none=>{silent=false},some(index)=>{
+    let wave: ref<app.Waveform> = array.borrow(struct.borrow(held,field=waveforms),index)
+    var at: u64 = 0
+    loop {if at >= array.len(struct.borrow(wave,field=peaks)) {break}
+      if array.get(struct.borrow(wave,field=peaks),at) != 0.0 {silent=false}
+      at=at+1
+    }
+  },}
+  let _ = test.check(suite,silent,"Every held audio bucket is silent")
+  let _ = test.check(suite,str.len(provider.last_error(struct.borrow(held,field=provider))) == 0,"No absent-worker failure")
+  let _ = test.done(suite)
+  ()
+}
+// OUT WORKER MANIFEST [REQUEST_ROOT REQUEST_ID]; projects beside manifest.
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 4 and view.len(args) != 6 {return 2}
+  let root: str = view.get(args,1)
+  let worker: str = view.get(args,2)
+  let manifest: str = view.get(args,3)
+  let request_root: string = if view.len(args) == 6 {string.copy(view.get(args,4))}else{string.new()}
+  let request_id: u64 = if view.len(args) == 6 {option.unwrap(text.parse_u64(view.get(args,5)))}else{0}
+  let _ = files.mkdirs(root)
+  let text_data: string = match files.read_text(manifest) {ok(value)=>value,err(_)=>{return 2},}
+  var rows: array<string> = text.split(text_data,"\n")
+  var suite: test.Suite = test.suite("Processed compound waveform identity",true)
+  var at: u64 = 0
+  var checked_publication: bool = false
+  loop {if at >= array.len(rows) {break}
+    var fields: array<string> = text.split(text.trim(array.borrow(rows,at)),"\t")
+    at=at+1
+    if array.len(fields) != 2 {continue}
+    let name: str = array.borrow(fields,0)
+    let clip: u64 = option.unwrap(text.parse_u64(array.borrow(fields,1)))
+    let saved: string = match files.read_text(path.join(path.dirname(manifest),text.concat(name,".air"))) {
+      ok(value)=>value,err(_)=>{return 2},
+    }
+    var doc: editor.Document = match editor_io.decode(saved) {ok(value)=>value,err(_)=>{return 2},}
+    let scratch: string = path.join(root,name)
+    let _ = files.mkdirs(scratch)
+    var state: app.App = app.app(provider.gcompose(worker,scratch))
+    let _ = struct.replace(state,doc,field=document)
+    struct.set(state,41,field=document_revision)
+    struct.set(state,7,field=media_revision)
+    let _ = test.start(suite,name)
+    let filled: u64 = if str.len(request_root) == 0 {preview.waveforms(state)}else{
+      match preview.waveforms_for_request(state,request_root,request_id) {
+        ok(value)=>value,err(problem)=>{provider.note_failure(struct.borrow(state,field=provider),problem)
+          0},
+      }
+    }
+    let _ = test.check(suite,filled > 0,"Real application waveform cache is populated")
+    let _ = test.check(suite,option.is_some(app.waveform_slot(state,clip)),"Requested authored clip has actual peaks")
+    preview.write_waveforms(state,scratch)
+    let waves: string = match files.read_text(path.join(scratch,"waveforms.tsv")) {ok(value)=>value,err(_)=>{return 2},}
+    let _ = files.write_text(path.join(root,text.concat(name,"-waveforms.tsv")),waves)
+    let error: string = provider.last_error(struct.borrow(state,field=provider))
+    let _ = files.write_text(path.join(root,text.concat(name,"-error.txt")),error)
+    let _ = test.check(suite,str.len(error) == 0,"Waveform generation has no coded media failure")
+    let _ = test.done(suite)
+    if not checked_publication and option.is_some(app.waveform_slot(state,clip)) and
+        option.unwrap(editor.clip(struct.borrow(state,field=document),clip)).nested != 0 {
+      reuse(suite,state,scratch,clip)
+      publication(suite,state,scratch,clip)
+      checked_publication=true
+    }
+    provider.restart(struct.borrow(state,field=provider))
+  }
+  test.conclude(suite,path.join(root,"nested-waveforms-tests.json"),120)
+}

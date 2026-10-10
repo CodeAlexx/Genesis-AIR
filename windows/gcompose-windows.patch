@@ -570,7 +570,7 @@ index 4b33e4a..1ddfa2e 100644
 +    return copied;
 +}
 diff --git a/gcompose/csrc/fpx_decode.c b/gcompose/csrc/fpx_decode.c
-index 8674e4c..f2eaabf 100644
+index 8674e4c..d811262 100644
 --- a/gcompose/csrc/fpx_decode.c
 +++ b/gcompose/csrc/fpx_decode.c
 @@ -11,8 +11,32 @@
@@ -943,7 +943,7 @@ index 8674e4c..f2eaabf 100644
                                     dw, dh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->lb_dw = dw; c->lb_dh = dh;
      }
-@@ -237,6 +490,195 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -237,6 +490,202 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
      return 0;
  }
  
@@ -1023,7 +1023,7 @@ index 8674e4c..f2eaabf 100644
 +}
 +
 +// The media path retains 16-bit source precision, then uploads normalized FP32 to OpenCL.
-+static int fpx_hi_blit(FpxCtx* c, float* out, int ow, int oh) {
++static int fpx_hi_blit_impl(FpxCtx* c, float* out, int ow, int oh, const uint16_t** out16) {
 +    int64_t started = av_gettime_relative();
 +    int dw, dh;
 +    if ((int64_t)c->width * oh >= (int64_t)ow * c->height) {
@@ -1034,7 +1034,7 @@ index 8674e4c..f2eaabf 100644
 +    int ox = (ow - dw) / 2, oy = (oh - dh) / 2;
 +#ifdef _WIN32
 +    const char* gpu_preview = getenv("GENESIS_GPU_PREVIEW");
-+    if (preview_enabled && (!gpu_preview || strcmp(gpu_preview,"0")) && !c->gpu_preview_failed && !working_hdr &&
++    if (!out16 && preview_enabled && (!gpu_preview || strcmp(gpu_preview,"0")) && !c->gpu_preview_failed && !working_hdr &&
 +        c->frame->format == AV_PIX_FMT_D3D11 && c->frame->hw_frames_ctx &&
 +        // Odd subsampled inputs require the visible-size RGB normalization below;
 +        // keep their exact reference sampling until GPU parity is established.
@@ -1082,6 +1082,11 @@ index 8674e4c..f2eaabf 100644
 +    int rows = sws_scale(c->sws_hi, (const uint8_t* const*)frame->data,
 +        frame->linesize, 0, frame->height, dst, lines);
 +    if (rows != dh) return -4;
++    if(out16){
++        if(dw!=ow||dh!=oh)return -20;
++        *out16=rgba;
++        return 0;
++    }
 +    if (dw == ow && dh == oh) {
 +        // A fitted full-canvas picture needs no black clear. SSE2 is part of the
 +        // x64 baseline; convert eight 16-bit channels per iteration without
@@ -1111,6 +1116,8 @@ index 8674e4c..f2eaabf 100644
 +    return 0;
 +}
 +
++static int fpx_hi_blit(FpxCtx*c,float*out,int w,int h){return fpx_hi_blit_impl(c,out,w,h,NULL);}
++
 +// AIR's text raster supplies SDR RGB and alpha coverage. In an HDR master its
 +// white is 100 nits, rather than an untagged PQ code value of 1 (10,000 nits).
 +int fpx_hdr_raster(const unsigned char* rgba8, float* out, int w, int h) {
@@ -1139,7 +1146,7 @@ index 8674e4c..f2eaabf 100644
  // Like fpx_decode_frame_scaled but ASPECT-PRESERVING (letterbox/pillarbox into ow x oh).
  // Forward-decode window (frames): a request this many frames AHEAD of the current decoder position
  // (or fewer) decodes forward WITHOUT seeking — the sequential playback/render case. A larger forward
-@@ -245,7 +687,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -245,7 +694,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
  // returns the exact frame); it only trades a seek for a forward decode. ~1 GOP is the sweet spot.
  #define FPX_SEQ_FWD_WINDOW 300
  
@@ -1148,7 +1155,7 @@ index 8674e4c..f2eaabf 100644
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
      FpxCtx* c = (FpxCtx*)h;
      int64_t target = av_rescale_q(frame_index, av_inv_q(c->frame_rate), c->time_base);
-@@ -271,13 +713,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -271,13 +720,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      // Return the FIRST frame with pts >= target (frame-accurate; identical selection to before).
      int eof_sent = 0;
      for (;;) {
@@ -1162,16 +1169,23 @@ index 8674e4c..f2eaabf 100644
 -                if (fpx_lb_blit(c, out, ow, oh) < 0) { c->have_pos = 0; return -4; }
 +                // Unused source frames never cross the GPU/CPU boundary.
 +                if (!high && fpx_cpu_frame(c) < 0) { c->have_pos = 0; return -4; }
-+                if ((high ? fpx_hi_blit(c, (float*)out, ow, oh) : fpx_lb_blit(c, (unsigned char*)out, ow, oh)) < 0) { c->have_pos = 0; return -4; }
++                if ((high==2 ? fpx_hi_blit_impl(c,NULL,ow,oh,(const uint16_t**)out) : high ? fpx_hi_blit(c, (float*)out, ow, oh) : fpx_lb_blit(c, (unsigned char*)out, ow, oh)) < 0) { c->have_pos = 0; return -4; }
                  return 0;
              }
              continue; // frame is before target: drop it and keep receiving
-@@ -302,6 +746,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -302,6 +753,20 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      }
  }
  
 +int fpx_decode_frame_letterbox(void* h, int index, unsigned char* out, int w, int ht) {
 +    return fpx_decode_letterbox(h, index, out, w, ht, 0);
++}
++// Borrowed post-reference-transform RGBA64. Only even native full-canvas
++// frames qualify; unsupported cases return before advancing decoder state.
++int fpx_decode_frame_u16(void*h,int index,const uint16_t**out,int w,int ht){
++ if(!h||!out)return -1;FpxCtx*c=(FpxCtx*)h;
++ if(w!=c->width||ht!=c->height||(w&1)||(ht&1))return -20;
++ *out=NULL;return fpx_decode_letterbox(h,index,out,w,ht,2);
 +}
 +int fpx_decode_frame_f32(void* h, int index, float* out, int w, int ht) {
 +    return fpx_decode_letterbox(h, index, out, w, ht, 1);
@@ -1180,7 +1194,7 @@ index 8674e4c..f2eaabf 100644
  // Aspect-preserving sequential decode (no seek) — for playback.
  int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
-@@ -310,7 +761,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
+@@ -310,7 +775,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -1189,7 +1203,7 @@ index 8674e4c..f2eaabf 100644
                      if (fpx_lb_blit(c, out, ow, oh) < 0) { av_packet_unref(c->pkt); return -4; }
                      got = 0; break;
                  }
-@@ -332,7 +783,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
+@@ -332,7 +797,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -1198,7 +1212,7 @@ index 8674e4c..f2eaabf 100644
                      uint8_t* dst[4] = { out, NULL, NULL, NULL };
                      int dstln[4] = { c->width * 4, 0, 0, 0 };
                      sws_scale(c->sws, (const uint8_t* const*)c->frame->data, c->frame->linesize,
-@@ -359,7 +810,7 @@ int fpx_nframes(void* h) {
+@@ -359,7 +824,7 @@ int fpx_nframes(void* h) {
      if (st->nb_frames > 0) return (int)st->nb_frames;
      if (c->fmt->duration > 0 && c->frame_rate.num > 0) {
          double secs = (double)c->fmt->duration / AV_TIME_BASE;
@@ -1207,7 +1221,7 @@ index 8674e4c..f2eaabf 100644
      }
      return 0;
  }
-@@ -367,10 +818,19 @@ int fpx_nframes(void* h) {
+@@ -367,10 +832,19 @@ int fpx_nframes(void* h) {
  void fpx_close(void* h) {
      if (!h) return;
      FpxCtx* c = (FpxCtx*)h;
@@ -1413,7 +1427,7 @@ index 805883d..0bf3afd 100644
              int r = fpx__send_audio_frame(e);
              if (r < 0) ret = r;
 diff --git a/gcompose/csrc/fpx_gpu.c b/gcompose/csrc/fpx_gpu.c
-index 0705636..93304c6 100644
+index 0705636..784388c 100644
 --- a/gcompose/csrc/fpx_gpu.c
 +++ b/gcompose/csrc/fpx_gpu.c
 @@ -24,10 +24,17 @@
@@ -1453,7 +1467,20 @@ index 0705636..93304c6 100644
  
  // every per-pixel kernel; VW/VH injected as -D build options.
  static const char* KSRC =
-@@ -72,10 +82,30 @@ static const char* KSRC =
+@@ -61,6 +71,12 @@ static const char* KSRC =
+ "  uint hsh=(uint)(xx+kx)*73856093u ^ (uint)(yy+ky)*19349663u; hsh^=hsh>>13; hsh*=2654435761u;\n"
+ "  return (float)(hsh>>8)*(1.0f/16777216.0f);\n"
+ "}\n"
++// Native reference RGBA64 expands to FP32 with the same SSE2 constant.
++"__kernel void k_unpack_u16(__global const ushort* s,__global float* d){\n"
++"  int x=get_global_id(0),y=get_global_id(1);if(x>=VW||y>=VH)return;int i=IDX(x,y);\n"
++"  const float factor=1.0f/65535.0f;\n"
++"  d[i]=convert_float(s[i])*factor;d[i+1]=convert_float(s[i+1])*factor;d[i+2]=convert_float(s[i+2])*factor;d[i+3]=convert_float(s[i+3])*factor;\n"
++"}\n"
+ // u8 -> f32 [0,1]
+ "__kernel void k_unpack(__global const uchar* s,__global float* d){\n"
+ "  int x=get_global_id(0),y=get_global_id(1); if(x>=VW||y>=VH) return; int i=IDX(x,y);\n"
+@@ -72,10 +88,30 @@ static const char* KSRC =
  "  d[i+0]=(uchar)(clamp01(s[i+0])*255.0f+0.5f); d[i+1]=(uchar)(clamp01(s[i+1])*255.0f+0.5f);\n"
  "  d[i+2]=(uchar)(clamp01(s[i+2])*255.0f+0.5f); d[i+3]=(uchar)(clamp01(s[i+3])*255.0f+0.5f);\n"
  "}\n"
@@ -1484,7 +1511,7 @@ index 0705636..93304c6 100644
  // scope: RGB histogram — 3x256 int bins (R:0..255, G:256..511, B:512..767)
  "__kernel void k_hist_clear(__global int* h){ int i=get_global_id(0); if(i<768) h[i]=0; }\n"
  "__kernel void k_hist(__global const float* s,__global volatile int* h){\n"
-@@ -141,8 +171,13 @@ static const char* KSRC =
+@@ -141,8 +177,13 @@ static const char* KSRC =
  "}\n"
  "__kernel void k_parade_clear(__global int* p){ int i=get_global_id(0); if(i<3*65536) p[i]=0; }\n"
  // composite alpha-over: dst = over*aeff + base*(1-aeff), aeff=over.a*op ; alpha from base
@@ -1499,7 +1526,7 @@ index 0705636..93304c6 100644
  "  float a=over[i+3]*op, inv=1.0f-a;\n"
  "  dst[i+0]=over[i+0]*a+base[i+0]*inv; dst[i+1]=over[i+1]*a+base[i+1]*inv; dst[i+2]=over[i+2]*a+base[i+2]*inv; dst[i+3]=base[i+3];\n"
  "}\n"
-@@ -172,12 +207,18 @@ static const char* KSRC =
+@@ -172,12 +213,18 @@ static const char* KSRC =
  // P31: the over RGB is first combined with the base through fpx_blend(base,over,blend) per channel,
  // THEN the standard alpha-over runs on that blended colour. blend==0 (Normal) => fpx_blend returns the
  // over colour unchanged => this is BYTE-IDENTICAL to the pre-P31 composite. Blend 1..11 alter it.
@@ -1519,7 +1546,7 @@ index 0705636..93304c6 100644
  "    float a=over[si+3]*op, inv=1.0f-a;\n"
  "    float cr=fpx_blend(base[i+0],over[si+0],blend), cg=fpx_blend(base[i+1],over[si+1],blend), cb=fpx_blend(base[i+2],over[si+2],blend);\n"
  "    dst[i+0]=cr*a+base[i+0]*inv; dst[i+1]=cg*a+base[i+1]*inv; dst[i+2]=cb*a+base[i+2]*inv; dst[i+3]=base[i+3];\n"
-@@ -265,71 +306,77 @@ static const char* KSRC =
+@@ -265,71 +312,77 @@ static const char* KSRC =
  "  d[i+0]=clamp01(rr*sl+noise); d[i+1]=clamp01(gg*sl+noise); d[i+2]=clamp01(bb*sl+noise); d[i+3]=s[i+3];\n"
  "}\n"
  // ---- transitions (t in [0,1]; alpha from base) ----
@@ -1617,7 +1644,7 @@ index 0705636..93304c6 100644
  "}\n"
  // ---- P2 color/transform effects (Shotcut-parity) ----
  // 3-way color wheels: per channel out = clamp01( pow( clamp01(in*gain + lift), 1/gamma ) ). Identity
-@@ -420,7 +467,7 @@ static const char* KSRC =
+@@ -420,7 +473,7 @@ static const char* KSRC =
  // into 'd'. Inverse map: for each dst pixel, undo the scale (divide) and rotation (rotate by -rot),
  // sample s. Out-of-bounds -> transparent black. Identity at rot=0, scale=1. Reads s, writes d (NEVER
  // the same buffer in place — caller passes a distinct source copy). 'rot_deg'/'scl' are NOT reserved.
@@ -1626,7 +1653,7 @@ index 0705636..93304c6 100644
  "  int x=get_global_id(0),y=get_global_id(1); if(x>=VW||y>=VH) return; int di=IDX(x,y);\n"
  "  float cx=(float)w*0.5f, cy=(float)h*0.5f;\n"
  "  float sf=(scl>1e-4f?scl:1e-4f);\n"
-@@ -435,36 +482,43 @@ static const char* KSRC =
+@@ -435,36 +488,43 @@ static const char* KSRC =
  "  int cy0=y0<0?0:(y0>h-1?h-1:y0), cy1=y1<0?0:(y1>h-1?h-1:y1);\n"
  "  int i00=IDX(cx0,cy0), i10=IDX(cx1,cy0), i01=IDX(cx0,cy1), i11=IDX(cx1,cy1);\n"
  "  float w00=(1.0f-fx)*(1.0f-fy), w10=fx*(1.0f-fy), w01=(1.0f-fx)*fy, w11=fx*fy;\n"
@@ -1679,7 +1706,7 @@ index 0705636..93304c6 100644
  "}\n"
  // ---- P7 COLOR filters (Shotcut-parity). Both run on the composited OUTB AFTER the P6 filters (flip),
  // BEFORE the look, in place per-pixel (own pixel only), in the pinned order HSL -> LEVELS. Each is a
-@@ -882,7 +936,7 @@ static const char* KSRC =
+@@ -882,7 +942,7 @@ static const char* KSRC =
  // (inside) to 0 (outside): m=1 for dist<=1-fw, m=0 for dist>=1, linear in between; 'inv' flips it.
  // RGB is scaled by m (alpha also scales in an upper-clip pass). VW/VH/IDX are existing macros;
  // none of the locals (nx/ny/dx/dy/dist/fw/m) are reserved OpenCL words.
@@ -1688,7 +1715,7 @@ index 0705636..93304c6 100644
  "  int x=get_global_id(0),y=get_global_id(1); if(x>=VW||y>=VH) return; int i=IDX(x,y);\n"
  "  float nx=((float)x+0.5f)/(float)VW, ny=((float)y+0.5f)/(float)VH;\n"
  "  float dx=(nx-cx)/fmax(rw,1e-4f), dy=(ny-cy)/fmax(rh,1e-4f);\n"
-@@ -891,7 +945,7 @@ static const char* KSRC =
+@@ -891,7 +951,7 @@ static const char* KSRC =
  "  float m;\n"
  "  if(dist<=1.0f-fw) m=1.0f; else if(dist>=1.0f) m=0.0f; else m=(1.0f-dist)/fw;\n"
  "  if(inv) m=1.0f-m;\n"
@@ -1697,7 +1724,7 @@ index 0705636..93304c6 100644
  "  if(cut_alpha) d[i+3]*=m;\n"
  "}\n"
  // ---- P38 DISTORTION FILTER BATCH (Shotcut-parity distort family). Three per-clip filters run on the
-@@ -965,14 +1019,14 @@ static const char* KSRC =
+@@ -965,14 +1025,14 @@ static const char* KSRC =
  "}\n"
  // FADE TO BLACK (P45): multiply RGB by the fade factor f (0=black, 1=full). f>=1 never reaches here
  // (caller skips), so a non-faded frame is byte-identical. Alpha untouched.
@@ -1711,11 +1738,11 @@ index 0705636..93304c6 100644
  // cached kernel objects (clCreateKernel once)
  static cl_kernel K(const char* name){ cl_int e; cl_kernel k = clCreateKernel(g_prog, name, &e); return (e==CL_SUCCESS)?k:NULL; }
 -static cl_kernel kUnpack,kPack,kCopy,kComposite,kPip,kBright,kContrast,kSat,kLut,kVhs;
-+static cl_kernel kFit,kUnpack,kPack,kPackMonitor,kCopy,kComposite,kPip,kBright,kContrast,kSat,kLut,kVhs;
++static cl_kernel kFit,kUnpack,kUnpackU16,kPack,kPackMonitor,kCopy,kComposite,kPip,kBright,kContrast,kSat,kLut,kVhs;
  static cl_kernel kHistClear,kHist;
  static cl_kernel kGridClear,kWaveAcc,kWaveImg,kVecAcc,kVecImg;
  static cl_kernel kParadeClear,kParadeAcc,kParadeImg;
-@@ -997,49 +1051,577 @@ static cl_kernel kChroma; // P4 chroma key (green-screen) on the OVER buffer
+@@ -997,49 +1057,581 @@ static cl_kernel kChroma; // P4 chroma key (green-screen) on the OVER buffer
  static cl_kernel kTrans[11]; // 0..10 (P36 added 8=iris, 9=clock, 10=barndoor)
  
  static int launch(cl_kernel k){
@@ -1750,6 +1777,7 @@ index 0705636..93304c6 100644
 +  cl_mem g_tmp2;
 +  cl_kernel kFit;
 +  cl_kernel kUnpack;
++  cl_kernel kUnpackU16;
 +  cl_kernel kPack;
 +  cl_kernel kPackMonitor;
 +  cl_kernel kCopy;
@@ -1869,6 +1897,7 @@ index 0705636..93304c6 100644
 +  c->g_tmp2=g_tmp2;
 +  c->kFit=kFit;
 +  c->kUnpack=kUnpack;
++  c->kUnpackU16=kUnpackU16;
 +  c->kPack=kPack;
 +  c->kPackMonitor=kPackMonitor;
 +  c->kCopy=kCopy;
@@ -1946,6 +1975,7 @@ index 0705636..93304c6 100644
 +  g_tmp2=c->g_tmp2;
 +  kFit=c->kFit;
 +  kUnpack=c->kUnpack;
++  kUnpackU16=c->kUnpackU16;
 +  kPack=c->kPack;
 +  kPackMonitor=c->kPackMonitor;
 +  kCopy=c->kCopy;
@@ -2020,6 +2050,7 @@ index 0705636..93304c6 100644
 +  if(c->g_tmp2)clReleaseMemObject(c->g_tmp2);
 +  if(c->kFit)clReleaseKernel(c->kFit);
 +  if(c->kUnpack)clReleaseKernel(c->kUnpack);
++  if(c->kUnpackU16)clReleaseKernel(c->kUnpackU16);
 +  if(c->kPack)clReleaseKernel(c->kPack);
 +  if(c->kPackMonitor)clReleaseKernel(c->kPackMonitor);
 +  if(c->kCopy)clReleaseKernel(c->kCopy);
@@ -2310,16 +2341,16 @@ index 0705636..93304c6 100644
 +  g_parade= clCreateBuffer(g_ctx, CL_MEM_READ_WRITE, 3*65536*sizeof(int), NULL, &e); if(e!=CL_SUCCESS) {init_error=-15;goto fail;}
 +  g_tmp   = clCreateBuffer(g_ctx, CL_MEM_READ_WRITE, GN*sizeof(float), NULL, &e); if(e!=CL_SUCCESS) {init_error=-17;goto fail;} // P2 scratch
 +  g_tmp2  = clCreateBuffer(g_ctx, CL_MEM_READ_WRITE, GN*sizeof(float), NULL, &e); if(e!=CL_SUCCESS) {init_error=-30;goto fail;} // P9 scratch #2 (glow)
-+  kFit=K("k_fit_f32"); kUnpack=K("k_unpack"); kPack=K("k_pack"); kPackMonitor=K("k_pack_monitor"); kCopy=K("k_copy"); kComposite=K("k_composite"); kPip=K("k_pip");
++  kFit=K("k_fit_f32"); kUnpack=K("k_unpack"); kUnpackU16=K("k_unpack_u16"); kPack=K("k_pack"); kPackMonitor=K("k_pack_monitor"); kCopy=K("k_copy"); kComposite=K("k_composite"); kPip=K("k_pip");
    kBright=K("k_brightness"); kContrast=K("k_contrast"); kSat=K("k_saturation"); kLut=K("k_lut3d"); kVhs=K("k_vhs");
    kHistClear=K("k_hist_clear"); kHist=K("k_hist");
    kGridClear=K("k_grid_clear"); kWaveAcc=K("k_wave_acc"); kWaveImg=K("k_wave_img"); kVecAcc=K("k_vec_acc"); kVecImg=K("k_vec_img");
-@@ -1065,91 +1647,93 @@ int fpx_gpu_init(void){
+@@ -1065,91 +1657,93 @@ int fpx_gpu_init(void){
    kTrans[0]=K("k_crossfade"); kTrans[1]=K("k_wipe_lr"); kTrans[2]=K("k_wipe_rl"); kTrans[3]=K("k_wipe_up");
    kTrans[4]=K("k_wipe_down"); kTrans[5]=K("k_slide_lr"); kTrans[6]=K("k_zoom"); kTrans[7]=K("k_dissolve");
    kTrans[8]=K("k_iris"); kTrans[9]=K("k_clock"); kTrans[10]=K("k_barndoor"); // P36 luma wipes
 -  if(!kUnpack||!kPack||!kComposite||!kPip||!kBright||!kContrast||!kLut||!kVhs||!kTrans[7]||!kTrans[10]) return -10;
-+  if(!kFit||!kUnpack||!kPack||!kPackMonitor||!kComposite||!kPip||!kBright||!kContrast||!kLut||!kVhs||!kTrans[7]||!kTrans[10]) {init_error=-10;goto fail;}
++  if(!kFit||!kUnpack||!kUnpackU16||!kPack||!kPackMonitor||!kComposite||!kPip||!kBright||!kContrast||!kLut||!kVhs||!kTrans[7]||!kTrans[10]) {init_error=-10;goto fail;}
    // scope kernels must build too — else a SCOPE command later launches a NULL kernel (segfault).
 -  if(!kHistClear||!kHist||!kGridClear||!kWaveAcc||!kWaveImg||!kVecAcc||!kVecImg) return -14;
 +  if(!kHistClear||!kHist||!kGridClear||!kWaveAcc||!kWaveImg||!kVecAcc||!kVecImg) {init_error=-14;goto fail;}
@@ -2449,7 +2480,22 @@ index 0705636..93304c6 100644
  }
  
  // upload an RGBA8 frame to slot (0=base,1=over,2=trans): staging u8 -> unpack -> float buf.
-@@ -1177,11 +1761,12 @@ int fpx_gpu_upload_lut(const float* lut, int nfloats){
+@@ -1164,6 +1758,14 @@ int fpx_gpu_upload_u8(int slot, const unsigned char* rgba8){
+   clSetKernelArg(kUnpack,0,sizeof(cl_mem),&g_stage); clSetKernelArg(kUnpack,1,sizeof(cl_mem),&g_buf[slot]);
+   return launch(kUnpack);
+ }
++// Existing budgeted scratch carries packed input. Blocking write completes
++// the borrowed host buffer; in-order expansion precedes scratch reuse.
++int fpx_gpu_upload_u16(int slot,const uint16_t*rgba){
++ if(!g_ready||slot<0||slot>2||!rgba)return -1;
++ if(clEnqueueWriteBuffer(g_q,g_tmp,CL_TRUE,0,(size_t)GN*sizeof(uint16_t),rgba,0,NULL,NULL)!=CL_SUCCESS)return -2;
++ if(clSetKernelArg(kUnpackU16,0,sizeof(cl_mem),&g_tmp)!=CL_SUCCESS||clSetKernelArg(kUnpackU16,1,sizeof(cl_mem),&g_buf[slot])!=CL_SUCCESS)return -2;
++ return launch(kUnpackU16);
++}
+ int fpx_gpu_upload_f32(int slot, const float* f32){
+   if(!g_ready||slot<0||slot>2||!f32) return -1; // CL_TRUE: transient host buffer (see fpx_gpu_upload_u8).
+   return clEnqueueWriteBuffer(g_q,g_buf[slot],CL_TRUE,0,GN*sizeof(float),f32,0,NULL,NULL)==CL_SUCCESS?0:-2;
+@@ -1177,11 +1779,12 @@ int fpx_gpu_upload_lut(const float* lut, int nfloats){
  void fpx_gpu_track1(int tt, float t, float param){
    if(!g_ready) return;
    if(tt<0||tt>10){ clSetKernelArg(kComposite,0,sizeof(cl_mem),&g_buf[BASE]); clSetKernelArg(kComposite,1,sizeof(cl_mem),&g_buf[TRANS]);
@@ -2463,7 +2509,7 @@ index 0705636..93304c6 100644
    launch(k);
  }
  // P2 TRANSFORM: rotate (degrees) + uniform scale the BASE frame (TRACK1 buffer) about its center,
-@@ -1199,6 +1784,7 @@ void fpx_gpu_transform(float rot_deg, float scale){
+@@ -1199,6 +1802,7 @@ void fpx_gpu_transform(float rot_deg, float scale){
    clSetKernelArg(kTransform,0,sizeof(cl_mem),&g_tmp); clSetKernelArg(kTransform,1,sizeof(cl_mem),&g_buf[TRACK1]);
    clSetKernelArg(kTransform,2,sizeof(float),&rot_deg); clSetKernelArg(kTransform,3,sizeof(float),&scale);
    clSetKernelArg(kTransform,4,sizeof(int),&w); clSetKernelArg(kTransform,5,sizeof(int),&h);
@@ -2471,7 +2517,7 @@ index 0705636..93304c6 100644
    launch(kTransform);
  }
  // P4 CHROMA KEY: zero/soften the OVER buffer's ALPHA where the pixel matches the key colour, IN PLACE
-@@ -1224,7 +1810,7 @@ void fpx_gpu_pip(float op, int blend, float px, float py, float pw, float ph){
+@@ -1224,7 +1828,7 @@ void fpx_gpu_pip(float op, int blend, float px, float py, float pw, float ph){
    if(!g_ready) return;
    clSetKernelArg(kPip,0,sizeof(cl_mem),&g_buf[TRACK1]); clSetKernelArg(kPip,1,sizeof(cl_mem),&g_buf[OVER]); clSetKernelArg(kPip,2,sizeof(cl_mem),&g_buf[INB]);
    clSetKernelArg(kPip,3,sizeof(float),&op); clSetKernelArg(kPip,4,sizeof(int),&blend); clSetKernelArg(kPip,5,sizeof(float),&px); clSetKernelArg(kPip,6,sizeof(float),&py);
@@ -2480,7 +2526,7 @@ index 0705636..93304c6 100644
  }
  // mid = brightness(in); out = contrast(mid); out = saturation(out) in-place (skip if sat==1)
  void fpx_gpu_grade(float bright, float contrast, float sat){
-@@ -1266,8 +1852,8 @@ void fpx_gpu_lgg(float lr,float lg,float lb,float gar,float gag,float gab,float
+@@ -1266,8 +1870,8 @@ void fpx_gpu_lgg(float lr,float lg,float lb,float gar,float gag,float gab,float
  // lgg, BEFORE look. Horizontal pass OUTB->g_tmp, vertical pass g_tmp->OUTB.
  void fpx_gpu_blur(float sigma){
    if(!g_ready || sigma<=0.0f) return; // identity / no-op blur: leave OUTB untouched.
@@ -2491,7 +2537,7 @@ index 0705636..93304c6 100644
  }
  // P5 CURVE: a 5-point master tone curve, IN PLACE on OUTB. The identity (0,.25,.5,.75,1) is skipped
  // so an un-curved clip is a true no-op. Runs AFTER blur, BEFORE look.
-@@ -1375,15 +1961,15 @@ void fpx_gpu_denoise(float strength){
+@@ -1375,15 +1979,15 @@ void fpx_gpu_denoise(float strength){
  // amt*g_tmp2). The blur ping-pongs g_tmp2->g_tmp->g_tmp2, so the final blurred bright pass lands back
  // in g_tmp2 (what k_glow_combine reads). g_tmp is only borrowed mid-sequence and is not relied on
  // after; OUTB is untouched until the combine. Runs after denoise, before rgb-shift.
@@ -2510,7 +2556,7 @@ index 0705636..93304c6 100644
    // 3) combine: OUTB = clamp01(OUTB + amt*g_tmp2).
    clSetKernelArg(kGlowCombine,0,sizeof(cl_mem),&g_buf[OUTB]); clSetKernelArg(kGlowCombine,1,sizeof(cl_mem),&g_tmp2); clSetKernelArg(kGlowCombine,2,sizeof(float),&amt);
    launch(kGlowCombine);
-@@ -1504,6 +2090,7 @@ void fpx_gpu_lens(float k){
+@@ -1504,6 +2108,7 @@ void fpx_gpu_lens(float k){
  // P17 CROP (margins to black): all-zero margins skip. PER-PIXEL IN PLACE on OUTB (own pixel
  // only, no g_tmp copy — like threshold/hsl/levels). Runs after lens, before glitch.
  void fpx_gpu_crop_rect_alpha(float left,float top,float right,float bottom,int cut_alpha){
@@ -2518,7 +2564,7 @@ index 0705636..93304c6 100644
    if(!g_ready || (left<=0.0f && top<=0.0f && right<=0.0f && bottom<=0.0f)) return;
    clSetKernelArg(kCrop,0,sizeof(cl_mem),&g_buf[OUTB]);
    clSetKernelArg(kCrop,1,sizeof(float),&left); clSetKernelArg(kCrop,2,sizeof(float),&top);
-@@ -1548,6 +2135,7 @@ void fpx_gpu_eq2rect(int enable, float yaw_deg, float pitch_deg, float fov_deg){
+@@ -1548,6 +2153,7 @@ void fpx_gpu_eq2rect(int enable, float yaw_deg, float pitch_deg, float fov_deg){
  // feather = soft-edge band width (normalized), inv (1/0) flips inside<->outside. Runs AFTER the P23
  // reframe, BEFORE the look. shape 1 = rectangle (Chebyshev distance), 2 = ellipse (euclidean radius).
  void fpx_gpu_mask_alpha(int shape,float cx,float cy,float rw,float rh,float feather,int inv,int cut_alpha){
@@ -2526,7 +2572,7 @@ index 0705636..93304c6 100644
    if(!g_ready || shape==0) return;
    clSetKernelArg(kMask,0,sizeof(cl_mem),&g_buf[OUTB]);
    clSetKernelArg(kMask,1,sizeof(int),&shape);
-@@ -1555,6 +2143,7 @@ void fpx_gpu_mask_alpha(int shape,float cx,float cy,float rw,float rh,float feat
+@@ -1555,6 +2161,7 @@ void fpx_gpu_mask_alpha(int shape,float cx,float cy,float rw,float rh,float feat
    clSetKernelArg(kMask,4,sizeof(float),&rw); clSetKernelArg(kMask,5,sizeof(float),&rh);
    clSetKernelArg(kMask,6,sizeof(float),&feather); clSetKernelArg(kMask,7,sizeof(int),&inv);
    clSetKernelArg(kMask,8,sizeof(int),&cut_alpha);
@@ -2534,7 +2580,7 @@ index 0705636..93304c6 100644
    launch(kMask);
  }
  void fpx_gpu_mask(int shape,float cx,float cy,float rw,float rh,float feather,int inv){
-@@ -1582,7 +2171,7 @@ void fpx_gpu_solarize(float thr){ if(thr<=0.0f) return; clSetKernelArg(kSolarize
+@@ -1582,7 +2189,7 @@ void fpx_gpu_solarize(float thr){ if(thr<=0.0f) return; clSetKernelArg(kSolarize
  // in place. t==0 -> no-op (skip) so the default result is byte-identical to pre-P41. Runs after solarize.
  void fpx_gpu_temp(float t){ if(t==0.0f) return; clSetKernelArg(kTemp,0,sizeof(cl_mem),&g_buf[OUTB]); clSetKernelArg(kTemp,1,sizeof(float),&t); launch(kTemp); }
  // P45 video fade-to-black: multiply OUTB rgb by f. f>=1 is a no-op (caller skips), so a non-faded frame is byte-identical.
@@ -2543,7 +2589,7 @@ index 0705636..93304c6 100644
  // look: 0=none (final=out), 1=vhs, 2=lut3d -> final=look ; returns 1 if final is LOOK else 0
  int fpx_gpu_look(int kind, float amt, int lut_n){
    if(!g_ready) return 0;
-@@ -1593,15 +2182,44 @@ int fpx_gpu_look(int kind, float amt, int lut_n){
+@@ -1593,15 +2200,44 @@ int fpx_gpu_look(int kind, float amt, int lut_n){
  }
  // download final buffer (0=out,1=look) -> host f32 (blocking)
  void fpx_gpu_download_f32(int final_is_look, float* out){
@@ -2589,7 +2635,7 @@ index 0705636..93304c6 100644
  void fpx_gpu_histogram(int final_is_look, int* out_hist){
    if(!g_ready||!out_hist) return; int b = final_is_look?LOOKB:OUTB;
 diff --git a/gcompose/src/ffi.rs b/gcompose/src/ffi.rs
-index 7bc6fbe..885c6bc 100644
+index 7bc6fbe..95c07e3 100644
 --- a/gcompose/src/ffi.rs
 +++ b/gcompose/src/ffi.rs
 @@ -7,6 +7,10 @@ use std::ffi::CString;
@@ -2603,10 +2649,11 @@ index 7bc6fbe..885c6bc 100644
      fn fpx_open(path: *const c_char) -> *mut c_void;
      fn fpx_decode_frame_letterbox(
          h: *mut c_void,
-@@ -15,12 +19,29 @@ extern "C" {
+@@ -15,12 +19,31 @@ extern "C" {
          ow: c_int,
          oh: c_int,
      ) -> c_int;
++    fn fpx_decode_frame_u16(h:*mut c_void,frame:c_int,out:*mut *const u16,w:c_int,ht:c_int)->c_int;
 +    fn fpx_decode_frame_f32(h: *mut c_void, frame: c_int, out: *mut f32, w: c_int, ht: c_int) -> c_int;
      fn fpx_close(h: *mut c_void);
      // Total video frame count (stream nb_frames, else estimated from duration*fps). 0 if unknown.
@@ -2630,11 +2677,12 @@ index 7bc6fbe..885c6bc 100644
 +    fn fpx_gpu_picture_upload(slot:c_int,epoch:u64,id:u64,fit:c_int)->c_int;
 +    fn fpx_gpu_upload_fitted_f32(slot: c_int, data: *const f32, w: c_int, h: c_int, opaque: c_int) -> c_int;
 +    fn fpx_gpu_set_size(width: c_int, height: c_int) -> c_int;
++    fn fpx_gpu_upload_u16(slot:c_int,rgba:*const u16)->c_int;
 +    fn fpx_gpu_upload_f32(slot: c_int, rgba: *const f32) -> c_int;
      fn fpx_gpu_upload_u8(slot: c_int, rgba8: *const u8) -> c_int;
      fn fpx_gpu_track1(tt: c_int, t: f32, param: f32);
      // P31: `blend` (0=Normal..7=Difference) selects the per-channel blend of the over RGB with the
-@@ -238,6 +259,7 @@ extern "C" {
+@@ -238,6 +261,7 @@ extern "C" {
      // success, negative on a bad arg / CL write failure.
      fn fpx_gpu_upload_lut(lut: *const f32, nfloats: c_int) -> c_int;
      fn fpx_gpu_download_u8(final_is_look: c_int, out: *mut u8);
@@ -2642,7 +2690,7 @@ index 7bc6fbe..885c6bc 100644
      fn fpx_gpu_download_f32(final_is_look: c_int, out: *mut f32);
      fn fpx_gpu_finish();
  
-@@ -301,24 +323,11 @@ extern "C" {
+@@ -301,24 +325,11 @@ extern "C" {
      fn fpx_enc_finish(h: *mut c_void) -> c_int;
      fn fpx_enc_close(h: *mut c_void);
  
@@ -2672,7 +2720,7 @@ index 7bc6fbe..885c6bc 100644
  
      // Audio / asset shims (fpx_aread.c).
      //   fpx_audio_envelope: whole-track peak envelope into out[nbuckets] (0..1).
-@@ -339,9 +348,18 @@ extern "C" {
+@@ -339,9 +350,18 @@ extern "C" {
      ) -> c_int;
  }
  
@@ -2694,7 +2742,7 @@ index 7bc6fbe..885c6bc 100644
  
  /// Scope-image dimensions (fpx_gpu.c renders waveform/vectorscope as a fixed SVW×SVH RGBA8 image,
  /// and the histogram is rendered into the same size here). Matches the C shim's hard-coded 256×256
-@@ -363,7 +381,33 @@ pub struct Gpu {
+@@ -363,7 +383,33 @@ pub struct Gpu {
      _priv: (),
  }
  
@@ -2728,7 +2776,7 @@ index 7bc6fbe..885c6bc 100644
      /// Initialize OpenCL + compile kernels. Returns None if no usable device / build fails.
      pub fn init() -> Option<Gpu> {
          eprintln!("[gpu] init...");
-@@ -412,8 +456,8 @@ impl Gpu {
+@@ -412,8 +458,8 @@ impl Gpu {
      /// void), so `--serve` fails fast + clean BEFORE printing "serve ready" rather than serving a
      /// broken worker whose first real PREVIEW/ENC would produce garbage.
      ///
@@ -2739,7 +2787,7 @@ index 7bc6fbe..885c6bc 100644
      /// exact and the check was a tautology that could never fail. The real signal is the pixel
      /// VALUES: we pre-fill the output with a sentinel that the upload value can't produce, upload a
      /// mid-gray (0x7F) frame, run an identity grade, and require the download to have (a) overwritten
-@@ -429,13 +473,13 @@ impl Gpu {
+@@ -429,13 +475,13 @@ impl Gpu {
          const SENTINEL: u8 = 0xAB; // pre-fill the download buffer with a value upload can't produce
  
          // Upload a uniform mid-gray frame into slot 0; op=0 disables PiP so slot 1 isn't required.
@@ -2755,7 +2803,7 @@ index 7bc6fbe..885c6bc 100644
          unsafe {
              fpx_gpu_track1(-1, 0.0, 4.0); // no transition: copy base (slot 0)
              fpx_gpu_pip(0.0, 0, 0.0, 0.0, 1.0, 1.0); // op=0: no overlay (blend=0 Normal)
-@@ -445,11 +489,11 @@ impl Gpu {
+@@ -445,11 +491,11 @@ impl Gpu {
              fpx_gpu_finish();
          }
  
@@ -2769,7 +2817,7 @@ index 7bc6fbe..885c6bc 100644
              );
              return false;
          }
-@@ -509,12 +553,26 @@ impl Gpu {
+@@ -509,12 +555,26 @@ impl Gpu {
          true
      }
  
@@ -2798,7 +2846,7 @@ index 7bc6fbe..885c6bc 100644
      /// Run the FIRST stage of the on-device pipeline directly (the transition / track-1 blend).
      ///
      /// `tt` = transition kind: -1 = none (copy slot-0 base into the track-1 buffer, today's
-@@ -552,7 +610,7 @@ impl Gpu {
+@@ -552,7 +612,7 @@ impl Gpu {
      }
  
      /// Run the on-device pipeline (no transition → PiP composite of slot1 over slot0 → grade →
@@ -2807,7 +2855,7 @@ index 7bc6fbe..885c6bc 100644
      ///
      /// `look_kind` selects the look (0=none, 1=VHS, 2=LUT3D), `look_amt` is the mix, and `lut_n` is
      /// the uploaded LUT's grid size N (only read by the kernel when `look_kind==2`; pass 0 otherwise).
-@@ -573,7 +631,7 @@ impl Gpu {
+@@ -573,7 +633,7 @@ impl Gpu {
          look_amt: f32,
          lut_n: i32,
      ) -> (Vec<u8>, bool) {
@@ -2816,7 +2864,7 @@ index 7bc6fbe..885c6bc 100644
          let fin = unsafe {
              fpx_gpu_track1(-1, 0.0, 4.0); // no transition: copy base (slot 0)
              fpx_gpu_pip(op, 0, px, py, pw, ph); // composite slot 1 over, into the PiP rect (blend=0 Normal)
-@@ -586,275 +644,10 @@ impl Gpu {
+@@ -586,275 +646,10 @@ impl Gpu {
          (out, fin != 0)
      }
  
@@ -3094,7 +3142,7 @@ index 7bc6fbe..885c6bc 100644
          &self,
          tt: i32,
          trans_prog: f32,
-@@ -1030,8 +823,7 @@ impl Gpu {
+@@ -1030,8 +825,7 @@ impl Gpu {
          // P45 VIDEO FADE: per-frame brightness factor in [0,1] (1.0 = no fade). Applied LAST on OUTB.
          fade: f32,
          spatial_alpha: i32,
@@ -3104,7 +3152,7 @@ index 7bc6fbe..885c6bc 100644
          let fin = unsafe {
              fpx_gpu_track1(tt as c_int, trans_prog, trans_param); // transition (or -1 copy base)
              fpx_gpu_transform(rot, scale); // P2: rotate+scale the BASE frame (TRACK1), before pip
-@@ -1101,11 +893,34 @@ impl Gpu {
+@@ -1101,11 +895,34 @@ impl Gpu {
              // P45 video fade-to-black — the LAST OUTB op, so the whole composed frame fades. f>=1 = skip.
              fpx_gpu_fade(fade);
              let fin = fpx_gpu_look(look_kind as c_int, look_amt, lut_n as c_int);
@@ -3142,7 +3190,7 @@ index 7bc6fbe..885c6bc 100644
      }
  
      /// Same pipeline as `compose`, but downloads the result as RGBA **f32** in [0,1] — the
-@@ -1129,7 +944,7 @@ impl Gpu {
+@@ -1129,7 +946,7 @@ impl Gpu {
          look_amt: f32,
          lut_n: i32,
      ) -> (Vec<f32>, bool) {
@@ -3151,7 +3199,7 @@ index 7bc6fbe..885c6bc 100644
          let fin = unsafe {
              fpx_gpu_track1(-1, 0.0, 4.0); // no transition: copy base (slot 0)
              fpx_gpu_pip(op, 0, px, py, pw, ph); // composite slot 1 over, into the PiP rect (blend=0 Normal)
-@@ -1431,9 +1246,11 @@ pub fn decode_audio_range(
+@@ -1431,9 +1248,11 @@ pub fn decode_audio_range(
      // `cap <= 0` guard or silently truncate the decoded audio. Callers already clamp (see
      // audio_feed's CAP_MAX), but clamp here too so this wrapper is sound for ANY caller. We shrink
      // the requested cap to the largest value the c_int can carry rather than over-allocating.
@@ -3165,7 +3213,7 @@ index 7bc6fbe..885c6bc 100644
      let rc = unsafe {
          fpx_decode_audio_range(
              c.as_ptr(),
-@@ -1453,65 +1270,18 @@ pub fn decode_audio_range(
+@@ -1453,65 +1272,18 @@ pub fn decode_audio_range(
      Some(buf)
  }
  
@@ -3235,7 +3283,7 @@ index 7bc6fbe..885c6bc 100644
  }
  
  impl Decoder {
-@@ -1522,7 +1292,7 @@ impl Decoder {
+@@ -1522,7 +1294,7 @@ impl Decoder {
          if h.is_null() {
              None
          } else {
@@ -3244,7 +3292,7 @@ index 7bc6fbe..885c6bc 100644
          }
      }
  
-@@ -1546,6 +1316,34 @@ impl Decoder {
+@@ -1546,6 +1318,49 @@ impl Decoder {
          }
      }
  
@@ -3254,6 +3302,21 @@ index 7bc6fbe..885c6bc 100644
 +        self.pixels.resize(w.checked_mul(h)?.checked_mul(4)?, 0.0);
 +        let rc = unsafe { fpx_decode_frame_f32(self.h, frame, self.pixels.as_mut_ptr(), w as c_int, h as c_int) };
 +        if rc >= 0 { Some(&self.pixels) } else { None }
++    }
++
++    /// Borrowed native reference RGBA64 is consumed by a blocking upload.
++    /// None means unsupported before decode; Some(false) is a real failure.
++    pub fn upload_native_u16(&mut self,slot:i32,frame:i32,w:usize,h:usize)->Option<bool>{
++        if std::env::var("GENESIS_NATIVE_U16_UPLOAD").ok().as_deref()==Some("0"){return None;}
++        if w%2!=0||h%2!=0||w!=unsafe{fpx_width(self.h)} as usize||h!=unsafe{fpx_height(self.h)} as usize{return None;}
++        let timer=std::time::Instant::now();let mut pixels=std::ptr::null();
++        let rc=unsafe{fpx_decode_frame_u16(self.h,frame,&mut pixels,w as c_int,h as c_int)};
++        let decoded=timer.elapsed().as_micros();
++        let uploaded=rc>=0&&!pixels.is_null()&&unsafe{fpx_gpu_upload_u16(slot as c_int,pixels)}==0;
++        if let Some(path)=std::env::var_os("GENESIS_GPU_PHASE_LOG"){
++            if let Ok(mut log)=std::fs::OpenOptions::new().append(true).create(true).open(path){let row=format!("NATIVE16\tdecode\t{}\tupload\t{}\n",decoded,timer.elapsed().as_micros()-decoded);let _=std::io::Write::write_all(&mut log,row.as_bytes());}
++        }
++        Some(uploaded)
 +    }
 +
 +    pub fn decode_compound_view(&mut self, frame:i32, w:usize, h:usize) -> Option<&[f32]> {
@@ -3279,7 +3342,7 @@ index 7bc6fbe..885c6bc 100644
      /// Total video frame count of the open media (0 if unknown). Used to clamp a clip's length so it
      /// never references source frames past the media end.
      pub fn nframes(&self) -> i32 {
-@@ -1558,3 +1356,61 @@ impl Drop for Decoder {
+@@ -1558,3 +1373,61 @@ impl Drop for Decoder {
          unsafe { fpx_close(self.h) };
      }
  }
@@ -3342,7 +3405,7 @@ index 7bc6fbe..885c6bc 100644
 +    { true }
 +}
 diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
-index c987aa3..44992d4 100644
+index c987aa3..43eace1 100644
 --- a/gcompose/src/main.rs
 +++ b/gcompose/src/main.rs
 @@ -22,6 +22,13 @@
@@ -3413,9 +3476,11 @@ index c987aa3..44992d4 100644
  
      let stdin = std::io::stdin();
      let mut stdout = std::io::stdout();
-@@ -291,8 +312,31 @@ fn serve() {
+@@ -290,9 +311,33 @@ fn serve() {
+ 
          // Dispatch on the leading keyword; a line with no keyword is the legacy preview frame.
          let kw = line.split_whitespace().next().unwrap_or("");
++        let phase_command_start=std::time::Instant::now();
          let reply: Reply = match kw {
 +            "PICBEGIN"=>{
 +                let f:Vec<&str>=line.split_whitespace().collect();
@@ -3446,7 +3511,7 @@ index c987aa3..44992d4 100644
                      line,
                      &mut enc,
                      &mut enc_fps,
-@@ -306,7 +350,7 @@ fn serve() {
+@@ -306,7 +351,7 @@ fn serve() {
                  }
              }
              "ENC" => {
@@ -3455,13 +3520,13 @@ index c987aa3..44992d4 100644
                      &gpu,
                      &mut decoders,
                      &mut lut_cache,
-@@ -323,8 +367,11 @@ fn serve() {
+@@ -323,8 +368,11 @@ fn serve() {
              }
              // AUDIO no longer feeds the encoder directly: it MIXES one decoded clip range into the
              // active program-audio accumulator (render or playback) at a destination offset.
 -            "AUDIO" => {
 -                if audio_mix(&mut prog, line) {
-+            "NESTBEGIN" | "NESTLEAF" | "NESTBUS" | "NESTCOMMIT" | "NESTMIX" => {
++            "NESTBEGIN" | "NESTLEAF" | "NESTBUS" | "NESTCOMMIT" | "NESTMIX" | "NESTENV" => {
 +                if nested_audio.command(&mut prog, line) { Reply::Done(None) } else { Reply::Err }
 +            }
 +            "AUDIO" | "AUDIOSTREAM" => {
@@ -3469,7 +3534,7 @@ index c987aa3..44992d4 100644
                      Reply::Done(None)
                  } else {
                      Reply::Err
-@@ -348,9 +395,21 @@ fn serve() {
+@@ -348,9 +396,21 @@ fn serve() {
                      Reply::Err
                  }
              }
@@ -3492,7 +3557,7 @@ index c987aa3..44992d4 100644
                  None => Reply::Err,
              },
              // MEAS begins a MEASUREMENT-only accumulator session (no encoder, no WAV) — the level
-@@ -391,10 +450,9 @@ fn serve() {
+@@ -391,10 +451,9 @@ fn serve() {
                  // drain and finishes video-only.
                  let ok = match enc.take() {
                      Some(mut e) => {
@@ -3506,7 +3571,7 @@ index c987aa3..44992d4 100644
                      }
                      None => false,
                  };
-@@ -406,7 +464,7 @@ fn serve() {
+@@ -406,7 +465,7 @@ fn serve() {
                      Reply::Err
                  }
              }
@@ -3515,7 +3580,7 @@ index c987aa3..44992d4 100644
                  Some(out) => Reply::Done(Some(out)),
                  None => Reply::Err,
              },
-@@ -445,7 +503,7 @@ fn serve() {
+@@ -445,7 +504,7 @@ fn serve() {
              // UI is showing. The only way it changes is another compose (a later PREVIEW/ENC) — which
              // is why the worker.rs `scope()` sends its PREVIEW immediately before SCOPE under one held
              // mutex.
@@ -3524,7 +3589,7 @@ index c987aa3..44992d4 100644
                  &gpu,
                  &mut decoders,
                  &mut lut_cache,
-@@ -471,6 +529,12 @@ fn serve() {
+@@ -471,6 +530,12 @@ fn serve() {
              },
          };
  
@@ -3537,7 +3602,19 @@ index c987aa3..44992d4 100644
          match reply {
              Reply::Done(Some(out)) => {
                  let _ = writeln!(stdout, "DONE {out}");
-@@ -596,8 +660,8 @@ fn open_render(
+@@ -482,6 +547,11 @@ fn serve() {
+                 let _ = writeln!(stdout, "ERR");
+             }
+         }
++        if let Some(path)=std::env::var_os("GENESIS_GPU_PHASE_LOG"){
++            if let Ok(mut log)=std::fs::OpenOptions::new().append(true).create(true).open(path){
++                let _=writeln!(log,"CMD\t{}\t{}\t{}",kw,phase_command_start.elapsed().as_micros(),std::process::id());
++            }
++        }
+         // Always flush so the client (blocking on a single response line) unblocks promptly.
+         let _ = stdout.flush();
+     }
+@@ -596,8 +666,8 @@ fn open_render(
      // OUTPUT (encoded) dims = the requested out_w×out_h. config_video builds the RGBA(in)→pixfmt
      // sws scaler from in_w/in_h to width/height, so the composed GVW×GVH frame is rescaled to the
      // chosen output resolution by the encoder — no change to the OpenCL compose path.
@@ -3548,7 +3625,7 @@ index c987aa3..44992d4 100644
  
      // Drop any previous (unfinished) encoder before starting a new job.
      *enc = None;
-@@ -650,6 +714,7 @@ fn open_render(
+@@ -650,6 +720,7 @@ fn open_render(
          return false;
      }
  
@@ -3556,7 +3633,7 @@ index c987aa3..44992d4 100644
      *enc = Some(e);
      // ENC timestamps each supplied timeline frame at enc_count / timeline_fps. Existing clients
      // omit the optional field and retain 30 fps. AIR supplies its sequence rate so the frame and
-@@ -659,7 +724,6 @@ fn open_render(
+@@ -659,7 +730,6 @@ fn open_render(
  
      // Allocate the program-audio accumulator for this render's full timeline duration (silence).
      // Each AUDIO line mixes a clip range into it; CLOSE drains it into the encoder.
@@ -3564,7 +3641,7 @@ index c987aa3..44992d4 100644
      true
  }
  
-@@ -819,7 +883,8 @@ fn enc_frame(
+@@ -819,7 +889,8 @@ fn enc_frame(
          Some(v) => v,
          None => return false,
      };
@@ -3574,7 +3651,7 @@ index c987aa3..44992d4 100644
  
      // PER-CLIP GRADE fields (Triad-B P1): cbright/ccontrast/csat, applied BEFORE the program grade.
      let clip_grade = (|| {
-@@ -1133,9 +1198,9 @@ fn enc_frame(
+@@ -1133,9 +1204,9 @@ fn enc_frame(
      // RGBA8 file): read it straight into the slot, SKIPPING decode (see `upload_slot`). A black
      // frame also keeps timing if a real base can't be decoded.
      if base_path == "-" {
@@ -3586,7 +3663,7 @@ index c987aa3..44992d4 100644
      }
  
      // Decode overlay if present and op>0; otherwise disable the composite. A `RAW:<path>` overlay is
-@@ -1144,6 +1209,7 @@ fn enc_frame(
+@@ -1144,6 +1215,7 @@ fn enc_frame(
      let mut eff_op = op;
      if over_path != "-" && op > 0.0 {
          if !upload_slot(gpu, decoders, 1, &over_path, over_frame) {
@@ -3594,7 +3671,7 @@ index c987aa3..44992d4 100644
              eff_op = 0.0;
          }
      } else {
-@@ -1156,6 +1222,8 @@ fn enc_frame(
+@@ -1156,6 +1228,8 @@ fn enc_frame(
      // (~1286-1300): decode the boundary partner, upload slot 2, then track1(tt_id, rtt, tt_p).
      let eff_tt = resolve_trans(gpu, decoders, trans_kind, &trans_path, trans_frame);
  
@@ -3603,7 +3680,7 @@ index c987aa3..44992d4 100644
      // Resolve the per-clip LOOK (load + upload the .cube for LUT3D, cached; VHS needs no LUT; a
      // missing/failed LUT degrades to no look). Then run the same transition→composite→look the
      // preview uses, downloading f32 for the encoder.
-@@ -1164,7 +1232,7 @@ fn enc_frame(
+@@ -1164,7 +1238,7 @@ fn enc_frame(
      // P4: chroma key only matters with an active overlay (it keys the OVER buffer); force ck_on=0 when
      // the overlay is disabled (no over clip / failed decode → eff_op==0) so we never key a stale slot.
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -3612,7 +3689,7 @@ index c987aa3..44992d4 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -1181,6 +1249,7 @@ fn enc_frame(
+@@ -1181,6 +1255,7 @@ fn enc_frame(
          sel_band, sel_hshift, sel_sat,
          sol_thr, temp, fade, spatial_alpha,
      );
@@ -3620,7 +3697,7 @@ index c987aa3..44992d4 100644
      let ts = (*enc_count as f64) / fps;
      if !e.video_frame(&frame, ts) {
          eprintln!("[gcompose] enc video_frame failed @ {}", *enc_count);
-@@ -1290,6 +1359,12 @@ struct ProgAudio {
+@@ -1290,6 +1365,12 @@ struct ProgAudio {
      gain_env: Vec<(f64, f32)>, // (sec, gain), sorted ascending by sec
  }
  
@@ -3633,7 +3710,7 @@ index c987aa3..44992d4 100644
  impl Default for ProgAudio {
      fn default() -> Self {
          ProgAudio { buf: Vec::new(), active: false, gain_env: Vec::new() }
-@@ -1300,21 +1375,24 @@ impl ProgAudio {
+@@ -1300,21 +1381,24 @@ impl ProgAudio {
      /// (Re)allocate the accumulator to `total_s` seconds of silence and mark it active. A prior
      /// (unconsumed) buffer is dropped. `total_s` is clamped to a sane ceiling so a pathological
      /// duration can't blow up the allocation.
@@ -3672,7 +3749,7 @@ index c987aa3..44992d4 100644
      }
  
      /// Drop the accumulator and mark inactive (after CLOSE/WAVECLOSE consumes it).
-@@ -1326,7 +1404,8 @@ impl ProgAudio {
+@@ -1326,7 +1410,8 @@ impl ProgAudio {
      }
  
      /// Mix `samples` (interleaved stereo @ 48000, already gain-applied) into the accumulator at
@@ -3682,7 +3759,7 @@ index c987aa3..44992d4 100644
      /// Samples that would land past the end of the accumulator are dropped (the accumulator is the
      /// authoritative timeline length, so a clip running slightly long is truncated to it).
      ///
-@@ -1350,8 +1429,7 @@ impl ProgAudio {
+@@ -1350,8 +1435,7 @@ impl ProgAudio {
          let room = self.buf.len() - start;
          let take = n.min(room);
          for i in 0..take {
@@ -3692,7 +3769,7 @@ index c987aa3..44992d4 100644
          }
      }
  
-@@ -1360,24 +1438,34 @@ impl ProgAudio {
+@@ -1360,24 +1444,34 @@ impl ProgAudio {
      /// across calls), so chunking is purely to bound the per-call slice — the muxed result is the
      /// single continuous timeline-length program audio. Best-effort: a rejected chunk is logged and
      /// the drain stops (the already-fed audio still muxes on finish).
@@ -3731,7 +3808,7 @@ index c987aa3..44992d4 100644
      }
  
      /// Per-channel PEAK + RMS of the accumulator, in dBFS (P3 level meter). Returns
-@@ -1397,7 +1485,7 @@ impl ProgAudio {
+@@ -1397,7 +1491,7 @@ impl ProgAudio {
          for fr in 0..frames {
              let base = fr * PROG_CH;
              for ch in 0..PROG_CH {
@@ -3740,7 +3817,7 @@ index c987aa3..44992d4 100644
                  let a = s.abs();
                  if a > peak[ch] {
                      peak[ch] = a;
-@@ -1432,8 +1520,8 @@ impl ProgAudio {
+@@ -1432,8 +1526,8 @@ impl ProgAudio {
          let mut re = vec![0.0f32; N];
          let mut im = vec![0.0f32; N];
          for i in 0..take {
@@ -3751,7 +3828,7 @@ index c987aa3..44992d4 100644
              let s = 0.5 * (l + r);
              // Hann window
              let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (N as f32 - 1.0)).cos();
-@@ -1460,7 +1548,7 @@ impl ProgAudio {
+@@ -1460,7 +1554,7 @@ impl ProgAudio {
          if win == 0 { return out; }
          for k in 0..n {
              let fr = (k * win) / n;            // decimate the window to n points
@@ -3760,7 +3837,7 @@ index c987aa3..44992d4 100644
          }
          out
      }
-@@ -1534,7 +1622,7 @@ fn gainenv_set(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1534,7 +1628,7 @@ fn gainenv_set(line: &str, prog: &mut ProgAudio) -> bool {
  /// Per-clip audio-decode capacity ceiling (in FLOATS), shared by AUDIO mixing. Mirrors MojoMedia's
  /// AUF (180 s stereo 48k + headroom) used as a per-decode cap. Bounds the temp decode buffer and
  /// guarantees the `cap as c_int` narrowing in ffi::decode_audio_range is lossless & positive.
@@ -3769,7 +3846,7 @@ index c987aa3..44992d4 100644
  
  /// `AUDIO <path> <src_in_s> <dur_s> <dst_offset_s> <gain> <fade_in_s> <fade_out_s> <clip_len_s>
  /// <range_local_s> <fx_chain|->` — decode the SOURCE audio range [src_in_s, src_in_s+dur_s) of
-@@ -1546,19 +1634,563 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
+@@ -1546,19 +1640,651 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
  /// full length is `clip_len_s`. This is the timeline-sync fix plus per-clip volume/fades/FX: the clip
  /// is positioned at its timeline offset, not concatenated.
  ///
@@ -4288,6 +4365,93 @@ index c987aa3..44992d4 100644
 +            self.warm_builds, self.cache_hits, timer.elapsed().as_secs_f64()*1000.0, budget);
 +        Ok(())
 +    }
++    // NESTENV <root_id> <buckets> <out>: exact processed clip-local stereo
++    // peaks, before final program limiting. The caller owns the published file
++    // inside its exclusive cache; failed output writes remain worker-owned.
++    fn envelope(&self, line: &str) -> Result<(), String> {
++        use std::io::Write;
++        let invalid = |detail| nest_error("GA_AUDIO_NESTED_ENV", detail);
++        let fields: Vec<_> = line.split_whitespace().collect();
++        if fields.len() != 4 || self.pending.is_some() {
++            return Err(invalid("Envelope needs a complete committed nested tree"));
++        }
++        let buckets = fields[2].parse::<usize>().ok().filter(|count| *count > 0 && *count <= 65536)
++            .ok_or_else(|| invalid("Envelope bucket count must be between one and 65536"))?;
++        let tree = self.accepted.as_ref().ok_or_else(|| invalid("No complete nested tree for envelope"))?;
++        let index = tree.nodes.iter().position(|node| node.id == fields[1])
++            .ok_or_else(|| invalid("Unknown nested envelope instance"))?;
++        let node = &tree.nodes[index];
++        if node.parent != "-" || matches!(node.input, NestInput::Leaf { .. }) {
++            return Err(invalid("Envelope requires a root bus"));
++        }
++        let frames = (node.end - node.start) as u64;
++        if frames == 0 || frames > NEST_MAX_FRAMES as u64 {
++            return Err(invalid("Envelope clip sample interval is invalid"));
++        }
++        let directory = self.directory.as_ref().ok_or_else(|| invalid("Nested envelope cache is not owned"))?;
++        let owned = std::fs::canonicalize(directory).map_err(|_| nest_cache("Cannot inspect owned envelope cache directory"))?;
++        let output = std::path::PathBuf::from(dec_path(fields[3]));
++        let name = output.file_name().and_then(|name| name.to_str())
++            .ok_or_else(|| invalid("Envelope output needs a normal filename"))?;
++        // Reject Windows alternate streams, device names and normalized aliases
++        // on both OS, keeping the caller-owned flat-directory contract portable.
++        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
++        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") ||
++            (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) &&
++             matches!(stem.as_bytes()[3], b'1'..=b'9'));
++        if name.contains(':') || name.ends_with('.') || name.ends_with(' ') || reserved {
++            return Err(invalid("Envelope output needs a portable normal filename"));
++        }
++        let parent = output.parent().ok_or_else(|| invalid("Envelope output needs an owned cache parent"))?;
++        if std::fs::canonicalize(parent).map_err(|_| invalid("Envelope output parent is not the owned cache"))? != owned {
++            return Err(invalid("Envelope output must remain inside the owned flat cache"));
++        }
++        match std::fs::symlink_metadata(&output) {
++            Ok(_) => return Err(invalid("Envelope output must be a new file")),
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
++            Err(_) => return Err(invalid("Cannot inspect envelope output path")),
++        }
++        let mut file = std::fs::File::open(&tree.paths[index]).map_err(|_| nest_cache("Cannot open nested envelope float output"))?;
++        if file.metadata().map_err(|_| nest_cache("Cannot inspect nested envelope float output"))?.len() != NEST_HEADER + frames * 8 {
++            return Err(nest_cache("Nested envelope float output length changed"));
++        }
++        let mut peaks = Vec::new();
++        peaks.try_reserve_exact(buckets).map_err(|_| nest_capacity("Cannot reserve bounded envelope peaks"))?;
++        peaks.resize(buckets, 0.0f32);
++        let mut bucket = 0usize;
++        let mut bucket_end = frames / buckets as u64;
++        let mut position = 0u64;
++        while position < frames {
++            let count = (frames-position).min(NEST_BLOCK as u64) as usize;
++            let samples = nest_read_samples(&mut file, position as i64, count)?;
++            for (offset, stereo) in samples.chunks_exact(2).enumerate() {
++                let at = position + offset as u64;
++                while at >= bucket_end {
++                    bucket += 1;
++                    if bucket >= buckets { return Err(nest_cache("Envelope bucket domain overflow")); }
++                    bucket_end = (bucket as u64 + 1) * frames / buckets as u64;
++                }
++                peaks[bucket] = peaks[bucket].max(stereo[0].abs()).max(stereo[1].abs());
++            }
++            position += count as u64;
++        }
++        // No filesystem output is created until the complete source scan passes.
++        // create_new forbids replacing an existing target even if it races us.
++        let mut outputs = NestFiles { paths: Vec::new() };
++        let mut target = outputs.create(output.clone())?;
++        if !target.metadata().map_err(|_| nest_cache("Cannot inspect new envelope output"))?.is_file() {
++            return Err(invalid("Envelope output is not a normal file"));
++        }
++        let mut bytes = Vec::new();
++        bytes.try_reserve_exact(buckets * 4).map_err(|_| nest_capacity("Cannot reserve bounded envelope bytes"))?;
++        for peak in peaks { bytes.extend_from_slice(&peak.to_le_bytes()); }
++        target.write_all(&bytes).and_then(|_| target.flush()).map_err(|_| nest_cache("Cannot write complete nested envelope"))?;
++        drop(target);
++        // The published output is now caller-owned. It survives normal worker
++        // exit for reading, then the host's existing join/flat-cache cleanup.
++        outputs.paths.clear();
++        Ok(())
++    }
 +    fn mix(&mut self, prog: &mut ProgAudio, line: &str) -> Result<(), String> {
 +        let f: Vec<_> = line.split_whitespace().collect();
 +        if f.len() != 5 || !prog.active { return Err(nest_protocol("Invalid nested mix request")); }
@@ -4330,10 +4494,11 @@ index c987aa3..44992d4 100644
 +        let result = match keyword {
 +            "NESTBEGIN" => self.begin(line), "NESTLEAF" | "NESTBUS" => self.append(line),
 +            "NESTCOMMIT" => self.commit(line), "NESTMIX" => self.mix(prog, line),
++            "NESTENV" => self.envelope(line),
 +            _ => Err(nest_protocol("Unknown nested command")),
 +        };
 +        if let Err(error) = result {
-+            self.pending = None; eprintln!("{error}"); false
++            if keyword != "NESTENV" { self.pending = None; } eprintln!("{error}"); false
 +        } else { true }
 +    }
 +}
@@ -4342,7 +4507,7 @@ index c987aa3..44992d4 100644
      // No active accumulator: a stray AUDIO outside an OPEN/WAVE session. ERR (client skips).
      if !prog.active {
          eprintln!("[gcompose] AUDIO with no active accumulator (no OPEN/WAVE)");
-@@ -1572,10 +2204,45 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1572,10 +2298,45 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // the path is a pool media path like ENC/THUMB), so a fixed-arity split is safe. The trailing 4
      // numeric fields carry the per-clip AUDIO FADE envelope (applied per-sample below); the FINAL
      // token is the per-clip libavfilter chain ("-" when the AudioFx is neutral).
@@ -4389,7 +4554,7 @@ index c987aa3..44992d4 100644
      // WHITESPACE-SAFE WIRE: the UI percent-encodes the media path token (enc_path); decode it here
      // (dec_path) BEFORE opening the decoder. A space-free path decodes to itself (identity).
      let path = dec_path(f[1]);
-@@ -1628,49 +2295,54 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1628,49 +2389,54 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
          return false;
      }
  
@@ -4474,7 +4639,7 @@ index c987aa3..44992d4 100644
  
      // Apply per-clip GAIN + FADE envelope in place (Triad-B P1). The gain is a flat linear multiplier;
      // the fades ramp the gain 0→1 over [0, fade_in_s) and 1→0 over [clip_len_s − fade_out_s,
-@@ -1685,13 +2357,16 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1685,13 +2451,16 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // Run the per-sample loop when the per-clip gain isn't unity, OR there's a fade, OR a master
      // envelope is present (the last clause is the GATE case: a flat-gain, fade-less clip still needs
      // the master envelope applied). When all three are absent the loop is skipped — identical to today.
@@ -4494,7 +4659,7 @@ index c987aa3..44992d4 100644
              let mut env = 1.0f64;
              if fade_in_s > 0.0 && tl < fade_in_s {
                  let r = tl / fade_in_s;
-@@ -1705,7 +2380,8 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1705,7 +2474,8 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
              // (dst_off_s = the clip's destination offset in the program; fr/sr = frames into the
              // range). Empty menv → eval_gain_env == 1.0 → unchanged.
              let abs_t = dst_off_s + (fr as f64) / sr_f;
@@ -4504,7 +4669,7 @@ index c987aa3..44992d4 100644
              let base = fr * PROG_CH;
              for ch in 0..PROG_CH {
                  samples[base + ch] *= g;
-@@ -1739,8 +2415,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1739,8 +2509,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
      if !total_s.is_finite() || total_s < 0.0 {
          return false;
      }
@@ -4514,7 +4679,7 @@ index c987aa3..44992d4 100644
  }
  
  /// `WAVECLOSE <out_wav>` — write the playback accumulator to `<out_wav>` as a 16-bit PCM stereo @
-@@ -1753,12 +2428,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
+@@ -1753,12 +2522,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
          eprintln!("[gcompose] bad WAVECLOSE ({} fields): {line}", f.len());
          return None;
      }
@@ -4529,7 +4694,7 @@ index c987aa3..44992d4 100644
      prog.clear();
      if ok {
          Some(out.to_string())
-@@ -1788,8 +2463,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1788,8 +2557,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
      if !window_s.is_finite() || window_s < 0.0 {
          return false;
      }
@@ -4539,7 +4704,7 @@ index c987aa3..44992d4 100644
  }
  
  /// `LEVELS <out>` — measure the active accumulator's per-channel PEAK + RMS (dBFS), write the 4
-@@ -1940,8 +2614,8 @@ fn write_wav_pcm16(path: &str, samples: &[f32], sr: u32, ch: u16) -> bool {
+@@ -1940,8 +2708,8 @@ fn write_wav_pcm16(path: &str, samples: &[f32], sr: u32, ch: u16) -> bool {
      out.extend_from_slice(b"data");
      out.extend_from_slice(&data_bytes.to_le_bytes());
      for &s in samples {
@@ -4550,7 +4715,7 @@ index c987aa3..44992d4 100644
          out.extend_from_slice(&(v as i16).to_le_bytes());
      }
      std::fs::write(path, &out).is_ok()
-@@ -1974,7 +2648,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
+@@ -1974,7 +2742,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
          decoders.insert(path.clone(), d);
      }
      let dec = decoders.get_mut(&path)?;
@@ -4560,7 +4725,7 @@ index c987aa3..44992d4 100644
      if std::fs::write(&out, &buf).is_err() {
          eprintln!("[gcompose] THUMB write failed: {out}");
          return None;
-@@ -2212,6 +2887,23 @@ fn handle_request(
+@@ -2212,6 +2981,23 @@ fn handle_request(
      line: &str,
  ) -> Option<String> {
      let mut f: Vec<&str> = line.split_whitespace().collect();
@@ -4584,7 +4749,7 @@ index c987aa3..44992d4 100644
      // Accept both the new explicit form (`PREVIEW` + the positional fields) and the legacy
      // keyword-less form. Strip a leading PREVIEW keyword so the positional indices below are
      // identical for both (finding #3). The fields are the 12 composite fields + the 1 P31 BLEND field
-@@ -2243,7 +2935,8 @@ fn handle_request(
+@@ -2243,7 +3029,8 @@ fn handle_request(
      // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
      // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
      // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
@@ -4594,7 +4759,7 @@ index c987aa3..44992d4 100644
          f.remove(0);
      }
      if f.len() != 103 && f.len() != 106 && f.len() != 107 && f.len() != 108 && f.len() != 109 {
-@@ -2277,7 +2970,8 @@ fn handle_request(
+@@ -2277,7 +3064,8 @@ fn handle_request(
      let trans_kind: i32 = f[16].parse().ok()?;
      let trans_prog: f32 = f[17].parse().ok()?;
      let trans_param: f32 = f[18].parse().ok()?;
@@ -4604,7 +4769,7 @@ index c987aa3..44992d4 100644
      let trans_frame: i32 = f[20].parse().ok()?;
      // Triad-B P1 PER-CLIP GRADE fields.
      let cbright: f32 = f[21].parse().ok()?;
-@@ -2469,15 +3163,16 @@ fn handle_request(
+@@ -2469,15 +3257,16 @@ fn handle_request(
      // identity here, applied for symmetry with the encoded emit side.
      let out_path = dec_path(f[f.len() - 1]);
  
@@ -4623,7 +4788,7 @@ index c987aa3..44992d4 100644
      }
  
      // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
-@@ -2486,6 +3181,7 @@ fn handle_request(
+@@ -2486,6 +3275,7 @@ fn handle_request(
      let mut eff_op = op;
      if over_path != "-" && op > 0.0 {
          if !upload_slot(gpu, decoders, 1, &over_path, over_frame) {
@@ -4631,7 +4796,7 @@ index c987aa3..44992d4 100644
              eff_op = 0.0;
          }
      } else {
-@@ -2496,6 +3192,7 @@ fn handle_request(
+@@ -2496,6 +3286,7 @@ fn handle_request(
      // active (kind 0..7 + a real path), else -1 (track1 copies the base). Same side-effecting helper
      // the ENC path uses, so the preview and the export animate the transition identically.
      let eff_tt = resolve_trans(gpu, decoders, trans_kind, &trans_path, trans_frame);
@@ -4639,7 +4804,7 @@ index c987aa3..44992d4 100644
  
      // Resolve the per-clip LOOK (load + upload the .cube for LUT3D, cached; VHS needs no LUT; a
      // missing/failed LUT degrades to no look). Then run the OpenCL pipeline (transition or base-copy
-@@ -2506,7 +3203,8 @@ fn handle_request(
+@@ -2506,7 +3297,8 @@ fn handle_request(
      // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
      // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -4649,13 +4814,16 @@ index c987aa3..44992d4 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -2526,9 +3224,44 @@ fn handle_request(
+@@ -2526,9 +3318,47 @@ fn handle_request(
      // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
      *last_final_is_look = fin;
  
 -    if std::fs::write(&out_path, &out).is_err() {
 -        eprintln!("[gcompose] write failed: {out_path}");
 -        return None;
++    if let Some(path)=std::env::var_os("GENESIS_GPU_PHASE_LOG"){
++        if let Ok(mut log)=std::fs::OpenOptions::new().append(true).create(true).open(path){let _=writeln!(log,"PHASE\tdecode-upload\t{}\t{}",uploaded_at.duration_since(profile_start).as_micros(),std::process::id());}
++    }
 +    if out_path.starts_with("GPU:"){
 +        let (epoch,id,mode)=match snapshot_token(&out_path){Some(v)=>v,None=>{eprintln!("[GA_VIDEO_SNAPSHOT_PROTOCOL] Invalid snapshot sink");return None;}};
 +        if !high_output||mode!=0{eprintln!("[GA_VIDEO_SNAPSHOT_PROTOCOL] Snapshot sink requires FLOAT");return None;}
@@ -4697,7 +4865,7 @@ index c987aa3..44992d4 100644
      }
      Some(out_path)
  }
-@@ -2539,34 +3272,33 @@ fn decode_cached(
+@@ -2539,34 +3369,33 @@ fn decode_cached(
      decoders: &mut HashMap<String, ffi::Decoder>,
      path: &str,
      frame: i32,
@@ -4741,7 +4909,7 @@ index c987aa3..44992d4 100644
      let mut best = (0, 0);
      let mut lowest = u64::MAX;
      for dy in (-24..=24).step_by(4) {
-@@ -2578,9 +3310,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2578,9 +3407,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
                      let b = (((y + dy) * w + x + dx) * 4) as usize;
                      // RGB differences distinguish camera motion on both bright
                      // and low-contrast material without a separate grayscale copy.
@@ -4754,7 +4922,7 @@ index c987aa3..44992d4 100644
                  }
              }
              if error < lowest ||
-@@ -2592,7 +3324,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2592,7 +3421,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
      }
      // A scene cut has no defensible motion estimate.
      let samples = ((h - 128 + 15) / 16 * ((w - 128 + 15) / 16)) as u64;
@@ -4763,7 +4931,7 @@ index c987aa3..44992d4 100644
  }
  
  fn stabilized_frame(
-@@ -2600,7 +3332,7 @@ fn stabilized_frame(
+@@ -2600,7 +3429,7 @@ fn stabilized_frame(
      path: &str,
      frame: i32,
      strength: f32,
@@ -4772,7 +4940,7 @@ index c987aa3..44992d4 100644
      let current = decode_cached(decoders, path, frame)?;
      if strength <= 0.0 { return Some(current); }
      let mut sum_x = 0i32;
-@@ -2629,9 +3361,9 @@ fn stabilized_frame(
+@@ -2629,9 +3458,9 @@ fn stabilized_frame(
      let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
      let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
      if shift_x == 0 && shift_y == 0 { return Some(current); }
@@ -4785,7 +4953,7 @@ index c987aa3..44992d4 100644
      for y in 0..h {
          let sy = y - shift_y;
          if sy < 0 || sy >= h { continue; }
-@@ -2662,6 +3394,33 @@ fn stabilized_frame(
+@@ -2662,6 +3491,33 @@ fn stabilized_frame(
  ///
  /// IDENTITY: a project with no titles never sends a `RAW:` path, so this routes every frame through
  /// `decode_cached` exactly as before — byte-identical to the pre-P5 engine.
@@ -4819,7 +4987,7 @@ index c987aa3..44992d4 100644
  fn upload_slot(
      gpu: &ffi::Gpu,
      decoders: &mut HashMap<String, ffi::Decoder>,
-@@ -2669,28 +3428,57 @@ fn upload_slot(
+@@ -2669,28 +3525,61 @@ fn upload_slot(
      path: &str,
      frame: i32,
  ) -> bool {
@@ -4874,6 +5042,10 @@ index c987aa3..44992d4 100644
 +                };
 +                decoders.insert(path.to_string(), decoder);
 +            }
++            if let Some(result)=decoders.get_mut(path).and_then(|decoder|decoder.upload_native_u16(slot,frame.max(0),ffi::width(),ffi::height())){
++                if !result&&gpu.compound(){eprintln!("[GA_VIDEO_NESTED_SOURCE] Native RGBA64 decode/upload failed");}
++                return result;
++            }
 +            if let Some(pixels) = decoders.get_mut(path).and_then(|decoder|
 +                if gpu.compound() { decoder.decode_compound_view(frame.max(0), ffi::width(), ffi::height()) } else { decoder.decode_f32_view(frame.max(0), ffi::width(), ffi::height()) }) {
 +                gpu.upload_f32(slot, pixels);
@@ -4885,7 +5057,7 @@ index c987aa3..44992d4 100644
          let decoded = if let Some(spec) = path.strip_prefix("STAB:") {
              match spec.split_once(':') {
                  Some((amount, source)) => match amount.parse::<f32>() {
-@@ -2703,11 +3491,11 @@ fn upload_slot(
+@@ -2703,11 +3592,11 @@ fn upload_slot(
          } else { decode_cached(decoders, path, frame) };
          match decoded {
              Some(rgba) => {
@@ -4899,7 +5071,7 @@ index c987aa3..44992d4 100644
                  false
              }
          }
-@@ -2718,13 +3506,13 @@ fn upload_slot(
+@@ -2718,13 +3607,13 @@ fn upload_slot(
  fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
      let gpu = ffi::Gpu::init()?;
      let mut b = ffi::Decoder::open(base)?;
@@ -4915,7 +5087,7 @@ index c987aa3..44992d4 100644
                  gpu.upload(1, &ov);
                  has_over = true;
              }
-@@ -2740,5 +3528,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+@@ -2740,5 +3629,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
  /// CPU/FFmpeg-only fallback: just the decoded base frame.
  fn decode_only(base: &str) -> Option<Vec<u8>> {
      let mut b = ffi::Decoder::open(base)?;
