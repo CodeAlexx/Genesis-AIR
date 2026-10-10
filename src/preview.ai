@@ -269,11 +269,18 @@ pub fn request_quality(root: str, document: str, generation: u64, start: i64, zo
 }
 pub fn request_revision(root: str, document: str, generation: u64, start: i64, zoom: f64,
     span: i64, width: u32, height: u32, media_revision: u64) -> bool effects {alloc, fs.write} {
+  request_document_revision(root,document,generation,start,zoom,span,width,height,media_revision,0)
+}
+pub fn request_document_revision(root: str, document: str, generation: u64, start: i64, zoom: f64,
+    span: i64, width: u32, height: u32, media_revision: u64, document_revision: u64)
+    -> bool effects {alloc, fs.write} {
   let geometry: string = text.concat(str.view(string.from_int(start)), text.concat("\t",
     text.concat(str.view(string.from_float(zoom)), text.concat("\t", str.view(string.from_int(span))))))
   let sized: string = text.concat(str.view(geometry), text.concat("\t", text.concat(str.view(string.from_int(width)),
     text.concat("\t", str.view(string.from_int(height))))))
-  let versioned: string = text.concat(str.view(sized), text.concat("\t", str.view(string.from_int(media_revision))))
+  var versioned: string = text.concat(str.view(sized), text.concat("\t", str.view(string.from_int(media_revision))))
+  string.append(versioned,"\t")
+  string.append(versioned,string.from_int(document_revision))
   // Document, viewport, quality and revision are one atomic snapshot. A reader
   // cannot pair an old generation with the next drag's geometry or document.
   let generation_text: string = string.from_int(generation)
@@ -420,16 +427,35 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
   true
 }
 
-fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
+pub fn compound_thumbnail(state: ref<app.App>, document: ref<editor.Document>,
+    clip: editor.Clip, owner_frame: i64) -> result<provider.Frame,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,net,time} {
+  let prefix: string = text.concat(provider.preview_path(struct.borrow(state,field=provider)),".strip")
+  var cache: timeline_media.RenderCache = timeline_media.render_cache(struct.borrow(state,field=fonts))
+  timeline_media.configure_monitor_preview(document,cache,80,45)
+  let planned: result<array<string>,string> = timeline_media.clip_picture_plan(document,clip,
+    owner_frame,"PREVIEW",str.view(prefix),str.view(prefix),cache)
+  var lines: array<string> = match planned {
+    err(problem)=>{timeline_media.cleanup_plan(str.view(prefix))
+      return result.err(problem)},ok(value)=>value,
+  }
+  var shot: provider.Frame = provider.program_plan(struct.borrow(state,field=provider),
+    lines,80,45,cache.width,cache.height)
+  timeline_media.cleanup_plan(str.view(prefix))
+  if not shot.ok {return result.err(string.copy(str.view(struct.borrow(shot,field=detail))))}
+  result.ok(shot)
+}
+
+fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> result<unit,string> effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   var fields: array<string> = text.split(geometry, "\t")
-  if array.len(fields) < 3 { return () }
+  if array.len(fields) < 3 { return result.ok(()) }
   let start: i64 = match text.parse_i64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
   let zoom: f64 = match text.parse_f64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 2.4,}
   let span: i64 = match text.parse_i64(str.view(array.borrow(fields, 2))) {some(value) => value, none => 450,}
-  if zoom <= 0.0 or span <= 0 { return () }
+  if zoom <= 0.0 or span <= 0 { return result.ok(()) }
   // Reserve the strip before reusing a slot. Readers keep the previous owned
   // pictures until the complete manifest and matching generation are committed.
-  if not publish_checked(root,"thumbnails.id","0") {return ()}
+  if not publish_checked(root,"thumbnails.id","0") {return result.err("[GA_TIMELINE_PUBLISH] Cannot reserve thumbnail generation")}
   // Match the painted, aspect-fitted tile width at this lane height. A fixed
   // 96px sampling interval left most of a 46px-high video lane without pictures.
   let tile_width: f64 = 80.0 * math.max(1.0, app.track_height(state) - 20.0) / 45.0
@@ -441,23 +467,29 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> u
   loop { if i >= editor.clip_count(doc) or total >= 32 { break }
     let clip: editor.Clip = option.unwrap(editor.clip_at(doc, i))
     i = i + 1
-    if clip.owner != doc.active or editor.track_kind(doc, clip.track) != editor.track_video() or clip.nested != 0 { continue }
-    let source_slot: u64 = match editor.source_slot(doc, clip.source) {none => { continue }, some(value) => value,}
-    let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), source_slot)
-    if not source.has_video or not source.online { continue }
-    let filename: string = string.copy(str.view(struct.borrow(source, field=path)))
+    if clip.owner != doc.active or editor.track_kind(doc, clip.track) != editor.track_video() { continue }
+    var filename: string = string.new()
+    if clip.nested == 0 {
+      let source_slot: u64 = match editor.source_slot(doc, clip.source) {none => { continue }, some(value) => value,}
+      let source: ref<editor.Source> = array.borrow(struct.borrow(doc, field=sources), source_slot)
+      if not source.has_video or not source.online { continue }
+      let _ = ref.swap(filename,string.copy(str.view(struct.borrow(source, field=path))))
+    }
     let last: i64 = if start + span < clip.start + clip.length { start + span } else { clip.start + clip.length }
     var at: i64 = if start > clip.start { start } else { clip.start }
     // Anchor the strip to the clip so a small scroll reuses the same samples.
     at = clip.start + ((at - clip.start) / step) * step
     loop { if at >= last or total >= 32 { break }
-      if number(root, "request.id") != id { return () }
+      if number(root, "request.id") != id { return result.ok(()) }
       let sample: i64 = timeline_media.source_frame(doc, clip, at)
-      var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), str.view(filename), sample, 80, 45)
+      var shot: provider.Frame = if clip.nested != 0 {
+        try compound_thumbnail(state,doc,clip,at)
+      }else{provider.source_frame(struct.borrow(state, field=provider), str.view(filename), sample, 80, 45)}
+      if number(root,"request.id") != id {return result.ok(())}
       if shot.ok {
         let name: string = text.concat("thumb-", text.concat(str.view(string.from_int(id % 2)), text.concat("-", str.view(string.from_int(total)))))
         var pixels: draw.Surface = provider.take_pixels(shot)
-        if not write_image(root,id,str.view(name),pixels) {return ()}
+        if not write_image(root,id,str.view(name),pixels) {return result.err("[GA_TIMELINE_PUBLISH] Cannot publish thumbnail pixels")}
         string.append(lines, str.view(string.from_int(clip.id)))
         string.append(lines, "\t")
         string.append(lines, str.view(string.from_int(at)))
@@ -470,15 +502,23 @@ fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> u
         string.append(lines, "\t")
         let revision_text: string = if array.len(fields) >= 6 {string.copy(str.view(array.borrow(fields,5)))}else{string.copy("0")}
         string.append(lines,str.view(revision_text))
+        string.append(lines,"\t")
+        let document_revision_text: string = if array.len(fields) >= 7 {
+          string.copy(str.view(array.borrow(fields,6)))
+        }else{string.copy("0")}
+        string.append(lines,str.view(document_revision_text))
         string.append(lines, "\n")
         total = total + 1
       }
       at = at + step
     }
   }
-  publish(root, "thumbnails.tsv", str.view(lines))
-  publish(root, "thumbnails.id", str.view(string.from_int(id)))
-  ()
+  if number(root,"request.id") != id {return result.ok(())}
+  if not publish_checked(root,"thumbnails.tsv",str.view(lines)) or
+      not publish_checked(root,"thumbnails.id",string.from_int(id)) {
+    return result.err("[GA_TIMELINE_PUBLISH] Cannot commit thumbnail generation")
+  }
+  result.ok(())
 }
 pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects {alloc, fs.read} {
   if number(root,"thumbnails.id") != id {return false}
@@ -489,20 +529,25 @@ pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects 
   loop { if i >= array.len(rows) { break }
     var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
     i = i + 1
-    if array.len(fields) != 6 { continue }
+    if array.len(fields) != 6 and array.len(fields) != 7 { continue }
     let clip: u64 = match text.parse_u64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
     let frame: i64 = match text.parse_i64(str.view(array.borrow(fields, 1))) {some(value) => value, none => 0,}
     let source: u64 = match text.parse_u64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>{continue},}
     let source_frame: i64 = match text.parse_i64(str.view(array.borrow(fields,4))) {some(value)=>value,none=>{continue},}
     let revision: u64 = match text.parse_u64(str.view(array.borrow(fields,5))) {some(value)=>value,none=>{continue},}
+    let document_revision: u64 = if array.len(fields) == 7 {
+      match text.parse_u64(str.view(array.borrow(fields,6))) {some(value)=>value,none=>{continue},}
+    }else{0}
     let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{continue},}
     if revision != state.media_revision or current.owner != struct.get(struct.borrow(state,field=document),field=active) or
+        (current.nested != 0 and document_revision != state.document_revision) or
         current.source != source or frame < current.start or frame >= current.start+current.length or
         timeline_media.source_frame(struct.borrow(state,field=document),current,frame) != source_frame {continue}
     let filename: string = image_file(root, id, str.view(array.borrow(fields, 2)))
     let raw: bytes = match files.read_bytes(str.view(filename)) {ok(value) => value, err(_) => { continue },}
     var pixels: draw.Surface = match draw.surface_from_rgba(80, 45, bytes.view(raw)) {some(value) => value, none => { continue },}
-    array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, source:source, source_frame:source_frame, revision:revision, pixels: pixels})
+    array.push(thumbs, app.Thumbnail {clip: clip, frame: frame, source:source, source_frame:source_frame,
+      revision:revision,document_revision:document_revision,pixels: pixels})
   }
   if number(root,"thumbnails.id") != id {return false}
   let _ = struct.replace(state, thumbs, field=thumbnails)
@@ -610,7 +655,10 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       write_waveforms(state,str.view(root))
       publish(str.view(root),"waveforms.id",str.view(string.from_int(id)))
       if not link.notify(wake,2,id) {break}
-      write_thumbnails(state,str.view(root),id,str.view(geometry))
+      match write_thumbnails(state,str.view(root),id,str.view(geometry)) {
+        err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
+          continue},ok(_)=>{},
+      }
       if not link.notify(wake,3,number(str.view(root),"thumbnails.id")) {break}
       continue
     }
@@ -673,7 +721,10 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       write_waveforms(state, str.view(root))
       publish(str.view(root), "waveforms.id", str.view(string.from_int(id)))
       if not link.notify(wake,2,id) { break }
-      write_thumbnails(state, str.view(root), id, str.view(geometry))
+      match write_thumbnails(state,str.view(root),id,str.view(geometry)) {
+        err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
+          continue},ok(_)=>{},
+      }
       if not link.notify(wake,3,number(str.view(root),"thumbnails.id")) { break }
     }
   }

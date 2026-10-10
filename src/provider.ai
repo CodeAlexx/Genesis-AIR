@@ -308,6 +308,7 @@ fn exchange(child: ref<Child>, reader: ref<proc.LineReader>, command: str) -> Ex
 fn exchange_reply(child: ref<Child>, reader: ref<proc.LineReader>, deadline: u64) -> Exchange
     effects {alloc,process,time} {
   var count: u64 = 0
+  var diagnostic: string = string.new()
   loop {
     if count >= 256 { return Exchange {kind: 2, text: string.copy("the worker emitted too many diagnostic lines")} }
     match proc.read_line(child, reader, deadline) {
@@ -316,12 +317,18 @@ fn exchange_reply(child: ref<Child>, reader: ref<proc.LineReader>, deadline: u64
         match value {
           none => { return Exchange {kind: 2, text: string.copy("the worker exited")} },
           some(line) => {
+            if str.starts_with(line, "[GA_") {
+              diagnostic = string.copy(str.slice(line, 0, if str.len(line) > 2048 {2048}else{str.len(line)}))
+            }
             if str.starts_with(str.view(line), "DONE") {
               let reply: string = if str.len(str.view(line)) <= 5 { string.new() }
                 else { string.copy(str.slice(str.view(line), 5, str.len(str.view(line)))) }
               return Exchange {kind: 0, text: reply}
             }
-            if str.starts_with(str.view(line), "ERR") { return Exchange {kind: 1, text: text.concat("[GA_WORKER_REQUEST] ", line)} }
+            if str.starts_with(str.view(line), "ERR") {
+              return Exchange {kind: 1, text: if str.len(diagnostic) > 0 {diagnostic}
+                else {text.concat("[GA_WORKER_REQUEST] ", line)}}
+            }
           },
         }
       },
@@ -738,6 +745,7 @@ fn receive_picture(child: ref<Child>, reader: ref<proc.LineReader>, listener: re
 fn accept_picture(child: ref<Child>, reader: ref<proc.LineReader>, listener: ref<Socket>,
     deadline: u64) -> result<Socket,string> effects {alloc,net,process,time} {
   var diagnostics: u64 = 0
+  var diagnostic: string = string.new()
   loop {
     if time.monotonic_ns() >= deadline {return result.err("[GA_PROGRAM_PIPE] The worker did not connect its picture transfer")}
     let step: u64 = time.monotonic_ns()+25000000
@@ -749,7 +757,11 @@ fn accept_picture(child: ref<Child>, reader: ref<proc.LineReader>, listener: ref
     match proc.read_line(child,reader,proc.deadline_in(1)) {
       err(_)=>{},ok(value)=>match value {none=>{return result.err("[GA_PROGRAM_PIPE] The worker exited before sending its picture")},
         some(line)=>{
-          if str.starts_with(line,"ERR") {return result.err(text.concat("[GA_WORKER_REQUEST] ",line))}
+          if str.starts_with(line,"[GA_") {
+            diagnostic = string.copy(str.slice(line,0,if str.len(line) > 2048 {2048}else{str.len(line)}))
+          }
+          if str.starts_with(line,"ERR") {return result.err(if str.len(diagnostic) > 0 {diagnostic}
+            else {text.concat("[GA_WORKER_REQUEST] ",line)})}
           if str.starts_with(line,"DONE") {
             // A connection can become ready immediately after accept's deadline.
             // The worker may already have sent a small picture and its text reply.
@@ -902,6 +914,10 @@ pub fn program_plan(state: ref<Provider>, lines: ref<array<string>>, width: u32,
     if at + 1 >= array.len(lines) { break }
     match ask(state, str.view(array.borrow(lines, at)), "program-step.txt") {
       none => {
+        // A refused step can leave the live worker on a child canvas or in group
+        // mode. Discard that session so the next plan starts on its root canvas.
+        // restart retains the coded failure for the caller.
+        restart(state)
         return Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
           detail: last_error(state)}
       },

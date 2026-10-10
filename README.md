@@ -820,7 +820,8 @@ history in private IEEE-float RF64 caches; uneven playback chunks and fresh seek
 slice that processed history. Program audio, audition WAV and export share the
 recursive plan. Empty child sequences produce silence, while missing sequences,
 cycles, invalid source ranges and resource limits fail with codes before export
-publishes output. Nested pictures remain unavailable.
+publishes output. Nested pictures now have a separate recursive render plan; see
+the [compound picture checkpoint](docs/CONTROL_COVERAGE.md#recursive-compound-pictures-on-2026-10-10).
 
 The nested gate checks 18 independently authored projects at every intended WAV,
 lossless-master and native whole/chunk/seek sample. It covers child sums, parent
@@ -1091,8 +1092,14 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   failures and repeated-wait behavior.
 - Custom Windows build destinations receive the bundled Noto Sans JP fallback and
   its license. Titles use normal Windows faces first, with Noto covering missing glyphs.
-- Nested sequence pictures and compound waveforms, track/audio-filter automation, animated speed and some filter combinations
-  remain unfinished. Recursive nested audio now has independent mixing, output,
+- Compound pictures render child sequences before applying parent effects, retain
+  transparent coverage until final presentation, and use owner/child FPS for trims,
+  reverse and rate. Compound filmstrips use the same picture plan and reject stale
+  descendant revisions. Native-size FP32 intermediates currently cost substantial
+  memory and scratch I/O; responsive compound 4K60 remains unproved. Parent
+  Stabilize refuses with `GA_VIDEO_NESTED_HISTORY` until group history is available.
+  Compound waveforms, track/audio-filter automation, animated speed and some filter combinations
+  remain unfinished. Recursive nested audio has independent mixing, output,
   refusal and cancellation gates; larger projects still need interactive/device
   acceptance, and full-history caches have startup and disk costs.
   Overlapping signed audio now retains float headroom until final output, so

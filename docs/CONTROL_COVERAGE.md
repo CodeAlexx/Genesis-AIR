@@ -588,3 +588,100 @@ Nested pictures and compound waveforms remain unavailable. Track/audio-filter au
 larger interactive nested-project acceptance, sustained A/V synchronization and
 complete professional editing acceptance remain open. Animated fade trim/Split
 refusals retain their existing `GA_TRIM_CONTEXT` / `GA_SPLIT_CONTEXT` safeguards.
+
+## Recursive compound pictures on 2026-10-10
+
+Compound clips now render children in postorder, then apply their enclosing clip's
+ordered picture effects to the completed child. Transparent FP32 RGBA coverage
+survives child fitting, fades, masks, transforms, blur, blends and transitions;
+the root is flattened onto black once. The ordinary flat renderer retains its
+legacy mode. Native child subtitles and title-only children are included.
+
+Owner time maps to child time using source-in, effective rate, reverse and the
+owner/child FPS ratio. Each placed instance owns separate bounded scratch names.
+The planner validates cycles, missing sequences, geometry, history and resource
+limits before raster work. Parent Stabilize requires unavailable group history
+and refuses with `GA_VIDEO_NESTED_HISTORY`. Existing transition-layer restrictions
+remain in force.
+
+Compound timeline bitmaps use the isolated clip picture plan. Their manifests
+retain both mapped frame identity and document revision, so descendant edits
+retire completed strips. An intermediate worker refusal now restarts its session:
+a failed child canvas cannot contaminate the next ordinary preview. Specific
+worker diagnostic codes survive both text replies and picture connection failures.
+
+| Candidate gate | Evidence |
+|---|---|
+| Planner | Six cases / 44 checks on Windows and Linux; existing spatial-canvas gate has four cases / 107 checks. Audio/export control suffix remains byte-identical. |
+| Native compositor | 604,160 independent channel comparisons, worst error `1.73e-7`; 42 byte-exact legacy comparisons against the previous accepted worker. Twelve blend modes, eleven transitions, alpha fitting, Gaussian blur, bilinear transforms, root flattening and three encoder canvas guards are covered. |
+| Allocation recovery | 104 native checks, including 16 injected allocation failures, prospective 4 GiB refusal, four-canvas eviction and zero live resources after shutdown. |
+| Saved project pictures | 26 independently authored cases: 416 native 16-bit master frames, 208 preview requests and 26 exact frame-zero rewinds. Seven coded refusal cases preserve project bytes and publish no output. A nonlinear parent-on-sum oracle differs from the incorrect per-leaf result by `0.0617647`. |
+| Picture/audio mapping | 25,600 NUT stereo sample frames match the authored PCM exactly. This covers that fixture's sample mapping, not every container or long-running device synchronization. |
+| Actual filmstrip | 128 asynchronously rendered compound bitmaps cover mixed FPS, reverse, trim/rate and descendant brightness changes. Three cases / 17 checks also preserve flat six-field manifests and recover the canvas after a coded refusal. |
+
+The full independent picture gate used application
+`6cf8a58a956670c224374ac5bea70148715eed80f9534f902ab0cbdffe7c4f51`
+and worker `e8354f1845985a9cf12697887fc5ddf48b590277649cf8394492ea4fd216eb73`.
+The [native candidate UI receipt](../archive/native-compound-candidate-ui-2026-10-10.json)
+records a reloaded window using a private copy of the supplied flat 4K project:
+playing pictures/time and stereo meters, stopped silence, nonblank frame-zero
+rewind, a fitted full filmstrip and embedded waveform, and completed scrubs at
+`00:01:23:46` and `00:03:01:49` with matching marker/time/scopes. The earlier
+unsaved user window and original project were preserved. A separate 30-second
+compound placed that source and its AAC audio inside a 480x270 child sequence:
+native child/parent pictures and filmstrip appeared, playback had active stereo
+meters, Stop cleared them, parent gain changed `1 -> 0.95 -> 1` through Undo,
+and a completed scrub at `00:00:11:14` matched its green-snake filmstrip scene
+and program scopes. Rewind returned to a visible frame zero. These bounded
+window checks do not establish larger compound projects or sustained 4K60 cadence.
+Native source fitting is checked against independently decoded/scaled codec pixels;
+completed-group fitting and compositing use independent math. The strict native
+error bound remains five 16-bit codes. Title acceptance covers timing, transparent
+background and grayscale coverage; font glyph shape is outside that oracle.
+
+Native compound canvases and FP32 disk intermediates prioritize picture correctness.
+One 4K group is 126.6 MiB. Smooth compound 4K60, larger interactive compound projects,
+compound waveforms and complete professional editing acceptance remain open.
+The separate audio audit also reproduced an existing PCM Matroska trim defect:
+timestamp-based selection against millisecond packet PTS shifts sample boundaries.
+Both the released and candidate workers reproduce it; independently authored NUT
+mapping passes and independent FFmpeg sample-count selection is exact. Origin-based
+sample selection and late-seek latency require a separate decoder checkpoint.
+
+Focused checks (use binaries built from the matching current source):
+
+```powershell
+python tests/nested_picture.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --report .\build-windows\nested-picture.json
+python tests/nested_timeline_bitmaps.py --client .\build-windows\native\bin\Release\genesis-nested-timeline-bitmaps.exe --worker .\genesis-gcompose.exe --report .\build-windows\nested-timeline-bitmap-pixels.json
+python tests/compound_pixels.py --worker .\genesis-gcompose.exe --report .\build-windows\compound-pixels.json
+```
+
+`build-windows.ps1 -RunTests` registers these gates plus the planner and native
+OpenCL canvas harness. `-CompositorSource` selects a private compositor source for
+acceptance without migrating the canonical checkout. Export stays at native
+sequence dimensions, and Genesis continues to reuse MM-AIR's codec runtime.
+
+The complete isolated Windows build/gate passed with freshly generated AIR C,
+including these compound gates, existing HDR/large/spatial picture checks,
+ordered filters and titles, all audio/automation/nesting/cancellation gates,
+native device clock, project recovery, retained painting and 749 control clicks.
+The installed root application is
+`0ae78ad228199d00f415bc0994e82a2444244ba41b3d802b6f04b7560d3d605c`;
+its worker is `e8354f1845985a9cf12697887fc5ddf48b590277649cf8394492ea4fd216eb73`.
+All six root runtime files match the accepted payload hashes. A cold native
+window from that root build opened the private 4K project with visible frame-zero
+source/program pictures and video filmstrip. The saved candidate QA window and
+its workers exited; the earlier unsaved user window remains intact.
+
+Canonical migration changed only GPU, FFI and worker-main sources. The other
+four maintained worker source blocks remain byte-identical, and the full overlay
+passes its reverse check against pinned worker
+`5e26dc2203540f3c2996dba7506f5da18d4065ac`. The maintained overlay SHA-256 is
+`3418035f56a2305e036e2f7f8a9b5fea2db78767a8dbcb3b1be9019e54975f9c`.
+Earlier root images and canonical sources were preserved in private backups.
+
+The 35-entry [sanitized acceptance bundle](../archive/compound-pictures-2026-10-10.tar.gz)
+has SHA-256 `c8369251f84c3e5dba9bc84ebcb5b85c76304752994c464a966de005814814c1`.
+Each entry was read back against its manifest; the bundle includes production
+source fingerprints, full-gate output, independent picture/bitmap/resource
+receipts, the before-fix canvas failure and the retained Matroska audio gap.

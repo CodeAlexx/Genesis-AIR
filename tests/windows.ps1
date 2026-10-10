@@ -46,6 +46,9 @@ try {
   $waitResult = Invoke-Native 'genesis-process-wait.exe' @()
   Write-Host $waitResult.TrimEnd()
   Set-Content -LiteralPath (Join-Path $root 'process-wait-windows.log') -Value $waitResult
+  $canvasResult = Invoke-Native 'genesis-compound-canvas.exe' @()
+  Write-Host $canvasResult.TrimEnd()
+  Set-Content -LiteralPath (Join-Path $root 'compound-canvas-windows.log') -Value $canvasResult
   & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
     --report (Join-Path $root 'native-audio-clock.json')
   if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
@@ -77,6 +80,16 @@ try {
       & python (Join-Path $PSScriptRoot 'shared_media_runtime.py') --worker $worker
       if ($LASTEXITCODE -ne 0) { throw 'Shared MM-AIR media runtime acceptance failed.' }
     }
+    & python (Join-Path $PSScriptRoot 'compound_pixels.py') --worker $worker `
+      --report (Join-Path $root 'compound-pixels.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Independent compound compositor pixels and recovery failed.' }
+    & python (Join-Path $PSScriptRoot 'nested_picture.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --worker $worker --report (Join-Path $root 'nested-picture.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Saved-project nested picture preview/master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'nested_timeline_bitmaps.py') `
+      --client (Join-Path $Bin 'genesis-nested-timeline-bitmaps.exe') --worker $worker `
+      --report (Join-Path $root 'nested-timeline-bitmap-pixels.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Actual asynchronous compound timeline bitmaps and recovery failed.' }
     & python (Join-Path $PSScriptRoot 'preview_fit.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker
@@ -176,6 +189,12 @@ try {
   $nestedControls = Join-Path $work 'nested-audio-controls'
   Write-Host (Invoke-Native 'genesis-nested-audio-controls.exe' @($nestedControls)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $nestedControls 'nested-audio-controls-tests.json') -Destination (Join-Path $root 'nested-audio-controls-tests.json') -Force
+  $nestedBitmaps = Join-Path $work 'nested-timeline-bitmaps'
+  Write-Host (Invoke-Native 'genesis-nested-timeline-bitmaps.exe' @($nestedBitmaps)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $nestedBitmaps 'nested-timeline-bitmaps-tests.json') -Destination (Join-Path $root 'nested-timeline-bitmaps-tests.json') -Force
+  $nestedPlan = Join-Path $work 'nested-picture-plan'
+  Write-Host (Invoke-Native 'genesis-nested-picture-plan.exe' @($nestedPlan)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $nestedPlan 'nested-picture-plan-tests.json') -Destination (Join-Path $root 'nested-picture-plan-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'native-tests.json') -Destination (Join-Path $root 'native-tests.json') -Force
 
   $headless = Invoke-Native 'genesis-headless.exe' @($work, (Join-Path $work 'project.air'), (Join-Path $work 'frame.png'))

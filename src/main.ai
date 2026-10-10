@@ -807,7 +807,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           ok(value)=>value,err(_)=>string.new(),
         }
         strip_requested=strip_requested+1
-        if preview.request_revision(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision) {
+        if preview.request_document_revision(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision,state.document_revision) {
           let _ = preview_link.wake(strip_transport,false)
           strip_document_revision=state.document_revision
           strip_initialized=true

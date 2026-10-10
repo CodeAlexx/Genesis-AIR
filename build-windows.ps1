@@ -5,6 +5,7 @@ param(
   [string]$Destination = $PSScriptRoot,
   [string]$NativeBuild = '',
   [string]$GeneratedDirectory = '',
+  [string]$CompositorSource = (Join-Path $PSScriptRoot 'build-windows/gcompose-source/gcompose/csrc/fpx_gpu.c'),
   [string]$Worker = (Join-Path $PSScriptRoot 'genesis-gcompose.exe'),
   [switch]$Launch,
   [switch]$SkipSmoke,
@@ -65,6 +66,8 @@ $sources = ,@('main', 'src/main.ai')
 if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai'), @('audio-device', 'tests/audio_device.ai'), @('audio-playback', 'tests/audio_playback.ai'), @('audio-cancel', 'tests/audio_cancel.ai'), @('preview-async', 'tests/preview_async.ai'), @('preview-stream', 'tests/preview_stream.ai'), @('preview-input', 'tests/preview_input.ai'), @('inspector', 'tests/inspector.ai'), @('live-paint', 'tests/live_paint.ai'), @('project-safety', 'tests/project_safety.ai'), @('picture-queue', 'tests/picture_queue.ai')) }
 if ($RunTests) { $sources += @(@('keyed-video', 'tests/keyed_video.ai'), @('window-cache', 'tests/window_cache.ai'), @('editor-trim', 'tests/editor_trim.ai'), @('trim-history', 'tests/trim_history.ai'), @('recovery-ownership', 'tests/recovery_ownership.ai'), @('media-session', 'tests/media_session.ai'), @('spatial-canvas', 'tests/spatial_canvas.ai')) }
 if ($RunTests) { $sources += @(@('fade-controls', 'tests/fade_controls.ai'), @('audio-fade-keys', 'tests/audio_fade_keys.ai'), @('audio-nested', 'tests/audio_nested.ai'), @('audio-nested-cancel', 'tests/audio_nested_cancel.ai'), @('nested-audio-controls', 'tests/nested_audio_controls.ai')) }
+if ($RunTests) { $sources += ,@('nested-timeline-bitmaps', 'tests/nested_timeline_bitmaps.ai') }
+if ($RunTests) { $sources += ,@('nested-picture-plan', 'tests/nested_picture_plan.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -80,9 +83,11 @@ if (-not (Test-Path -LiteralPath $cmake)) { throw 'Install Visual Studio C++ Bui
 $build = if ($NativeBuild) { $NativeBuild } else { Join-Path $buildRoot 'native' }
 $projectCmake = $here -replace '\\', '/'
 $generatedCmake = $generated -replace '\\', '/'
+$compositorCmake = $CompositorSource -replace '\\', '/'
 $includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
 & $cmake -S $sdk -B $build -G 'Visual Studio 17 2022' -A x64 "-DGENESIS_ROOT=$projectCmake" `
   "-DGENESIS_GENERATED_DIR=$generatedCmake" `
+  "-DGENESIS_COMPOSITOR_SOURCE=$compositorCmake" `
   "-DCMAKE_PROJECT_air_INCLUDE=$includeCmake" "-DGENESIS_TESTS=$($RunTests.IsPresent)" `
   "-DAIR_WINDOWS_APP_C=$generatedCmake/main.c" -DAIR_WINDOWS_APP_NAME=Genesis-AIR `
   -DAIR_DESKTOP=OFF -DAIR_SAM3=OFF -DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE
@@ -92,6 +97,8 @@ if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-
 if ($RunTests) { $targets += @('genesis-keyed-video', 'genesis-window-cache', 'genesis-editor-trim', 'genesis-trim-history', 'genesis-recovery-ownership', 'genesis-media-session', 'genesis-spatial-canvas') }
 if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys', 'genesis-audio-nested', 'genesis-audio-nested-cancel', 'genesis-nested-audio-controls') }
 if ($RunTests) { $targets += @('genesis-process-wait') }
+if ($RunTests) { $targets += @('genesis-nested-timeline-bitmaps') }
+if ($RunTests) { $targets += @('genesis-nested-picture-plan', 'genesis-compound-canvas') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'

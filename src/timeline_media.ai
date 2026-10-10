@@ -142,6 +142,7 @@ pub fn effective_speed(doc: ref<editor.Document>, clip: editor.Clip) -> f64 effe
 }
 
 pub fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64 effects {alloc} {
+  if clip.nested != 0 {return match nested_picture_frame(doc,clip,frame) {ok(value)=>value,err(_)=>-1,}}
   let unclamped: i64 = frame - clip.start
   let local: i64 = if unclamped < 0 { 0 }
     else if unclamped >= clip.length { clip.length - 1 }
@@ -150,7 +151,7 @@ pub fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) ->
     none => 30.0,
     some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=fps),
   }
-  let timeline_fps: f64 = editor.sequence_fps(doc, doc.active)
+  let timeline_fps: f64 = editor.sequence_fps(doc, clip.owner)
   let ratio: f64 = if timeline_fps > 0.0 and source_fps > 0.0 {
     source_fps / timeline_fps
   } else { 1.0 }
@@ -1362,7 +1363,7 @@ fn canvas_gcd(width: u32, height: u32) -> u32 effects {} {
 
 pub fn configure_monitor_preview(doc: ref<editor.Document>, cache: ref<RenderCache>,
     monitor_width: u32, monitor_height: u32) -> unit effects {alloc, process, time} {
-  var native: bool = false
+  var native: bool = nested_picture_requested(doc)
   var index: u64 = 0
   loop {
     if index >= array.len(struct.borrow(doc,field=filters)) {break}
@@ -1609,7 +1610,7 @@ fn raster_subtitle(doc: ref<editor.Document>, id: u64, prefix: str,
   result.ok(raster_file)
 }
 
-pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
+fn flat_frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
                   scratch_prefix: str, cache: ref<RenderCache>)
                   -> result<array<string>, string> effects {alloc, fs.meta, fs.read, fs.write} {
   let _ = try validate_lut_paths(doc, frame, cache)
@@ -1625,7 +1626,7 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   let raw_caption: string = text.concat("RAW:", str.view(caption))
   put(values, 0, str.view(provider.wire_path(str.view(raw_base))))
   put(values, 1, str.view(provider.wire_path(str.view(raw_caption))))
-  let folded: string = if str.eq(kind, "PREVIEW") { string.copy(out) }
+  let folded: string = if str.eq(kind, "PREVIEW") or str.eq(kind, "FLOAT") { string.copy(out) }
     else { text.concat(scratch_prefix, ".caption.rgba") }
   array.push(lines, wire_line(values, if str.eq(kind, "PREVIEW") { "PREVIEW" } else { "FLOAT" }, str.view(folded)))
   if str.eq(kind, "ENC") {
@@ -1637,7 +1638,7 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   result.ok(lines)
 }
 
-pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.read, fs.write} {
+fn cleanup_flat_plan(prefix: str) -> unit effects {alloc, fs.read, fs.write} {
   let _ = files.remove(str.view(text.concat(prefix, ".base-opacity.rgba")))
   let _ = files.remove(str.view(text.concat(prefix, ".incoming-opacity.rgba")))
   let _ = files.remove(str.view(layer_path(prefix, 0)))
@@ -1675,6 +1676,417 @@ pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.read, fs.write} {
   let _ = files.remove(str.view(text.concat(prefix, ".base.rgba")))
   let _ = files.remove(str.view(text.concat(prefix, ".caption.rgba")))
   ()
+}
+
+// Compound pictures use a private document projection. The original sequence,
+// clip-local automation, authored filter order and source phase never change.
+type PictureBudget = struct {nodes:u64, passes:u64, pixels:u64, bytes:u64}
+type PictureBuild = struct {groups:u64}
+type PictureRaster = struct {lines:array<string>, path:string, width:u32, height:u32}
+
+fn nested_picture_requested(doc: ref<editor.Document>) -> bool effects {} {
+  var at:u64=0
+  loop {if at >= editor.clip_count(doc) {break}
+    let clip:editor.Clip=array.get(struct.borrow(doc,field=clips),at)
+    if clip.owner == doc.active and clip.nested != 0 and clip.enabled and
+       editor.track_kind(doc,clip.track) == editor.track_video() and
+       editor.track_visible(doc,clip.track) {return true}
+    at=at+1
+  }
+  false
+}
+
+fn picture_exact_frame(frame:i64) -> bool effects {} {
+  let value:f64=cast.float(frame)
+  math.abs(value) <= 9007199254740991.0
+}
+fn picture_same_clip(a:editor.Clip,b:editor.Clip) -> bool effects {} {
+  a.id == b.id and a.owner == b.owner and a.source == b.source and a.nested == b.nested and
+    a.source_in == b.source_in and a.length == b.length and a.start == b.start and
+    a.track == b.track and a.group == b.group and a.enabled == b.enabled and
+    a.selected == b.selected and a.fade_in == b.fade_in and a.fade_out == b.fade_out and
+    a.gain == b.gain and a.pan == b.pan and a.speed == b.speed and a.reverse == b.reverse
+}
+
+// source_in belongs to the enclosing sequence, not to the child's native FPS.
+// Clamp transition handles just as a media clip clamps its sampled endpoints.
+pub fn nested_picture_frame(doc: ref<editor.Document>, clip:editor.Clip, frame:i64)
+    -> result<i64,string> effects {alloc} {
+  if clip.nested == 0 or clip.source != 0 or clip.length <= 0 or clip.source_in < 0 {
+    return result.err("[GA_VIDEO_NESTED_PROTOCOL] Invalid compound source geometry")
+  }
+  match editor.sequence_slot(doc,clip.owner) {none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Compound owner sequence is missing")},some(_)=>{},}
+  match editor.sequence_slot(doc,clip.nested) {none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Compound child sequence is missing")},some(_)=>{},}
+  let owner_fps:f64=editor.sequence_fps(doc,clip.owner)
+  let child_fps:f64=editor.sequence_fps(doc,clip.nested)
+  let speed:f64=effective_speed(doc,clip)
+  if not math.is_finite(owner_fps) or owner_fps <= 0.0 or
+     not math.is_finite(child_fps) or child_fps <= 0.0 or
+     not math.is_finite(speed) or speed < 0.0 {
+    return result.err("[GA_VIDEO_NESTED_PROTOCOL] Invalid compound rate")
+  }
+  let delta:i64=sub.sat(frame,clip.start)
+  let local:i64=if delta < 0 {0}else if delta >= clip.length {clip.length-1}else{delta}
+  let position:i64=if clip.reverse {clip.length-1-local}else{local}
+  let sampled:f64=math.floor((cast.float(clip.source_in)+cast.float(position)*speed)*child_fps/owner_fps)
+  if not math.is_finite(sampled) or sampled < 0.0 or sampled > 9007199254740991.0 {
+    return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound frame exceeds the exact frame domain")
+  }
+  let duration:i64=editor.sequence_duration(doc,clip.nested)
+  if duration > 0 and sampled >= cast.float(duration) {
+    return result.err("[GA_VIDEO_NESTED_SOURCE] Compound rate and length exceed child frames")
+  }
+  result.ok(cast.sat(sampled))
+}
+
+fn picture_charge(budget:ref<PictureBudget>, width:u32, height:u32, passes:u64,
+                  path_bytes:u64) -> result<unit,string> effects {alloc} {
+  let pixels:u64=cast.wrap(width)*cast.wrap(height)
+  let cost:u64=pixels*passes
+  let bytes:u64=(3072+path_bytes)*passes
+  if budget.passes > 16384 or passes > 16384-budget.passes or
+     cost > 2147483648 or budget.pixels > 2147483648-cost or
+     bytes > 960000 or budget.bytes > 960000-bytes {
+    return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound picture pass, pixel or descriptor budget exceeded")
+  }
+  struct.set(budget,budget.passes+passes,field=passes)
+  struct.set(budget,budget.pixels+cost,field=pixels)
+  struct.set(budget,budget.bytes+bytes,field=bytes)
+  result.ok(())
+}
+
+// Validate the reachable visible-track structure before any title/raster writes.
+// Inspect every enabled clip, including future transition halves, so malformed
+// children cannot appear only after an export has started publishing frames.
+fn picture_preflight(doc:ref<editor.Document>, sequence:u64, ancestors:ref<array<u64>>,
+                     budget:ref<PictureBudget>, prefix_bytes:u64, frame:i64, visible_context:bool)
+    -> result<unit,string> effects {alloc} {
+  var at:u64=0
+  loop {if at >= array.len(ancestors) {break}
+    if array.get(ancestors,at) == sequence {return result.err("[GA_VIDEO_NESTED_CYCLE] Compound picture composition cycle")}
+    at=at+1
+  }
+  if array.len(ancestors) >= 16 or budget.nodes >= 4096 {
+    return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound picture depth or node budget exceeded")
+  }
+  let seq_slot:u64=match editor.sequence_slot(doc,sequence) {
+    none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Compound picture sequence is missing")},some(value)=>value,
+  }
+  let width:u32=struct.get(array.borrow(struct.borrow(doc,field=sequences),seq_slot),field=width)
+  let height:u32=struct.get(array.borrow(struct.borrow(doc,field=sequences),seq_slot),field=height)
+  let fps:f64=editor.sequence_fps(doc,sequence)
+  if not math.is_finite(fps) or fps <= 0.0 or width < 16 or height < 16 or
+     width > 8192 or height > 8192 {
+    return result.err("[GA_VIDEO_NESTED_PROTOCOL] Invalid compound sequence format")
+  }
+  let native_pixels:u64=cast.wrap(width)*cast.wrap(height)
+  if native_pixels > 16777216 {
+    return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound canvas exceeds sixteen million pixels")
+  }
+  struct.set(budget,budget.nodes+1,field=nodes)
+  if visible_context {let _=try picture_charge(budget,width,height,3,prefix_bytes*6+384)}
+  var next:array<u64> = array.new()
+  at=0
+  loop {if at >= array.len(ancestors) {break}
+    array.push(next,array.get(ancestors,at))
+    at=at+1
+  }
+  array.push(next,sequence)
+  var view_doc:editor.Document=editor.copy_document(doc)
+  struct.set(view_doc,sequence,field=active)
+  at=0
+  loop {if at >= editor.clip_count(doc) {break}
+    let clip:editor.Clip=array.get(struct.borrow(doc,field=clips),at)
+    at=at+1
+    if clip.owner != sequence or not clip.enabled or
+       editor.track_kind(doc,clip.track) != editor.track_video() or
+       not editor.track_visible(doc,clip.track) {continue}
+    if budget.nodes >= 4096 {return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound picture node budget exceeded")}
+    struct.set(budget,budget.nodes+1,field=nodes)
+    let track_slot:u64=match editor.track_slot(doc,clip.track) {
+      none=>{return result.err("[GA_VIDEO_NESTED_PROTOCOL] Compound picture clip track is missing")},some(value)=>value,
+    }
+    if struct.get(array.borrow(struct.borrow(doc,field=tracks),track_slot),field=owner) != sequence or
+       clip.length <= 0 or clip.start < 0 or clip.source_in < 0 or
+       not picture_exact_frame(clip.start) or
+       not picture_exact_frame(clip.length) or
+       not picture_exact_frame(clip.source_in) or
+       not picture_exact_frame(editor.clip_end(clip)) {
+      return result.err("[GA_VIDEO_NESTED_PROTOCOL] Compound picture clip geometry is invalid")
+    }
+    var operators:u64=0
+    var filter_at:u32=0
+    loop {match editor.filter_at(doc,clip.id,filter_at) {
+      none=>{break},some(filter)=>{
+        if editor.filter_enabled(doc,filter) {
+          let kind:string=editor.filter_kind(doc,filter)
+          if clip.nested != 0 and kind == "stabilize" {
+            return result.err("[GA_VIDEO_NESTED_HISTORY] Compound stabilization needs group frame history")
+          }
+          if picture_operator(str.view(kind)) {operators=operators+1}
+        }
+      },
+    }
+    filter_at=filter_at+1
+    if operators > 4096 {return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound picture filter stack exceeds 4096 operators")}
+    }
+    let used:bool=visible_context and picture_used(view_doc,clip,frame)
+    var path_bytes:u64=prefix_bytes*6+384
+    if clip.nested != 0 {
+      var ancestor_at:u64=0
+      loop {if ancestor_at >= array.len(next) {break}
+        if array.get(next,ancestor_at) == clip.nested {return result.err("[GA_VIDEO_NESTED_CYCLE] Compound picture composition cycle")}
+        ancestor_at=ancestor_at+1
+      }
+      let _=try nested_picture_frame(doc,clip,clip.start)
+      let _=try nested_picture_frame(doc,clip,editor.clip_end(clip)-1)
+      let child_frame:i64=if used {try nested_picture_frame(doc,clip,frame)}else{0}
+      let _=try picture_preflight(doc,clip.nested,next,budget,prefix_bytes+32,child_frame,used)
+    }else{
+      let source:string=match source_path(doc,clip) {
+        none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Compound leaf has no online video source")},some(value)=>value,
+      }
+      if str.len(source) > 32768 {return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound media source path is too long")}
+      path_bytes=path_bytes+str.len(source)*3
+      let source_slot:u64=option.unwrap(editor.source_slot(doc,clip.source))
+      let source_fps:f64=struct.get(array.borrow(struct.borrow(doc,field=sources),source_slot),field=fps)
+      let speed:f64=effective_speed(doc,clip)
+      if not math.is_finite(source_fps) or source_fps <= 0.0 or
+         not math.is_finite(speed) or speed < 0.0 {
+        return result.err("[GA_VIDEO_NESTED_PROTOCOL] Invalid compound leaf rate")
+      }
+      let last:f64=math.floor((cast.float(clip.source_in)+cast.float(clip.length-1)*speed)*source_fps/fps)
+      let frames:i64=editor.source_frames(doc,clip.source)
+      if not math.is_finite(last) or last > 9007199254740991.0 or
+         (frames > 0 and last >= cast.float(frames)) {
+        return result.err("[GA_VIDEO_NESTED_SOURCE] Compound leaf rate and length exceed source frames")
+      }
+    }
+    if used {let _=try picture_charge(budget,width,height,operators+3,path_bytes)}
+    var key_at:u64=0
+    loop {if key_at >= array.len(struct.borrow(doc,field=keys)) {break}
+      let key:editor.Key=array.get(struct.borrow(doc,field=keys),key_at)
+      if key.clip == clip.id and (key.owner != clip.owner or
+          not math.is_finite(key.value) or math.abs(cast.float(key.frame)) > 9007199254740991.0 or
+          not key_supported(str.view(editor.name_text(doc,key.param)))) {
+        return result.err("[GA_VIDEO_NESTED_PROTOCOL] Compound picture has unsupported or invalid animation")
+      }
+      key_at=key_at+1
+    }
+  }
+  result.ok(())
+}
+
+fn picture_canvas(width:u32,height:u32,mode:u32) -> string effects {alloc} {
+  var fields:array<string> = ["CANVAS",string.from_int(width),string.from_int(height),string.from_int(mode)]
+  text.join(fields," ")
+}
+fn picture_token(kind:str,width:u32,height:u32,file:str) -> string effects {alloc} {
+  var value:string=text.concat(kind,":")
+  string.append(value,string.from_int(width))
+  string.append(value,":")
+  string.append(value,string.from_int(height))
+  string.append(value,":")
+  string.append(value,file)
+  value
+}
+fn picture_prefix(prefix:str,index:u64) -> string effects {alloc} {
+  text.concat(text.concat(prefix,".nested-"),string.from_int(index))
+}
+fn picture_used(doc:ref<editor.Document>,clip:editor.Clip,frame:i64) -> bool effects {alloc} {
+  match composited_clip(doc,clip.track,frame) {none=>{},some(value)=>{if value.id == clip.id {return true}},}
+  match editor.transition_at(doc,clip.track,frame) {
+    none=>{},some(id)=>{
+      let transition:editor.Transition=match editor.transition(doc,id) {none=>{return false},some(value)=>value,}
+      match transition_pair(doc,clip.track,transition.center) {
+        none=>{},some(pair)=>{if pair.incoming.id == clip.id {return true}},
+      }
+    },
+  }
+  false
+}
+
+fn picture_sequence_plan(doc:ref<editor.Document>,sequence:u64,frame:i64,
+    width:u32,height:u32,prefix:str,build:ref<PictureBuild>,fonts:ref<array<string>>)
+    -> result<PictureRaster,string> effects {alloc,fs.meta,fs.read,fs.write} {
+  if build.groups >= 4096 {return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound raster node budget exceeded")}
+  let own_prefix:string=picture_prefix(prefix,build.groups)
+  struct.set(build,build.groups+1,field=groups)
+  match files.mkdirs(path.dirname(prefix)) {err(_)=>{return result.err("[GA_VIDEO_NESTED_SCRATCH] Cannot create compound scratch")},ok(_)=>{},}
+  match files.write_text(text.concat(prefix,".nested-count"),string.from_int(build.groups)) {
+    err(_)=>{return result.err("[GA_VIDEO_NESTED_SCRATCH] Cannot record compound raster ownership")},ok(_)=>{},
+  }
+  var projected:editor.Document=editor.copy_document(doc)
+  struct.set(projected,sequence,field=active)
+  var lines:array<string> = array.new()
+  var at:u64=0
+  loop {if at >= editor.clip_count(doc) {break}
+    let clip:editor.Clip=array.get(struct.borrow(doc,field=clips),at)
+    at=at+1
+    if clip.owner != sequence or not clip.enabled or
+       editor.track_kind(doc,clip.track) != editor.track_video() or
+       not editor.track_visible(doc,clip.track) or not picture_used(projected,clip,frame) {continue}
+    let factor:f64=clip_factor(projected,clip,frame)
+    if not math.is_finite(factor) or factor < 0.0 or factor > 1.0 {
+      return result.err("[GA_VIDEO_NESTED_PROTOCOL] Compound picture opacity is outside zero to one")
+    }
+    if clip.nested == 0 {continue}
+    let child_frame:i64=try nested_picture_frame(doc,clip,frame)
+    let child_slot:u64=option.unwrap(editor.sequence_slot(doc,clip.nested))
+    let child_width:u32=struct.get(array.borrow(struct.borrow(doc,field=sequences),child_slot),field=width)
+    let child_height:u32=struct.get(array.borrow(struct.borrow(doc,field=sequences),child_slot),field=height)
+    var child:PictureRaster=try picture_sequence_plan(doc,clip.nested,child_frame,
+      child_width,child_height,prefix,build,fonts)
+    var line_at:u64=0
+    loop {if line_at >= array.len(struct.borrow(child,field=lines)) {break}
+      array.push(lines,string.copy(str.view(array.borrow(struct.borrow(child,field=lines),line_at))))
+      line_at=line_at+1
+    }
+    let source:string=picture_token("FLOATDIM",child.width,child.height,str.view(child.path))
+    let source_id:u64=editor.add_source(projected,str.view(source),"compound raster",1,editor.sequence_fps(doc,clip.owner))
+    let _=editor.describe_source(projected,source_id,child.width,child.height,true,false,0,0)
+    var replacement:editor.Clip=clip
+    struct.set(replacement,source_id,field=source)
+    struct.set(replacement,0,field=nested)
+    struct.set(replacement,0,field=source_in)
+    // Zero freezes only this private already-sampled raster, even when original
+    // Speed filters are present. Keep local keys/start/length/filter identities.
+    struct.set(replacement,0.0,field=speed)
+    struct.set(replacement,false,field=reverse)
+    let replacement_slot:u64=option.unwrap(editor.clip_slot(projected,clip.id))
+    array.set(struct.borrow(projected,field=clips),replacement_slot,replacement)
+  }
+  array.push(lines,picture_canvas(width,height,1))
+  var cache:RenderCache=render_cache(fonts)
+  struct.set(cache,width,field=width)
+  struct.set(cache,height,field=height)
+  let output:string=text.concat(str.view(own_prefix),".group.rgba")
+  var own_lines:array<string> = try flat_frame_plan(projected,frame,"FLOAT",str.view(output),str.view(own_prefix),cache)
+  at=0
+  loop {if at >= array.len(own_lines) {break}
+    array.push(lines,string.copy(str.view(array.borrow(own_lines,at))))
+    at=at+1
+  }
+  result.ok(PictureRaster {lines:lines,path:output,width:width,height:height})
+}
+
+fn picture_lines_valid(lines:ref<array<string>>) -> bool effects {} {
+  if array.len(lines) > 16384 {return false}
+  var bytes:u64=0
+  var at:u64=0
+  loop {if at >= array.len(lines) {break}
+    let size:u64=str.len(str.view(array.borrow(lines,at)))+1
+    if size > 1048576 or size > 960000-bytes {return false}
+    bytes=bytes+size
+    at=at+1
+  }
+  true
+}
+
+pub fn frame_plan(doc:ref<editor.Document>,frame:i64,kind:str,out:str,
+    scratch_prefix:str,cache:ref<RenderCache>)
+    -> result<array<string>,string> effects {alloc,fs.meta,fs.read,fs.write} {
+  if not nested_picture_requested(doc) {
+    return flat_frame_plan(doc,frame,kind,out,scratch_prefix,cache)
+  }
+  if str.len(scratch_prefix) == 0 or str.len(scratch_prefix) > 4096 or
+     frame < 0 or not picture_exact_frame(frame) or
+     (kind != "PREVIEW" and kind != "FLOAT" and kind != "ENC") {
+    return result.err("[GA_VIDEO_NESTED_PROTOCOL] Invalid compound picture request")
+  }
+  var budget:PictureBudget=PictureBudget {nodes:0,passes:0,pixels:0,bytes:0}
+  var ancestors:array<u64> = array.new()
+  try picture_preflight(doc,doc.active,ancestors,budget,str.len(scratch_prefix),frame,true)
+  cleanup_plan(scratch_prefix)
+  var build:PictureBuild=PictureBuild {groups:0}
+  var raster:PictureRaster=match picture_sequence_plan(doc,doc.active,frame,
+      cache.width,cache.height,scratch_prefix,build,struct.borrow(cache,field=fonts)) {
+    err(problem)=>{cleanup_plan(scratch_prefix)
+      return result.err(problem)},ok(value)=>value,
+  }
+  var lines:array<string> = struct.replace(raster,array.new(),field=lines)
+  array.push(lines,picture_canvas(cache.width,cache.height,0))
+  var values:array<string> = neutral()
+  let source:string=picture_token("OPAQUE",raster.width,raster.height,str.view(raster.path))
+  put(values,0,str.view(provider.wire_path(str.view(source))))
+  array.push(lines,wire_line(values,kind,out))
+  if not picture_lines_valid(lines) {
+    cleanup_plan(scratch_prefix)
+    return result.err("[GA_VIDEO_NESTED_CAPACITY] Compound picture wire budget exceeded")
+  }
+  result.ok(lines)
+}
+
+// Timeline filmstrips address the authored clip, even when it is disabled/hidden.
+// Isolate only its enclosing lane; child visibility and clip enablement survive.
+pub fn clip_picture_plan(doc:ref<editor.Document>,clip:editor.Clip,owner_frame:i64,
+    kind:str,out:str,prefix:str,cache:ref<RenderCache>)
+    -> result<array<string>,string> effects {alloc,fs.meta,fs.read,fs.write} {
+  let slot:u64=match editor.clip_slot(doc,clip.id) {
+    none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Filmstrip clip is missing")},some(value)=>value,
+  }
+  if not picture_same_clip(array.get(struct.borrow(doc,field=clips),slot),clip) or
+     owner_frame < clip.start or owner_frame >= editor.clip_end(clip) or
+     editor.track_kind(doc,clip.track) != editor.track_video() {
+    return result.err("[GA_VIDEO_NESTED_PROTOCOL] Filmstrip clip or frame is stale")
+  }
+  var isolated:editor.Document=editor.copy_document(doc)
+  struct.set(isolated,clip.owner,field=active)
+  var at:u64=0
+  loop {if at >= editor.clip_count(isolated) {break}
+    var current:editor.Clip = array.get(struct.borrow(isolated,field=clips),at)
+    if current.owner == clip.owner {struct.set(current,current.id == clip.id,field=enabled)
+      array.set(struct.borrow(isolated,field=clips),at,current)}
+    at=at+1
+  }
+  let track_slot:u64=match editor.track_slot(isolated,clip.track) {
+    none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Filmstrip clip track is missing")},some(value)=>value,
+  }
+  struct.set(array.borrow(struct.borrow(isolated,field=tracks),track_slot),false,field=hidden)
+  var transitions:array<editor.Transition> = array.new()
+  at=0
+  loop {if at >= array.len(struct.borrow(isolated,field=transitions)) {break}
+    let transition:editor.Transition=array.get(struct.borrow(isolated,field=transitions),at)
+    if transition.owner != clip.owner {array.push(transitions,transition)}
+    at=at+1
+  }
+  let _=struct.replace(isolated,transitions,field=transitions)
+  // Sequence captions are siblings of the isolated clip and do not belong in
+  // its filmstrip; captions inside the nested source remain part of its picture.
+  var subtitles:array<editor.Subtitle> = array.new()
+  at=0
+  loop {if at >= array.len(struct.borrow(isolated,field=subtitles)) {break}
+    let subtitle:ref<editor.Subtitle> = array.borrow(struct.borrow(isolated,field=subtitles),at)
+    if subtitle.owner != clip.owner {array.push(subtitles,editor.Subtitle {
+      id:subtitle.id,owner:subtitle.owner,start:subtitle.start,finish:subtitle.finish,
+      text:string.copy(str.view(struct.borrow(subtitle,field=text)))})}
+    at=at+1
+  }
+  let _=struct.replace(isolated,subtitles,field=subtitles)
+  if clip.nested != 0 {
+    let seq_slot:u64=match editor.sequence_slot(isolated,clip.owner) {
+      none=>{return result.err("[GA_VIDEO_NESTED_SOURCE] Filmstrip owner sequence is missing")},some(value)=>value,
+    }
+    struct.set(cache,struct.get(array.borrow(struct.borrow(isolated,field=sequences),seq_slot),field=width),field=width)
+    struct.set(cache,struct.get(array.borrow(struct.borrow(isolated,field=sequences),seq_slot),field=height),field=height)
+  }
+  frame_plan(isolated,owner_frame,kind,out,prefix,cache)
+}
+
+pub fn cleanup_plan(prefix:str) -> unit effects {alloc,fs.read,fs.write} {
+  let count_file:string=text.concat(prefix,".nested-count")
+  let count:u64=match files.read_text(str.view(count_file)) {
+    err(_)=>0,ok(value)=>match text.parse_u64(str.view(value)) {none=>0,some(number)=>if number <= 4096 {number}else{0},},
+  }
+  var at:u64=0
+  loop {if at >= count {break}
+    let owned:string=picture_prefix(prefix,at)
+    cleanup_flat_plan(str.view(owned))
+    let _=files.remove(text.concat(str.view(owned),".group.rgba"))
+    at=at+1
+  }
+  let _=files.remove(str.view(count_file))
+  cleanup_flat_plan(prefix)
 }
 
 // Playback and export check their control files while process I/O waits.

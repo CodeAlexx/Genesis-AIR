@@ -1,0 +1,168 @@
+module genesis.tests.nested_picture_plan
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/timeline_media.ai" as media
+import "../src/typeface.ai" as typeface
+
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>"encode failed",}
+}
+fn joined(lines:ref<array<string>>) -> string effects {alloc} {text.join(lines,"\n")}
+fn fixture() -> editor.Document effects {alloc} {
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let child:u64=editor.add_sequence(doc,"child",24.0,32,64)
+  let source:u64=editor.add_source(doc,"frame-coded.mkv","fixture",480,60.0)
+  let track:u64=editor.add_track(doc,child,editor.track_video(),"child V1")
+  let _=editor.place(doc,track,source,0,120,0)
+  let parent:u64=editor.add_track(doc,doc.active,editor.track_video(),"parent V1")
+  let _=editor.place_nested(doc,parent,child,15,30,10)
+  doc
+}
+fn parent_clip(doc:ref<editor.Document>) -> editor.Clip effects {} {
+  array.get(struct.borrow(doc,field=clips),1)
+}
+fn mapped(suite:ref<test.Suite>,doc:ref<editor.Document>,frame:i64,wanted:i64,label:str)
+    -> unit effects {alloc} {
+  let actual:i64=match media.nested_picture_frame(doc,parent_clip(doc),frame) {ok(value)=>value,err(_)=>-1,}
+  let _=test.eq_i64(suite,actual,wanted,label)
+}
+fn refused(suite:ref<test.Suite>,doc:ref<editor.Document>,root:str,code:str)
+    -> unit effects {alloc,fs.meta,fs.read,fs.write} {
+  let before:string=encoded(doc)
+  var fonts:array<string> = array.new()
+  var cache:media.RenderCache=media.render_cache(fonts)
+  struct.set(cache,64,field=width)
+  struct.set(cache,36,field=height)
+  let prefix:string=path.join(root,"refused")
+  let _=test.check(suite,match media.frame_plan(doc,10,"FLOAT","unused",prefix,cache) {
+    ok(_)=>false,err(problem)=>text.contains(problem,code),},code)
+  let _=test.eq_str(suite,encoded(doc),before,"Refusal preserves authored document")
+  let _=test.check(suite,not match files.exists(text.concat(prefix,".nested-count")) {ok(value)=>value,err(_)=>true,},"Structural refusal creates no ownership/raster files")
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Compound picture planning",true)
+  var doc:editor.Document=fixture()
+  let clip:u64=parent_clip(doc).id
+  let _=test.start(suite,"Owner frame units, child FPS, source phase and retiming")
+  mapped(suite,doc,10,12,"Source-in is fifteen owner frames at30fps, twelve child frames at24fps")
+  mapped(suite,doc,20,20,"Child sampled frame follows owner FPS")
+  mapped(suite,doc,9,12,"Incoming transition handle clamps first endpoint")
+  mapped(suite,doc,45,35,"Outgoing transition handle clamps final endpoint")
+  let _=editor.set_clip_speed(doc,clip,2.0)
+  mapped(suite,doc,20,28,"Rate applies once before child sampling")
+  let rate:u64=option.unwrap(editor.add_filter(doc,clip,"speed"))
+  let _=editor.set_filter_param(doc,rate,"rate",0.5)
+  mapped(suite,doc,20,20,"Enabled Speed filters compose with clip Rate")
+  let _=editor.set_clip_reverse(doc,clip,true)
+  mapped(suite,doc,10,35,"Reverse selects final authored sample")
+  mapped(suite,doc,39,12,"Reverse returns to source-in")
+  let _=editor.set_clip_speed(doc,clip,0.0)
+  mapped(suite,doc,20,12,"Freeze preserves source phase")
+  let _=test.done(suite)
+  let _=test.start(suite,"Postorder native canvases and parent grade after the child picture")
+  doc=fixture()
+  let gamma:u64=option.unwrap(editor.add_filter(doc,parent_clip(doc).id,"gamma"))
+  let _=editor.set_filter_param(doc,gamma,"level",2.0)
+  var fonts:array<string> = array.new()
+  var cache:media.RenderCache=media.render_cache(fonts)
+  media.configure_monitor_preview(doc,cache,80,45)
+  let _=test.eq_u64(suite,cast.wrap(cache.width),64,"Parent retains native canvas")
+  let _=test.eq_u64(suite,cast.wrap(cache.height),36,"Parent native canvas height")
+  let prefix:string=path.join(root,"ordered")
+  let before:string=encoded(doc)
+  var lines:array<string> = match media.frame_plan(doc,20,"PREVIEW","out.rgba",prefix,cache) {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 1},}
+  let wire:string=joined(lines)
+  let _=test.check(suite,str.starts_with(str.view(array.borrow(lines,0)),"CANVAS 32 64 1"),"Child canvas precedes child decode")
+  let _=test.check(suite,text.contains(wire,"CANVAS 64 36 1"),"Enclosing canvas restored before parent effects")
+  let _=test.check(suite,text.contains(wire,"FLOATDIM:32:64:"),"Parent consumes dimensioned child FP32 rather than a leaf")
+  let _=test.check(suite,text.contains(wire,"OPAQUE:64:36:"),"Completed root is black-flattened exactly once")
+  let _=test.eq_str(suite,str.view(array.borrow(lines,array.len(lines)-2)),"CANVAS 64 36 0","Legacy root mode restored before presentation")
+  let _=test.check(suite,str.starts_with(str.view(array.borrow(lines,array.len(lines)-1)),"PREVIEW "),"Provider final line remains PREVIEW")
+  let _=test.eq_str(suite,encoded(doc),before,"Planning does not intern/mutate original source or keys")
+  // The actual child media sample is20child frames ×60/24=50native frames.
+  var decoded:array<string> = text.split(str.view(array.borrow(lines,1))," ")
+  let _=test.eq_str(suite,str.view(array.borrow(decoded,3)),"50","Child leaf uses its own FPS after nested mapping")
+  var graded:array<string> = text.split(str.view(array.borrow(lines,3))," ")
+  let _=test.check(suite,str.starts_with(str.view(array.borrow(graded,1)),"FLOATDIM:32:64:"),"Parent grade consumes the completed child picture")
+  let _=test.eq_str(suite,str.view(array.borrow(graded,57)),"2","Parent gamma is applied once after the child composition")
+  media.cleanup_plan(prefix)
+  let _=test.check(suite,not match files.exists(text.concat(prefix,".nested-count")) {ok(value)=>value,err(_)=>true,},"Cleanup removes the bounded ownership receipt")
+  let _=test.done(suite)
+  let _=test.start(suite,"Compound filmstrip is isolated even when the parent is disabled/hidden")
+  let _=editor.set_clip_enabled(doc,parent_clip(doc).id,false)
+  let _=editor.set_track_hidden(doc,parent_clip(doc).track,true)
+  let snapshot:string=encoded(doc)
+  var strip:array<string> = match media.clip_picture_plan(doc,parent_clip(doc),20,"PREVIEW","strip.rgba",prefix,cache) {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 1},}
+  let _=test.check(suite,text.contains(joined(strip),"FLOATDIM:32:64:"),"Disabled parent still has a filmstrip of its contents")
+  let _=test.eq_str(suite,encoded(doc),snapshot,"Isolated strip preserves authored visibility")
+  media.cleanup_plan(prefix)
+  let _=test.done(suite)
+  let _=test.start(suite,"Future sequential shots do not consume a current-frame descriptor budget")
+  doc=fixture()
+  var future:u64=0
+  let child_clip:editor.Clip=array.get(struct.borrow(doc,field=clips),0)
+  loop {if future >= 250 {break}
+    let _=editor.place(doc,child_clip.track,child_clip.source,0,1,1000+cast.sat(future)*2)
+    future=future+1
+  }
+  let _=test.check(suite,match media.frame_plan(doc,20,"PREVIEW","out.rgba",prefix,cache) {ok(value)=>array.len(value)==6,err(_)=>false,},"Only the currently selected child shot is charged/rendered")
+  media.cleanup_plan(prefix)
+  let _=test.done(suite)
+  let _=test.start(suite,"Empty child subtitles write distinct native rasters and the requested group output")
+  doc=fixture()
+  let empty_parent:editor.Clip=parent_clip(doc)
+  var surviving:array<editor.Clip> = [empty_parent]
+  let _=struct.replace(doc,surviving,field=clips)
+  let _=editor.add_subtitle(doc,empty_parent.nested,0,100,"Nested")
+  fonts=typeface.defaults()
+  cache=media.render_cache(fonts)
+  struct.set(cache,64,field=width)
+  struct.set(cache,36,field=height)
+  let untouched:string=encoded(doc)
+  var captioned:array<string> = match media.frame_plan(doc,20,"PREVIEW","out.rgba",prefix,cache) {ok(value)=>value,err(problem)=>{io.write(problem)
+    return 1},}
+  let caption_wire:string=joined(captioned)
+  let child_group:string=text.concat(prefix,".nested-1.group.rgba")
+  let _=test.check(suite,text.contains(caption_wire,text.concat(" ",child_group)),"FLOAT caption fold writes the requested child group path")
+  let caption_file:string=text.concat(prefix,".nested-1.subtitle.rgba")
+  let _=test.eq_u64(suite,match files.file_size(caption_file) {ok(size)=>size,err(_)=>0,},8192,"Child caption raster uses32x64 native pixels")
+  let _=test.eq_str(suite,encoded(doc),untouched,"Subtitle planning preserves the saved project")
+  media.cleanup_plan(prefix)
+  let _=test.check(suite,not match files.exists(caption_file) {ok(value)=>value,err(_)=>true,},"Cleanup removes per-instance subtitle scratch")
+  let _=test.done(suite)
+  let _=test.start(suite,"Cycle, missing source, format, history and source extent refuse before writes")
+  doc=fixture()
+  var broken:editor.Clip=parent_clip(doc)
+  struct.set(broken,doc.active,field=nested)
+  array.set(struct.borrow(doc,field=clips),1,broken)
+  refused(suite,doc,root,"GA_VIDEO_NESTED_CYCLE")
+  doc=fixture()
+  broken=parent_clip(doc)
+  struct.set(broken,999999,field=nested)
+  array.set(struct.borrow(doc,field=clips),1,broken)
+  refused(suite,doc,root,"GA_VIDEO_NESTED_SOURCE")
+  doc=fixture()
+  let child_slot:u64=option.unwrap(editor.sequence_slot(doc,parent_clip(doc).nested))
+  struct.set(array.borrow(struct.borrow(doc,field=sequences),child_slot),8192,field=width)
+  struct.set(array.borrow(struct.borrow(doc,field=sequences),child_slot),8192,field=height)
+  refused(suite,doc,root,"GA_VIDEO_NESTED_CAPACITY")
+  doc=fixture()
+  let _=editor.add_filter(doc,parent_clip(doc).id,"stabilize")
+  refused(suite,doc,root,"GA_VIDEO_NESTED_HISTORY")
+  doc=fixture()
+  broken=parent_clip(doc)
+  struct.set(broken,10000,field=source_in)
+  array.set(struct.borrow(doc,field=clips),1,broken)
+  refused(suite,doc,root,"GA_VIDEO_NESTED_SOURCE")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"nested-picture-plan-tests.json"),20)
+}

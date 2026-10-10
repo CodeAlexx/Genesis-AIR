@@ -414,6 +414,7 @@ fn paint_thumbnails(canvas: ref<draw.Canvas>, state: ref<app.App>, model: ref<ti
     i = i + 1
     let clip: editor.Clip = match editor.clip(doc, thumb.clip) {none => { continue }, some(value) => value,}
     if clip.owner != doc.active or clip.source != thumb.source or thumb.revision != state.media_revision or
+        (clip.nested != 0 and thumb.document_revision != state.document_revision) or
         thumb.frame < clip.start or thumb.frame >= clip.start+clip.length or
         timeline_media.source_frame(doc,clip,thumb.frame) != thumb.source_frame {continue}
     var lane: u64 = 0

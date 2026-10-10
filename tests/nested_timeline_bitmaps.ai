@@ -1,0 +1,239 @@
+// Compound thumbnails are pictures of descendant edits, so retime alone is
+// insufficient identity. A completed old document must never replace new edits.
+module genesis.tests.nested_timeline_bitmaps
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.math as math
+import std.tasks as tasks
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+import "../src/preview_link.ai" as link
+import "../src/typeface.ai" as typeface
+
+fn row(doc: ref<editor.Document>, id: u64, revision: u64, document_revision: u64,
+       legacy: bool) -> string effects {alloc} {
+  let clip: editor.Clip = option.unwrap(editor.clip(doc,id))
+  var fields: array<string> = [string.from_int(id),string.from_int(clip.start),"sample",
+    string.from_int(clip.source),string.from_int(media.source_frame(doc,clip,clip.start)),
+    string.from_int(revision)]
+  if not legacy {array.push(fields,string.from_int(document_revision))}
+  text.concat(text.join(fields,"\t"),"\n")
+}
+
+fn sample(local: i64, reverse: bool, source_in: i64, length: i64, fast: bool) -> i64 effects {} {
+  let position: i64 = if reverse {length-1-local}else{local}
+  // Independently fixed 30000/1001 owner and 24000/1001 child/source.
+  // A 1.25 rate maps one owner frame to exactly one child frame.
+  (source_in*4 + position*if fast {5}else{4})/5
+}
+fn color(surface: ref<draw.Surface>, source_frame: i64, bright: bool) -> bool effects {alloc,io.write} {
+  let value: draw.Color = match draw.surface_pixel(surface,surface.width/2,surface.height/2) {
+    none=>{return false},some(value)=>value,
+  }
+  let shift: i64 = if bright {26}else{0}
+  let red: i64 = 32+(source_frame*37)%192+shift
+  let green: i64 = 32+(source_frame*73)%192+shift
+  let blue: i64 = 32+(source_frame*109)%192+shift
+  let r: i64 = cast.wrap(value.r)
+  let g: i64 = cast.wrap(value.g)
+  let b: i64 = cast.wrap(value.b)
+  let matches: bool = r >= red-2 and r <= red+2 and g >= green-2 and g <= green+2 and b >= blue-2 and b <= blue+2
+  if not matches {
+    var fields: array<string> = ["[GA_TEST_COMPOUND_BITMAP]",string.from_int(source_frame),
+      "expected",string.from_int(red),string.from_int(green),string.from_int(blue),
+      "actual",string.from_int(r),string.from_int(g),string.from_int(b)]
+    io.write(text.concat(text.join(fields," "),"\n"))
+  }
+  matches
+}
+fn canvas_recovery(root:str,worker:str,source_file:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  var engine:provider.Provider=provider.gcompose(worker,root)
+  var doc:editor.Document=editor.document(30000.0/1001.0,64,36)
+  let source:u64=editor.add_source(doc,source_file,"Recovery source",96,24000.0/1001.0)
+  let _=editor.describe_source(doc,source,320,180,true,false,0,0)
+  let track:u64=editor.add_track(doc,doc.active,editor.track_video(),"Flat V1")
+  let _=editor.append(doc,track,source,0,60)
+  var fonts:array<string> =array.new()
+  var cache:media.RenderCache=media.render_cache(fonts)
+  struct.set(cache,64,field=width)
+  struct.set(cache,36,field=height)
+  let prefix:string=path.join(root,"recovery")
+  var valid:array<string> =match media.frame_plan(doc,0,"PREVIEW",prefix,prefix,cache) {
+    err(_)=>{return false},ok(value)=>value,
+  }
+  var broken:array<string> =[string.copy("CANVAS 32 64 1"),string.copy("CANVAS 0 64 1"),
+    string.copy(str.view(array.borrow(valid,array.len(valid)-1)))]
+  var refused:provider.Frame=provider.program_plan(engine,broken,80,45,64,36)
+  let error:string=provider.last_error(engine)
+  var restored:provider.Frame=provider.program_plan(engine,valid,80,45,64,36)
+  let edge:draw.Color=match draw.surface_pixel(struct.borrow(restored,field=pixels),10,22) {
+    none=>draw.rgb(0,0,0),some(value)=>value,
+  }
+  let starts:u64=provider.worker_starts(engine)
+  provider.shutdown(engine)
+  media.cleanup_plan(prefix)
+  let good:bool=not refused.ok and text.contains(error,"CANVAS") and restored.ok and
+    starts == 2 and edge.r >= 30 and edge.r <= 34 and edge.g >= 30 and edge.g <= 34 and edge.b >= 30 and edge.b <= 34
+  if not good {
+    var fields:array<string> =["[GA_TEST_CANVAS_RECOVERY]",string.from_int(starts),
+      "edge",string.from_int(edge.r),string.from_int(edge.g),string.from_int(edge.b),string.copy(str.view(error))]
+    io.write(text.concat(text.join(fields," "),"\n"))
+  }
+  good
+}
+fn strip_media(root: str, worker: str, source_file: str) -> bool
+    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let strip_root: string = path.join(root,"real-compound-strip")
+  let _ = files.mkdirs(strip_root)
+  preview.reset(strip_root)
+  var state: app.App = app.app(provider.gcompose(worker,strip_root))
+  app.set_fonts(state,typeface.search_paths())
+  let imported: commands.Result = commands.import_media(state,source_file,"coded compound source")
+  if not imported.ok {return false}
+  let owner: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let _ = editor.set_sequence_format(struct.borrow(state,field=document),owner,320,180,30000.0/1001.0)
+  let child: u64 = editor.add_sequence(struct.borrow(state,field=document),"Nested picture",24000.0/1001.0,320,180)
+  let child_track: u64 = editor.add_track(struct.borrow(state,field=document),child,editor.track_video(),"Child V1")
+  let leaf: u64 = option.unwrap(editor.append(struct.borrow(state,field=document),child_track,imported.value,0,96))
+  let parent_track: u64 = app.default_video_track(state)
+  let compound: u64 = option.unwrap(editor.place_nested(struct.borrow(state,field=document),parent_track,child,0,100,7))
+  var transport: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  var configured: preview.Config = preview.config(state,strip_root,link.ticket(transport))
+  struct.set(configured,true,field=strips_only)
+  var good: bool = true
+  var checked: u64 = 0
+  task.scope {
+    var jobs: array<task<bool>> = array.new()
+    array.push(jobs,task.spawn(configured,fn=preview.run))
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,} and good
+    var phase: u64 = 0
+    loop {if phase >= 4 or not good {break}
+      if phase == 1 {good=editor.set_clip_reverse(struct.borrow(state,field=document),compound,true) and good}
+      if phase == 2 {
+        good=editor.set_clip_reverse(struct.borrow(state,field=document),compound,false) and good
+        good=editor.trim_start(struct.borrow(state,field=document),compound,19) and good
+        good=editor.trim_end(struct.borrow(state,field=document),compound,80) and good
+        good=editor.set_clip_speed(struct.borrow(state,field=document),compound,1.25) and good
+      }
+      if phase == 3 {
+        let filter: u64 = option.unwrap(editor.add_filter(struct.borrow(state,field=document),leaf,"brightness"))
+        good=editor.set_filter_param(struct.borrow(state,field=document),filter,"level",1.1) and good
+      }
+      app.document_changed(state)
+      if phase != 0 {
+        // Old descendant pixels must retire before fresh asynchronous work ends.
+        good=preview.read_thumbnails(state,strip_root,phase) and
+          array.len(struct.borrow(state,field=thumbnails)) == 0 and good
+      }
+      let encoded: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+      let id: u64 = phase+1
+      good=preview.request_document_revision(strip_root,encoded,id,0,40.0,450,480,270,
+        state.media_revision,state.document_revision) and good
+      good=match link.wake(transport,false) {ok(_)=>true,err(_)=>false,} and good
+      good=match link.await_event(transport,3,id,time.monotonic_ns()+30000000000) {ok(_)=>true,err(_)=>false,} and good
+      good=preview.read_thumbnails(state,strip_root,id) and good
+      let parent: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),compound))
+      let expected_revision: u64 = state.document_revision
+      let count: u64 = array.len(struct.borrow(state,field=thumbnails))
+      good=count > 12 and good
+      var index: u64 = 0
+      loop {if index >= count {break}
+        let thumb: ref<app.Thumbnail> = array.borrow(struct.borrow(state,field=thumbnails),index)
+        let expected: i64 = sample(thumb.frame-parent.start,parent.reverse,parent.source_in,parent.length,phase >= 2)
+        let identity: bool = thumb.clip == compound and thumb.source_frame == expected and
+          thumb.document_revision == expected_revision
+        if not identity {
+          var fields: array<string> = ["[GA_TEST_COMPOUND_IDENTITY]",string.from_int(thumb.frame),
+            "sample",string.from_int(thumb.source_frame),"expected",string.from_int(expected),
+            "revision",string.from_int(thumb.document_revision),"expected",string.from_int(expected_revision)]
+          io.write(text.concat(text.join(fields," "),"\n"))
+        }
+        good=identity and
+          thumb.document_revision == expected_revision and color(struct.borrow(thumb,field=pixels),expected,phase == 3) and good
+        checked=checked+1
+        index=index+1
+      }
+      phase=phase+1
+    }
+    preview.stop(strip_root)
+    let _ = link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,5000) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  provider.shutdown(struct.borrow(state,field=provider))
+  io.write(text.concat(string.from_int(checked)," actual compound timeline bitmaps checked\n"))
+  good
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _ = files.mkdirs(root)
+  var report: test.Suite = test.suite("compound thumbnail identity",false)
+  let _ = test.start(report,"Compound strip publication tracks descendant and media revisions")
+  var doc: editor.Document = editor.document(30.0,160,90)
+  let source: u64 = editor.add_source(doc,"coded.mov","Frame-coded child",120,30.0)
+  let _ = editor.describe_source(doc,source,160,90,true,false,0,0)
+  let owner: u64 = doc.active
+  let owner_track: u64 = editor.add_track(doc,owner,editor.track_video(),"Owner video")
+  let child: u64 = editor.add_sequence(doc,"Compound",24.0,160,90)
+  let child_track: u64 = editor.add_track(doc,child,editor.track_video(),"Child video")
+  let _ = editor.append(doc,child_track,source,0,60)
+  let compound: u64 = option.unwrap(editor.place_nested(doc,owner_track,child,0,60,0))
+  let flat: u64 = option.unwrap(editor.append(doc,owner_track,source,0,60))
+  let _ = editor.move_clip(doc,flat,owner_track,90)
+  var state: app.App = app.app(provider.fake(root))
+  let _ = struct.replace(state,doc,field=document)
+  struct.set(state,7,field=document_revision)
+  struct.set(state,3,field=media_revision)
+  var canvas: draw.Canvas = draw.canvas(option.unwrap(draw.surface(80,45)))
+  draw.clear(canvas,draw.rgb(240,20,40))
+  var surface: draw.Surface = draw.finish(canvas)
+  var pixels: bytes = draw.surface_rgba(surface)
+  let _ = files.write_bytes(path.join(root,"sample1.rgba"),bytes.view(pixels))
+  let _ = files.write_text(path.join(root,"thumbnails.id"),"1")
+  let _ = files.write_text(path.join(root,"thumbnails.tsv"),row(struct.borrow(state,field=document),compound,3,7,false))
+  let _ = test.check(report,preview.read_thumbnails(state,root,1),"completed compound publication reads")
+  let _ = test.eq_i64(report,cast.sat(array.len(struct.borrow(state,field=thumbnails))),1,"current descendant revision accepted")
+  // A descendant grade can change without altering this clip id/source/frame.
+  struct.set(state,8,field=document_revision)
+  let _ = test.check(report,preview.read_thumbnails(state,root,1),"obsolete complete publication still parses")
+  let _ = test.eq_i64(report,cast.sat(array.len(struct.borrow(state,field=thumbnails))),0,"descendant edit retires old pixels")
+  let _ = files.write_text(path.join(root,"thumbnails.tsv"),row(struct.borrow(state,field=document),compound,3,8,false))
+  let _ = test.check(report,preview.read_thumbnails(state,root,1),"new descendant publication reads")
+  let _ = test.eq_i64(report,cast.sat(array.len(struct.borrow(state,field=thumbnails))),1,"new descendant pixels accepted")
+  let _ = files.write_text(path.join(root,"thumbnails.id"),"0")
+  let _ = test.check(report,not preview.read_thumbnails(state,root,1),"partial slot cannot publish")
+  let _ = test.eq_i64(report,cast.sat(array.len(struct.borrow(state,field=thumbnails))),1,"partial slot preserves owned pixels")
+  let _ = files.write_text(path.join(root,"thumbnails.id"),"1")
+  let _ = files.write_text(path.join(root,"thumbnails.tsv"),row(struct.borrow(state,field=document),compound,2,8,false))
+  let _ = test.check(report,preview.read_thumbnails(state,root,1),"old media publication parses")
+  let _ = test.eq_i64(report,cast.sat(array.len(struct.borrow(state,field=thumbnails))),0,"Reload revision retires compound pixels")
+  let _ = files.write_text(path.join(root,"thumbnails.tsv"),row(struct.borrow(state,field=document),flat,3,0,true))
+  let _ = test.check(report,preview.read_thumbnails(state,root,1),"legacy flat publication reads")
+  let _ = test.eq_i64(report,cast.sat(array.len(struct.borrow(state,field=thumbnails))),1,"flat source pixels remain compatible")
+  let encoded: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>{return 2},}
+  let _ = test.check(report,preview.request_document_revision(root,encoded,9,0,2.4,120,480,270,3,8),"revision travels with atomic project snapshot")
+  let snapshot: string = match files.read_text(path.join(root,"request.air")) {ok(value)=>value,err(_)=>{return 2},}
+  let _ = test.check(report,text.contains(snapshot,"\t480\t270\t3\t8\n"),"snapshot includes media and document revision")
+  let _ = test.eq_i64(report,cast.sat(struct.get(struct.borrow(state,field=document),field=active)),cast.sat(owner),"thumbnail identity leaves active sequence unchanged")
+  let _ = test.done(report)
+  if view.len(args) >= 4 {
+    let _ = test.start(report,"A failed child canvas cannot contaminate a later flat preview")
+    let _ = test.check(report,canvas_recovery(root,view.get(args,2),view.get(args,3)),"Coded child refusal, restart and flat edge pixels")
+    let _ = test.done(report)
+    let _ = test.start(report,"Actual compound filmstrip pixels follow retime and descendant edits")
+    let _ = test.check(report,strip_media(root,view.get(args,2),view.get(args,3)),"Async compound source-time, pixels and revision identity")
+    let _ = test.done(report)
+  }
+  test.conclude(report,path.join(root,"nested-timeline-bitmaps-tests.json"),8)
+}
