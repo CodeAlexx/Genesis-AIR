@@ -197,7 +197,20 @@ def main():
             for legacy in modes:
                 root = evidence / f"pair-{n}"
                 root.mkdir(exist_ok=True)
-                result = measure(binary, worker, project, root, args.seconds, legacy, not args.project, args.poll)
+                try:
+                    result = measure(binary, worker, project, root, args.seconds, legacy, not args.project, args.poll)
+                except Exception as error:
+                    # Raw evidence already lives outside the temporary fixture.
+                    # Collect the small coded failure markers before media cleanup.
+                    diagnostics = {}
+                    for item in root.rglob("*"):
+                        if item.is_file() and item.name in {"errors.jsonl", "error.txt", "request.id", "ready.id"}:
+                            diagnostics[str(item.relative_to(root))] = item.read_text(encoding="utf-8", errors="replace")[-65536:]
+                    failed = dict(schema="genesis.playback-timing-failure", error=str(error),
+                                  raw_evidence=str(root), seconds=args.seconds, diagnostics=diagnostics)
+                    report.with_suffix(".failed.json").write_text(json.dumps(failed, indent=2), encoding="utf-8")
+                    print(json.dumps(failed), flush=True)
+                    raise
                 results.append(result)
                 print(json.dumps(result), flush=True)
     report.write_text(json.dumps({"schema": "genesis.playback-timing", "revision": 2,

@@ -221,6 +221,16 @@ fn paint_monitor_time(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typograp
     area: layout.Rect, frame: i64, last: i64, mark_in: i64, mark_out: i64, fps: f64,
     playing: bool) -> unit effects {alloc} {
   let bar_top: f64 = area.bottom - 61.0
+  // Time text can exceed a narrow monitor. Keep it inside the physical band
+  // refreshed by retained painting, so old glyph edges cannot accumulate.
+  let scale: f64 = draw.transform(canvas).a
+  let saved: draw.State = draw.state(canvas)
+  match geometry.rect(math.floor((area.left+4.0)*scale)/scale,
+      math.floor((bar_top-3.0)*scale)/scale,
+      math.ceil((area.right-4.0)*scale)/scale,
+      math.ceil((area.bottom-31.0)*scale)/scale) {
+    none => {return ()},some(box) => {let _ = draw.clip_rect(canvas,box)},
+  }
   fill_at(canvas, area.left + 8.0, bar_top, area.right - 8.0, bar_top + 7.0, draw.rgb(22, 24, 29))
   let span: f64 = if last > 0 { cast.float(last) } else { 1.0 }
   if mark_in >= 0 and mark_out > mark_in {
@@ -233,6 +243,7 @@ fn paint_monitor_time(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typograp
   var line: string = string.copy(str.view(timeline.timecode(frame, fps)))
   string.append(line, if playing { "   PLAY" } else { "   PAUSE" })
   label(canvas, typography, area.left + 8.0, bar_top + 16.0, str.view(line), type_body(), colors.text)
+  draw.restore(canvas,saved)
   ()
 }
 
@@ -688,6 +699,54 @@ fn paint_timeline_bar(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.Ap
 // ---------------------------------------------------------------------------
 // Scopes, read off the program frame that was already fetched for the monitor.
 
+fn scope_bins(count: u64) -> array<f64> effects {alloc} {
+  var bins: array<f64> = array.new()
+  var index: u64 = 0
+  loop {if index >= count {break}
+    array.push(bins,0.0)
+    index=index+1}
+  bins
+}
+fn scope_add(bins: ref<array<f64>>, column: u64, level: u64) -> unit effects {} {
+  let index: u64 = column*64+level
+  array.set(bins,index,array.get(bins,index)+1.0)
+  ()
+}
+// Horizontal position belongs to the picture, vertical position to signal level.
+// Density changes trace brightness, never its location or a histogram bar length.
+fn scope_trace(canvas: ref<draw.Canvas>, bins: ref<array<f64>>, area: layout.Rect,
+               tone: draw.Color, edge: draw.Color) -> unit effects {alloc} {
+  fill(canvas,area,draw.rgb(12,13,16))
+  var grid: u64 = 1
+  loop {if grid >= 4 {break}
+    let y: f64 = area.top+layout.height_of(area)*cast.float(grid)/4.0
+    fill_at(canvas,area.left,y,area.right,y+0.5,draw.rgb(30,32,38))
+    grid=grid+1}
+  var peak: f64 = 1.0
+  var index: u64 = 0
+  loop {if index >= 4096 {break}
+    peak=math.max(peak,array.get(bins,index))
+    index=index+1}
+  // Keep 0 and 255 inside the outline instead of drawing under its border.
+  let column: f64 = (layout.width_of(area)-2.0)/64.0
+  let row: f64 = (layout.height_of(area)-2.0)/64.0
+  index=0
+  loop {if index >= 4096 {break}
+    let amount: f64 = array.get(bins,index)
+    if amount > 0.0 {
+      let strength: f64 = 0.25+0.75*math.sqrt(amount/peak)
+      let r: f64 = cast.float(tone.r)
+      let g: f64 = cast.float(tone.g)
+      let b: f64 = cast.float(tone.b)
+      let colour: draw.Color = draw.rgb(cast.sat(r*strength),cast.sat(g*strength),cast.sat(b*strength))
+      let x: f64 = area.left+1.0+cast.float(index/64)*column
+      let y: f64 = area.top+1.0+cast.float(63-index%64)*row
+      fill_at(canvas,x,y,x+column,y+row,colour)
+    }
+    index=index+1}
+  outline(canvas,area,edge)
+  ()
+}
 fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, colors: Theme, area: layout.Rect,
                 image: ref<draw.Surface>) -> unit effects {alloc} {
   let wide: u32 = draw.surface_width(image)
@@ -702,6 +761,10 @@ fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, c
   var green: array<f64> = array.new()
   var blue: array<f64> = array.new()
   var luma: array<f64> = array.new()
+  var parade_red: array<f64> = scope_bins(4096)
+  var parade_green: array<f64> = scope_bins(4096)
+  var parade_blue: array<f64> = scope_bins(4096)
+  var waveform: array<f64> = scope_bins(4096)
   var slot: u64 = 0
   loop {
     if slot >= 64 { break }
@@ -729,7 +792,7 @@ fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, c
           let bucket_r: u64 = r / 4
           let bucket_g: u64 = g / 4
           let bucket_b: u64 = b / 4
-          let grey: u64 = (r * 30 + g * 59 + b * 11) / 100
+          let grey: u64 = (r * 2126 + g * 7152 + b * 722) / 10000
           let bucket_l: u64 = grey / 4
           let seen_r: f64 = array.get(red, bucket_r)
           let seen_g: f64 = array.get(green, bucket_g)
@@ -739,6 +802,11 @@ fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, c
           array.set(green, bucket_g, seen_g + 1.0)
           array.set(blue, bucket_b, seen_b + 1.0)
           array.set(luma, bucket_l, seen_l + 1.0)
+          let column: u64 = cast.wrap(x)*64/cast.wrap(wide)
+          scope_add(parade_red,column,bucket_r)
+          scope_add(parade_green,column,bucket_g)
+          scope_add(parade_blue,column,bucket_b)
+          scope_add(waveform,column,bucket_l)
           counted = counted + 1.0
         },
       }
@@ -794,23 +862,10 @@ fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, c
   loop {
     if channel >= 3 { break }
     let left: f64 = area.left + 6.0 + cast.float(channel) * (each + 4.0)
-    fill_at(canvas, left, top, left + each, top + parade_height, draw.rgb(12, 13, 16))
-    var bucket: u64 = 0
-    loop {
-      if bucket >= 64 { break }
-      let amount: f64 = if channel == 0 { array.get(red, bucket) }
-        else if channel == 1 { array.get(green, bucket) } else { array.get(blue, bucket) }
-      if amount > 0.0 {
-        let level: f64 = top + parade_height
-          - parade_height * cast.float(bucket) / 63.0
-        let bar: f64 = each * math.min(1.0, amount / peak)
-        let tone: draw.Color = if channel == 0 { draw.rgb(200, 80, 80) }
-          else if channel == 1 { draw.rgb(80, 190, 100) } else { draw.rgb(80, 120, 215) }
-        fill_at(canvas, left, level - 1.5, left + bar, level + 1.5, tone)
-      }
-      bucket = bucket + 1
-    }
-    outline(canvas, layout.rect(left, top, left + each, top + parade_height), colors.edge)
+    let area: layout.Rect = layout.rect(left,top,left+each,top+parade_height)
+    if channel == 0 {scope_trace(canvas,parade_red,area,draw.rgb(200,80,80),colors.edge)}
+    else if channel == 1 {scope_trace(canvas,parade_green,area,draw.rgb(80,190,100),colors.edge)}
+    else {scope_trace(canvas,parade_blue,area,draw.rgb(80,120,215),colors.edge)}
     channel = channel + 1
   }
   top = top + parade_height + 10.0
@@ -818,21 +873,8 @@ fn paint_scopes(canvas: ref<draw.Canvas>, typography: ref<ui_text.Typography>, c
   label(canvas, typography, area.left + 6.0, top, "LUMA WAVEFORM", type_small(), colors.accent)
   top = top + 12.0
   let wave_height: f64 = 72.0
-  fill_at(canvas, area.left + 6.0, top, area.right - 6.0, top + wave_height, draw.rgb(12, 13, 16))
-  index = 0
-  loop {
-    if index >= 64 { break }
-    let amount: f64 = array.get(luma, index)
-    if amount > 0.0 {
-      let x0: f64 = area.left + 6.0 + cast.float(index) * column
-      let height: f64 = wave_height * math.min(1.0, amount / peak)
-      fill_at(canvas, x0, top + wave_height - height, x0 + column - 0.5, top + wave_height,
-        draw.rgb(150, 200, 160))
-    }
-    index = index + 1
-  }
-  outline(canvas, layout.rect(area.left + 6.0, top, area.right - 6.0, top + wave_height),
-    colors.edge)
+  scope_trace(canvas,waveform,layout.rect(area.left+6.0,top,area.right-6.0,top+wave_height),
+    draw.rgb(150,200,160),colors.edge)
   top = top + wave_height + 10.0
 
   let shown_wide: u64 = cast.wrap(wide)
@@ -1094,7 +1136,7 @@ fn paint_live_monitor(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: The
     if last > 0 { last - 1 } else { 0 }, transport.mark_in, transport.mark_out, fps, transport.playing)
 }
 fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
-    previous_frame: i64, source: ref<draw.Surface>, program: ref<draw.Surface>) -> unit effects {alloc} {
+    previous_frame: i64, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool) -> unit effects {alloc} {
   ui_text.set_scale(struct.borrow(state, field=typography), draw.transform(canvas).a)
   let colors: Theme = theme(state)
   let frame: layout.Frame = layout.frame(width, height)
@@ -1104,7 +1146,7 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
     else { paint_live_monitor(canvas, state, colors, frame, false, program) }
     return ()
   }
-  paint_live_monitor(canvas, state, colors, frame, true, source)
+  if not hold_source { paint_live_monitor(canvas, state, colors, frame, true, source) }
   paint_live_monitor(canvas, state, colors, frame, false, program)
   let current: i64 = app.timeline_frame(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
@@ -1114,12 +1156,22 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
     repaint_head(canvas, state, colors, frame, model, previous_frame)
     repaint_head(canvas, state, colors, frame, model, current)
   }
-  if app.dock_tab(state) == chrome.tab_scopes() or app.dock_tab(state) == chrome.tab_audio() or
-      animated {
+  if app.dock_tab(state) == chrome.tab_audio() and not animated and layout.width_of(frame.dock_body) >= 360.0 {
+    // Unkeyed faders and effect controls change only through full input paints.
+    // Preserve them while refreshing the actual mixed output meter region.
+    let saved: draw.State = draw.state(canvas)
+    let right: f64 = if chrome.dock_scroll_max(frame,state) > 0.0 {chrome.dock_scroll_track(frame).left-2.0}else{frame.dock_body.right}
+    match geometry.rect(frame.dock_body.left,frame.dock_body.top,right,frame.dock_body.bottom) {
+      some(box) => {let _ = draw.clip_rect(canvas,box)},none=>{},
+    }
+    paint_meters(canvas,colors,state,frame.dock_body)
+    draw.restore(canvas,saved)
+  } else if app.dock_tab(state) == chrome.tab_scopes() or app.dock_tab(state) == chrome.tab_audio() or animated {
     erase_section(canvas, frame.dock, colors.background)
     paint_dock(canvas, colors, state, frame, program)
   }
-  erase_section(canvas, frame.status, colors.background)
+  // The opaque status fill already clears its text. An expanded erase would
+  // destroy neighboring track headers when the timeline reaches this boundary.
   paint_status(canvas, colors, state, frame.status)
   app.count_paint(state)
   ()
@@ -1131,6 +1183,13 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
 // Dimension and transport changes conservatively repaint all.
 pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
     full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>) -> bool effects {alloc} {
+  render_with_source_hold(state,cache,width,height,full,source,program,false)
+}
+// The caller tracks actual source-image replacement. A held image can reuse its
+// monitor only during a retained paint; edits, resize and transport changes still
+// repaint the entire canvas. Ordinary render callers remain conservative.
+pub fn render_with_source_hold(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
+    full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool) -> bool effects {alloc} {
   let program_frame: i64 = app.timeline_frame(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   let source_playing: bool = struct.get(struct.borrow(doc, field=monitor), field=playing)
@@ -1148,7 +1207,7 @@ pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32
   let scale: f64 = layout.ui_scale(cast.float(width), cast.float(height))
   draw.set_transform(canvas, draw.scale(scale, scale))
   if repaint { paint(state, canvas, cast.float(width) / scale, cast.float(height) / scale, source, program) }
-  else { paint_live(state, canvas, cast.float(width) / scale, cast.float(height) / scale, cache.frame, source, program) }
+  else { paint_live(state, canvas, cast.float(width) / scale, cast.float(height) / scale, cache.frame, source, program,hold_source) }
   let _ = struct.replace(cache, draw.finish(canvas), field=surface)
   struct.set(cache, program_frame, field=frame)
   struct.set(cache, source.width, field=source_width)

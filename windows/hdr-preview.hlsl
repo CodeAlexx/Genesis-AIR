@@ -6,7 +6,7 @@ RWStructuredBuffer<float4> output_pixels : register(u0);
 cbuffer Picture : register(b0) { uint sw; uint sh; uint dw; uint dh; };
 
 float2 uv_at(int2 p) {
-    return chroma.Load(int3(clamp(p, int2(0,0), int2(sw/2-1,sh/2-1)),0));
+    return chroma.Load(int3(clamp(p, int2(0,0), int2((sw+1)/2-1,(sh+1)/2-1)),0));
 }
 float3 encoded_rgb(int x, int y) {
     x = clamp(x, 0, int(sw)-1); y = clamp(y, 0, int(sh)-1);

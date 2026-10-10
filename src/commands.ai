@@ -21,6 +21,7 @@ import "app.ai" as app
 import "provider.ai" as provider
 import "recovery.ai" as recovery
 import "timeline_media.ai" as timeline_media
+import "filter_keys.ai" as filter_keys
 
 pub type Result = struct { ok: bool, message: string, value: u64 }
 
@@ -61,6 +62,7 @@ pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> un
   let _ = app.set_dock_scroll(state, 0.0)
   app.end_parameter_drag(state)
   app.end_gesture(state)
+  app.document_changed(state)
   struct.set(state, state.project_epoch + 1, field=project_epoch)
   app.mark_media_changed(state)
   ()
@@ -94,7 +96,7 @@ pub fn sequence_preset(state: ref<app.App>, preset: u64) -> Result effects {allo
   }
   editor.capture(struct.borrow(state, field=history), doc)
   if not editor.set_sequence_format(doc, doc.active, width, height, fps) { return refused("[GA_SEQUENCE_FORMAT] Invalid format") }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done(text.concat(string.from_int(width), text.concat(" x ", string.from_int(height))), preset)
 }
 
@@ -106,7 +108,7 @@ pub fn camera_cut(state: ref<app.App>, track: u64) -> Result effects {alloc} {
   }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let count: u64 = editor.cut_camera(struct.borrow(state, field=document), track, frame)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("Camera cut recorded; audio mix unchanged", count)
 }
 pub fn camera_number(state: ref<app.App>, number: u64) -> Result effects {alloc} {
@@ -212,7 +214,7 @@ pub fn import_media(state: ref<app.App>, path: str, name: str) -> Result effects
     report.frames, report.fps)
   let _ = editor.describe_source(struct.borrow(state, field=document), id, report.width,
     report.height, report.has_video, report.has_audio, 48000, 2)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   if not report.ok {
     app.set_status(state, "Imported, but its length is unknown")
     return done("imported with unknown length", id)
@@ -247,7 +249,7 @@ pub fn import_drop(state: ref<app.App>, listing: str) -> Result effects {alloc, 
 pub fn add_bin(state: ref<app.App>, name: str) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let id: u64 = editor.add_bin(struct.borrow(state, field=document), name, 1)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("bin added", id)
 }
 
@@ -263,7 +265,7 @@ pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {al
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, str.view(absolute),
     report.frames)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   if corrected != 0 {
     app.set_status(state, "Relinked; some clips were clamped to the new media")
     return done("relinked with clamping", corrected)
@@ -284,7 +286,7 @@ pub fn add_track(state: ref<app.App>, kind: u32, name: str) -> Result effects {a
   if kind == editor.track_audio() {
     let _ = editor.reorder_track(struct.borrow(state, field=document), id, 0)
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done(if kind == editor.track_audio() { "audio track added below the video" }
        else { "video track added" }, id)
 }
@@ -294,7 +296,7 @@ pub fn remove_track(state: ref<app.App>, track: u64) -> Result effects {alloc} {
   if not editor.remove_track(struct.borrow(state, field=document), track) {
     return refused("that track is locked or unknown")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("track removed", track)
 }
 
@@ -303,7 +305,7 @@ pub fn rename_track(state: ref<app.App>, track: u64, name: str) -> Result effect
   if not editor.rename_track(struct.borrow(state, field=document), track, name) {
     return refused("no such track")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("track renamed", track)
 }
 
@@ -316,9 +318,13 @@ pub fn rename_track(state: ref<app.App>, track: u64, name: str) -> Result effect
 
 pub fn insert_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64, length: i64,
                    at: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  match editor.insert(struct.borrow(state, field=document), track, source, source_in, length, at) {
-    some(id) => { app.mark_dirty(state, true)
+  // The toolkit may split before placement refuses a source range. Commit only success.
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  match editor.insert(candidate, track, source, source_in, length, at) {
+    some(id) => {
+      editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+      let _ = struct.replace(state, candidate, field=document)
+      app.document_changed(state)
       done("inserted", id) },
     none => refused("the clip could not be inserted there"),
   }
@@ -326,9 +332,13 @@ pub fn insert_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
 
 pub fn overwrite_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
                       length: i64, at: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  match editor.overwrite(struct.borrow(state, field=document), track, source, source_in, length, at) {
-    some(id) => { app.mark_dirty(state, true)
+  // Lifting the occupied range must not reach the live document if placement refuses it.
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
+  match editor.overwrite(candidate, track, source, source_in, length, at) {
+    some(id) => {
+      editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+      let _ = struct.replace(state, candidate, field=document)
+      app.document_changed(state)
       done("overwrote", id) },
     none => refused("the clip could not be placed there"),
   }
@@ -338,7 +348,7 @@ pub fn append_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
                    length: i64) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   match editor.append(struct.borrow(state, field=document), track, source, source_in, length) {
-    some(id) => { app.mark_dirty(state, true)
+    some(id) => { app.document_changed(state)
       done("appended", id) },
     none => refused("the clip could not be appended"),
   }
@@ -354,7 +364,7 @@ pub fn move_clip(state: ref<app.App>, clip: u64, track: u64, start: i64) -> Resu
   if not editor.move_clip(struct.borrow(state, field=document), clip, track, start) {
     return refused("that clip cannot move there")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("moved", clip)
 }
 
@@ -363,7 +373,7 @@ pub fn nudge(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {allo
   if not editor.nudge(struct.borrow(state, field=document), clip, delta) {
     return refused("that clip cannot be nudged")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("nudged", clip)
 }
 
@@ -372,19 +382,27 @@ pub fn split_at_playhead(state: ref<app.App>) -> Result effects {alloc} {
   let frame: i64 = editor.playhead(struct.borrow(state, field=document))
   let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
   let chosen: u64 = app.current_clip(state)
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state,field=document))
   if chosen != 0 {
-    match editor.split(struct.borrow(state, field=document), chosen, frame) {
-      some(id) => { app.mark_dirty(state, true)
-        return done("split", id) },
-      none => { },
+    let selected: editor.Clip = match editor.clip(candidate,chosen) {none=>{return refused("no selected clip")},some(value)=>value,}
+    if selected.start < frame and editor.clip_end(selected) > frame {
+      match editor.split(candidate, chosen, frame) {
+        some(id) => {
+          editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+          let _ = struct.replace(state,candidate,field=document)
+          app.document_changed(state)
+          return done("split", id) },
+        none => {return refused("[GA_SPLIT_CONTEXT] Cut is locked or cannot preserve source time, fades, or effect history")},
+      }
     }
   }
   // Nothing selected, or the playhead is not inside it: split every track at the playhead,
   // which is the ordinary "razor all" gesture.
-  let cuts: u64 = editor.split_all(struct.borrow(state, field=document), sequence, frame)
-  if cuts == 0 { return refused("nothing to split at the playhead") }
-  app.mark_dirty(state, true)
+  let cuts: u64 = editor.split_all(candidate, sequence, frame)
+  if cuts == 0 { return refused("[GA_SPLIT_CONTEXT] No unlocked cut can preserve source time, fades, and effect history at this playhead") }
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _ = struct.replace(state,candidate,field=document)
+  app.document_changed(state)
   done("split all tracks", cuts)
 }
 
@@ -393,7 +411,7 @@ pub fn trim_start(state: ref<app.App>, clip: u64, start: i64) -> Result effects 
   if not editor.trim_start(struct.borrow(state, field=document), clip, start) {
     return refused("that head trim was refused")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("trimmed head", clip)
 }
 pub fn trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {alloc} {
@@ -401,7 +419,7 @@ pub fn trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {
   if not editor.trim_end(struct.borrow(state, field=document), clip, length) {
     return refused("that tail trim was refused")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("trimmed tail", clip)
 }
 pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {alloc} {
@@ -409,7 +427,7 @@ pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result ef
   if not editor.ripple_trim_end(struct.borrow(state, field=document), clip, length) {
     return refused("that ripple trim was refused")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("ripple trimmed", clip)
 }
 pub fn ripple_delete(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
@@ -417,7 +435,7 @@ pub fn ripple_delete(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
   if not editor.ripple_delete(struct.borrow(state, field=document), clip) {
     return refused("no such clip")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("ripple deleted", clip)
 }
 pub fn lift(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
@@ -425,7 +443,7 @@ pub fn lift(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
   if not editor.lift(struct.borrow(state, field=document), clip) {
     return refused("no such clip")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("lifted", clip)
 }
 pub fn slip(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
@@ -433,14 +451,14 @@ pub fn slip(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc
   if not editor.slip(struct.borrow(state, field=document), clip, delta) {
     return refused("that slip was refused")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("slipped", clip)
 }
 pub fn roll(state: ref<app.App>, left: u64, right: u64, delta: i64) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let applied: i64 = editor.roll(struct.borrow(state, field=document), left, right, delta)
   if applied == 0 { return refused("that cut cannot roll") }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("rolled", cast.wrap(if applied < 0 { 0 - applied } else { applied }))
 }
 pub fn slide(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
@@ -448,7 +466,7 @@ pub fn slide(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {allo
   if not editor.slide(struct.borrow(state, field=document), clip, delta) {
     return refused("that clip has no abutting neighbours to absorb a slide")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("slid", clip)
 }
 
@@ -478,7 +496,7 @@ pub fn group_selection(state: ref<app.App>) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let id: u64 = editor.group(struct.borrow(state, field=document), array.view(members))
   if id == 0 { return refused("those clips could not be grouped") }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("grouped", id)
 }
 pub fn ungroup(state: ref<app.App>, group: u64) -> Result effects {alloc} {
@@ -486,7 +504,7 @@ pub fn ungroup(state: ref<app.App>, group: u64) -> Result effects {alloc} {
   if not editor.ungroup(struct.borrow(state, field=document), group) {
     return refused("no such group")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("ungrouped", group)
 }
 pub fn move_group(state: ref<app.App>, group: u64, delta: i64) -> Result effects {alloc} {
@@ -494,7 +512,7 @@ pub fn move_group(state: ref<app.App>, group: u64, delta: i64) -> Result effects
   if not editor.move_group(struct.borrow(state, field=document), group, delta) {
     return refused("that group cannot move")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("group moved", group)
 }
 
@@ -506,7 +524,7 @@ pub fn add_transition(state: ref<app.App>, track: u64, centre: i64, duration: i6
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let id: u64 = editor.add_transition(struct.borrow(state, field=document), track, centre,
     duration, kind)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("transition added", id)
 }
 pub fn set_transition_duration(state: ref<app.App>, transition: u64, duration: i64) -> Result effects {alloc} {
@@ -514,7 +532,7 @@ pub fn set_transition_duration(state: ref<app.App>, transition: u64, duration: i
   if not editor.set_transition_duration(struct.borrow(state, field=document), transition, duration) {
     return refused("no such transition")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("transition resized", transition)
 }
 pub fn remove_transition(state: ref<app.App>, transition: u64) -> Result effects {alloc} {
@@ -522,7 +540,7 @@ pub fn remove_transition(state: ref<app.App>, transition: u64) -> Result effects
   if not editor.remove_transition(struct.borrow(state, field=document), transition) {
     return refused("no such transition")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("transition removed", transition)
 }
 
@@ -532,7 +550,7 @@ pub fn set_fades(state: ref<app.App>, clip: u64, fade_in: i64, fade_out: i64) ->
     return refused("no such clip")
   }
   let _ = editor.set_fade_out(struct.borrow(state, field=document), clip, fade_out)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("fades set", clip)
 }
 
@@ -542,7 +560,7 @@ pub fn set_key(state: ref<app.App>, clip: u64, param: str, frame: i64, value: f6
   if not editor.set_key(struct.borrow(state, field=document), clip, param, frame, value, interp) {
     return refused("that parameter could not be keyed")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("keyframe set", clip)
 }
 
@@ -550,7 +568,7 @@ pub fn add_marker(state: ref<app.App>, frame: i64, label: str) -> Result effects
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
   let id: u64 = editor.add_marker(struct.borrow(state, field=document), sequence, frame, label, 2)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("marker added", id)
 }
 
@@ -558,7 +576,7 @@ pub fn add_subtitle(state: ref<app.App>, start: i64, finish: i64, text: str) -> 
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let sequence: u64 = struct.get(struct.borrow(state, field=document), field=active)
   match editor.add_subtitle(struct.borrow(state, field=document), sequence, start, finish, text) {
-    some(id) => { app.mark_dirty(state, true)
+    some(id) => { app.document_changed(state)
       done("subtitle added", id) },
     none => refused("a subtitle needs a positive span"),
   }
@@ -571,7 +589,7 @@ pub fn add_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effects {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
     some(id) => { app.set_selected_filter(state, id)
-      app.mark_dirty(state, true)
+      app.document_changed(state)
       done("filter added", id) },
     none => refused("no such clip"),
   }
@@ -582,7 +600,7 @@ pub fn remove_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc}
     return refused("no such filter")
   }
   if app.selected_filter(state) == filter { app.set_selected_filter(state, 0) }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("filter removed", filter)
 }
 pub fn toggle_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
@@ -591,7 +609,7 @@ pub fn toggle_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc}
   if not editor.set_filter_enabled(struct.borrow(state, field=document), filter, not now) {
     return refused("no such filter")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done(if now { "filter disabled" } else { "filter enabled" }, filter)
 }
 pub fn reorder_filter(state: ref<app.App>, filter: u64, position: u32) -> Result effects {alloc} {
@@ -599,7 +617,7 @@ pub fn reorder_filter(state: ref<app.App>, filter: u64, position: u32) -> Result
   if not editor.reorder_filter(struct.borrow(state, field=document), filter, position) {
     return refused("no such filter")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("filter reordered", filter)
 }
 pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64) -> Result effects {alloc} {
@@ -607,7 +625,7 @@ pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64)
   if not editor.set_filter_param(struct.borrow(state, field=document), filter, name, value) {
     return refused("no such filter")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("parameter set", filter)
 }
 
@@ -616,7 +634,7 @@ pub fn set_filter_text_param(state: ref<app.App>, filter: u64, name: str, value:
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.set_filter_text_param(struct.borrow(state, field=document), filter,
     name, value) { return refused("no such filter") }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("text parameter set", filter)
 }
 
@@ -628,7 +646,7 @@ pub fn set_track_gain(state: ref<app.App>, track: u64, value: f64) -> Result eff
   if not editor.set_track_gain(struct.borrow(state, field=document), track, value) {
     return refused("no such track")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("gain set", track)
 }
 pub fn set_track_pan(state: ref<app.App>, track: u64, value: f64) -> Result effects {alloc} {
@@ -636,7 +654,7 @@ pub fn set_track_pan(state: ref<app.App>, track: u64, value: f64) -> Result effe
   if not editor.set_track_pan(struct.borrow(state, field=document), track, value) {
     return refused("no such track")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("pan set", track)
 }
 pub fn toggle_mute(state: ref<app.App>, track: u64) -> Result effects {alloc} {
@@ -645,7 +663,7 @@ pub fn toggle_mute(state: ref<app.App>, track: u64) -> Result effects {alloc} {
   if not editor.set_track_muted(struct.borrow(state, field=document), track, not now) {
     return refused("no such track")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("mute toggled", track)
 }
 pub fn toggle_solo(state: ref<app.App>, track: u64) -> Result effects {alloc} {
@@ -657,7 +675,7 @@ pub fn toggle_solo(state: ref<app.App>, track: u64) -> Result effects {alloc} {
   }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let _ = editor.set_track_solo(struct.borrow(state, field=document), track, not now)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("solo toggled", track)
 }
 pub fn toggle_track_lock(state: ref<app.App>, track: u64) -> Result effects {alloc} {
@@ -669,15 +687,24 @@ pub fn toggle_track_lock(state: ref<app.App>, track: u64) -> Result effects {all
   }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let _ = editor.set_track_lock(struct.borrow(state, field=document), track, not now)
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("lock toggled", track)
 }
 
 // ---------------------------------------------------------------------------
 // Transport. The two transports are independent, which is the toolkit's model.
 
+fn marks_change(current: editor.Transport, action: u32) -> bool effects {} {
+  if action == editor.mark_in() {return current.mark_in != current.frame}
+  if action == editor.mark_out() {return current.mark_out != current.frame}
+  if action == editor.clear_marks() {return current.mark_in != -1 or current.mark_out != -1}
+  false
+}
 pub fn program(state: ref<app.App>, action: u32) -> Result effects {alloc} {
+  let marks: bool = marks_change(struct.get(struct.borrow(state,field=document),field=program),action)
+  if marks {editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))}
   let landed: editor.Transport = editor.program_action(struct.borrow(state, field=document), action)
+  if marks {app.document_changed(state)}
   done("program transport", cast.wrap(landed.frame))
 }
 pub fn seek(state: ref<app.App>, frame: i64) -> Result effects {alloc} {
@@ -698,7 +725,10 @@ pub fn reload_source(state: ref<app.App>, source: u64) -> Result effects {alloc,
   open_source(state, source)
 }
 pub fn monitor(state: ref<app.App>, action: u32) -> Result effects {alloc} {
+  let marks: bool = marks_change(struct.get(struct.borrow(state,field=document),field=monitor),action)
+  if marks {editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))}
   let landed: editor.Transport = editor.monitor_action(struct.borrow(state, field=document), action)
+  if marks {app.document_changed(state)}
   done("source transport", cast.wrap(landed.frame))
 }
 pub fn set_project_range(state: ref<app.App>, start: i64, finish: i64) -> Result effects {alloc} {
@@ -706,7 +736,7 @@ pub fn set_project_range(state: ref<app.App>, start: i64, finish: i64) -> Result
   if not editor.set_export_range(struct.borrow(state, field=document), start, finish) {
     return refused("that range is inverted")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("range set", 0)
 }
 
@@ -717,7 +747,7 @@ pub fn undo(state: ref<app.App>) -> Result effects {alloc} {
   if not editor.undo(struct.borrow(state, field=history), struct.borrow(state, field=document)) {
     return refused("nothing to undo")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   app.set_status(state, "Undone")
   done("undone", 0)
 }
@@ -725,7 +755,7 @@ pub fn redo(state: ref<app.App>) -> Result effects {alloc} {
   if not editor.redo(struct.borrow(state, field=history), struct.borrow(state, field=document)) {
     return refused("nothing to redo")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   app.set_status(state, "Redone")
   done("redone", 0)
 }
@@ -784,7 +814,7 @@ fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) ->
       if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
       let interp: u32 = gain_key_interp(doc, clip, frame)
       let _ = editor.set_key(doc, clip, "gain", frame, value, interp)
-      app.mark_dirty(state, true)
+      app.document_changed(state)
       return done("gain keyframe set", clip)
     }
   }
@@ -801,7 +831,7 @@ fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) ->
       editor.set_clip_speed(struct.borrow(state, field=document), clip, value)
     } else { false }
   if not ok { return refused("that clip property is not settable") }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("clip property set", clip)
 }
 
@@ -816,7 +846,7 @@ pub fn toggle_clip_reverse(state: ref<app.App>, clip: u64) -> Result effects {al
   if not editor.set_clip_reverse(struct.borrow(state, field=document), clip, not now) {
     return refused("no such clip")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done(if now { "playing forward" } else { "playing in reverse" }, clip)
 }
 
@@ -840,7 +870,8 @@ pub fn set_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str, n
     filter = chrome_filter_of_kind(state, clip, kind)
     if filter == 0 {
       match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
-        none => { return refused("no such clip") }, some(id) => { filter = id },
+        none => { return refused("no such clip") }, some(id) => { filter = id
+          app.document_changed(state) },
       }
     }
   }
@@ -852,7 +883,7 @@ pub fn update_parameter(state: ref<app.App>, domain: u32, target: u64, name: str
                         value: f64) -> Result effects {alloc} {
   if domain == 1 { return set_clip_field_live(state, target, name, value) }
   let outcome: Result = update_parameter_document(struct.borrow(state, field=document),domain,target,name,value)
-  if outcome.ok { app.mark_dirty(state, true) }
+  if outcome.ok { app.document_changed(state) }
   outcome
 }
 
@@ -864,8 +895,9 @@ fn update_parameter_document(doc: ref<editor.Document>, domain: u32, target: u64
     }
     let clip: u64 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=clip)
     let kind: string = editor.filter_kind(doc, target)
-    let qualified: string = text.concat(str.view(kind), text.concat(".", name))
-    if editor.key_count(doc, clip, str.view(qualified)) > 0 {
+    let qualified: string = filter_keys.name(target,str.view(kind),name)
+    let old: string = filter_keys.legacy(str.view(kind),name)
+    if filter_keys.has(doc,clip,str.view(qualified)) or filter_keys.has(doc,clip,str.view(old)) {
       let selected: editor.Clip = match editor.clip(doc, clip) {
         none => { return refused("selected clip is missing") }, some(found) => found,
       }
@@ -876,6 +908,7 @@ fn update_parameter_document(doc: ref<editor.Document>, domain: u32, target: u64
       if not timeline_media.key_layer_supported(doc,selected,str.view(kind),editor.playhead(doc)) {
         return refused("[GA_KEY_LAYER] This effect needs an upper clip over a lower picture and cannot key a transition side")
       }
+      filter_keys.migrate(doc,clip,target,str.view(kind),name)
       let interp: u32 = parameter_key_interp(doc, clip, str.view(qualified), frame)
       if not editor.set_key(doc, clip, str.view(qualified), frame, value, interp) {
         return refused("[GA_VIDEO_KEY_WRITE] That parameter could not be keyed")
@@ -905,7 +938,8 @@ fn parameter_key_interp(doc: ref<editor.Document>, clip: u64, param: str, frame:
     if key.clip == clip and key.param == named and key.frame == frame { return key.interp }
     i = i + 1
   }
-  if str.eq(param,"blend.mode") { curve.hold() } else { curve.linear() }
+  let canonical: string = filter_keys.canonical(param)
+  if str.eq(str.view(canonical),"blend.mode") { curve.hold() } else { curve.linear() }
 }
 
 pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str,
@@ -950,11 +984,16 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
   // K on a parameter row can precede the first ordinary parameter edit. Create
   // its filter along with the key so one Undo removes both changes.
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if domain == 2 and chrome_filter_of_kind(state, clip, kind) == 0 {
-    match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
-      none => { return refused("the filter could not be created") },
-      some(_) => { },
+  if domain == 2 {
+    var instance: u64 = if target == 0 {chrome_filter_of_kind(state,clip,kind)}else{target}
+    if instance == 0 {
+      match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
+        none => { return refused("the filter could not be created") },
+        some(id) => {instance=id},
+      }
     }
+    filter_keys.migrate(struct.borrow(state,field=document),clip,instance,kind,name)
+    let _ = ref.swap(qualified,filter_keys.name(instance,kind,name))
   }
   let interp: u32 = parameter_key_interp(struct.borrow(state, field=document), clip,
     str.view(qualified), frame)
@@ -962,7 +1001,7 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
                         str.view(qualified), frame, value, interp) {
     return refused("that parameter could not be keyed")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done("keyframe set", clip)
 }
 
@@ -1005,7 +1044,7 @@ pub fn toggle_track_hidden(state: ref<app.App>, track: u64) -> Result effects {a
   if not editor.set_track_hidden(struct.borrow(state, field=document), track, not now) {
     return refused("no such track")
   }
-  app.mark_dirty(state, true)
+  app.document_changed(state)
   done(if now { "track shown" } else { "track hidden" }, track)
 }
 
@@ -1014,36 +1053,12 @@ pub fn toggle_track_hidden(state: ref<app.App>, track: u64) -> Result effects {a
 // The split itself is `std.editor.split`; this only enumerates the lanes.
 
 pub fn razor_all(state: ref<app.App>) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let document: ref<editor.Document> = struct.borrow(state, field=document)
-  let sequence: u64 = document.active
-  let frame: i64 = editor.playhead(document)
-  var targets: array<u64> = array.new()
-  var index: u64 = 0
-  loop {
-    if index >= editor.track_count(document) { break }
-    let entry: ref<editor.Track> = array.borrow(struct.borrow(document, field=tracks), index)
-    if struct.get(entry, field=owner) == sequence and not struct.get(entry, field=locked) {
-      let id: u64 = struct.get(entry, field=id)
-      match editor.clip_spanning(document, id, frame) {
-        some(clip) => { array.push(targets, clip) },
-        none => { },
-      }
-    }
-    index = index + 1
-  }
-  var cut: u64 = 0
-  index = 0
-  loop {
-    if index >= array.len(targets) { break }
-    match editor.split(struct.borrow(state, field=document), array.get(targets, index), frame) {
-      some(made) => { cut = cut + 1 },
-      none => { },
-    }
-    index = index + 1
-  }
-  if cut == 0 { return refused("nothing under the playhead to razor") }
-  app.mark_dirty(state, true)
+  var candidate: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+  let cut: u64 = editor.split_all(candidate,candidate.active,editor.playhead(candidate))
+  if cut == 0 { return refused("[GA_SPLIT_CONTEXT] No unlocked razor cut can preserve source time, fades, and effect history") }
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _ = struct.replace(state,candidate,field=document)
+  app.document_changed(state)
   var line: string = string.copy("razored ")
   let shown: i64 = cast.sat(cut)
   string.append(line, str.view(string.from_int(shown)))

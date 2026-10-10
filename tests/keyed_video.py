@@ -1,6 +1,7 @@
 """Inspector picture-key edits must survive save/open and affect preview/master pixels."""
 
 import argparse
+from array import array
 import json
 import os
 from pathlib import Path
@@ -87,6 +88,45 @@ def main():
             worst = max(worst, check_pixels(master[local*size:(local+1)*size], local,
                                            (2+local)*4//5, f"master {local}"))
         print(f"Keyed video: 6 whole preview pictures and 24 master frames match independent source/time/brightness formulas within {worst}/255; save/open and exact rewind passed")
+        for legacy in (False,True):
+            folder=native/("legacy-duplicate" if legacy else "duplicate")
+            values=[]
+            for name in ("plain","edited"):
+                payload=run([ffmpeg,"-nostdin","-v","error","-i",folder/f"{name}.mkv",
+                             "-f","rawvideo","-pix_fmt","rgb48le","pipe:1"])
+                data=array("H");data.frombytes(payload)
+                assert len(data)==24*320*180*3
+                values.append(data)
+            neutral,edited=values
+            expected=[]
+            native_worst=0
+            for local in range(24):
+                if legacy:
+                    first=.9+.5*local/12 if local<=12 else 1.4-.3*(local-12)/11
+                    second=.9+.2*local/23
+                else:
+                    first=.8+.6*local/12 if local<=12 else 1.4
+                    second=1.3-.6*local/23
+                offset=local*size
+                pixel=[max(0,min(1,max(0,min(1,neutral[offset+c]/65535+first-1))+second-1)) for c in range(3)]
+                expected.append(pixel)
+                for channel,wanted in enumerate(pixel):
+                    error=max(abs(value/65535-wanted) for value in edited[offset+channel:offset+size:3])
+                    native_worst=max(native_worst,error)
+            assert native_worst<=4/65535,(folder,native_worst)
+            preview_worst=0
+            for index,local in enumerate((0,6,12,18,23,0)):
+                shown=run([ffmpeg,"-nostdin","-v","error","-i",folder/f"{index}.png",
+                           "-f","rawvideo","-pix_fmt","rgb24","pipe:1"])
+                assert len(shown)==size
+                preview_worst=max(preview_worst,max(max(abs(value/255-expected[local][channel]) for value in shown[channel::3]) for channel in range(3)))
+            assert preview_worst<=1.1/255,(folder,preview_worst)
+            assert (folder/"0.png").read_bytes()==(folder/"5.png").read_bytes()
+            doc=json.loads((folder/"edited.air").read_text(encoding="utf-8"))
+            named={doc["names"][key["param"]-1] for key in doc["keys"]}
+            assert sum(name.startswith("filter.") for name in named)==(1 if legacy else 2),named
+            assert ("brightness.level" in named)==legacy,named
+            print(f"{'Legacy migration' if legacy else 'Independent duplicates'}:24 native16-bit frames and6 full previews match independently evaluated sequential curves; master error {native_worst:.8f}, preview {preview_worst:.8f}, exact rewind/roundtrip/Undo passed")
         blend_root = native / "blend"
         blend_worst = 0
         for index, local in enumerate((0, 6, 11, 12, 18, 23, 0)):

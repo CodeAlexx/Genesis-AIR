@@ -35,6 +35,21 @@ if [ "$have" != "$AIR_SDK_COMMIT" ] &&
   echo "genesis-air: warning — AIR SDK is at $have, this project pins $AIR_SDK_COMMIT" >&2
 fi
 
+# One shared editor implementation supplies exact Split semantics on both OS.
+editor_patch="$here/patches/air-editor.patch"
+if [ ! -f "$editor_patch" ]; then
+  echo 'genesis-air: [GA_SDK_PATCH_MISSING] shared editor overlay is missing' >&2
+  exit 1
+fi
+if git -C "$AIR_HOME" apply --reverse --check "$editor_patch" >/dev/null 2>&1; then
+  :
+elif git -C "$AIR_HOME" apply --check "$editor_patch" >/dev/null 2>&1; then
+  git -C "$AIR_HOME" apply "$editor_patch"
+else
+  echo 'genesis-air: [GA_SDK_PATCH_BASE] editor overlay does not match SDK; existing changes preserved' >&2
+  exit 1
+fi
+
 mkdir -p "$here/build"
 mode=${MODE:-release}
 echo "genesis-air: building against AIR $AIR_SDK_COMMIT ($mode)"

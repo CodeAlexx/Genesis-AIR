@@ -5,3 +5,4 @@
 
 # Unified patch context uses a single space on empty source lines.
 windows/*.patch text eol=lf whitespace=-blank-at-eol
+patches/*.patch text eol=lf whitespace=-blank-at-eol

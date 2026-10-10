@@ -16,6 +16,7 @@ import std.font as font
 import "chrome.ai" as chrome
 import "provider.ai" as provider
 import "typeface.ai" as typeface
+import "filter_keys.ai" as filter_keys
 
 type SourceInfo = struct {path: string, frames: i64, fps: f64, audio: bool, online: bool}
 
@@ -137,21 +138,7 @@ fn picture_path(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
 // Multiple filters compose multiplicatively; picture, sound, and bounds use one
 // derived value, so no renderer maintains a second speed interpretation.
 pub fn effective_speed(doc: ref<editor.Document>, clip: editor.Clip) -> f64 effects {alloc} {
-  var speed: f64 = clip.speed
-  var index: u32 = 0
-  loop {
-    match editor.filter_at(doc, clip.id, index) {
-      none => { break },
-      some(filter) => {
-        if editor.filter_enabled(doc, filter) and
-           str.eq(str.view(editor.filter_kind(doc, filter)), "speed") {
-          speed = speed * editor.filter_param(doc, filter, "rate", 1.0)
-        }
-      },
-    }
-    index = index + 1
-  }
-  speed
+  editor.playback_rate(doc,clip)
 }
 
 pub fn source_frame(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> i64 effects {alloc} {
@@ -215,8 +202,7 @@ fn fade(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> f64 effects
 fn filter_value(doc: ref<editor.Document>, clip: editor.Clip, filter: u64,
                 kind: str, frame: i64, name: str, fallback: f64) -> f64 effects {alloc} {
   let base: f64 = editor.filter_param(doc, filter, name, fallback)
-  let qualified: string = text.concat(kind, text.concat(".", name))
-  editor.clip_value_at(doc, clip.id, str.view(qualified), frame, base)
+  filter_keys.value(doc,clip.id,filter,kind,name,frame,base)
 }
 
 fn multiply_gain(values: ref<array<string>>, channel: u64, factor: f64)
@@ -431,12 +417,11 @@ fn overlay_opacity(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> 
           let kind: string = editor.filter_kind(doc, filter)
           if str.eq(str.view(kind), "opacity") {
             let base: f64 = editor.filter_param(doc, filter, "level", 1.0)
-            value = value * editor.clip_value_at(doc, clip.id, "opacity.level", frame, base)
+            value = value * filter_keys.value(doc,clip.id,filter,"opacity","level",frame,base)
           }
           if str.eq(str.view(kind), "size_position") {
             let base: f64 = editor.filter_param(doc, filter, "opacity", 1.0)
-            value = value * editor.clip_value_at(doc, clip.id,
-              "size_position.opacity", frame, base)
+            value = value * filter_keys.value(doc,clip.id,filter,"size_position","opacity",frame,base)
           }
         }
       },
@@ -454,7 +439,8 @@ fn clip_factor(doc: ref<editor.Document>, clip: editor.Clip, frame: i64) -> f64 
 pub fn key_supported(param: str) -> bool effects {alloc} {
   if str.eq(param, "opacity") or str.eq(param, "fade_in") or
      str.eq(param, "fade_out") or str.eq(param, "gain") { return true }
-  var pieces: array<string> = text.split(param, ".")
+  let canonical: string = filter_keys.canonical(param)
+  var pieces: array<string> = text.split(str.view(canonical), ".")
   if array.len(pieces) != 2 { return false }
   let kind: str = str.view(array.borrow(pieces, 0))
   let name: str = str.view(array.borrow(pieces, 1))
@@ -823,8 +809,28 @@ fn text_clip_path(prefix: str, slot: u64) -> string effects {alloc} {
   scratch_variant(prefix, ".textclip", slot)
 }
 
+fn ordered_title_path(prefix: str, slot: u64, index: u64) -> string effects {alloc} {
+  let stem: string = scratch_variant(prefix, ".ordered-title", slot)
+  text.concat(str.view(stem), text.concat(".", str.view(string.from_int(cast.sat(index)))))
+}
+
+fn ordered_count_path(prefix: str, slot: u64) -> string effects {alloc} {
+  scratch_variant(prefix, ".ordered-count", slot)
+}
+
+// Composition/transport controls stay outside the per-picture stack. Everything
+// else is a picture operator, including titles and unknown kinds (which the
+// mapping must explicitly refuse rather than silently discard).
+fn picture_operator(kind: str) -> bool effects {alloc} {
+  not chrome.is_audio_kind(kind) and not str.eq(kind, "speed") and
+    not str.eq(kind, "stabilize") and not str.eq(kind, "opacity") and
+    not str.eq(kind, "blend") and not str.eq(kind, "size_position") and
+    not str.eq(kind, "chroma_key")
+}
+
 fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
-                    prefix: str, slot: u64, cache: ref<RenderCache>)
+                    prefix: str, slot: u64, only: u64, output_override: str,
+                    cache: ref<RenderCache>)
                     -> result<option<string>, string> effects {alloc, fs.meta, fs.read, fs.write} {
   var present: bool = false
   var index: u32 = 0
@@ -832,7 +838,7 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
     match editor.filter_at(doc, clip.id, index) {
       none => { break },
       some(filter) => {
-        if editor.filter_enabled(doc, filter) {
+        if editor.filter_enabled(doc, filter) and (only == 0 or filter == only) {
           let kind: string = editor.filter_kind(doc, filter)
           if str.eq(str.view(kind), "timer") { present = true }
           if str.eq(str.view(kind), "text") {
@@ -860,7 +866,7 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
     match editor.filter_at(doc, clip.id, index) {
       none => { break },
       some(filter) => {
-        if editor.filter_enabled(doc, filter) {
+        if editor.filter_enabled(doc, filter) and (only == 0 or filter == only) {
           let kind: string = editor.filter_kind(doc, filter)
           if str.eq(str.view(kind), "text") or str.eq(str.view(kind), "timer") {
             let size: f64 = filter_value(doc, clip, filter, str.view(kind), frame,
@@ -903,7 +909,8 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
   }
   var finished: draw.Surface = draw.finish(canvas)
   var rgba: bytes = draw.surface_rgba(finished)
-  let output: string = text_raster_path(prefix, slot)
+  let output: string = if str.len(output_override) == 0 {text_raster_path(prefix, slot)}
+    else {string.copy(output_override)}
   match files.write_bytes(str.view(output), bytes.view(rgba)) {
     err(problem) => { return result.err("text raster could not be written") },
     ok(_) => { },
@@ -911,10 +918,90 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
   result.ok(option.some(output))
 }
 
+// A fixed wire packs parameters by kind and cannot represent arbitrary order or
+// duplicate instances. Keep its single-operator fast path; larger stacks use
+// one FP32 pass per operator with fresh neutral parameters. The first pass alone
+// addresses the original source frame; later passes consume FLOAT intermediates.
+fn ordered_clip_plan(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
+                     prefix: str, slot: u64, upper: bool, cache: ref<RenderCache>)
+                     -> result<option<PreparedClip>, string> effects {alloc, fs.meta, fs.read, fs.write} {
+  var count: u64 = 0
+  var index: u32 = 0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => {break}, some(filter) => {
+        let kind: string = editor.filter_kind(doc, filter)
+        if editor.filter_enabled(doc, filter) and picture_operator(str.view(kind)) {count=count+1}
+      },
+    }
+    index=index+1
+  }
+  if count < 2 {return result.ok(option.none())}
+  // Unique title rasters survive until the worker executes the prepared plan.
+  // The count sidecar lets the normal frame cleanup remove only these files.
+  if count > 4096 {return result.err("[GA_FILTER_STACK_LIMIT] More than 4096 picture filters on one clip")}
+  match files.mkdirs(str.view(path.dirname(prefix))) {
+    err(_) => {return result.err("[GA_FILTER_STACK_SCRATCH] Cannot create ordered filter scratch directory")},
+    ok(_) => {},
+  }
+  match files.write_text(str.view(ordered_count_path(prefix,slot)),
+    str.view(string.from_int(cast.sat(count)))) {
+    err(_) => {return result.err("[GA_FILTER_STACK_SCRATCH] Cannot record ordered filter scratch count")},
+    ok(_) => {},
+  }
+  var source: string = match source_path(doc, clip) {
+    none => {return result.err("an ordered clip has no online video source")},
+    some(value) => try picture_path(doc, clip, frame, value),
+  }
+  var source_at: i64 = source_frame(doc, clip, frame)
+  var lines: array<string> = array.new()
+  var step: u64 = 0
+  index=0
+  loop {
+    match editor.filter_at(doc, clip.id, index) {
+      none => {break}, some(filter) => {
+        let kind: string = editor.filter_kind(doc, filter)
+        if editor.filter_enabled(doc, filter) and picture_operator(str.view(kind)) {
+          var values: array<string> = neutral()
+          if upper {put(values,107,"1")}
+          put(values,0,str.view(provider.wire_path(str.view(source))))
+          put_i(values,2,source_at)
+          if str.eq(str.view(kind),"text") or str.eq(str.view(kind),"timer") {
+            let raster: string = ordered_title_path(prefix,slot,step)
+            match try raster_clip_text(doc,clip,frame,prefix,slot,filter,str.view(raster),cache) {
+              none => {index=index+1
+                step=step+1
+                continue},
+              some(title) => {
+                let raw_title: string = text.concat("RAW:",str.view(title))
+                put(values,1,str.view(provider.wire_path(str.view(raw_title))))
+              },
+            }
+          } else if not apply_filter(doc,clip,values,filter,false,frame) {
+            return result.err("[GA_FILTER_STACK_KIND] An ordered clip uses an unsupported picture filter")
+          }
+          let out: string = if array.len(lines) % 2 == 0 {preclip_path(prefix,slot)}
+            else {text_clip_path(prefix,slot)}
+          array.push(lines,wire_line(values,"FLOAT",str.view(out)))
+          source=text.concat("FLOAT:",str.view(out))
+          source_at=0
+          step=step+1
+        }
+      },
+    }
+    index=index+1
+  }
+  if array.len(lines) == 0 {return result.ok(option.none())}
+  result.ok(option.some(PreparedClip {lines:lines,path:source}))
+}
+
 fn text_clip_plan(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
                   prefix: str, slot: u64, upper: bool, cache: ref<RenderCache>)
                   -> result<option<PreparedClip>, string> effects {alloc, fs.meta, fs.read, fs.write} {
-  let title: string = match try raster_clip_text(doc, clip, frame, prefix, slot, cache) {
+  match try ordered_clip_plan(doc,clip,frame,prefix,slot,upper,cache) {
+    some(prepared) => {return result.ok(option.some(prepared))}, none => {},
+  }
+  let title: string = match try raster_clip_text(doc, clip, frame, prefix, slot, 0, "", cache) {
     none => { return result.ok(option.none()) }, some(value) => value,
   }
   var lines: array<string> = array.new()
@@ -977,6 +1064,7 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   var base_override: string = string.new()
   var upper_override: string = string.new()
   var incoming_override: string = string.new()
+  let incoming_slot: u64 = array.len(visible)
   var base_fade_prepassed: bool = false
   var base_transition: bool = false
   if array.len(visible) >= 1 {
@@ -997,6 +1085,18 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
       some(value) => { var prepared: PreparedClip = value
         base_override = string.copy(str.view(prepared.path))
         append_plan(lines, prepared) },
+    }
+  }
+  // Rasters are produced while the whole frame plan is assembled. Every visible
+  // camera and the incoming transition half therefore need distinct slot ids;
+  // reusing slot 2 would overwrite a previous camera's titles before execution.
+  let used_slots: u64 = array.len(visible) + if base_transition {1}else{0}
+  if used_slots > 4097 {return result.err("[GA_FILTER_STACK_LIMIT] More than 4097 prepared picture slots")}
+  if used_slots > 4 {
+    match files.write_text(str.view(text.concat(scratch_prefix,".prepared-count")),
+      str.view(string.from_int(cast.sat(used_slots)))) {
+      err(_) => {return result.err("[GA_FILTER_STACK_SCRATCH] Cannot record prepared picture slots")},
+      ok(_) => {},
     }
   }
   // The worker's fade field fades its complete output. Resolve a bottom clip's
@@ -1055,12 +1155,12 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
           some(value) => value,
         }
         let incoming: editor.Clip = pair.incoming
-        match try text_clip_plan(doc, incoming, frame, scratch_prefix, 3, false, cache) {
+        match try text_clip_plan(doc, incoming, frame, scratch_prefix, incoming_slot, false, cache) {
           some(value) => { var prepared: PreparedClip = value
             incoming_override = string.copy(str.view(prepared.path))
             append_plan(lines, prepared) },
           none => {
-            let raster: string = preclip_path(scratch_prefix, 3)
+            let raster: string = preclip_path(scratch_prefix, incoming_slot)
             match try preclip_line(doc, incoming, frame, str.view(raster), false) {
               none => { },
               some(line) => {
@@ -1128,13 +1228,13 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
       none => { return result.err("a visible clip has no online video source") },
     }
     var prepassed: bool = false
-    match try text_clip_plan(doc, clip, frame, scratch_prefix, 2, true, cache) {
+    match try text_clip_plan(doc, clip, frame, scratch_prefix, layer, true, cache) {
       some(value) => { var prepared: PreparedClip = value
         path = string.copy(str.view(prepared.path))
         append_plan(lines, prepared)
         prepassed = true },
       none => {
-        let raster: string = preclip_path(scratch_prefix, 2)
+        let raster: string = preclip_path(scratch_prefix, layer)
         match try preclip_line(doc, clip, frame, str.view(raster), true) {
           none => { },
           some(line) => {
@@ -1199,13 +1299,49 @@ pub fn render_cache(fonts: ref<array<string>>) -> RenderCache effects {alloc} {
 
 pub fn configure_preview(doc: ref<editor.Document>, cache: ref<RenderCache>)
                           -> unit effects {alloc, process, time} {
+  configure_monitor_preview(doc,cache,1280,720)
+}
+
+// Only operations whose coordinates and parameters are independent of pixel
+// size may use a smaller composition canvas. Unknown/new effects retain native
+// sequence pixels until their spatial contract has been established. Inspect all
+// enabled filters conservatively, including transition halves and nested clips.
+fn monitor_independent(kind: str) -> bool effects {alloc} {
+  chrome.is_audio_kind(kind) or kind == "text" or kind == "timer" or
+    kind == "speed" or kind == "opacity" or kind == "blend" or
+    kind == "size_position" or kind == "brightness" or kind == "contrast" or
+    kind == "saturation" or kind == "hue" or kind == "gamma" or kind == "levels" or
+    kind == "vignette" or kind == "lift_gamma_gain" or kind == "rotate" or
+    kind == "flip" or kind == "mirror" or kind == "invert" or kind == "sepia" or
+    kind == "mono" or kind == "crop" or kind == "mask" or kind == "chroma_key" or
+    kind == "white_balance" or kind == "lut3d"
+}
+
+pub fn configure_monitor_preview(doc: ref<editor.Document>, cache: ref<RenderCache>,
+    monitor_width: u32, monitor_height: u32) -> unit effects {alloc, process, time} {
+  var native: bool = false
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(doc,field=filters)) {break}
+    let filter: ref<editor.Filter> = array.borrow(struct.borrow(doc,field=filters),index)
+    if filter.enabled and not monitor_independent(str.view(struct.borrow(filter,field=kind))) {
+      native = true
+      break
+    }
+    index = index+1
+  }
   match editor.sequence_slot(doc, doc.active) {
     none => {},
     some(slot) => {
       let seq: ref<editor.Sequence> = array.borrow(struct.borrow(doc, field=sequences), slot)
       // Keep small sequences at their own resolution. Only the fitted monitor
       // enlarges them; rendering effects on an enlarged canvas wastes each frame.
-      let factor: f64 = math.min(1.0, math.min(1280.0 / cast.float(seq.width), 720.0 / cast.float(seq.height)))
+      // Native spatial filters preserve their physical radius, texture and
+      // sampling semantics. Pointwise color/normalized geometry/title previews
+      // compose only the pixels the ordinary monitor can display.
+      let factor: f64 = if native {1.0} else {math.min(1.0,
+        math.min(cast.float(monitor_width) / cast.float(seq.width),
+          cast.float(monitor_height) / cast.float(seq.height)))}
       let width: u32 = cast.sat(math.max(16.0, math.round(cast.float(seq.width) * factor)))
       let height: u32 = cast.sat(math.max(16.0, math.round(cast.float(seq.height) * factor)))
       struct.set(cache, width, field=width)
@@ -1437,19 +1573,40 @@ pub fn frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
   result.ok(lines)
 }
 
-pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.write} {
+pub fn cleanup_plan(prefix: str) -> unit effects {alloc, fs.read, fs.write} {
   let _ = files.remove(str.view(text.concat(prefix, ".base-opacity.rgba")))
   let _ = files.remove(str.view(text.concat(prefix, ".incoming-opacity.rgba")))
   let _ = files.remove(str.view(layer_path(prefix, 0)))
   let _ = files.remove(str.view(layer_path(prefix, 1)))
   var slot: u64 = 0
+  var slots: u64 = 4
+  let prepared_count: string = text.concat(prefix,".prepared-count")
+  match files.read_text(str.view(prepared_count)) {
+    err(_) => {}, ok(value) => {
+      match text.parse_u64(str.view(value)) {
+        none => {}, some(count) => {if count > slots and count <= 4097 {slots=count}},
+      }
+    },
+  }
   loop {
-    if slot == 4 { break }
+    if slot == slots { break }
     let _ = files.remove(str.view(preclip_path(prefix, slot)))
     let _ = files.remove(str.view(text_raster_path(prefix, slot)))
     let _ = files.remove(str.view(text_clip_path(prefix, slot)))
+    let count_file: string = ordered_count_path(prefix,slot)
+    match files.read_text(str.view(count_file)) {
+      err(_) => {}, ok(value) => {
+        let count: u64 = match text.parse_u64(str.view(value)) {none=>0,some(value)=>value,}
+        var index: u64 = 0
+        loop {if index >= count or index >= 4096 {break}
+          let _ = files.remove(str.view(ordered_title_path(prefix,slot,index)))
+          index=index+1}
+      },
+    }
+    let _ = files.remove(str.view(count_file))
     slot = slot + 1
   }
+  let _ = files.remove(str.view(prepared_count))
   let _ = files.remove(str.view(subtitle_path(prefix)))
   let _ = files.remove(str.view(text.concat(prefix, ".base.rgba")))
   let _ = files.remove(str.view(text.concat(prefix, ".caption.rgba")))

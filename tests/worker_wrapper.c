@@ -1,72 +1,128 @@
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <string.h>
 #include <stdlib.h>
 
-/* Deterministic wire producer for retained-reader checks. It rewrites pixels
- * in place, just like the real compositor, and deliberately emits bad lengths. */
-static int preview_input(void) {
-    char line[16384];
-    while (fgets(line, sizeof(line), stdin)) {
-        char verb[32], pattern[32], encoded[4096], decoded[4096];
-        unsigned width, height;
-        if (sscanf_s(line, "%31s %u %u %31s %4095s", verb, (unsigned)sizeof(verb),
-                     &width, &height, pattern, (unsigned)sizeof(pattern),
-                     encoded, (unsigned)sizeof(encoded)) != 5 ||
-            strcmp(verb, "PREVIEWFIT") != 0 || width == 0 || height == 0 ||
-            width > 1280 || height > 720) return 2;
-        if (strcmp(pattern, "error") == 0) {
-            fputs("ERR [GA_TEST_REQUEST] fixture refusal\n", stdout); fflush(stdout); continue;
-        }
-        size_t at = 0;
-        for (size_t i = 0; encoded[i]; ++i) {
-            if (encoded[i] == '%' && encoded[i+1] && encoded[i+2]) {
-                unsigned value;
-                if (sscanf_s(encoded+i+1, "%2x", &value) != 1) return 2;
-                decoded[at++] = (char)value; i += 2;
-            } else decoded[at++] = encoded[i];
-        }
-        decoded[at] = 0;
-        wchar_t path[4096];
-        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, decoded, -1, path, 4096)) return 2;
-        if (strcmp(pattern, "crash-once") == 0) {
-            wchar_t marker[4096];
-            if (_snwprintf_s(marker, 4096, _TRUNCATE, L"%s.crash", path) < 0) return 2;
-            if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES) {
-                FILE *created = _wfopen(marker, L"wb");
-                if (!created) return 2;
-                fclose(created);
-                if (!DeleteFileW(path)) return 2;
-                return 3;
-            }
-            strcpy_s(pattern, sizeof(pattern), "blue");
-        }
-        size_t wanted = (size_t)width * height * 4;
-        size_t count = strcmp(pattern, "short") == 0 ? wanted-1 :
-                       strcmp(pattern, "extra") == 0 ? wanted+1 :
-                       strcmp(pattern, "empty") == 0 ? 0 : wanted;
-        unsigned char *pixels = (unsigned char *)malloc(wanted+1);
-        if (!pixels) return 2;
-        for (size_t i = 0; i < wanted; i += 4) {
-            pixels[i] = strcmp(pattern, "red") == 0 ? 255 : 0;
-            pixels[i+1] = strcmp(pattern, "green") == 0 ? 255 : 0;
-            pixels[i+2] = strcmp(pattern, "blue") == 0 ? 255 : 0;
-            pixels[i+3] = 255;
-        }
-        pixels[wanted] = 42;
-        FILE *output = _wfopen(path, L"wb");
-        if (!output) { free(pixels); return 2; }
-        int wrote = fwrite(pixels, 1, count, output) == count;
-        int closed = fclose(output) == 0;
-        free(pixels);
-        if (!wrote || !closed) return 2;
-        fprintf(stdout, "DONE %s\n", decoded); fflush(stdout);
+/* A real independent binary socket producer. Deliberately wrong identities,
+ * fragmented payloads and short/extra frames exercise refusal and recovery. */
+static int send_all(SOCKET socket, const unsigned char *bytes, size_t count, size_t chunk) {
+    while (count) {
+        int portion = (int)(count > chunk ? chunk : count);
+        int sent = send(socket, (const char *)bytes, portion, 0);
+        if (sent <= 0) return 0;
+        bytes += sent; count -= (size_t)sent;
     }
-    return 0;
+    return 1;
 }
-
+static void number_le(unsigned char *header, size_t at, unsigned long long value, size_t count) {
+    for (size_t i=0; i<count; ++i) {header[at+i]=(unsigned char)value; value >>= 8;}
+}
+static void port_failure(const wchar_t *path, const char *stage, unsigned long long packets,
+                         unsigned port, int error) {
+    wchar_t receipt[4096];
+    if(_snwprintf_s(receipt,4096,_TRUNCATE,L"%s.ports-error.jsonl",path)<0)return;
+    FILE *metrics=_wfopen(receipt,L"ab");if(!metrics)return;
+    fprintf(metrics,"{\"pid\":%lu,\"stage\":\"%s\",\"completed\":%llu,\"port\":%u,\"winsock_error\":%d}\n",
+        GetCurrentProcessId(),stage,packets,port,error);
+    fclose(metrics);
+}
+static int preview_input(void) {
+    WSADATA data;
+    if (WSAStartup(MAKEWORD(2,2),&data)) return 2;
+    char line[16384];
+    unsigned char client_ports[65536]={0},listener_ports[65536]={0};
+    unsigned long long packets=0,unique_clients=0,unique_listeners=0;
+    ULONGLONG began=GetTickCount64();
+    while (fgets(line,sizeof(line),stdin)) {
+        char verb[32],pattern[32],encoded[4096],decoded[4096];
+        unsigned width,height,port;
+        unsigned long long token,sequence;
+        if (sscanf_s(line,"%31s %u %u %u %llu %llu %31s %4095s",verb,(unsigned)sizeof(verb),
+            &width,&height,&port,&token,&sequence,pattern,(unsigned)sizeof(pattern),
+            encoded,(unsigned)sizeof(encoded)) != 8 || strcmp(verb,"PREVIEWTCP") ||
+            !width || !height || width>1280 || height>720 || !port || port>65535) return 2;
+        if (!strcmp(pattern,"error")) {fputs("ERR [GA_TEST_REQUEST] fixture refusal\n",stdout); fflush(stdout); continue;}
+        if (!strcmp(pattern,"missing")) {fputs("DONE\n",stdout); fflush(stdout); continue;}
+        size_t at=0;
+        for (size_t i=0; encoded[i]; ++i) {
+            if (encoded[i]=='%' && encoded[i+1] && encoded[i+2]) {
+                unsigned value; if(sscanf_s(encoded+i+1,"%2x",&value)!=1) return 2;
+                decoded[at++]=(char)value; i+=2;
+            } else decoded[at++]=encoded[i];
+        }
+        decoded[at]=0;
+        int done_first=!strcmp(pattern,"done-first");
+        if(done_first) {
+            /* Force the consumer's text lane to become readable before its
+             * accept step can complete; retain a diagnostic after DONE too. */
+            fprintf(stdout,"DONE %s\n[gcompose] retained diagnostic\n",decoded);
+            fflush(stdout);Sleep(100);
+        }
+        wchar_t path[4096];
+        if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,decoded,-1,path,4096)) return 2;
+        if(!strcmp(pattern,"crash-once")) {
+            wchar_t marker[4096];
+            if(_snwprintf_s(marker,4096,_TRUNCATE,L"%s.crash",path)<0) return 2;
+            if(GetFileAttributesW(marker)==INVALID_FILE_ATTRIBUTES) {
+                FILE *created=_wfopen(marker,L"wb"); if(!created) return 2;
+                fclose(created); return 3;
+            }
+            strcpy_s(pattern,sizeof(pattern),"blue");
+        }
+        size_t wanted=(size_t)width*height*4;
+        size_t count=!strcmp(pattern,"short")?wanted-1:!strcmp(pattern,"extra")?wanted+1:
+            !strcmp(pattern,"empty")?0:wanted;
+        unsigned char *pixels=(unsigned char*)malloc(wanted+1); if(!pixels)return 2;
+        for(size_t i=0;i<wanted;i+=4) {
+            pixels[i]=!strcmp(pattern,"red")||!strcmp(pattern,"fragment")||done_first?255:0;
+            pixels[i+1]=!strcmp(pattern,"green")?255:0;
+            pixels[i+2]=!strcmp(pattern,"blue")?255:0;
+            pixels[i+3]=255;
+        }
+        pixels[wanted]=42;
+        SOCKET stream=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP); if(stream==INVALID_SOCKET)return 2;
+        struct sockaddr_in address={0}; address.sin_family=AF_INET;
+        address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons((unsigned short)port);
+        DWORD timeout=3000; setsockopt(stream,SOL_SOCKET,SO_SNDTIMEO,(const char*)&timeout,sizeof(timeout));
+        if(connect(stream,(struct sockaddr*)&address,sizeof(address))) {
+            port_failure(path,"connect",packets,port,WSAGetLastError());
+            closesocket(stream);free(pixels);return 2;
+        }
+        struct sockaddr_in local={0};int local_size=sizeof(local);
+        if(getsockname(stream,(struct sockaddr*)&local,&local_size))return 2;
+        unsigned local_port=ntohs(local.sin_port);
+        if(!client_ports[local_port]){client_ports[local_port]=1;unique_clients++;}
+        if(!listener_ports[port]){listener_ports[port]=1;unique_listeners++;}
+        unsigned char header[40]={0}; memcpy(header,"GAPIX001",8);
+        number_le(header,8,token+(!strcmp(pattern,"bad-token")),8);
+        number_le(header,16,sequence+(!strcmp(pattern,"bad-sequence")),8);
+        number_le(header,24,width+(!strcmp(pattern,"bad-width")),4);
+        number_le(header,28,height,4);
+        number_le(header,32,wanted+(!strcmp(pattern,"bad-count")),8);
+        if(!strcmp(pattern,"bad-magic"))header[0]='X';
+        size_t chunk=!strcmp(pattern,"fragment")?3:65536;
+        int good=send_all(stream,header,40,chunk) && send_all(stream,pixels,count,chunk);
+        shutdown(stream,SD_SEND);closesocket(stream);free(pixels);
+        /* A consumer refusing an invalid header may close before this send ends. */
+        if(!good && strncmp(pattern,"bad-",4)) {
+            port_failure(path,"send",packets,port,WSAGetLastError());return 2;
+        }
+        packets++;
+        if(packets%3600==0) {
+            wchar_t receipt[4096];
+            if(_snwprintf_s(receipt,4096,_TRUNCATE,L"%s.ports.json",path)<0)return 2;
+            FILE *metrics=_wfopen(receipt,L"wb");if(!metrics)return 2;
+            fprintf(metrics,"{\"packets\":%llu,\"unique_client_ports\":%llu,\"unique_listener_ports\":%llu,\"client_port_reuses\":%llu,\"listener_port_reuses\":%llu,\"elapsed_ms\":%llu}\n",
+                packets,unique_clients,unique_listeners,packets-unique_clients,packets-unique_listeners,(unsigned long long)(GetTickCount64()-began));
+            fclose(metrics);
+        }
+        if(!done_first){fprintf(stdout,"DONE %s\n",decoded);fflush(stdout);}
+    }
+    WSACleanup();return 0;
+}
 /* A real blocked pipe/child for active audio cancellation, only when requested
  * by the fixture. A later start delegates to the genuine compositor. */
 static int stall_audio(const wchar_t *marker) {

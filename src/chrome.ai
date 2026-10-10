@@ -18,6 +18,7 @@ import std.math as math
 import "ui_text.ai" as ui_text
 import "app.ai" as app
 import "layout.ai" as layout
+import "filter_keys.ai" as filter_keys
 
 // ---------------------------------------------------------------------------
 // How a control is drawn.
@@ -989,8 +990,8 @@ pub fn filter_of_kind(doc: ref<editor.Document>, clip: u64, kind: str) -> u64 ef
 
 // Every parameter of one filter kind, drawn whether or not the filter exists.
 fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
-                doc: ref<editor.Document>, clip: u64, kind: str) -> f64 effects {alloc} {
-  let id: u64 = filter_of_kind(doc, clip, kind)
+                doc: ref<editor.Document>, clip: u64, kind: str, instance: u64) -> f64 effects {alloc} {
+  let id: u64 = if instance == 0 {filter_of_kind(doc, clip, kind)}else{instance}
   var specs: array<Spec> = params_for(kind)
   var cursor: f64 = top
   if id != 0 and (str.eq(kind, "text") or str.eq(kind, "lut3d")) {
@@ -1018,9 +1019,8 @@ fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
     let fallback: f64 = struct.get(spec, field=fallback)
     let base: f64 = if id == 0 { fallback }
       else { editor.filter_param(doc, id, str.view(owned_name), fallback) }
-    let qualified: string = text.concat(kind, text.concat(".", str.view(owned_name)))
     let value: f64 = if id == 0 { base } else {
-      animated_value(doc, clip, str.view(qualified), base)
+      filter_keys.value(doc,clip,id,kind,str.view(owned_name),editor.playhead(doc),base)
     }
     cursor = param_row(out, area, cursor, domain_filter(), id, kind, str.view(owned_name),
       str.view(owned_label), value, struct.get(spec, field=low),
@@ -1047,7 +1047,7 @@ fn effect_switch(out: ref<array<Control>>, area: layout.Rect, top: f64,
     array.push(out, drop_button(area, top, id, kind))
   }
   var cursor: f64 = top + row_height()
-  if id != 0 { cursor = kind_section(out, area, cursor, doc, clip, kind) }
+  if id != 0 { cursor = kind_section(out, area, cursor, doc, clip, kind, id) }
   cursor
 }
 
@@ -1094,7 +1094,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
   if clip == 0 { return out }
 
   cursor = heading(out, area, cursor, "SIZE, POSITION & ROTATE")
-  cursor = kind_section(out, area, cursor, doc, clip, "size_position")
+  cursor = kind_section(out, area, cursor, doc, clip, "size_position",0)
 
   cursor = heading(out, area, cursor, "BLEND")
   let blend_id: u64 = filter_of_kind(doc, clip, "blend")
@@ -1136,7 +1136,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
         0.0, 4.0, 0.05, clip != 0)
     },
   }
-  cursor = kind_section(out, area, cursor, doc, clip, "eq_3band")
+  cursor = kind_section(out, area, cursor, doc, clip, "eq_3band",0)
 
   cursor = heading(out, area, cursor, "DYNAMICS")
   cursor = effect_switch(out, area, cursor, doc, clip, "compressor", "Compress")
@@ -1159,12 +1159,12 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
   cursor = effect_switch(out, area, cursor, doc, clip, "phaser", "Phaser")
 
   cursor = heading(out, area, cursor, "GRAPHIC EQ")
-  cursor = kind_section(out, area, cursor, doc, clip, "eq_10band")
+  cursor = kind_section(out, area, cursor, doc, clip, "eq_10band",0)
 
   cursor = heading(out, area, cursor, "CLIP GRADE")
-  cursor = kind_section(out, area, cursor, doc, clip, "brightness")
-  cursor = kind_section(out, area, cursor, doc, clip, "contrast")
-  cursor = kind_section(out, area, cursor, doc, clip, "saturation")
+  cursor = kind_section(out, area, cursor, doc, clip, "brightness",0)
+  cursor = kind_section(out, area, cursor, doc, clip, "contrast",0)
+  cursor = kind_section(out, area, cursor, doc, clip, "saturation",0)
   out
 }
 
@@ -1272,7 +1272,7 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
     if picked != 0 {
       let owned: string = editor.filter_kind(doc, picked)
       cursor = heading(out, area, cursor, str.view(owned))
-      cursor = kind_section(out, area, cursor, doc, clip, str.view(owned))
+      cursor = kind_section(out, area, cursor, doc, clip, str.view(owned), picked)
     }
   }
 
@@ -1392,7 +1392,7 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
         0.0, 4.0, 0.05, true)
       cursor = param_row(out, area, cursor, domain_clip(), clip, "", "pan", "Clip pan", value.pan, -1.0, 1.0, 0.05, true)
     }, }
-    cursor = kind_section(out, area, cursor, doc, clip, "eq_3band")
+    cursor = kind_section(out, area, cursor, doc, clip, "eq_3band",0)
     var kinds: array<string> = audio_kinds()
     var k: u64 = 0
     loop { if k >= array.len(kinds) { break }

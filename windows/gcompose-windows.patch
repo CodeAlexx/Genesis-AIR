@@ -258,7 +258,7 @@ index 4b33e4a..1bdb4b2 100644
 +    return copied;
 +}
 diff --git a/gcompose/csrc/fpx_decode.c b/gcompose/csrc/fpx_decode.c
-index 8674e4c..7c8e4a2 100644
+index 8674e4c..f2eaabf 100644
 --- a/gcompose/csrc/fpx_decode.c
 +++ b/gcompose/csrc/fpx_decode.c
 @@ -11,8 +11,32 @@
@@ -631,7 +631,7 @@ index 8674e4c..7c8e4a2 100644
                                     dw, dh, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL);
          c->lb_dw = dw; c->lb_dh = dh;
      }
-@@ -237,6 +490,179 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -237,6 +490,195 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
      return 0;
  }
  
@@ -679,6 +679,19 @@ index 8674e4c..7c8e4a2 100644
 +            snprintf(sdr_chain, sizeof(sdr_chain), "format=gbrp16le,zscale=pin=bt709:tin=bt709:min=gbr:rin=full:p=bt709:t=linear:m=gbr:r=full:npl=100,format=gbrpf32le,zscale=pin=bt709:tin=linear:min=gbr:rin=full:p=bt2020:t=smpte2084:m=gbr:r=full:npl=100,format=gbrp16le");
 +            chain = sdr_chain;
 +        }
++        // zscale rejects odd subsampled visible dimensions. Upsample only that
++        // input to planar 16-bit RGB, preserving every visible row and column;
++        // the ordinary even-size HDR pipeline remains unchanged.
++        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(frame->format);
++        int odd_chroma = descriptor &&
++            ((frame->width & ((1 << descriptor->log2_chroma_w)-1)) ||
++             (frame->height & ((1 << descriptor->log2_chroma_h)-1)));
++        char odd_chain[640];
++        if (odd_chroma) {
++            snprintf(odd_chain, sizeof(odd_chain),
++                "scale=flags=bilinear+accurate_rnd,format=gbrp16le,%s", chain);
++            chain = odd_chain;
++        }
 +        AVFilterInOut *outputs = avfilter_inout_alloc(), *inputs = avfilter_inout_alloc();
 +        if (!outputs || !inputs) { avfilter_inout_free(&outputs); avfilter_inout_free(&inputs); avfilter_graph_free(&graph); return NULL; }
 +        outputs->name = av_strdup("in"); outputs->filter_ctx = source; outputs->pad_idx = 0;
@@ -711,6 +724,9 @@ index 8674e4c..7c8e4a2 100644
 +    const char* gpu_preview = getenv("GENESIS_GPU_PREVIEW");
 +    if (preview_enabled && (!gpu_preview || strcmp(gpu_preview,"0")) && !c->gpu_preview_failed && !working_hdr &&
 +        c->frame->format == AV_PIX_FMT_D3D11 && c->frame->hw_frames_ctx &&
++        // Odd subsampled inputs require the visible-size RGB normalization below;
++        // keep their exact reference sampling until GPU parity is established.
++        !(c->frame->width & 1) && !(c->frame->height & 1) &&
 +        c->frame->color_trc == AVCOL_TRC_SMPTE2084 && c->frame->color_primaries == AVCOL_PRI_BT2020 &&
 +        c->frame->colorspace == AVCOL_SPC_BT2020_NCL && c->frame->color_range == AVCOL_RANGE_MPEG &&
 +        c->frame->chroma_location <= AVCHROMA_LOC_LEFT &&
@@ -811,7 +827,7 @@ index 8674e4c..7c8e4a2 100644
  // Like fpx_decode_frame_scaled but ASPECT-PRESERVING (letterbox/pillarbox into ow x oh).
  // Forward-decode window (frames): a request this many frames AHEAD of the current decoder position
  // (or fewer) decodes forward WITHOUT seeking — the sequential playback/render case. A larger forward
-@@ -245,7 +671,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
+@@ -245,7 +687,7 @@ static int fpx_lb_blit(FpxCtx* c, unsigned char* out, int ow, int oh) {
  // returns the exact frame); it only trades a seek for a forward decode. ~1 GOP is the sweet spot.
  #define FPX_SEQ_FWD_WINDOW 300
  
@@ -820,7 +836,7 @@ index 8674e4c..7c8e4a2 100644
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
      FpxCtx* c = (FpxCtx*)h;
      int64_t target = av_rescale_q(frame_index, av_inv_q(c->frame_rate), c->time_base);
-@@ -271,13 +697,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -271,13 +713,15 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      // Return the FIRST frame with pts >= target (frame-accurate; identical selection to before).
      int eof_sent = 0;
      for (;;) {
@@ -838,7 +854,7 @@ index 8674e4c..7c8e4a2 100644
                  return 0;
              }
              continue; // frame is before target: drop it and keep receiving
-@@ -302,6 +730,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
+@@ -302,6 +746,13 @@ int fpx_decode_frame_letterbox(void* h, int frame_index, unsigned char* out, int
      }
  }
  
@@ -852,7 +868,7 @@ index 8674e4c..7c8e4a2 100644
  // Aspect-preserving sequential decode (no seek) — for playback.
  int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      if (!h || !out || ow <= 0 || oh <= 0) return -1;
-@@ -310,7 +745,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
+@@ -310,7 +761,7 @@ int fpx_decode_next_letterbox(void* h, unsigned char* out, int ow, int oh) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -861,7 +877,7 @@ index 8674e4c..7c8e4a2 100644
                      if (fpx_lb_blit(c, out, ow, oh) < 0) { av_packet_unref(c->pkt); return -4; }
                      got = 0; break;
                  }
-@@ -332,7 +767,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
+@@ -332,7 +783,7 @@ int fpx_decode_next_rgba(void* h, unsigned char* out, int out_size) {
      while (got != 0 && av_read_frame(c->fmt, c->pkt) >= 0) {
          if (c->pkt->stream_index == c->vindex) {
              if (avcodec_send_packet(c->dec, c->pkt) == 0) {
@@ -870,7 +886,7 @@ index 8674e4c..7c8e4a2 100644
                      uint8_t* dst[4] = { out, NULL, NULL, NULL };
                      int dstln[4] = { c->width * 4, 0, 0, 0 };
                      sws_scale(c->sws, (const uint8_t* const*)c->frame->data, c->frame->linesize,
-@@ -359,7 +794,7 @@ int fpx_nframes(void* h) {
+@@ -359,7 +810,7 @@ int fpx_nframes(void* h) {
      if (st->nb_frames > 0) return (int)st->nb_frames;
      if (c->fmt->duration > 0 && c->frame_rate.num > 0) {
          double secs = (double)c->fmt->duration / AV_TIME_BASE;
@@ -879,7 +895,7 @@ index 8674e4c..7c8e4a2 100644
      }
      return 0;
  }
-@@ -367,10 +802,19 @@ int fpx_nframes(void* h) {
+@@ -367,10 +818,19 @@ int fpx_nframes(void* h) {
  void fpx_close(void* h) {
      if (!h) return;
      FpxCtx* c = (FpxCtx*)h;
@@ -1931,7 +1947,7 @@ index 7bc6fbe..f322f60 100644
 +    { true }
 +}
 diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
-index c987aa3..a5ccc35 100644
+index c987aa3..d636d65 100644
 --- a/gcompose/src/main.rs
 +++ b/gcompose/src/main.rs
 @@ -22,6 +22,13 @@
@@ -2055,7 +2071,7 @@ index c987aa3..a5ccc35 100644
              // is why the worker.rs `scope()` sends its PREVIEW immediately before SCOPE under one held
              // mutex.
 -            "PREVIEW" => match handle_request(
-+            "PREVIEW" | "PREVIEWFIT" | "FLOAT" => match handle_request(
++            "PREVIEW" | "PREVIEWFIT" | "PREVIEWTCP" | "FLOAT" => match handle_request(
                  &gpu,
                  &mut decoders,
                  &mut lut_cache,
@@ -2524,24 +2540,31 @@ index c987aa3..a5ccc35 100644
      if std::fs::write(&out, &buf).is_err() {
          eprintln!("[gcompose] THUMB write failed: {out}");
          return None;
-@@ -2212,6 +2397,16 @@ fn handle_request(
+@@ -2212,6 +2397,23 @@ fn handle_request(
      line: &str,
  ) -> Option<String> {
      let mut f: Vec<&str> = line.split_whitespace().collect();
-+    let monitor_size = if f.first() == Some(&"PREVIEWFIT") {
++    let picture_transport = if f.first() == Some(&"PREVIEWTCP") {
++        let port: u16 = f.get(3)?.parse().ok()?;
++        let token: u64 = f.get(4)?.parse().ok()?;
++        let sequence: u64 = f.get(5)?.parse().ok()?;
++        if port == 0 || token == 0 || sequence == 0 { return None; }
++        Some((port, token, sequence))
++    } else { None };
++    let monitor_size = if f.first() == Some(&"PREVIEWFIT") || picture_transport.is_some() {
 +        let w: usize = f.get(1)?.parse().ok()?;
 +        let h: usize = f.get(2)?.parse().ok()?;
 +        if w == 0 || h == 0 || w > 16384 || h > 16384 || w.checked_mul(h)? > 16_777_216 {
 +            eprintln!("[GA_PREVIEW_SIZE] Invalid fitted monitor dimensions");
 +            return None;
 +        }
-+        f.drain(0..3);
++        f.drain(0..if picture_transport.is_some() { 6 } else { 3 });
 +        Some((w, h))
 +    } else { None };
      // Accept both the new explicit form (`PREVIEW` + the positional fields) and the legacy
      // keyword-less form. Strip a leading PREVIEW keyword so the positional indices below are
      // identical for both (finding #3). The fields are the 12 composite fields + the 1 P31 BLEND field
-@@ -2243,7 +2438,8 @@ fn handle_request(
+@@ -2243,7 +2445,8 @@ fn handle_request(
      // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
      // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
      // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
@@ -2551,7 +2574,7 @@ index c987aa3..a5ccc35 100644
          f.remove(0);
      }
      if f.len() != 103 && f.len() != 106 && f.len() != 107 && f.len() != 108 && f.len() != 109 {
-@@ -2469,15 +2665,16 @@ fn handle_request(
+@@ -2469,15 +2672,16 @@ fn handle_request(
      // identity here, applied for symmetry with the encoded emit side.
      let out_path = dec_path(f[f.len() - 1]);
  
@@ -2570,7 +2593,7 @@ index c987aa3..a5ccc35 100644
      }
  
      // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
-@@ -2506,7 +2703,8 @@ fn handle_request(
+@@ -2506,7 +2710,8 @@ fn handle_request(
      // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
      // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -2580,28 +2603,49 @@ index c987aa3..a5ccc35 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -2526,10 +2724,19 @@ fn handle_request(
+@@ -2526,9 +2731,38 @@ fn handle_request(
      // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
      *last_final_is_look = fin;
  
 -    if std::fs::write(&out_path, &out).is_err() {
+-        eprintln!("[gcompose] write failed: {out_path}");
+-        return None;
 +    let bytes: Vec<u8> = if high_output {
 +        gpu.download_f32(fin).iter().flat_map(|sample| sample.to_le_bytes()).collect()
 +    } else if let Some((w, h)) = monitor_size { gpu.download_monitor_u8(fin, w, h)? }
 +    else { gpu.download_u8(fin) };
-+    if std::fs::write(&out_path, &bytes).is_err() {
-         eprintln!("[gcompose] write failed: {out_path}");
-         return None;
-     }
++    if let Some((port, token, sequence)) = picture_transport {
++        // A separate bounded binary stream leaves stdout/stderr available for
++        // diagnostics. The request identity prevents a stale connection from
++        // becoming a monitor frame; only one request is active per provider.
++        let (w, h) = monitor_size?;
++        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
++        let mut socket = match std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3)) {
++            Ok(value) => value, Err(error) => { eprintln!("[GA_PROGRAM_PIPE] Picture connection failed: {error}"); return None; }
++        };
++        let _ = socket.set_write_timeout(Some(std::time::Duration::from_secs(3)));
++        let _ = socket.set_nodelay(true);
++        let mut header = Vec::with_capacity(40);
++        header.extend_from_slice(b"GAPIX001");
++        header.extend_from_slice(&token.to_le_bytes());
++        header.extend_from_slice(&sequence.to_le_bytes());
++        header.extend_from_slice(&(w as u32).to_le_bytes());
++        header.extend_from_slice(&(h as u32).to_le_bytes());
++        header.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
++        if socket.write_all(&header).and_then(|_| socket.write_all(&bytes)).is_err() {
++            eprintln!("[GA_PROGRAM_PIPE] Picture transfer failed"); return None;
++        }
++    } else if std::fs::write(&out_path, &bytes).is_err() {
++        eprintln!("[gcompose] write failed: {out_path}"); return None;
++    }
 +    if std::env::var_os("GENESIS_MEDIA_PROFILE").is_some() {
 +        eprintln!("[gcompose] preview upload_us={} finish_us={} total_us={}",
 +            uploaded_at.duration_since(profile_start).as_micros(),
 +            uploaded_at.elapsed().as_micros(), profile_start.elapsed().as_micros());
-+    }
+     }
      Some(out_path)
  }
- 
-@@ -2539,34 +2746,33 @@ fn decode_cached(
+@@ -2539,34 +2773,33 @@ fn decode_cached(
      decoders: &mut HashMap<String, ffi::Decoder>,
      path: &str,
      frame: i32,
@@ -2645,7 +2689,7 @@ index c987aa3..a5ccc35 100644
      let mut best = (0, 0);
      let mut lowest = u64::MAX;
      for dy in (-24..=24).step_by(4) {
-@@ -2578,9 +2784,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2578,9 +2811,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
                      let b = (((y + dy) * w + x + dx) * 4) as usize;
                      // RGB differences distinguish camera motion on both bright
                      // and low-contrast material without a separate grayscale copy.
@@ -2658,7 +2702,7 @@ index c987aa3..a5ccc35 100644
                  }
              }
              if error < lowest ||
-@@ -2592,7 +2798,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2592,7 +2825,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
      }
      // A scene cut has no defensible motion estimate.
      let samples = ((h - 128 + 15) / 16 * ((w - 128 + 15) / 16)) as u64;
@@ -2667,7 +2711,7 @@ index c987aa3..a5ccc35 100644
  }
  
  fn stabilized_frame(
-@@ -2600,7 +2806,7 @@ fn stabilized_frame(
+@@ -2600,7 +2833,7 @@ fn stabilized_frame(
      path: &str,
      frame: i32,
      strength: f32,
@@ -2676,7 +2720,7 @@ index c987aa3..a5ccc35 100644
      let current = decode_cached(decoders, path, frame)?;
      if strength <= 0.0 { return Some(current); }
      let mut sum_x = 0i32;
-@@ -2629,9 +2835,9 @@ fn stabilized_frame(
+@@ -2629,9 +2862,9 @@ fn stabilized_frame(
      let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
      let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
      if shift_x == 0 && shift_y == 0 { return Some(current); }
@@ -2689,7 +2733,7 @@ index c987aa3..a5ccc35 100644
      for y in 0..h {
          let sy = y - shift_y;
          if sy < 0 || sy >= h { continue; }
-@@ -2669,28 +2875,51 @@ fn upload_slot(
+@@ -2669,28 +2902,51 @@ fn upload_slot(
      path: &str,
      frame: i32,
  ) -> bool {
@@ -2749,7 +2793,7 @@ index c987aa3..a5ccc35 100644
          let decoded = if let Some(spec) = path.strip_prefix("STAB:") {
              match spec.split_once(':') {
                  Some((amount, source)) => match amount.parse::<f32>() {
-@@ -2703,11 +2932,11 @@ fn upload_slot(
+@@ -2703,11 +2959,11 @@ fn upload_slot(
          } else { decode_cached(decoders, path, frame) };
          match decoded {
              Some(rgba) => {
@@ -2763,7 +2807,7 @@ index c987aa3..a5ccc35 100644
                  false
              }
          }
-@@ -2718,13 +2947,13 @@ fn upload_slot(
+@@ -2718,13 +2974,13 @@ fn upload_slot(
  fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
      let gpu = ffi::Gpu::init()?;
      let mut b = ffi::Decoder::open(base)?;
@@ -2779,7 +2823,7 @@ index c987aa3..a5ccc35 100644
                  gpu.upload(1, &ov);
                  has_over = true;
              }
-@@ -2740,5 +2969,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+@@ -2740,5 +2996,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
  /// CPU/FFmpeg-only fallback: just the decoded base frame.
  fn decode_only(base: &str) -> Option<Vec<u8>> {
      let mut b = ffi::Decoder::open(base)?;

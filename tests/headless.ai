@@ -21,6 +21,7 @@ import "../src/transport_clock.ai" as transport_clock
 import "../src/timeline_media.ai" as timeline_media
 import "../src/typeface.ai" as typeface
 import "../src/view.ai" as painter
+import "../src/filter_keys.ai" as filter_keys
 
 fn emit(name: str, value: str) -> unit effects {io.write} {
   io.write(name)
@@ -38,6 +39,24 @@ fn emit_i(name: str, value: i64) -> unit effects {io.write, alloc} {
 }
 fn emit_b(name: str, value: bool) -> unit effects {io.write, alloc} {
   emit(name, if value { "true" } else { "false" })
+}
+fn wire_is(line: str, index: u64, expected: str) -> bool effects {alloc} {
+  var fields: array<string> = text.split(line," ")
+  index < array.len(fields) and str.eq(str.view(array.borrow(fields,index)),expected)
+}
+fn wire_feed(line: str, field: u64, previous: str) -> bool effects {alloc} {
+  var fields: array<string> = text.split(previous," ")
+  if array.len(fields) == 0 {return false}
+  let expected: string = text.concat("FLOAT:",str.view(array.borrow(fields,array.len(fields)-1)))
+  wire_is(line,field,str.view(expected))
+}
+fn title_ready(prefix: str, slot: u64, width: u32, height: u32) -> bool effects {alloc,fs.read} {
+  let digits: string = string.from_int(slot)
+  let raster: string = text.concat(prefix,text.concat(".ordered-title",text.concat(str.view(digits),".rgba.0")))
+  let count: string = text.concat(prefix,text.concat(".ordered-count",text.concat(str.view(digits),".rgba")))
+  let recorded: bool = match files.read_text(str.view(count)) {err(_)=>false,ok(value)=>str.eq(str.view(value),"2"),}
+  let pixels: bytes = match files.read_bytes(str.view(raster)) {err(_)=>{return false},ok(value)=>value,}
+  recorded and view.len(bytes.view(pixels)) == cast.wrap(width)*cast.wrap(height)*4
 }
 fn emit_result(name: str, value: ref<commands.Result>) -> unit effects {io.write, alloc} {
   emit(name, str.view(commands.message(value)))
@@ -720,15 +739,20 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     str.view(title_scratch), title_cache) {
     err(problem) => { emit_b("title_grade_once", false) },
     ok(value) => { var lines: array<string> = value
-      var pre_fields: array<string> = text.split(str.view(array.borrow(lines, 0)), " ")
-      var final_fields: array<string> = text.split(str.view(array.borrow(lines, 2)), " ")
-      let pre_level: f64 = match text.parse_f64(str.view(array.borrow(pre_fields, 22))) {
-        none => 100.0, some(number) => number,
+      var correct: bool = false
+      if array.len(lines) == 3 {
+        let title: str = str.view(array.borrow(lines,0))
+        let grade: str = str.view(array.borrow(lines,1))
+        let final: str = str.view(array.borrow(lines,2))
+        correct=wire_is(title,0,"FLOAT") and wire_is(title,1,"/media/title.mp4") and
+          wire_is(title,3,"0") and wire_is(title,22,"0") and
+          text.contains(title,"RAW:") and wire_is(grade,0,"FLOAT") and
+          wire_feed(grade,1,title) and wire_is(grade,2,"-") and wire_is(grade,3,"0") and
+          wire_is(grade,22,"-0.5") and wire_feed(final,1,grade) and
+          wire_is(final,2,"-") and wire_is(final,3,"0") and wire_is(final,22,"0") and
+          title_ready(str.view(title_scratch),0,title_cache.width,title_cache.height)
       }
-      let final_level: f64 = match text.parse_f64(str.view(array.borrow(final_fields, 22))) {
-        none => 100.0, some(number) => number,
-      }
-      emit_b("title_grade_once", pre_level == -0.5 and final_level == 0.0) },
+      emit_b("title_grade_once",correct) },
   }
   timeline_media.cleanup_plan(str.view(title_scratch))
   let _ = editor.set_filter_text_param(title_doc, plan_text_filter, "content", "Café Привет 日本")
@@ -780,12 +804,39 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let incoming_title: u64 = match editor.add_filter(transition_doc,
     second_transition_clip, "text") { none => 0, some(value) => value }
   let _ = editor.set_filter_text_param(transition_doc, incoming_title, "content", "IN")
+  // Different grades make accidental grading of the whole dissolve observable.
+  let outgoing_grade: u64 = match editor.add_filter(transition_doc,first_transition_clip,"brightness") {none=>0,some(id)=>id,}
+  let incoming_grade: u64 = match editor.add_filter(transition_doc,second_transition_clip,"brightness") {none=>0,some(id)=>id,}
+  let _ = editor.set_filter_param(transition_doc,outgoing_grade,"level",0.5)
+  let _ = editor.set_filter_param(transition_doc,incoming_grade,"level",1.25)
   match timeline_media.frame_plan(transition_doc, 12, "PREVIEW", "transition.png",
     str.view(transition_scratch), title_cache) {
     err(problem) => { emit_b("incoming_title_at_cut", false) },
     ok(value) => { var lines: array<string> = value
-      emit_b("incoming_title_at_cut", array.len(lines) == 5 and
-        text.contains(str.view(array.borrow(lines, 4)), ".textclip3.rgba")) },
+      var correct: bool = false
+      if array.len(lines) == 5 {
+        let outgoing: str = str.view(array.borrow(lines,0))
+        let outgoing_picture: str = str.view(array.borrow(lines,1))
+        let incoming: str = str.view(array.borrow(lines,2))
+        let incoming_picture: str = str.view(array.borrow(lines,3))
+        let final: str = str.view(array.borrow(lines,4))
+        correct=wire_is(outgoing,0,"FLOAT") and wire_is(incoming,0,"FLOAT") and
+          wire_is(outgoing,1,"/media/transition.mp4") and wire_is(outgoing,3,"11") and
+          wire_is(incoming,1,"/media/transition.mp4") and wire_is(incoming,3,"12") and
+          text.contains(outgoing,".ordered-title0.rgba.0") and
+          text.contains(incoming,".ordered-title1.rgba.0") and
+          wire_is(outgoing,22,"0") and wire_is(incoming,22,"0") and
+          wire_feed(outgoing_picture,1,outgoing) and wire_is(outgoing_picture,3,"0") and
+          wire_is(outgoing_picture,2,"-") and wire_is(outgoing_picture,22,"-0.5") and
+          wire_feed(incoming_picture,1,incoming) and wire_is(incoming_picture,3,"0") and
+          wire_is(incoming_picture,2,"-") and wire_is(incoming_picture,22,"0.25") and
+          wire_feed(final,1,outgoing_picture) and wire_feed(final,20,incoming_picture) and
+          wire_is(final,3,"0") and wire_is(final,21,"0") and wire_is(final,17,"7") and
+          wire_is(final,18,"0.5") and wire_is(final,22,"0") and
+          title_ready(str.view(transition_scratch),0,title_cache.width,title_cache.height) and
+          title_ready(str.view(transition_scratch),1,title_cache.width,title_cache.height)
+      }
+      emit_b("incoming_title_at_cut",correct) },
   }
   timeline_media.cleanup_plan(str.view(transition_scratch))
   let _ = editor.set_key(transition_doc, second_transition_clip,
@@ -887,16 +938,20 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let key_entry: editor.Key = array.get(struct.borrow(
     struct.borrow(key_state, field=document), field=keys), 0)
   emit_b("keyframe_uses_local_frame", key_added.ok and key_entry.frame == 5)
+  let keyed_opacity: u64 = chrome.filter_of_kind(struct.borrow(key_state,field=document),key_clip.value,"opacity")
+  let opacity_name: string = filter_keys.name(keyed_opacity,"opacity","level")
   emit_b("keyframe_creates_filter", editor.filter_count(
-    struct.borrow(key_state, field=document), key_clip.value) == 1)
+    struct.borrow(key_state, field=document), key_clip.value) == 1 and
+    filter_keys.has(struct.borrow(key_state,field=document),key_clip.value,str.view(opacity_name)) and
+    filter_keys.value(struct.borrow(key_state,field=document),key_clip.value,keyed_opacity,"opacity","level",15,1.0) == 0.5)
   var rejected_key: commands.Result = commands.keyframe_parameter(key_state,
     chrome.domain_clip(), key_clip.value, "", "pan", 0.5)
   emit_b("unrendered_key_refused", not rejected_key.ok and
     str.eq(str.view(rejected_key.message),
       "[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet"))
   let _ = commands.undo(key_state)
-  emit_b("keyframe_filter_one_undo", editor.key_count(
-    struct.borrow(key_state, field=document), key_clip.value, "opacity.level") == 0 and
+  emit_b("keyframe_filter_one_undo", not filter_keys.has(
+    struct.borrow(key_state, field=document), key_clip.value, str.view(opacity_name)) and
     editor.filter_count(struct.borrow(key_state, field=document), key_clip.value) == 0)
   0
 }

@@ -25,20 +25,18 @@ fn blue_frame(frame: ref<provider.Frame>) -> bool effects {} {
     some(pixel) => pixel.b > 200 and pixel.r < 30, none => false,
   }
 }
-// Hard-coded quadrant geometry checks aspect fitting, row duplication and the
-// existing distinction between an exact RGBA read and an opaque resized monitor.
-fn fitted_quadrants(frame: ref<provider.Frame>, shape: u32) -> bool effects {} {
+// Hard-coded quadrant values check a complete fitted monitor copy and alpha.
+// Geometry fitting happens before the provider publishes its in-memory cache.
+fn fitted_quadrants(frame: ref<provider.Frame>) -> bool effects {} {
   let image: ref<draw.Surface> = struct.borrow(frame,field=pixels)
+  if image.width != 2 or image.height != 2 {return false}
   var y: u32 = 0
   loop {if y == image.height {break}
     var x: u32 = 0
     loop {if x == image.width {break}
-      let border: bool = (shape == 2 and (x == 0 or x == 5)) or (shape == 3 and (y == 0 or y == 5))
-      let sx: u32 = if shape == 0 {x}else if shape == 2 {if x == 0 {0}else{(x-1)/2}}else{x/2}
-      let sy: u32 = if shape == 0 {y}else if shape == 3 {if y == 0 {0}else{(y-1)/2}}else{y/2}
-      let expected: draw.Color = if border {draw.color(0,0,0,255)}else if sy == 0 {
-        if sx == 0 {draw.color(255,0,0,if shape == 0 {17}else{255})}else{draw.color(0,255,0,if shape == 0 {0}else{255})}
-      }else{if sx == 0 {draw.color(0,0,255,if shape == 0 {128}else{255})}else{draw.color(255,255,0,255)}}
+      let expected: draw.Color = if y == 0 {
+        if x == 0 {draw.color(255,0,0,17)}else{draw.color(0,255,0,0)}
+      }else{if x == 0 {draw.color(0,0,255,128)}else{draw.color(255,255,0,255)}}
       let actual: draw.Color = match draw.surface_pixel(image,x,y) {some(value)=>value,none=>{return false},}
       if actual.r != expected.r or actual.g != expected.g or actual.b != expected.b or actual.a != expected.a {return false}
       x=x+1
@@ -184,33 +182,35 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.check(suite, undo.ok, "Camera cut is one undo step")
   let _ = test.eq_u64(suite, editor.key_count(struct.borrow(edit, field=document), second.value, "opacity"), 0, "Undo removes whole camera cut")
   let _ = test.done(suite)
-  let _ = test.start(suite,"Program monitor span copies preserve pixels, aspect and alpha")
+  let _ = test.start(suite,"Fitted program memory preserves RGBA and rejects stale geometry and signatures")
   var monitor: provider.Provider = provider.fake(scratch)
   struct.set(monitor,2,field=canvas_width)
   struct.set(monitor,2,field=canvas_height)
-  let fixture: string = provider.preview_path(monitor)
-  let _ = files.write_bytes(str.view(fixture),b"\x{ff}\x{00}\x{00}\x{11}\x{00}\x{ff}\x{00}\x{00}\x{00}\x{00}\x{ff}\x{80}\x{ff}\x{ff}\x{00}\x{ff}")
-  provider.hold_program(monitor,"quadrants")
-  var shape: u32 = 0
-  loop {if shape == 5 {break}
-    let w: u32 = if shape == 0 {2}else if shape == 2 {6}else if shape == 4 {1}else{4}
-    let h: u32 = if shape == 0 {2}else if shape == 3 {6}else if shape == 4 {1}else{4}
-    var frame: provider.Frame = option.unwrap(provider.cached_program(monitor,"quadrants",w,h))
-    let _ = test.check(suite,frame.ok and frame.width == w and frame.height == h,"complete fitted monitor dimensions")
-    let _ = test.check(suite,fitted_quadrants(frame,shape),"quadrants, black bars and existing alpha")
-    shape=shape+1
-  }
-  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",0,4) {none=>true,some(_)=>false,},"zero width refused")
-  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,0) {none=>true,some(_)=>false,},"zero height refused")
   struct.set(monitor,2,field=program_width)
   struct.set(monitor,2,field=program_height)
-  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",2,2) {some(value)=>fitted_quadrants(value,0),none=>false,},"fitted cache preserves every alpha byte")
+  let _ = struct.replace(monitor,bytes.copy(b"\x{ff}\x{00}\x{00}\x{11}\x{00}\x{ff}\x{00}\x{00}\x{00}\x{00}\x{ff}\x{80}\x{ff}\x{ff}\x{00}\x{ff}"),field=program_pixels)
+  let fixture: string = provider.preview_path(monitor)
+  // A stale on-disk image must not substitute for the published memory picture.
+  let _ = files.write_bytes(str.view(fixture),b"stale disk image")
+  provider.hold_program(monitor,"quadrants")
+  match provider.cached_program(monitor,"quadrants",2,2) {
+    none=>{let _ = test.check(suite,false,"Published complete memory picture must be available")},
+    some(value)=>{
+      var frame: provider.Frame = value
+      let _ = test.check(suite,frame.ok and frame.width == 2 and frame.height == 2,"complete fitted monitor dimensions")
+      let _ = test.check(suite,fitted_quadrants(frame),"every quadrant and translucent alpha comes from memory")
+    },
+  }
+  let _ = test.check(suite,match provider.cached_program(monitor,"different content",2,2) {none=>true,some(_)=>false,},"different content signature refuses stale pixels")
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",0,4) {none=>true,some(_)=>false,},"zero width refused")
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,0) {none=>true,some(_)=>false,},"zero height refused")
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",2,2) {some(value)=>fitted_quadrants(value),none=>false,},"fitted cache preserves every alpha byte")
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,4) {none=>true,some(_)=>false,},"larger monitor refuses enlargement of a smaller fitted cache")
   let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",1,1) {none=>true,some(_)=>false,},"smaller monitor requests its own fitted geometry")
-  struct.set(monitor,0,field=program_width)
-  struct.set(monitor,0,field=program_height)
-  let _ = files.write_bytes(str.view(fixture),b"short")
-  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",4,4) {none=>true,some(_)=>false,},"incomplete canvas refused")
+  let _ = struct.replace(monitor,bytes.copy(b"short"),field=program_pixels)
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",2,2) {none=>true,some(_)=>false,},"truncated memory picture is refused even with correct geometry and signature")
+  provider.invalidate(monitor)
+  let _ = test.check(suite,match provider.cached_program(monitor,"quadrants",2,2) {none=>true,some(_)=>false,},"Reload retires the published fitted picture")
   let _ = test.done(suite)
   let _ = test.start(suite,"Preview preserves small sequences and bounds large working canvases")
   var formats: array<u32> = [320,180,320,180,641,361,641,361,480,640,480,640,

@@ -43,6 +43,8 @@ import "preview.ai" as preview
 import "preview_link.ai" as preview_link
 import "preview_profile.ai" as preview_profile
 import "picture_queue.ai" as picture_queue
+import "window_cache.ai" as window_cache
+import "window_profile.ai" as window_profile
 import "playback_profile.ai" as playback_profile
 import "transport_clock.ai" as transport_clock
 import "view.ai" as painter
@@ -155,7 +157,7 @@ fn load_theme(state: ref<app.App>, args: view<str>, scratch: str) -> unit effect
 
 // Ask the provider for the two monitor images the next repaint needs. The view never does
 // this itself, so painting stays free of media work.
-fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+fn render_to(state: ref<app.App>, target: str, width: u32, height: u32) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   let _ = preview.waveforms(state)
   var images: array<draw.Surface> = preview.images(state, 320, 180)
   var program_image: draw.Surface = match array.pop(images) {
@@ -272,7 +274,7 @@ fn pause_transport(state: ref<app.App>, source: bool) -> unit effects {alloc} {
   ()
 }
 
-fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
+fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
     err(problem) => { say("Genesis AIR could not open a window; try the render command instead.")
@@ -281,6 +283,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   let _ = session.offer_recovery(state)
   var native_fullscreen: bool = false
   var dirty: bool = true
+  var last_present_ns: u64 = 0
+  var passive_pending: bool = false
+  var source_pixels_pending: bool = true
+  var displayed_source_id: u64 = 0
   var repaint_all: bool = true
   var renderer: painter.Renderer = painter.renderer()
   var handled_prompt: u32 = 0
@@ -304,6 +310,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   var audio_task_generation: u64 = 0
   var audio_task_end: i64 = 0
   var audio_task_output: string = string.new()
+  var semantic_cache: window_cache.Cache = window_cache.cache()
+  var window_measure: window_profile.Profile = window_profile.profile()
   var sound_signature: string = string.new()
   var sound_revision: u64 = 0
   var previous_source: bool = false
@@ -359,7 +367,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     preview.stop(str.view(preview_root))
     audio_playback.stop(str.view(audio_root))
     return 1},}
-  var strip_signature: string = string.new()
+  var strip_document_revision: u64 = 0
+  var strip_initialized: bool = false
   var strip_requested: u64 = 0
   var strip_revision: u64 = 0
   var strip_scroll: i64 = -1
@@ -382,9 +391,24 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
   let export_progress: string = provider.export_progress_path(struct.borrow(state, field=provider))
   loop {
     if not app.running(state) { break }
+    var passive_changed: bool = false
+    var window_row: window_profile.Row = window_profile.row()
+    struct.set(window_row,window_profile.stamp(window_measure),field=begin)
+    let selected_source_id: u64 = struct.get(struct.borrow(state,field=document),field=monitor_source)
+    if displayed_source_id != selected_source_id {
+      // A new source must never label the previous source's pixels/time with its
+      // own frame rate and duration while the asynchronous decoder catches up.
+      let _ = ref.swap(source_image,draw.empty_surface())
+      struct.set(state,-1,field=presented_source_frame)
+      displayed_source_id = selected_source_id
+      source_pixels_pending = true
+      repaint_all = true
+      dirty = true
+    }
     if preview_media_revision != state.media_revision {
       let _ = ref.swap(program_image, draw.empty_surface())
       let _ = ref.swap(source_image, draw.empty_surface())
+      source_pixels_pending = true
       preview_seen = preview_requested
       waveform_seen = strip_requested
       thumbnail_seen = strip_requested
@@ -471,7 +495,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     }
     match ref.swap(audio_library, option.none()) {
       none => {
-        if playing_now and transport_clock.advance(struct.borrow(state, field=document), elapsed_ns, frame_clock) { dirty = true }
+        if playing_now and transport_clock.advance(struct.borrow(state, field=document), elapsed_ns, frame_clock) { passive_changed = true }
       },
       some(opened) => {
         var library: CAbiLibrary = opened
@@ -484,11 +508,21 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           let _ = audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
           let _ = preview_link.wake(audio_transport,false)
         }
-        let next_sound: string = if source_playing { string.from_int(struct.get(struct.borrow(state, field=document), field=monitor_source)) }
-          else { timeline_media.audio_signature(struct.borrow(state, field=document)) }
-        let mix_changed: bool = sound_revision != state.media_revision or not str.eq(str.view(next_sound), str.view(sound_signature))
-        sound_signature = next_sound
+        let signature_begin: u64 = window_profile.stamp(window_measure)
+        let sound_refreshed: bool = window_cache.refresh(state,semantic_cache)
+        var mix_changed: bool = sound_revision != state.media_revision
+        if source_playing {
+          let next_sound: string = string.from_int(struct.get(struct.borrow(state,field=document),field=monitor_source))
+          if not str.eq(str.view(next_sound),str.view(sound_signature)) {mix_changed=true
+            sound_signature=next_sound}
+        } else if sound_refreshed or previous_source {
+          // The cached wire mix is compared only after an edit or mode switch.
+          let next_sound: ref<string> = struct.borrow(semantic_cache,field=audio)
+          if not str.eq(str.view(next_sound),str.view(sound_signature)) {mix_changed=true
+            sound_signature=string.copy(str.view(next_sound))}
+        }
         sound_revision = state.media_revision
+        struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
         if playing_now and (not previous_playing or source_playing != previous_source or frame_now != previous_frame or mix_changed) {
           audio_pending=false
           audio_generation = audio_generation + 1
@@ -550,7 +584,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
               let actual: i64 = transport_clock.frame_at_samples(audio_origin,device.samples,fps,last)
               let current: i64 = if source_playing { struct.get(struct.borrow(doc, field=monitor), field=frame) } else { editor.playhead(doc) }
               if actual != current { let _ = if source_playing { editor.seek_monitor(doc, actual) } else { editor.seek(doc, actual) }
-                dirty = true }
+                passive_changed = true }
               if device.queued == 0 and audio_next >= finish {
                 let _ = if source_playing { editor.monitor_action(doc, editor.pause()) } else { editor.program_action(doc, editor.pause()) }
                 let _ = native_audio.request(library, "stop", "")
@@ -599,7 +633,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
         if audio_active and playing_now {
           var levels: native_audio.Levels = native_audio.levels(library)
           if levels.ok {
-            if state.audio_left != levels.left or state.audio_right != levels.right { dirty = true }
+            if state.audio_left != levels.left or state.audio_right != levels.right { passive_changed = true }
             struct.set(state, levels.left, field=audio_left)
             struct.set(state, levels.right, field=audio_right)
           }
@@ -647,13 +681,25 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     let parked_source: i64 = struct.get(struct.borrow(doc,field=monitor),field=frame)
     let fps: f64 = if picture_source {timeline_media.monitor_fps(doc)}else{editor.sequence_fps(doc,doc.active)}
     let finish: i64 = if picture_source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
+    if window_measure.enabled {
+      window_profile.context(window_row,picture_source,picture_playing,audio_origin,fps,
+        if finish > 0 {finish-1}else{0},state.presented_program_frame,state.presented_source_frame)
+      // These identify the pixels about to be painted, before input can install
+      // a new document or viewport at the end of this same loop iteration.
+      struct.set(window_row,state.document_revision,field=revision)
+      struct.set(window_row,state.media_revision,field=media_revision)
+      struct.set(window_row,width,field=width)
+      struct.set(window_row,height,field=height)
+    }
     let monitor_width: u32 = if state.fullscreen != 0 {1280}else{480}
     let monitor_height: u32 = if state.fullscreen != 0 {720}else{270}
     if dirty or not pictures.initialized or pictures.epoch != audio_generation or
         pictures.playing != picture_playing or pictures.source != picture_source or
         pictures.width != monitor_width or pictures.height != monitor_height {
-      let key: string = picture_queue.identity(state,picture_source,picture_playing)
+      let signature_begin: u64 = window_profile.stamp(window_measure)
+      let key: string = picture_queue.identity_revision(state,picture_source,picture_playing)
       if picture_queue.configure(pictures,key,audio_generation,picture_playing,picture_source,monitor_width,monitor_height) {dirty=true}
+      struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
     }
     preview_media_revision=state.media_revision
     let ready: u64 = preview_transport.ready
@@ -676,6 +722,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           // immediately so retiring a prepared Program frame cannot erase it.
           if not picture_source and not held {
             let _ = ref.swap(source_image,next_source)
+            source_pixels_pending = true
             next_source=draw.empty_surface()
             struct.set(state,position.source_frame,field=presented_source_frame)
             held=true
@@ -693,6 +740,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       }
     }
     match picture_queue.take_due(pictures,wanted) {none=>{},some(frame)=>{
+      if not frame.held_source { source_pixels_pending = true }
       picture_queue.apply(state,frame,source_image,program_image)
       dirty=true},}
     let shown: i64 = if picture_source {state.presented_source_frame}else{state.presented_program_frame}
@@ -701,6 +749,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
         preview_requested=preview_requested+1
         let program_frame: i64 = if picture_source {parked_program}else{target}
         let source_frame: i64 = if picture_source {target}else{parked_source}
+        let signature_begin: u64 = window_profile.stamp(window_measure)
         if preview.request_frame(state,preview_root,preview_transport,preview_requested,
             struct.borrow(pictures,field=key),program_frame,source_frame,monitor_width,monitor_height) {
           picture_queue.requested(pictures,preview_requested,target,clock.start())
@@ -708,39 +757,74 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
           pause_transport(state,true)
           pause_transport(state,false)
           dirty=true}
+        struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
       },
     }
+    // Fresh pictures and user actions repaint immediately. Clock/meter-only
+    // updates get a bounded interval so repeated old frames cannot monopolize
+    // the presenter while the next picture is being prepared.
+    if passive_changed { passive_pending = true }
+    if passive_pending and clock.start() - last_present_ns >= 33000000 { dirty = true }
     if dirty {
-      let signature: string = match editor_io.encode(struct.borrow(state, field=document)) {
-        ok(value) => value, err(_) => string.new(),
-      }
       let view_frame: layout.Frame = layout.frame(logical_width, logical_height)
       let span: i64 = cast.sat(layout.width_of(view_frame.timeline) / app.zoom(state))
-      let next_strip: string = preview.strips_signature(struct.borrow(state,field=document))
-      if strip_revision != state.media_revision or strip_scroll != app.scroll(state) or strip_zoom != app.zoom(state) or strip_span != span or
-          not str.eq(str.view(next_strip),str.view(strip_signature)) {
+      if not strip_initialized or strip_document_revision != state.document_revision or
+          strip_revision != state.media_revision or strip_scroll != app.scroll(state) or strip_zoom != app.zoom(state) or strip_span != span {
+        let signature_begin: u64 = window_profile.stamp(window_measure)
+        // Encode only a real content/viewport change, never a moving heard clock.
+        let signature: string = match editor_io.encode(struct.borrow(state,field=document)) {
+          ok(value)=>value,err(_)=>string.new(),
+        }
         strip_requested=strip_requested+1
         if preview.request_revision(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision) {
           let _ = preview_link.wake(strip_transport,false)
-          strip_signature=next_strip
+          strip_document_revision=state.document_revision
+          strip_initialized=true
           strip_revision=state.media_revision
           strip_scroll=app.scroll(state)
           strip_zoom=app.zoom(state)
           strip_span=span
         }else{app.set_status(state,"[GA_TIMELINE_REQUEST] Cannot publish timeline bitmap request")}
+        struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
       }
-      if painter.render(state, renderer, width, height, repaint_all, source_image, program_image) {
-        match gui.present_surface(window, struct.borrow(renderer, field=surface)) {
-          ok(_) => {},
-          err(_) => { app.set_status(state, "[GA_UI_PRESENT] Native presenter could not display the window frame") },
+      let paint_begin: u64 = window_profile.stamp(window_measure)
+      let painted: bool = painter.render_with_source_hold(state,renderer,width,height,repaint_all,source_image,program_image,not source_pixels_pending)
+      struct.set(window_row,window_profile.stamp(window_measure)-paint_begin,field=paint)
+      if painted {
+        if window_measure.enabled {
+          // Queue application can change completed pixels after loop context.
+          struct.set(window_row,state.presented_program_frame,field=program)
+          struct.set(window_row,state.presented_source_frame,field=source)
+          window_profile.sample(audio_library,window_row,false)
+          struct.set(window_row,window_profile.stamp(window_measure),field=present_begin)
         }
-      } else { app.set_status(state, "[GA_UI_SURFACE] The window canvas could not be allocated") }
-      repaint_all = false
-      dirty = false
+        match gui.present_surface(window,struct.borrow(renderer,field=surface)) {
+          ok(_) => {struct.set(window_row,true,field=present_ok)
+            last_present_ns = clock.start()
+            passive_pending = false
+            source_pixels_pending = false},
+          err(_) => {app.set_status(state,"[GA_UI_PRESENT] Native presenter could not display the window frame")},
+        }
+        if window_measure.enabled {
+          struct.set(window_row,window_profile.stamp(window_measure),field=present_end)
+          struct.set(window_row,window_row.present_end-window_row.present_begin,field=present)
+          window_profile.sample(audio_library,window_row,true)
+        }
+      } else {app.set_status(state,"[GA_UI_SURFACE] The window canvas could not be allocated")}
+      if window_row.present_ok {
+        repaint_all = false
+        dirty = false
+      } else {
+        // Keep an unsuccessful paused edit eligible for a bounded retry too.
+        repaint_all = true
+        dirty = true
+      }
     }
     var drained: u64 = 0
     loop {
+      let wait_begin: u64 = window_profile.stamp(window_measure)
       let event: ui.event = preview_link.wait(window,preview_transport,if drained == 0 {if playing_now {8}else{20}}else{0})
+      struct.set(window_row,window_row.wait+window_profile.stamp(window_measure)-wait_begin,field=wait)
       if event.kind == 0 or event.kind == 14 { break }
       if event.kind == 1 {
         let note: string = input.close_request(state)
@@ -902,8 +986,17 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
       diagnostics.record(str.view(scratch), "GA_EDITOR", str.view(status), "window")
       last_recorded_error = status
     }
-
+    if window_measure.enabled {
+      struct.set(window_row,window_profile.stamp(window_measure),field=end)
+      struct.set(window_row,array.len(struct.borrow(pictures,field=frames)),field=prepared)
+      struct.set(window_row,preview_transport.snapshot_generation,field=snapshot)
+      struct.set(window_row,semantic_cache.rebuilds,field=rebuilds)
+      struct.set(window_row,strip_requested,field=strips)
+      struct.set(window_row,drained,field=inputs)
+      window_profile.record(window_measure,window_row)
+    }
   }
+  window_profile.flush(window_measure)
   // Leaving the scope joins every task; stop an export at its next frame instead of
   // holding the closed window open until it finishes.
   if array.len(export_jobs) > 0 { timeline_media.request_export_cancel(str.view(export_cancel)) }

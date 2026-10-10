@@ -20,13 +20,22 @@ clicks. The separate 4K ProRes, portrait, multicam and 16-bit/HDR precision gate
 also passed. These checks exclude interactive native presentation and physical
 speaker latency; sustained smooth 4K60 remains open.
 
+The published root application SHA-256 is
+`9DD7F025134C146080232A633D3E23060CF441A3AC008DF3D32916F6372C577E`;
+the worker is `66EE15B507E15EEC67E69999411654C4893A0F9FF3EA8ACCBD1224CC5B62FD9C`.
+After the complete combined gate, two additional bounded paint fixes received
+the expanded 32-case/656-check native pixel gate and final application smoke.
+Root-file hashes match the accepted files, and its six shared-runtime process
+cases pass. The native playback timing below names its separately measured
+application hash; it is not a timing claim for every subsequent build.
+
 | Gate | Evidence |
 |---|---|
 | Shared MM-AIR media runtime | Six isolated native process cases, delayed DLL imports, Unicode paths, explicit override and coded missing/invalid runtime recovery; Genesis packages no FFmpeg executable or codec DLLs. Optional Vulkan decoding passes 504 exact RGBA/FP32 and software-reference picture pairs across generated NV12/P010/PQ/HLG and the supplied 4K clip, including EOF/rewind. |
 | Project and control model | 153 saved application facts, three native file-drop checks, 749 dispatched clicks across four tabs, no enabled-control overlap |
-| Native media and project I/O | Ten cases / 111 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status, file-based quadrant checks for exact alpha, opaque resized monitors, up/down sampling, aspect letterboxing, zero/short input refusal, and six small/odd/portrait/4K preview canvas formats preserving sequence/export dimensions and time |
-| Inspector and transport | Seventeen cases / 121 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan/mute/solo, gain and video K/fader key editing with evaluated readings, unchanged project names during unkeyed gain display/planning, stable mix/strip signatures, equal-height RGB histogram bins, retained program-scope updates and completed-frame monitor/timeline time |
-| Project safety and recovery | Fifteen cases / 84 checks. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
+| Native media and project I/O | Ten cases / 105 checks, Unicode media paths, source/program pixels, native frame units, coded failure exit status, every fitted-memory RGBA/alpha byte, rejection of stale signatures, mismatched geometry and truncated buffers, Reload invalidation, and six small/odd/portrait/4K preview canvas formats preserving sequence/export dimensions and time. Actual fitting and letterboxing have separate worker pixel gates. |
+| Inspector and transport | Twenty cases / 174 checks: real monitor buttons, both scrub bars, fullscreen transport and seeking, lane-area playhead dragging, video/audio lane refusal, file shortcuts, ruler scrubbing, pause during seek, slider clamping/one undo/cancel, disabled filter selection, embedded audio gain/pan/mute/solo, gain and video K/fader key editing with evaluated readings, unchanged project names during unkeyed gain display/planning, stable mix/strip signatures, equal-height RGB histogram bins, retained program-scope updates and completed-frame monitor/timeline time |
+| Project safety and recovery | Sixteen cases / 93 checks, including saved Program/Source In/Out marks and their Undo/Redo. Headless input policy checks preserve edits on Cancel, missing/invalid Open and failed Save; Save as completes a deferred action only after publication; native close-request dispatch uses the same policy; paused final edits autosave on an independent timer; atomic failures preserve the prior snapshot and foreign temporary; independent sessions have separate snapshot names; startup skips corrupt records; legacy recovery opens a paused copy; ordinary project files are preserved, including inside the recovery folder; File Recover includes the active snapshot; pending recovery preserves it despite autosave and native path spelling differences |
 | Native audio device | Two queued PCM chunks, advancing device sample clock, nonzero post-mix stereo levels, a panned file with a zero opposite meter, silent PCM with zero meters, immediate Stop |
 | Native audio clock and timing | 75 controlled ABI checks cover sample/byte/millisecond driver positions, repeated 32-bit rollover, backward observations, changing units, post-mix meter indexing, coded refusal/recovery and scoped timer lifecycle. Successful device opening requests a one-millisecond timer period; Stop, restart and guard destruction release it. Failed opening makes no request; timer refusal preserves audio availability and is inspectable. The twenty-second silent device gate checks uneven buffers, monotonic position, drained-queue hold, resume and reset. A separate three-minute device run completed 222 buffers with -2.98 ms interval drift and a 3.11 ms phase range versus monotonic time. This excludes picture presentation and physical speaker latency. |
 | Continuous playback audio | Four direct-worker and thirty-three editor/source/rate/mixer cases compare concatenated playback chunks against whole-range WAVs. All twenty audio effects, reverse, 2x speed, fractional sample endpoints, seek reset, source audition and embedded video audio are covered. Independent PCM checks verify the clip/track gain product, left/right pan, zero muted output and solo isolation; coded filter failure/recovery and idle Stop without a wake |
@@ -233,3 +242,33 @@ Preview spatial resampling differs at edges; master transforms retain the refere
 
 Keep this ledger with the implementation. Add a measured output assertion when closing a
 row; a document mutation or successful worker reply alone is insufficient.
+
+## Additional Windows candidate acceptance on 2026-10-09
+
+The native window opens the supplied 4K AV1/PQ project, updates paused pictures and
+timecodes from the ruler, and rewinds to a visible frame zero. Live stereo meters,
+filmstrip bitmaps, histogram, spatial RGB parade and luma waveform were observed.
+Scopes describe the displayed SDR preview, including horizontal sample positions.
+The final native Audio-tab interval delivers 56.76 changed pictures/s over 79.20
+seconds, with 1.42 ms median painting and no observed drained audio queues.
+Sustained 4K60 remains open; fullscreen 4K remains deferred.
+See [native timing](FFMPEG_GPU_PREVIEW.md#native-window-measurements-on-2026-10-09).
+
+Independent native 16-bit pixel checks establish ordered picture operators,
+duplicates, unclipped float intermediates, title/grade order and four simultaneous
+camera titles. Each duplicate picture filter has its own animation keys;
+qualified keys take precedence over legacy kind keys, and the first edit migrates
+the selected instance's legacy curve. Inspector checks cover the selected instance,
+Save/Open and Undo/Redo. Transport/composition controls remain separate from the
+ordered picture passes; arbitrary interleaving and duplicate composition semantics
+are not established. Complex 4K effect-stack throughput is unmeasured.
+
+Refused source Insert/Overwrite preserves document bytes, selection, semantic
+revision and every undo/redo snapshot. Legal edits remain reversible. Program and
+Source In/Out marks now create saved edits with history; repeated identical marks
+create no extra history step. The project-safety gate has 16 cases and 93 checks.
+Retained painting matches complete painting in 32 cases/656 checks, including held
+Source pixels, transparent same-size replacement, resize at all three UI scales,
+scrolled unkeyed Audio meters, and narrow/short windows. Two added cases exposed
+status erasure crossing a track header and timecode glyphs escaping the narrow
+monitor's redraw band; both boundaries are fixed without pixel tolerances.

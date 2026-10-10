@@ -432,7 +432,24 @@ their source endpoints and length. Incomplete strip slots retain the last owned 
 Monitor timecodes use the decoded picture's frame stamp. During playback the timeline
 cursor follows that same program frame; paused scrubbing changes the requested position
 immediately. RGB histogram channels have independent bars, including equal-height bins
-in black and white frames, and refresh from the displayed program picture.
+in black and white frames, and refresh from the displayed program picture. RGB parade
+and luma waveform retain each sample's horizontal picture position and plot its signal
+level vertically; they use the same displayed SDR program frame. Luma uses Rec.709
+coefficients. These scopes describe the tone-mapped preview rather than the HDR master.
+
+The window caches its audio mix and project snapshot by an explicit document-mutation
+revision. Transport ticks reuse them; edits, slider cancellation, Undo/Redo and project
+replacement invalidate them. A picture-only edit compares the resulting audio mix
+before restarting sound. Timeline strips also refresh on content, viewport or media
+changes instead of every moving playhead tick.
+
+Set `GENESIS_WINDOW_PROFILE` to an absolute local TSV filename before starting the
+editor to measure its actual native presentation and audio sample clock. Diagnostics
+are off by default and stop after 50,000 rows. Analyze a recording with
+`python tests/window_timing.py PROFILE.tsv --require-active --report REPORT.json`.
+It reports unique displayed-picture delivery, skipped positions, presenter/paint/wait
+costs and device interval drift. Physical speaker latency and display photon timing
+are outside this measurement.
 
 Preview requests and completed frames wake the worker and native window wait through
 bounded `std.channel` lanes. Rapid drag requests are coalesced before decoding; frame,
@@ -622,8 +639,8 @@ python tests/precision_media.py --binary .\Genesis-AIR.exe --worker .\genesis-gc
 ```
 
 The Windows gate verifies 153 saved application facts, three native file-drop facts,
-749 control clicks with overlap checks, 111 native media/project checks and 105 focused
-inspector/transport/audio checks. Native device tests verify queueing, advancing sample
+749 control clicks with overlap checks, 105 native media/project checks and 174 focused
+inspector checks, with separate transport/audio gates. Native device tests verify queueing, advancing sample
 clock, stereo, panned and silent output levels and immediate Stop. Continuous audio checks compare four
 worker cases and thirty-three editor/source/rate/mixer cases against whole-range WAV output;
 the generated PCM fixture matches exactly across chunk boundaries. Cases cover all twenty
@@ -920,6 +937,12 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
+- Both build scripts apply the shared `patches/air-editor.patch` overlay to the pinned
+  SDK. Split preserves filter instances, full automation curves and representable source
+  offsets. Cuts with fractional source phases, cuts inside active scalar fades,
+  animated speed/fade lengths, or enabled Timer/Delay/Reverb refuse with
+  `GA_SPLIT_CONTEXT`; document and undo/redo remain unchanged. Ordinary reverse/nonunit
+  trim rebasing and other temporal DSP history preservation remain unfinished.
 - Compressed-source seek startup can differ
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.

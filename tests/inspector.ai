@@ -22,6 +22,7 @@ import "../src/timeline_media.ai" as media
 import "../src/preview.ai" as preview
 import "../src/picture_queue.ai" as pictures
 import "../src/preview_link.ai" as link
+import "../src/filter_keys.ai" as filter_keys
 
 fn fixture(scratch: str) -> app.App effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var state: app.App = app.app(provider.fake(scratch))
@@ -43,6 +44,27 @@ fn histogram_pixel(surface: ref<draw.Surface>, frame: layout.Frame, bucket: u64,
   // than the antialiased border. Other bins use their channel centers.
   option.unwrap(draw.surface_pixel(surface,cast.sat(frame.dock_body.left+6.0+cast.float(bucket)*column+(cast.float(channel)+(if bucket == 0 and channel == 0 {0.8}else{0.5}))*bar),
     cast.sat(frame.dock_body.top+6.0+12.0+48.0)))
+}
+// Probe the spatial location of a known input column/intensity. Histogram bins
+// cannot satisfy these independent rising-red/falling-green picture identities.
+fn signal_pixel(surface: ref<draw.Surface>, frame: layout.Frame, channel: u64,
+                column: u64, bucket: u64) -> draw.Color effects {} {
+  let width: f64 = layout.width_of(frame.dock_body)-12.0
+  let each: f64 = (width-8.0)/3.0
+  let left: f64 = frame.dock_body.left+6.0+
+    (if channel < 3 {cast.float(channel)*(each+4.0)}else{0.0})
+  let top: f64 = frame.dock_body.top+6.0+12.0+96.0+10.0+12.0+
+    (if channel < 3 {0.0}else{72.0+10.0+12.0})
+  let plot_width: f64 = if channel < 3 {each}else{width}
+  let x: u32 = cast.sat(left+1.0+(cast.float(column)+0.5)*(plot_width-2.0)/64.0)
+  let y: u32 = cast.sat(top+1.0+(63.5-cast.float(bucket))*70.0/64.0)
+  option.unwrap(draw.surface_pixel(surface,x,y))
+}
+fn signal_visible(colour: draw.Color, channel: u64) -> bool effects {} {
+  if channel == 0 {colour.r > 70 and colour.r > colour.g}
+  else if channel == 1 {colour.g > 70 and colour.g > colour.r}
+  else if channel == 2 {colour.b > 70 and colour.b > colour.g}
+  else {colour.g > 70 and colour.g > colour.r}
 }
 
 fn parameter(controls: ref<array<chrome.Control>>, kind: str, name: str) -> layout.Rect effects {alloc} {
@@ -465,15 +487,62 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.eq_i64(suite,state.presented_program_frame,-1,"Reload invalidates completed monitor stamps")
   let _ = test.done(suite)
 
+  let _ = test.start(suite, "Duplicate filter selection and legacy automation isolate by stable instance")
+  var duplicates: app.App = fixture(scratch)
+  let duplicate_clip: u64 = app.current_clip(duplicates)
+  let first_effect: u64 = match editor.add_filter(struct.borrow(duplicates,field=document),duplicate_clip,"brightness") {none=>0,some(id)=>id,}
+  let second_effect: u64 = match editor.add_filter(struct.borrow(duplicates,field=document),duplicate_clip,"brightness") {none=>0,some(id)=>id,}
+  let _ = editor.set_filter_param(struct.borrow(duplicates,field=document),first_effect,"level",0.6)
+  let _ = editor.set_filter_param(struct.borrow(duplicates,field=document),second_effect,"level",1.4)
+  let names_before: u64 = array.len(struct.borrow(struct.borrow(duplicates,field=document),field=names))
+  app.set_dock_tab(duplicates,chrome.tab_filters())
+  app.set_selected_filter(duplicates,second_effect)
+  var duplicate_controls: array<chrome.Control> = chrome.filters_panel(frame,duplicates)
+  var second_displayed: bool = false
+  var di: u64 = 0
+  loop {if di >= array.len(duplicate_controls) {break}
+    let control: ref<chrome.Control> = array.borrow(duplicate_controls,di)
+    if control.action == chrome.act_param_set() and str.eq(str.view(struct.borrow(control,field=kind)),"brightness") {
+      second_displayed=control.target == second_effect and math.abs(control.value-1.4)<0.00001
+    }
+    di=di+1
+  }
+  let _ = test.check(suite,second_displayed,"Picking second duplicate binds its own target and static value")
+  let _ = test.eq_u64(suite,array.len(struct.borrow(struct.borrow(duplicates,field=document),field=names)),names_before,"Unanimated inspector reading does not mutate names")
+  let _ = editor.set_key(struct.borrow(duplicates,field=document),duplicate_clip,"brightness.level",0,0.8,curve.linear())
+  let _ = editor.set_key(struct.borrow(duplicates,field=document),duplicate_clip,"brightness.level",20,1.2,curve.hold())
+  let _ = test.near_f64(suite,filter_keys.value(struct.borrow(duplicates,field=document),duplicate_clip,second_effect,"brightness","level",10,1.4),1.0,0.00001,"Legacy project curve still drives both instances")
+  let _ = commands.seek(duplicates,10)
+  let migrated: commands.Result = commands.keyframe_parameter(duplicates,chrome.domain_filter(),second_effect,"brightness","level",1.5)
+  let second_name: string = filter_keys.name(second_effect,"brightness","level")
+  let first_name: string = filter_keys.name(first_effect,"brightness","level")
+  let _ = test.check(suite,migrated.ok,"K forks legacy curve for selected duplicate")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(duplicates,field=document),duplicate_clip,str.view(second_name)),3,"Complete legacy curve migrates before middle edit")
+  let _ = test.check(suite,not filter_keys.has(struct.borrow(duplicates,field=document),duplicate_clip,str.view(first_name)),"Other instance keeps legacy curve")
+  let _ = test.near_f64(suite,filter_keys.value(struct.borrow(duplicates,field=document),duplicate_clip,first_effect,"brightness","level",10,0.6),1.0,0.00001,"Editing second instance leaves first interpolation unchanged")
+  let _ = test.near_f64(suite,filter_keys.value(struct.borrow(duplicates,field=document),duplicate_clip,second_effect,"brightness","level",20,1.4),1.2,0.00001,"Fork preserves legacy endpoint")
+  let _ = commands.undo(duplicates)
+  let _ = test.check(suite,not filter_keys.has(struct.borrow(duplicates,field=document),duplicate_clip,str.view(second_name)),"One Undo removes entire migrated curve")
+  let _ = commands.redo(duplicates)
+  let _ = test.near_f64(suite,filter_keys.value(struct.borrow(duplicates,field=document),duplicate_clip,second_effect,"brightness","level",10,1.4),1.5,0.00001,"Redo restores isolated duplicate animation")
+  let duplicate_project: string = path.join(scratch,"duplicate-keys.air")
+  let duplicate_saved: commands.Result = commands.save_project(duplicates,str.view(duplicate_project))
+  let duplicate_opened: commands.Result = commands.open_project(duplicates,str.view(duplicate_project))
+  let _ = test.check(suite,duplicate_saved.ok and duplicate_opened.ok,"Legacy and scoped curves round trip together")
+  let _ = test.near_f64(suite,filter_keys.value(struct.borrow(duplicates,field=document),duplicate_clip,first_effect,"brightness","level",10,0.6),1.0,0.00001,"Reopen preserves unmigrated duplicate")
+  let _ = test.check(suite,media.key_supported(str.view(second_name)) and not media.key_supported("filter.0.brightness.level") and not media.key_supported("filter.09.brightness.level") and not media.key_supported("filter.9.compressor.threshold"),"Scoped names retain canonical stable IDs and video-only whitelist")
+  let _ = test.done(suite)
+
   let _ = test.start(suite, "Keyed video faders display and edit the audible-time picture value")
   var video_keys: app.App = fixture(scratch)
   let video_clip: u64 = app.current_clip(video_keys)
   let _ = commands.seek(video_keys, 0)
   let _ = commands.keyframe_parameter(video_keys, chrome.domain_filter(), 0, "brightness", "level", 0.5)
   let brightness: u64 = chrome.filter_of_kind(struct.borrow(video_keys,field=document),video_clip,"brightness")
+  let brightness_key: string = filter_keys.name(brightness,"brightness","level")
   let _ = commands.seek(video_keys, 20)
   let _ = commands.set_parameter(video_keys, chrome.domain_filter(), brightness, "brightness", "level", 1.5)
-  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,"brightness.level"),2,"Fader creates a current-time picture key")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,str.view(brightness_key)),2,"Fader creates a current-time picture key")
   let _ = commands.seek(video_keys, 10)
   app.set_dock_tab(video_keys,chrome.tab_filters())
   app.set_selected_filter(video_keys,brightness)
@@ -492,11 +561,11 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = input.pointer_down(video_keys,1600.0,980.0,video_bar.left+layout.width_of(video_bar)*0.6,(video_bar.top+video_bar.bottom)*0.5)
   let _ = input.pointer_move(video_keys,1600.0,980.0,video_bar.left+layout.width_of(video_bar)*0.7,(video_bar.top+video_bar.bottom)*0.5)
   let _ = input.pointer_up(video_keys,1600.0,980.0,video_bar.left+layout.width_of(video_bar)*0.7,(video_bar.top+video_bar.bottom)*0.5)
-  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(video_keys,field=document),video_clip,"brightness.level",10,1.0),1.4,0.00001,"The complete drag changes the rendered value")
-  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,"brightness.level"),3,"Drag adds only one current-time key")
+  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(video_keys,field=document),video_clip,str.view(brightness_key),10,1.0),1.4,0.00001,"The complete drag changes the rendered value")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,str.view(brightness_key)),3,"Drag adds only one current-time key")
   let _ = commands.undo(video_keys)
-  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,"brightness.level"),2,"One undo removes the complete keyed drag")
-  let _ = editor.set_key(struct.borrow(video_keys,field=document),video_clip,"brightness.level",20,1.5,curve.hold())
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,str.view(brightness_key)),2,"One undo removes the complete keyed drag")
+  let _ = editor.set_key(struct.borrow(video_keys,field=document),video_clip,str.view(brightness_key),20,1.5,curve.hold())
   let _ = commands.seek(video_keys,20)
   let _ = commands.keyframe_parameter(video_keys,chrome.domain_filter(),brightness,"brightness","level",1.4)
   var held_found: bool = false
@@ -533,6 +602,48 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.contains(suite,commands.message(stale_key),"GA_KEY_TARGET","Stale key target has a copyable diagnostic")
   let _ = test.done(suite)
 
+  let _ = test.start(suite,"RGB parade and Rec709 waveform retain horizontal picture position")
+  app.set_dock_tab(state,chrome.tab_scopes())
+  var signal_canvas: draw.Canvas = draw.canvas(option.unwrap(draw.surface(64,64)))
+  var column: u64 = 0
+  loop {if column >= 64 {break}
+    let red: u8 = cast.sat(column*4)
+    let green: u8 = cast.sat(252-column*4)
+    draw.fill_rect(signal_canvas,option.unwrap(geometry.rect(cast.float(column),0.0,cast.float(column+1),64.0)),draw.rgb(red,green,128))
+    column=column+1}
+  var signal_image: draw.Surface = draw.finish(signal_canvas)
+  var scope_paint: painter.Renderer = painter.renderer()
+  let _ = painter.render(state,scope_paint,1600,980,true,source_picture,signal_image)
+  let scope_frame: layout.Frame = layout.frame(1600.0,980.0)
+  column=8
+  loop {if column >= 64 {break}
+    let red_level: u64 = column
+    let green_level: u64 = 63-column
+    let luma_level: u64 = ((column*4)*2126+(252-column*4)*7152+128*722)/10000/4
+    let _ = test.check(suite,signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,0,column,red_level),0),"R trace rises with its source column")
+    let _ = test.check(suite,signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,1,column,green_level),1),"G trace falls with its source column")
+    let _ = test.check(suite,signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,2,column,32),2),"B trace keeps its constant half level")
+    let _ = test.check(suite,signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,3,column,luma_level),3),"Waveform uses independently calculated Rec709 signal level")
+    let _ = test.check(suite,not signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,0,column,63-red_level),0),"R is absent at the reversed spatial level")
+    let _ = test.check(suite,not signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,1,column,red_level),1),"G is absent at the reversed spatial level")
+    column=column+16}
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Scope endpoints and frame replacement stay visible inside plot borders")
+  var white_signal: draw.Surface = flat(draw.rgb(255,255,255))
+  let _ = painter.render(state,scope_paint,1600,980,false,source_picture,white_signal)
+  var channel: u64 = 0
+  loop {if channel >= 4 {break}
+    let _ = test.check(suite,signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,channel,32,63),channel),"White signal occupies the upper plot row")
+    let _ = test.check(suite,not signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,channel,32,0),channel),"White has no stale lower trace")
+    channel=channel+1}
+  var black_signal: draw.Surface = flat(draw.rgb(0,0,0))
+  let _ = painter.render(state,scope_paint,1600,980,false,source_picture,black_signal)
+  channel=0
+  loop {if channel >= 4 {break}
+    let _ = test.check(suite,signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,channel,32,0),channel),"Black signal occupies the lower plot row")
+    let _ = test.check(suite,not signal_visible(signal_pixel(struct.borrow(scope_paint,field=surface),scope_frame,channel,32,63),channel),"Black replacement removes the previous white trace")
+    channel=channel+1}
+  let _ = test.done(suite)
   let _ = test.start(suite, "TrueType metrics, caching and display scale")
   app.set_fonts(state, typeface.search_paths())
   let book: ref<ui_text.Typography> = struct.borrow(state, field=typography)

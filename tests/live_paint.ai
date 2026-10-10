@@ -10,6 +10,7 @@ import std.text as text
 import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
+import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
 import "../src/project_session.ai" as session
 import "../src/typeface.ai" as typeface
@@ -38,9 +39,29 @@ fn fixture(scratch: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.wr
   }
   state
 }
+fn meter_fixture(scratch: str) -> app.App effects {alloc,env,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App = fixture(scratch)
+  let imported: commands.Result = commands.import_media(state,"meter.wav","Unkeyed meter strips")
+  let first: commands.Result = commands.append_clip(state,app.default_audio_track(state),imported.value,0,900)
+  var selected: u64 = first.value
+  var index: u64 = 0
+  loop {if index == 2 {break}
+    let track: commands.Result = commands.add_track(state,editor.track_audio(),"Meter test track")
+    let added: commands.Result = commands.append_clip(state,track.value,imported.value,0,900)
+    selected=added.value
+    index=index+1
+  }
+  let _ = commands.select_only(state,selected)
+  app.set_dock_tab(state,chrome.tab_audio())
+  state
+}
 fn compare(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.Renderer>, width: u32,
     height: u32, full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, scratch: str) -> unit effects {alloc, fs.read, fs.write, io.write} {
-  let _ = test.check(suite, painter.render(state, cache, width, height, full, source, program), "Retained paint succeeds")
+  compare_held(suite,state,cache,width,height,full,source,program,scratch,false)
+}
+fn compare_held(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.Renderer>, width: u32,
+    height: u32, full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, scratch: str, hold_source: bool) -> unit effects {alloc, fs.read, fs.write, io.write} {
+  let _ = test.check(suite, painter.render_with_source_hold(state, cache, width, height, full, source, program,hold_source), "Retained paint succeeds")
   var oracle: painter.Renderer = painter.renderer()
   let _ = test.check(suite, painter.render(state, oracle, width, height, true, source, program), "Complete paint succeeds")
   let actual: ref<array<byte>> = struct.borrow(struct.borrow(cache, field=surface), field=pixels)
@@ -75,6 +96,48 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let widths: array<u32> = [1600, 2560, 3200]
   let heights: array<u32> = [980, 1440, 1800]
   let positions: array<i64> = [1, 17, 0, 85, 600]
+  // Fresh documents keep these cases on the unkeyed meter path. The later
+  // inspector fixture deliberately adds keys and would force complete dock paints.
+  let meter_widths: array<u32> = [1600,2560,3200,640,1600]
+  let meter_heights: array<u32> = [980,1440,1800,980,480]
+  let meter_left: array<f64> = [0.01,1.0,0.0,0.6,0.95]
+  let meter_right: array<f64> = [1.0,0.0,0.4,0.02,0.8]
+  var meter_case: u64 = 0
+  loop {if meter_case == array.len(meter_widths) {break}
+    let _ = test.start(suite,text.concat("Unkeyed scrolled Audio meters at dock/scale ",string.from_int(meter_case)))
+    var meter_state: app.App = meter_fixture(scratch)
+    let width: u32 = array.get(meter_widths,meter_case)
+    let height: u32 = array.get(meter_heights,meter_case)
+    let scale: f64 = layout.ui_scale(cast.float(width),cast.float(height))
+    let frame: layout.Frame = layout.frame(cast.float(width)/scale,cast.float(height)/scale)
+    let maximum: f64 = chrome.dock_scroll_max(frame,meter_state)
+    let _ = test.check(suite,maximum > 0.0,"Audio controls overflow and have a real scrollbar")
+    let _ = test.check(suite,array.len(struct.borrow(struct.borrow(meter_state,field=document),field=keys)) == 0,"No animation key bypasses the unkeyed meter path")
+    let _ = test.check(suite,if meter_case == 3 {layout.width_of(frame.dock_body) < 360.0}else{layout.width_of(frame.dock_body) >= 360.0},"Fixture selects the intended meter fast path or narrow dock fallback")
+    let _ = app.set_dock_scroll(meter_state,maximum*0.6)
+    let _ = test.check(suite,app.dock_scroll(meter_state) > 0.0,"Audio strips are actually scrolled")
+    var meter_cache: painter.Renderer = painter.renderer()
+    compare_held(suite,meter_state,meter_cache,width,height,true,source,program,scratch,true)
+    var step: u64 = 0
+    loop {if step == array.len(positions) {break}
+      let _ = editor.seek(struct.borrow(meter_state,field=document),array.get(positions,step))
+      struct.set(meter_state,array.get(meter_left,step),field=audio_left)
+      struct.set(meter_state,array.get(meter_right,step),field=audio_right)
+      program=picture(480,270,step%2 == 0,255)
+      compare_held(suite,meter_state,meter_cache,width,height,false,source,program,scratch,true)
+      step=step+1
+    }
+    // Scrolling is an input edit, so reset the retained canvas before testing
+    // subsequent meter ticks at the bottom of the scrollbar.
+    let _ = app.set_dock_scroll(meter_state,maximum)
+    compare_held(suite,meter_state,meter_cache,width,height,true,source,program,scratch,true)
+    struct.set(meter_state,0.0,field=audio_left)
+    struct.set(meter_state,1.0,field=audio_right)
+    compare_held(suite,meter_state,meter_cache,width,height,false,source,program,scratch,true)
+    let _ = test.done(suite)
+    if test.failed(suite) != 0 {return test.conclude(suite,path.join(scratch,"live-paint-tests.json"),32)}
+    meter_case=meter_case+1
+  }
   var size: u64 = 0
   loop { if size >= array.len(widths) { break }
     let width: u32 = array.get(widths, size)
@@ -193,5 +256,30 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     }
     size=size+1
   }
-  test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 24)
+  struct.set(state,0,field=fullscreen)
+  size=0
+  loop {if size == 3 {break}
+    let _ = test.start(suite,text.concat("Held source pixels and replacement at scale ",str.view(string.from_int(size))))
+    app.set_light(state,size == 1)
+    app.set_dock_tab(state,chrome.tab_audio())
+    source=picture(480,270,false,128)
+    let _ = editor.seek_monitor(struct.borrow(state,field=document),0)
+    var held_cache: painter.Renderer = painter.renderer()
+    compare_held(suite,state,held_cache,array.get(widths,size),array.get(heights,size),false,source,program,scratch,true)
+    var step: u64 = 0
+    loop {if step == array.len(positions) {break}
+      let _ = editor.seek(struct.borrow(state,field=document),array.get(positions,step))
+      program=picture(480,270,step%2 == 0,array.get(alphas,step))
+      struct.set(state,cast.float(step)/6.0,field=audio_left)
+      compare_held(suite,state,held_cache,array.get(widths,size),array.get(heights,size),false,source,program,scratch,true)
+      step=step+1
+    }
+    // A new image at the same time/size must refresh when the caller releases hold.
+    source=picture(480,270,true,96)
+    compare_held(suite,state,held_cache,array.get(widths,size),array.get(heights,size),false,source,program,scratch,false)
+    compare_held(suite,state,held_cache,1600,980,false,source,program,scratch,true)
+    let _ = test.done(suite)
+    size=size+1
+  }
+  test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 32)
 }

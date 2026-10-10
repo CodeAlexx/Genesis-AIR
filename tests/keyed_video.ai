@@ -12,8 +12,9 @@ import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
 import "../src/provider.ai" as provider
 import "../src/timeline_media.ai" as media
+import "../src/filter_keys.ai" as filter_keys
 
-pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
   if view.len(args) != 4 { return 2 }
   let root: str = view.get(args,1)
   let worker: str = view.get(args,2)
@@ -33,19 +34,20 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let first: commands.Result = commands.keyframe_parameter(state,chrome.domain_filter(),0,"brightness","level",0.75)
   let _ = test.check(suite,first.ok,"K creates the first picture key")
   let filter: u64 = chrome.filter_of_kind(struct.borrow(state,field=document),clip.value,"brightness")
+  let brightness_key: string = filter_keys.name(filter,"brightness","level")
   let _ = commands.seek(state,30)
   let last: commands.Result = commands.set_parameter(state,chrome.domain_filter(),filter,"brightness","level",1.25)
   let _ = test.check(suite,last.ok,"Fader creates the last picture key")
   let _ = commands.seek(state,19)
   let middle: commands.Result = commands.set_parameter(state,chrome.domain_filter(),filter,"brightness","level",1.1)
   let _ = test.check(suite,middle.ok,"Fader creates a middle key")
-  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),clip.value,"brightness.level"),3,"All three fader positions are keys")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),clip.value,str.view(brightness_key)),3,"All three fader positions are keys")
   let _ = test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),filter,"level",1.0),1.0,0.00001,"Static fallback remains independent of animation")
   let project: string = path.join(root,"edited.air")
   let saved: commands.Result = commands.save_project(state,str.view(project))
   let opened: commands.Result = commands.open_project(state,str.view(project))
   let _ = test.check(suite,saved.ok and opened.ok,"Animated edit is saved and reopened")
-  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),clip.value,"brightness.level"),3,"Reopened project preserves automation")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),clip.value,str.view(brightness_key)),3,"Reopened project preserves automation")
   let _ = test.done(suite)
   let _ = test.start(suite,"Actual preview requests retain edited picture values through seek and rewind")
   var fonts: array<string> = array.new()
@@ -132,5 +134,81 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
     err(problem)=>{let _ = test.check(suite,false,problem)},
   }
   let _ = test.done(suite)
+  duplicate_media(suite,root,worker,source,false)
+  duplicate_media(suite,root,worker,source,true)
   test.conclude(suite,path.join(root,"keyed-video-tests.json"),8)
+}
+
+fn duplicate_media(suite: ref<test.Suite>, root: str, worker: str, source: str,
+                   legacy: bool) -> unit effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  let folder: string = path.join(root,if legacy {"legacy-duplicate"}else{"duplicate"})
+  let _ = files.mkdirs(str.view(folder))
+  let _ = test.start(suite,if legacy {"Legacy curve forks without changing other duplicate's media"}else{"Duplicate animated effects use independent stable identities"})
+  var state: app.App = app.app(provider.gcompose(worker,str.view(folder)))
+  let imported: commands.Result = commands.import_media(state,source,"duplicates")
+  let active: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let _ = editor.set_sequence_format(struct.borrow(state,field=document),active,320,180,30000.0/1001.0)
+  let placed: commands.Result = commands.overwrite_clip(state,app.default_video_track(state),imported.value,2,24,7)
+  let _ = commands.select_only(state,placed.value)
+  let _ = editor.set_export_range(struct.borrow(state,field=document),7,31)
+  var fonts: array<string> = array.new()
+  match media.render_profile(struct.borrow(state,field=document),worker,path.join(str.view(folder),"plain.mkv"),fonts,"","",3) {
+    ok(_)=>{},err(problem)=>{let _ = test.check(suite,false,problem)},
+  }
+  let first: u64 = match editor.add_filter(struct.borrow(state,field=document),placed.value,"brightness") {none=>0,some(id)=>id,}
+  let second: u64 = match editor.add_filter(struct.borrow(state,field=document),placed.value,"brightness") {none=>0,some(id)=>id,}
+  let _ = commands.seek(state,7)
+  if legacy {
+    let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"brightness.level",0,0.9,curve.linear())
+    let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"brightness.level",23,1.1,curve.linear())
+  } else {
+    let a: commands.Result = commands.keyframe_parameter(state,chrome.domain_filter(),first,"brightness","level",0.8)
+    let b: commands.Result = commands.keyframe_parameter(state,chrome.domain_filter(),second,"brightness","level",1.3)
+    let _ = commands.seek(state,30)
+    let c: commands.Result = commands.set_parameter(state,chrome.domain_filter(),first,"brightness","level",1.4)
+    let d: commands.Result = commands.set_parameter(state,chrome.domain_filter(),second,"brightness","level",0.7)
+    let _ = test.check(suite,a.ok and b.ok and c.ok and d.ok,"Each duplicate owns two endpoint keys")
+  }
+  let _ = commands.seek(state,19)
+  let changed: commands.Result = commands.keyframe_parameter(state,chrome.domain_filter(),first,"brightness","level",1.4)
+  let _ = test.check(suite,changed.ok,"Middle edit belongs to first instance only")
+  let _ = commands.undo(state)
+  let _ = commands.redo(state)
+  let second_expected: f64 = if legacy {0.9+0.2*12.0/23.0}else{1.3-0.6*12.0/23.0}
+  let _ = test.near_f64(suite,filter_keys.value(struct.borrow(state,field=document),placed.value,second,"brightness","level",19,1.0),second_expected,0.000001,"Undo/Redo leaves other curve unchanged")
+  let project: string = path.join(str.view(folder),"edited.air")
+  let saved: commands.Result = commands.save_project(state,str.view(project))
+  let opened: commands.Result = commands.open_project(state,str.view(project))
+  let _ = test.check(suite,saved.ok and opened.ok,"Independent/legacy duplicate keys survive project round trip")
+  var cache: media.RenderCache = media.render_cache(fonts)
+  media.configure_preview(struct.borrow(state,field=document),cache)
+  var offsets: array<i64> = [0,6,12,18,23,0]
+  var at: u64 = 0
+  loop {if at >= array.len(offsets) {break}
+    let frame: i64 = 7+array.get(offsets,at)
+    let _ = commands.seek(state,frame)
+    let out: string = provider.preview_path(struct.borrow(state,field=provider))
+    let prefix: string = path.join(str.view(folder),"picture")
+    match media.frame_plan(struct.borrow(state,field=document),frame,"PREVIEW",str.view(out),str.view(prefix),cache) {
+      err(problem)=>{let _ = test.check(suite,false,problem)},
+      ok(lines)=>{
+        var plan: array<string> = lines
+        var picture: provider.Frame = provider.program_plan(struct.borrow(state,field=provider),plan,320,180,cache.width,cache.height)
+        let _ = test.check(suite,picture.ok,"Preview independently keyed duplicate stack")
+        if picture.ok {
+          let name: string = text.concat(string.from_int(at),".png")
+          let png: bytes = image.encode_png(struct.borrow(picture,field=pixels))
+          let _ = image.write_file(path.join(str.view(folder),str.view(name)),png)
+        }
+      },
+    }
+    media.cleanup_plan(str.view(prefix))
+    at=at+1
+  }
+  match media.render_profile(struct.borrow(state,field=document),worker,path.join(str.view(folder),"edited.mkv"),fonts,"","",3) {
+    ok(_)=>{let _ = test.check(suite,true,"Export native16-bit independent duplicate animation")},
+    err(problem)=>{let _ = test.check(suite,false,problem)},
+  }
+  let _ = test.done(suite)
+  ()
 }

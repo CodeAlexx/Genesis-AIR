@@ -6,7 +6,7 @@ file it belonged in, and a reproducer — and the application worked around it i
 stayed visible to the person using it, rather than pretending the feature existed.
 
 The AIR gaps below are closed in the compatible SDK checkout pinned by
-`air-sdk.conf` (`genesis-pro-windows` at `65bc08d57537`). This file records
+`air-sdk.conf` (`genesis-pro-windows` at `df80f270dd28`). This file records
 the original issues and their language-level fixes; current renderer acceptance
 status lives in [the control ledger](CONTROL_COVERAGE.md).
 
@@ -876,11 +876,45 @@ The audio-continuity gate runs in the ordinary Windows suite.
 
 ## Remaining native window work
 
-The playback diagnostic paints the retained editor but does not execute every
-native window-loop signature/strip check or call native presentation. The window
-still rebuilds normalized content, raw strip and audio signatures on clock updates.
-A safe cache needs a semantic document-mutation revision covering live edits,
-cancel, undo/redo and project replacement; dirty/media-reload flags are insufficient.
-The native presenter also converts and uploads the entire canvas and synchronously
-ends its Direct2D draw. Its latency and physical speaker/display alignment remain
-unmeasured. Headless throughput therefore does not establish interactive 4K60.
+The window now caches semantic audio and picture facts using a document-mutation
+revision covering live edits, cancellation, undo/redo and project replacement.
+Filmstrip requests depend on content and viewport changes rather than the clock.
+Actual native-window profiles measure painting, presentation, changed-picture
+delivery and the audio device clock; the Audio and Scopes tabs delivered about
+56 changed pictures/second in the first measured candidate. Bounded passive
+redraws reduce repeated pictures and delay. The final Audio-tab candidate paints
+only its changing output meters and Program image when other controls are static;
+median paint time is 1.42 ms, with 56.76 changed pictures/s over 79.20 seconds.
+Throughput remains below 60.
+The native presenter still uploads the whole canvas and synchronously ends its
+Direct2D draw. Physical speaker/display alignment remains unmeasured. See
+[native measurements](FFMPEG_GPU_PREVIEW.md#native-window-measurements-on-2026-10-09)
+for the measured scope and retained transport failure.
+
+## Shared editor Split overlay
+
+The pinned editor previously created the right-hand clip without its filters or
+automation, and advanced its source lower bound as though every clip played at
+unit speed. `patches/air-editor.patch` fixes this in the shared `std.editor` source.
+Both build scripts apply that one patch idempotently, and refuse an incompatible
+SDK before changing it. The compiler and project schema remain unchanged.
+
+Split clones ordered filter records with fresh instance IDs and remaps scoped
+automation names. Both halves retain complete key-curve context; right-hand key
+times shift by the cut offset, including context keys outside the visible body.
+Representable forward/reverse source offsets and outer fades preserve their
+original samples. Split/razor and destructive edit preflights refuse unsupported
+contexts before mutation; application commands capture history only after success.
+
+Fractional source phases, cuts inside active scalar fade ramps, animated speed or
+fade lengths, and enabled Timer/Delay/Reverb cannot preserve their original context
+with the current model and are refused. Surviving reverse/nonunit lift/overwrite
+trims are also refused. Other temporal DSP continuity and ordinary trim rebasing
+need separate contracts and media acceptance; they are not established by cloning
+the filter list.
+
+The Windows cache/Split gate passes eight cases and 1,619 checks, including every
+pre-/post-cut source position, nonlinear and held keys, fade samples, project
+roundtrip and exact document/history preservation on refusal. The SDK's independent
+native/reference oracle passes 192 model/render facts. Actual scratch application
+and reversal reproduce the tested shared source and clean baseline.

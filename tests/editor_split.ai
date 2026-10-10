@@ -1,0 +1,219 @@
+// Shared editor Split acceptance: compare every original timeline sample and full
+// interpolation contexts, rather than deriving an expectation from new clip fields.
+module genesis.tests.editor_split
+import std.editor as editor
+import std.editor_io as editor_io
+import std.curve as curve
+import std.math as math
+import std.testing as test
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/filter_keys.ai" as scoped
+import "../src/picture_queue.ai" as pictures
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn history_bytes(history: ref<editor.History>) -> string effects {alloc} {
+  var out: string = string.copy("undo\n")
+  var i: u64 = 0
+  loop {if i >= editor.undo_depth(history) {break}
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),i)))
+    string.append(out,"\n")
+    i=i+1}
+  string.append(out,"redo\n")
+  i=0
+  loop {if i >= editor.redo_depth(history) {break}
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),i)))
+    string.append(out,"\n")
+    i=i+1}
+  out
+}
+fn fade_sample(value: editor.Clip, frame: i64) -> f64 effects {} {
+  let local: i64 = frame-value.start
+  var gain: f64 = 1.0
+  if value.fade_in > 0 and local < value.fade_in {gain=cast.float(local)/cast.float(value.fade_in)}
+  if value.fade_out > 0 and value.length-local <= value.fade_out {
+    gain=math.min(gain,cast.float(value.length-local)/cast.float(value.fade_out))
+  }
+  gain
+}
+fn source_continuity(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Split preserves forward reverse freeze and mixed-fps source samples")
+  var variant: u64 = 0
+  loop {if variant >= 10 {break}
+    var doc: editor.Document = editor.document(30.0,1920,1080)
+    let source: u64 = editor.add_source(doc,"sample.mov","Sample",2400,24.0)
+    let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let id: u64 = option.unwrap(editor.place(doc,track,source,20,90,10))
+    let rate: f64 = if variant < 2 {0.0} else if variant < 4 {0.5} else if variant < 6 {1.0} else if variant < 8 {2.0} else {0.5}
+    let _ = editor.set_clip_speed(doc,id,rate)
+    let _ = editor.set_clip_reverse(doc,id,variant%2 == 1)
+    if variant >= 8 {
+      let speed: u64 = option.unwrap(editor.add_filter(doc,id,"speed"))
+      let _ = editor.set_filter_param(doc,speed,"rate",4.0)
+    }
+    var original: editor.Document = editor.copy_document(doc)
+    let old: editor.Clip = option.unwrap(editor.clip(original,id))
+    let right: u64 = match editor.split(doc,id,34) {none=>0,some(value)=>value,}
+    let _ = test.check(suite,right != 0,"Representable static-rate cut succeeds")
+    let left_clip: editor.Clip = option.unwrap(editor.clip(doc,id))
+    let right_clip: editor.Clip = option.unwrap(editor.clip(doc,right))
+    var frame: i64 = 10
+    loop {if frame >= 100 {break}
+      let landed: editor.Clip = if frame < 34 {left_clip} else {right_clip}
+      let independent: i64 = cast.sat(math.floor((20.0+cast.float(if old.reverse {99-frame} else {frame-10})*media.effective_speed(original,old))*0.8))
+      let _ = test.eq_i64(suite,media.source_frame(doc,landed,frame),independent,"Every split frame equals independent original source indexing")
+      frame=frame+1}
+    variant=variant+1}
+  let _ = test.done(suite)
+  ()
+}
+fn content_continuity(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _ = test.start(suite,"Split clones ordered instance filters and complete nonlinear automation contexts")
+  var doc: editor.Document = editor.document(30.0,1920,1080)
+  let source: u64 = editor.add_source(doc,"sample.mov","Sample",2400,24.0)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let id: u64 = option.unwrap(editor.place(doc,track,source,20,90,10))
+  let first: u64 = option.unwrap(editor.add_filter(doc,id,"brightness"))
+  let second: u64 = option.unwrap(editor.add_filter(doc,id,"brightness"))
+  let _ = editor.set_filter_param(doc,first,"amount",0.2)
+  let _ = editor.set_filter_param(doc,second,"amount",0.8)
+  let _ = editor.set_filter_text_param(doc,first,"label","Original text")
+  let _ = editor.set_filter_enabled(doc,second,false)
+  let _ = editor.reorder_filter(doc,second,0)
+  let name: string = scoped.name(first,"brightness","amount")
+  var names: array<string> = [string.copy("gain"),string.copy("opacity"),name,string.copy("brightness.amount")]
+  var p: u64 = 0
+  loop {if p >= array.len(names) {break}
+    let param: str = str.view(array.borrow(names,p))
+    let kind: u32 = if p == 0 {curve.smooth_natural()} else if p == 1 {curve.bounce_out()} else if p == 2 {curve.cubic_in_out()} else {curve.hold()}
+    let _ = editor.set_key(doc,id,param,0,0.2,kind)
+    let _ = editor.set_key(doc,id,param,20,0.9,kind)
+    let _ = editor.set_key(doc,id,param,60,0.3,kind)
+    let _ = editor.set_key(doc,id,param,89,0.7,kind)
+    p=p+1}
+  let _ = editor.set_fade_in(doc,id,37)
+  let _ = editor.set_fade_out(doc,id,53)
+  var original: editor.Document = editor.copy_document(doc)
+  let right: u64 = option.unwrap(editor.split(doc,id,47))
+  let cloned_second: u64 = option.unwrap(editor.filter_at(doc,right,0))
+  let cloned_first: u64 = option.unwrap(editor.filter_at(doc,right,1))
+  let _ = test.check(suite,cloned_first != first and cloned_second != second,"Every cloned instance receives a fresh filter identity")
+  let _ = test.check(suite,not editor.filter_enabled(doc,cloned_second) and editor.filter_enabled(doc,cloned_first),"Stack order and disabled state survive")
+  let _ = test.near_f64(suite,editor.filter_param(doc,cloned_first,"amount",0.0),0.2,0.0,"Numeric filter parameter survives")
+  let _ = test.eq_str(suite,editor.filter_text_param(doc,cloned_first,"label",""),"Original text","Text parameter survives")
+  let right_name: string = scoped.name(cloned_first,"brightness","amount")
+  let _ = test.eq_u64(suite,editor.key_count(doc,right,right_name),4,"Scoped automation remaps the fresh filter identity")
+  let _ = test.eq_u64(suite,editor.key_count(doc,right,array.borrow(names,2)),0,"Right clip has no dangling old scoped filter identity")
+  var frame: i64 = 10
+  loop {if frame >= 100 {break}
+    let old_clip: editor.Clip = option.unwrap(editor.clip(original,id))
+    let new_clip: editor.Clip = option.unwrap(editor.clip(doc,if frame < 47 {id} else {right}))
+    let _ = test.near_f64(suite,fade_sample(new_clip,frame),fade_sample(old_clip,frame),0.000000000001,"Every original outer-fade sample remains identical at a representable boundary cut")
+    p=0
+    loop {if p >= array.len(names) {break}
+      let left_name: str = str.view(array.borrow(names,p))
+      let parameter: string = if frame < 47 or p != 2 {string.copy(left_name)} else {string.copy(str.view(right_name))}
+      let expected: f64 = editor.clip_value_at(original,id,left_name,frame,-1.0)
+      let actual: f64 = editor.clip_value_at(doc,if frame < 47 {id} else {right},parameter,frame,-1.0)
+      let _ = test.near_f64(suite,actual,expected,0.000000000001,"Every nonlinear gain opacity scoped and legacy frame remains identical")
+      p=p+1}
+    frame=frame+1}
+  var negatives: u64 = 0
+  p=0
+  loop {if p >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),p)
+    if key.clip == right and key.frame < 0 {negatives=negatives+1}
+    p=p+1}
+  let _ = test.eq_u64(suite,negatives,8,"Two negative context keys per curve preserve original easing and Catmull tangents")
+  let serialized: string = encoded(doc)
+  var reloaded: editor.Document = match editor_io.decode(serialized) {ok(value)=>value,err(_)=>editor.document(30.0,1920,1080),}
+  let _ = test.eq_str(suite,encoded(reloaded),serialized,"Complete negative and out-of-body curve context survives project roundtrip without a schema change")
+  let _ = editor.set_filter_text_param(doc,cloned_first,"label","Changed right")
+  let _ = test.eq_str(suite,editor.filter_text_param(doc,first,"label",""),"Original text","Cloned text storage is independent")
+  let _ = test.eq_i64(suite,option.unwrap(editor.clip(doc,id)).fade_in,37,"Left retains exact outer fade-in")
+  let _ = test.eq_i64(suite,option.unwrap(editor.clip(doc,right)).fade_out,53,"Right retains exact outer fade-out")
+  let _ = test.done(suite)
+  ()
+}
+fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _ = test.start(suite,"Split refusals preserve complete document redo selection and preview identity")
+  var state: app.App = app.app(provider.fake(root))
+  let source: commands.Result = commands.import_media(state,"split.mov","Split source")
+  let placed: commands.Result = commands.append_clip(state,app.default_video_track(state),source.value,0,90)
+  let audio: commands.Result = commands.append_clip(state,app.default_audio_track(state),source.value,0,90)
+  let _ = commands.select_only(state,placed.value)
+  let _ = commands.seek(state,37)
+  var variant: u64 = 0
+  loop {if variant >= 9 {break}
+    let _ = editor.set_clip_speed(struct.borrow(state,field=document),placed.value,if variant < 2 {0.5} else {1.0})
+    let _ = editor.set_clip_reverse(struct.borrow(state,field=document),placed.value,variant == 1)
+    let _ = editor.set_fade_in(struct.borrow(state,field=document),placed.value,if variant == 2 {48} else {0})
+    let _ = editor.set_fade_out(struct.borrow(state,field=document),placed.value,if variant == 3 {54} else {0})
+    if variant == 4 {let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"fade_in",0,0.0,curve.linear())}
+    if variant == 5 {let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"speed.rate",0,1.0,curve.linear())}
+    var temporal: u64 = 0
+    if variant >= 6 {
+      let kind: string = if variant == 6 {string.copy("timer")} else if variant == 7 {string.copy("delay")} else {string.copy("reverb")}
+      temporal=option.unwrap(editor.add_filter(struct.borrow(state,field=document),placed.value,str.view(kind)))
+    }
+    let _ = commands.set_clip_field(state,audio.value,"gain",0.5)
+    let _ = commands.undo(state)
+    app.mark_dirty(state,false)
+    let before: string = encoded(struct.borrow(state,field=document))
+    let history: string = history_bytes(struct.borrow(state,field=history))
+    let revision: u64 = state.document_revision
+    let key: string = pictures.identity_revision(state,false,true)
+    var probe: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+    let raw: option<u64> = editor.split(probe,placed.value,37)
+    let _ = test.check(suite,match raw {none=>true,some(_)=>false,},"Shared toolkit itself refuses unsupported cut")
+    let _ = test.eq_str(suite,encoded(probe),before,"SDK refusal changes no clip filter key name or ID allocator")
+    let inserted: option<u64> = editor.insert(probe,app.default_video_track(state),source.value,0,15,37)
+    let _ = test.check(suite,match inserted {none=>true,some(_)=>false,},"Insert propagates occupied-clip split refusal")
+    let _ = test.eq_str(suite,encoded(probe),before,"SDK refused insertion leaves occupied content untouched")
+    let overwritten: option<u64> = editor.overwrite(probe,app.default_video_track(state),source.value,0,15,37)
+    let _ = test.check(suite,match overwritten {none=>true,some(_)=>false,},"Overwrite preflights unsafe surviving trims")
+    let _ = test.eq_str(suite,encoded(probe),before,"SDK refused overwrite preserves both remnants")
+    editor.lift_range(probe,app.default_video_track(state),37,52)
+    let _ = test.eq_str(suite,encoded(probe),before,"Destructive lift-range caller fails safely before unsupported split")
+    let result: commands.Result = commands.split_at_playhead(state)
+    let _ = test.check(suite,not result.ok,"Unsupported phase fade rate timer or temporal-history cut is refused")
+    let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Refusal does not cut the other eligible audio clip")
+    let _ = test.eq_str(suite,history_bytes(struct.borrow(state,field=history)),history,"Refusal preserves every undo and redo snapshot")
+    let _ = test.eq_u64(suite,state.document_revision,revision,"Refused Split preserves document revision")
+    let _ = test.eq_str(suite,pictures.identity_revision(state,false,true),key,"Refused Split preserves cached preview identity")
+    let _ = test.check(suite,not app.dirty(state),"Refused Split leaves saved state clean")
+    let razor: commands.Result = commands.razor_all(state)
+    let _ = test.check(suite,not razor.ok,"All-track razor refuses atomically when one lane cannot preserve context")
+    let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Refused all-track razor preserves all clips")
+    let _ = test.eq_str(suite,history_bytes(struct.borrow(state,field=history)),history,"Refused all-track razor preserves redo")
+    if variant == 4 {let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"fade_in",0)}
+    if variant == 5 {let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"speed.rate",0)}
+    if temporal != 0 {let _ = editor.remove_filter(struct.borrow(state,field=document),temporal)}
+    variant=variant+1}
+  let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"speed.rate",0)
+  let _ = editor.set_clip_speed(struct.borrow(state,field=document),placed.value,1.0)
+  let inactive: u64 = option.unwrap(editor.add_filter(struct.borrow(state,field=document),placed.value,"timer"))
+  let _ = editor.set_filter_enabled(struct.borrow(state,field=document),inactive,false)
+  let before: string = encoded(struct.borrow(state,field=document))
+  let depth: u64 = editor.undo_depth(struct.borrow(state,field=history))
+  let succeeded: commands.Result = commands.split_at_playhead(state)
+  let _ = test.check(suite,succeeded.ok,"Representable selected Split succeeds")
+  let _ = test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Split captures exactly once")
+  let committed: string = encoded(struct.borrow(state,field=document))
+  let _ = commands.undo(state)
+  let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo restores full pre-Split document")
+  let _ = commands.redo(state)
+  let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),committed,"Redo restores exact committed Split")
+  let _ = test.done(suite)
+  ()
+}
+pub fn run(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  source_continuity(suite)
+  content_continuity(suite)
+  refused_and_undo(suite,root)
+  ()
+}

@@ -132,6 +132,7 @@ pub type App = struct {
   fullscreen: u32,
   media_revision: u64,
   project_epoch: u64,
+  document_revision: u64,
   waveforms: array<Waveform>,
   thumbnails: array<Thumbnail>,
   presented_source_frame: i64,
@@ -168,7 +169,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new()},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, waveforms: array.new(), thumbnails: array.new(),
+    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, document_revision: 0, waveforms: array.new(), thumbnails: array.new(),
     presented_source_frame: -1, presented_program_frame: -1, audio_left: 0.0, audio_right: 0.0,
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
@@ -208,6 +209,13 @@ pub fn timeline_frame(state: ref<App>) -> i64 effects {} {
 pub fn dirty(state: ref<App>) -> bool effects {} { state.dirty }
 pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
   struct.set(state, value, field=dirty)
+  ()
+}
+// Successful document mutations explicitly invalidate semantic playback caches.
+// Saving, repainting and following the heard clock do not change this revision.
+pub fn document_changed(state: ref<App>) -> unit effects {} {
+  struct.set(state,state.document_revision+1,field=document_revision)
+  struct.set(state,true,field=dirty)
   ()
 }
 pub fn running(state: ref<App>) -> bool effects {} { state.running }

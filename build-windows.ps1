@@ -19,6 +19,23 @@ if (-not $AirSdk) {
 }
 if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
 $sdk = (Resolve-Path -LiteralPath $AirSdk).Path
+$editorPatch = Join-Path $here 'patches/air-editor.patch'
+if (-not (Test-Path -LiteralPath $editorPatch)) { throw '[GA_SDK_PATCH_MISSING] The shared editor overlay is missing.' }
+$previousNativePreference = $PSNativeCommandUseErrorActionPreference
+try {
+  # A check refusal is an expected probe outcome, including in PowerShell 7
+  # sessions that promote native exit codes to terminating errors.
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $editorPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $editorPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PATCH_BASE] The editor overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $editorPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PATCH_APPLY] Could not apply the shared editor overlay.' }
+  }
+} finally {
+  $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+}
 $buildRoot = Join-Path $here 'build-windows'
 $generated = if ($GeneratedDirectory) { [IO.Path]::GetFullPath($GeneratedDirectory) } else { Join-Path $buildRoot 'generated' }
 New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
@@ -32,7 +49,7 @@ $sdkLinux = WslPath $sdk
 if ($LASTEXITCODE -ne 0) { throw '[GA_TOOLCHAIN] Build the matching AIR compiler first with .\build-compiler-wsl.ps1.' }
 $sources = ,@('main', 'src/main.ai')
 if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai'), @('audio-device', 'tests/audio_device.ai'), @('audio-playback', 'tests/audio_playback.ai'), @('audio-cancel', 'tests/audio_cancel.ai'), @('preview-async', 'tests/preview_async.ai'), @('preview-stream', 'tests/preview_stream.ai'), @('preview-input', 'tests/preview_input.ai'), @('inspector', 'tests/inspector.ai'), @('live-paint', 'tests/live_paint.ai'), @('project-safety', 'tests/project_safety.ai'), @('picture-queue', 'tests/picture_queue.ai')) }
-if ($RunTests) { $sources += ,@('keyed-video', 'tests/keyed_video.ai') }
+if ($RunTests) { $sources += @(@('keyed-video', 'tests/keyed_video.ai'), @('window-cache', 'tests/window_cache.ai')) }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -57,7 +74,7 @@ $includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
 if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
 $targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio')
 if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-audio-clock', 'genesis-audio-playback', 'genesis-audio-cancel', 'genesis-preview-async', 'genesis-preview-stream', 'genesis-preview-input', 'genesis-inspector', 'genesis-ui-pixels', 'genesis-live-paint', 'genesis-project-safety', 'genesis-picture-queue') }
-if ($RunTests) { $targets += 'genesis-keyed-video' }
+if ($RunTests) { $targets += @('genesis-keyed-video', 'genesis-window-cache') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'

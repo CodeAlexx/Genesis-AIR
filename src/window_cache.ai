@@ -1,0 +1,20 @@
+// Window playback caches semantic facts, never the moving transport or paint flag.
+module genesis.window_cache
+import "app.ai" as app
+import "timeline_media.ai" as media
+
+pub type Cache = struct {ready: bool, revision: u64, audio: string, rebuilds: u64}
+pub fn cache() -> Cache effects {alloc} {
+  Cache {ready:false,revision:0,audio:string.new(),rebuilds:0}
+}
+// Compare the resulting mix separately: a picture-only edit must not flush sound.
+// Media Reload is handled by the independent media revision/decoder epoch.
+pub fn refresh(state: ref<app.App>, cache: ref<Cache>) -> bool effects {alloc} {
+  if cache.ready and cache.revision == state.document_revision {return false}
+  let next: string = media.audio_signature(struct.borrow(state,field=document))
+  let _ = struct.replace(cache,next,field=audio)
+  struct.set(cache,state.document_revision,field=revision)
+  struct.set(cache,cache.rebuilds+1,field=rebuilds)
+  struct.set(cache,true,field=ready)
+  true
+}

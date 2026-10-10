@@ -254,7 +254,11 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_p
     link.close_commands(audio_link)
   }
   device.close(library)
-  if failure {io.write("[GA_PLAYBACK_PROFILE] Native playback measurement failed\n")
+  if failure {
+    let _ = files.write_text(text.concat(report,".failed.tsv"),rows)
+    let media_error: string = match files.read_text(path.join(root,"error.txt")) {ok(value)=>value,err(_)=>string.new(),}
+    if str.len(media_error) != 0 {io.write(text.concat(media_error,"\n"))}
+    io.write("[GA_PLAYBACK_PROFILE] Native playback measurement failed\n")
     return 1}
   match files.write_text(report,rows) {ok(_)=>{},err(_)=>{return 1},}
   io.write("Genesis native audio/picture timing report written\n")

@@ -1,0 +1,84 @@
+// Stable instance-scoped automation, with compatibility for kind-scoped projects.
+module genesis.filter_keys
+import std.editor as editor
+import std.text as text
+
+pub fn legacy(kind: str, param: str) -> string effects {alloc} {
+  text.concat(kind,text.concat(".",param))
+}
+pub fn name(id: u64, kind: str, param: str) -> string effects {alloc} {
+  let digits: string = string.from_int(id)
+  let family: string = legacy(kind,param)
+  text.concat("filter.",text.concat(str.view(digits),text.concat(".",str.view(family))))
+}
+
+// Name lookup is read-only: inspecting/rendering an unanimated row must not
+// intern absent names and accidentally dirty or invalidate the project.
+pub fn has(doc: ref<editor.Document>, clip: u64, param: str) -> bool effects {} {
+  var named: u64 = 0
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=names)) {break}
+    if str.eq(str.view(array.borrow(struct.borrow(doc,field=names),i)),param) {named=i+1
+      break}
+    i=i+1
+  }
+  if named == 0 {return false}
+  i=0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == clip and key.param == named {return true}
+    i=i+1
+  }
+  false
+}
+pub fn value(doc: ref<editor.Document>, clip: u64, id: u64, kind: str,
+             param: str, frame: i64, fallback: f64) -> f64 effects {alloc} {
+  let scoped: string = name(id,kind,param)
+  if has(doc,clip,str.view(scoped)) {
+    return editor.clip_value_at(doc,clip,str.view(scoped),frame,fallback)
+  }
+  let old: string = legacy(kind,param)
+  if has(doc,clip,str.view(old)) {
+    return editor.clip_value_at(doc,clip,str.view(old),frame,fallback)
+  }
+  fallback
+}
+
+// Map a valid instance-qualified name back to the public effect parameter.
+// Invalid qualified names stay invalid for the renderer's existing whitelist.
+pub fn canonical(param: str) -> string effects {alloc} {
+  var parts: array<string> = text.split(param,".")
+  if array.len(parts) == 4 and str.eq(str.view(array.borrow(parts,0)),"filter") {
+    let id: u64 = match text.parse_u64(str.view(array.borrow(parts,1))) {none=>0,some(value)=>value,}
+    let digits: string = string.from_int(id)
+    if id > 0 and str.eq(str.view(digits),str.view(array.borrow(parts,1))) {
+      return legacy(str.view(array.borrow(parts,2)),str.view(array.borrow(parts,3)))
+    }
+  }
+  string.copy(param)
+}
+
+// Fork the complete legacy curve only when this instance is first edited.
+// Snapshot before set_key, which sorts the document's key store after writes.
+pub fn migrate(doc: ref<editor.Document>, clip: u64, id: u64, kind: str,
+               param: str) -> unit effects {alloc} {
+  let scoped: string = name(id,kind,param)
+  if has(doc,clip,str.view(scoped)) {return ()}
+  let old: string = legacy(kind,param)
+  if not has(doc,clip,str.view(old)) {return ()}
+  let named: u64 = editor.name_id(doc,str.view(old))
+  var copied: array<editor.Key> = array.new()
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == clip and key.param == named {array.push(copied,key)}
+    i=i+1
+  }
+  i=0
+  loop {if i >= array.len(copied) {break}
+    let key: editor.Key = array.get(copied,i)
+    let _ = editor.set_key(doc,clip,str.view(scoped),key.frame,key.value,key.interp)
+    i=i+1
+  }
+  ()
+}

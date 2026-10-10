@@ -80,6 +80,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Native video readback pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'hdr_preview.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'Native HDR preview color, precision and frame selection acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'odd_hdr_preview.py') --worker $worker --report (Join-Path $root 'odd-hdr-preview.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Odd-sized HDR preview/master acceptance failed.' }
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
     Write-Host (Invoke-Native 'genesis-preview-stream.exe' @((Join-Path $work 'stream'), $worker, $media)).TrimEnd()
     & python (Join-Path $PSScriptRoot 'frame_identity.py') --worker $worker --client (Join-Path $Bin 'genesis-preview-stream.exe')
@@ -88,6 +90,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Inspector picture-key preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'preview_canvas.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Small-sequence preview/master pixel acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'large_preview.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --report (Join-Path $root 'large-preview.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Large-sequence preview geometry and physical effect-radius acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'filter_order.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --report (Join-Path $root 'filter-order.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Ordered and duplicate picture-filter preview/master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'filter_titles.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Ordered title and independent multilayer raster acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'transition_clips.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Per-clip transition preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_export_length.py') --worker $worker
@@ -114,6 +124,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $work "project-safety/$artifact") -Destination (Join-Path $root $artifact) -Force
   }
   Write-Host (Invoke-Native 'genesis-picture-queue.exe' @((Join-Path $root 'picture-queue-tests.json'))).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-window-cache.exe' @((Join-Path $work 'window-cache'))).TrimEnd()
+  & python (Join-Path $PSScriptRoot 'window_timing_test.py')
+  if ($LASTEXITCODE -ne 0) { throw 'Native window timing reader regression failed.' }
   Write-Host (Invoke-Native 'genesis-live-paint.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'live-paint-tests.json') -Destination (Join-Path $root 'live-paint-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()

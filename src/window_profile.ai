@@ -1,0 +1,111 @@
+// Opt-in local native-window measurements. This never estimates speaker latency.
+module genesis.window_profile
+import std.files as files
+import "native_audio.ai" as audio
+import "transport_clock.ai" as transport_clock
+
+pub type Profile = struct {enabled: bool, path: string, pending: string, rows: u64, buffered: u64, previous_ns: u64}
+pub type Row = struct {
+  begin: u64, present_begin: u64, present_end: u64, end: u64,
+  signature: u64, paint: u64, present: u64, wait: u64,
+  program: i64, source: i64, heard_before: i64, heard_after: i64,
+  samples_before: u64, samples_after: u64, queued_before: u64, queued_after: u64,
+  origin: i64, fps: f64, last: i64, source_mode: bool, playing: bool,
+  clock_ok: bool, present_ok: bool, revision: u64, media_revision: u64,
+  width: u32, height: u32, prepared: u64, snapshot: u64, rebuilds: u64, strips: u64, inputs: u64
+}
+pub fn row() -> Row effects {} {
+  Row {begin:0,present_begin:0,present_end:0,end:0,signature:0,paint:0,present:0,wait:0,
+    program:-1,source:-1,heard_before:-1,heard_after:-1,samples_before:0,samples_after:0,
+    queued_before:0,queued_after:0,origin:0,fps:0.0,last:0,source_mode:false,playing:false,
+    clock_ok:false,present_ok:false,revision:0,media_revision:0,width:0,height:0,
+    prepared:0,snapshot:0,rebuilds:0,strips:0,inputs:0}
+}
+// Poll-only iterations belong to the current playing epoch too. Present stamps
+// remain zero until pixels really pass through the native presenter.
+pub fn context(row: ref<Row>, source_mode: bool, playing: bool, origin: i64,
+    fps: f64, last: i64, program: i64, source: i64) -> unit effects {} {
+  struct.set(row,source_mode,field=source_mode)
+  struct.set(row,playing,field=playing)
+  struct.set(row,origin,field=origin)
+  struct.set(row,fps,field=fps)
+  struct.set(row,last,field=last)
+  struct.set(row,program,field=program)
+  struct.set(row,source,field=source)
+  ()
+}
+pub fn profile() -> Profile effects {alloc,env,fs.write} {
+  var target: string = match env.get("GENESIS_WINDOW_PROFILE") {some(value)=>value,none=>string.new(),}
+  var enabled: bool = str.len(target) != 0
+  if enabled {
+    let header: str = "loop_begin_ns\tpresent_begin_ns\tpresent_end_ns\tloop_end_ns\tsignature_ns\tpaint_ns\tpresent_ns\twait_ns\tprogram_shown\tsource_shown\theard_before\theard_after\tsamples_before\tsamples_after\tqueued_before\tqueued_after\taudio_origin\tfps\tsource_mode\tplaying\tclock_ok\tpresent_ok\tdocument_revision\tmedia_revision\twidth\theight\tprepared_frames\tsnapshot_generation\taudio_cache_rebuilds\tstrip_requests\tinput_events\tdiagnostic_previous_ns\n"
+    enabled=match files.write_text(target,header) {ok(_)=>true,err(_)=>false,}
+  }
+  Profile {enabled:enabled,path:target,pending:string.new(),rows:0,buffered:0,previous_ns:0}
+}
+pub fn stamp(profile: ref<Profile>) -> u64 effects {time} {
+  if profile.enabled {time.monotonic_ns()}else{0}
+}
+pub fn sample(library: ref<option<CAbiLibrary>>, row: ref<Row>, after: bool) -> unit effects {alloc,ffi} {
+  match ref.swap(library,option.none()) {none=>{},some(opened)=>{
+    var device: CAbiLibrary = opened
+    let clock: audio.Clock = audio.clock(device)
+    if after {
+      struct.set(row,row.clock_ok and clock.ok,field=clock_ok)
+      struct.set(row,clock.samples,field=samples_after)
+      struct.set(row,clock.queued,field=queued_after)
+      if clock.ok {struct.set(row,transport_clock.frame_at_samples(row.origin,clock.samples,row.fps,row.last),field=heard_after)}
+    } else {
+      struct.set(row,clock.ok,field=clock_ok)
+      struct.set(row,clock.samples,field=samples_before)
+      struct.set(row,clock.queued,field=queued_before)
+      if clock.ok {struct.set(row,transport_clock.frame_at_samples(row.origin,clock.samples,row.fps,row.last),field=heard_before)}
+    }
+    let _ = ref.swap(library,option.some(device))
+  },}
+  ()
+}
+fn integer(out: ref<string>, value: i64) -> unit effects {alloc} {
+  string.append(out,string.from_int(value))
+  string.append(out,"\t")
+  ()
+}
+pub fn flush(profile: ref<Profile>) -> unit effects {alloc,fs.write} {
+  if profile.enabled and profile.buffered > 0 {
+    match files.append_text(struct.borrow(profile,field=path),struct.borrow(profile,field=pending)) {
+      ok(_)=>{},err(_)=>{struct.set(profile,false,field=enabled)},
+    }
+    let _ = struct.replace(profile,string.new(),field=pending)
+    struct.set(profile,0,field=buffered)
+  }
+  ()
+}
+pub fn record(profile: ref<Profile>, row: ref<Row>) -> unit effects {alloc,fs.write,time} {
+  if not profile.enabled or profile.rows >= 50000 {return ()}
+  let began: u64 = time.monotonic_ns()
+  let out: ref<string> = struct.borrow(profile,field=pending)
+  var values: array<i64> = [cast.wrap(row.begin),cast.wrap(row.present_begin),cast.wrap(row.present_end),cast.wrap(row.end),
+    cast.wrap(row.signature),cast.wrap(row.paint),cast.wrap(row.present),cast.wrap(row.wait),
+    row.program,row.source,row.heard_before,row.heard_after,cast.wrap(row.samples_before),cast.wrap(row.samples_after),
+    cast.wrap(row.queued_before),cast.wrap(row.queued_after),row.origin]
+  var i: u64 = 0
+  loop {if i >= array.len(values) {break}
+    integer(out,array.get(values,i))
+    i=i+1}
+  string.append(out,string.from_float(row.fps))
+  string.append(out,"\t")
+  var tail: array<i64> = [if row.source_mode {1}else{0},if row.playing {1}else{0},if row.clock_ok {1}else{0},
+    if row.present_ok {1}else{0},cast.wrap(row.revision),cast.wrap(row.media_revision),cast.wrap(row.width),cast.wrap(row.height),
+    cast.wrap(row.prepared),cast.wrap(row.snapshot),cast.wrap(row.rebuilds),cast.wrap(row.strips),cast.wrap(row.inputs)]
+  i=0
+  loop {if i >= array.len(tail) {break}
+    integer(out,array.get(tail,i))
+    i=i+1}
+  string.append(out,string.from_int(profile.previous_ns))
+  string.append(out,"\n")
+  struct.set(profile,profile.rows+1,field=rows)
+  struct.set(profile,profile.buffered+1,field=buffered)
+  if profile.buffered >= 128 or profile.rows == 50000 {flush(profile)}
+  struct.set(profile,time.monotonic_ns()-began,field=previous_ns)
+  ()
+}

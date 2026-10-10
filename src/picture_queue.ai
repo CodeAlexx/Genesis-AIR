@@ -43,6 +43,25 @@ pub fn identity(state: ref<app.App>, source: bool, playing: bool) -> string effe
     struct.get(struct.borrow(doc,field=monitor),field=frame)}))
   out
 }
+// The native window has an explicit mutation revision. The worker treats this
+// short token as opaque identity and serializes the actual document on change.
+// Keep the parked monitor and both paused times, without encoding the project
+// again for every heard-clock tick. The uncached identity remains an oracle.
+pub fn identity_revision(state: ref<app.App>, source: bool, playing: bool) -> string effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  var out: string = string.from_int(state.document_revision)
+  string.append(out,"\n")
+  string.append(out,string.from_int(state.media_revision))
+  string.append(out,"\n")
+  string.append(out,string.from_int(doc.monitor_source))
+  string.append(out,"\n")
+  string.append(out,string.from_int(if source {editor.playhead(doc)}else{doc.monitor.frame}))
+  if not playing {
+    string.append(out,"\n")
+    string.append(out,string.from_int(if source {doc.monitor.frame}else{editor.playhead(doc)}))
+  }
+  out
+}
 pub fn configure(queue: ref<Queue>, key: str, epoch: u64, playing: bool,
     source: bool, width: u32, height: u32) -> bool effects {alloc} {
   if queue.initialized and queue.key == key and queue.epoch == epoch and

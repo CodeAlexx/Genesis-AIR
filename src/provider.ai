@@ -52,7 +52,8 @@ pub type Provider = struct {
   program_signature: string,
   starts: u64,
   profile: bool,
-  program_input: option<File>
+  program_input: option<File>,
+  program_pixels: bytes
 }
 
 // What a probe learned about one source. `frames` 0 means the length is genuinely unknown,
@@ -74,7 +75,7 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch),
     ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
 }
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
@@ -85,7 +86,7 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta, 
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
 }
 
 // FFmpeg is a real-media backend, selected only when gcompose is absent.
@@ -93,7 +94,7 @@ pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effec
   Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
     scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none()}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
 }
 pub fn set_profile(state: ref<Provider>, enabled: bool) -> unit effects {alloc,fs.write} {
   if enabled and not state.profile {
@@ -111,6 +112,7 @@ fn discard_program_input(state: ref<Provider>) -> unit effects {} {
 }
 pub fn invalidate(state: ref<Provider>) -> unit effects {alloc} {
   discard_program_input(state)
+  let _ = struct.replace(state,bytes.copy(b""),field=program_pixels)
   let _ = struct.replace(state, string.new(), field=program_signature)
   struct.set(state,0,field=program_width)
   struct.set(state,0,field=program_height)
@@ -236,6 +238,11 @@ fn exchange(child: ref<Child>, reader: ref<proc.LineReader>, command: str) -> Ex
     err(problem) => { return Exchange {kind: 2, text: string.copy("the worker stopped accepting requests")} },
     ok(_) => { },
   }
+  exchange_reply(child,reader,deadline)
+}
+
+fn exchange_reply(child: ref<Child>, reader: ref<proc.LineReader>, deadline: u64) -> Exchange
+    effects {alloc,process,time} {
   var count: u64 = 0
   loop {
     if count >= 256 { return Exchange {kind: 2, text: string.copy("the worker emitted too many diagnostic lines")} }
@@ -609,7 +616,8 @@ fn read_program(file: str, width: u32, height: u32, canvas_width: u32, canvas_he
 }
 
 // The document signature includes edits and program time, but excludes source transport.
-// Keep the worker output on disk; copying it here avoids an unnecessary decode/composite.
+// Retain exactly one fitted monitor in memory; a parked monitor needs neither a
+// decode/composite nor another image-file read.
 pub fn cached_program(state: ref<Provider>, signature: str, width: u32, height: u32)
     -> option<Frame> effects {alloc, fs.read} {
   if str.len(signature) == 0 or not str.eq(signature, str.view(struct.borrow(state, field=program_signature))) {
@@ -618,9 +626,7 @@ pub fn cached_program(state: ref<Provider>, signature: str, width: u32, height: 
   // A fitted file belongs to its display geometry. A larger monitor must render
   // again from the composition rather than enlarge an older small preview.
   if state.program_width != 0 and (state.program_width != width or state.program_height != height) {return option.none()}
-  let stored_width: u32 = if state.program_width == 0 {state.canvas_width}else{state.program_width}
-  let stored_height: u32 = if state.program_height == 0 {state.canvas_height}else{state.program_height}
-  match read_program(str.view(preview_path(state)), width, height, stored_width, stored_height) {
+  match rgba_surface(bytes.view(struct.borrow(state,field=program_pixels)),width,height) {
     none => option.none(),
     some(pixels) => option.some(Frame {ok: true, width: width, height: height, pixels: pixels,
       detail: string.copy("cached program monitor")}),
@@ -631,88 +637,197 @@ pub fn hold_program(state: ref<Provider>, signature: str) -> unit effects {alloc
   ()
 }
 
+fn picture_number(data: view<byte>, at: u64, count: u64) -> u64 effects {} {
+  var value: u64 = 0
+  var factor: u64 = 1
+  var index: u64 = 0
+  loop {if index >= count {break}
+    let octet: u8 = cast.bits(view.get(data,at+index))
+    value = value+cast.wrap(octet)*factor
+    index=index+1
+    if index < count {factor=factor*256}
+  }
+  value
+}
+fn picture_bytes(socket: ref<Socket>, count: u64, deadline: u64) -> result<bytes,string>
+    effects {alloc,net,time} {
+  var data: bytes = bytes.copy(b"")
+  loop {if view.len(data) >= count {break}
+    let left: u64 = count-view.len(data)
+    let room: u64 = if left > 262144 {262144}else{left}
+    let next: bytes = match net.tcp_recv_until(socket,room,deadline) {
+      ok(value)=>value,err(_)=>{return result.err("[GA_PROGRAM_PIPE] The worker picture transfer timed out or failed")},
+    }
+    if view.len(next) == 0 {return result.err("[GA_PROGRAM_SIZE] The worker picture ended before its declared byte count")}
+    bytes.append(data,next)
+  }
+  result.ok(data)
+}
+fn receive_picture(child: ref<Child>, reader: ref<proc.LineReader>, listener: ref<Socket>,
+    token: u64, sequence: u64, width: u32, height: u32, deadline: u64) -> result<bytes,string>
+    effects {alloc,net,process,time} {
+  var socket: Socket = try accept_picture(child,reader,listener,deadline)
+  let outcome: result<bytes,string> = receive_picture_socket(socket,token,sequence,width,height,deadline)
+  let _ = net.tcp_close(socket)
+  outcome
+}
+fn accept_picture(child: ref<Child>, reader: ref<proc.LineReader>, listener: ref<Socket>,
+    deadline: u64) -> result<Socket,string> effects {alloc,net,process,time} {
+  var diagnostics: u64 = 0
+  loop {
+    if time.monotonic_ns() >= deadline {return result.err("[GA_PROGRAM_PIPE] The worker did not connect its picture transfer")}
+    let step: u64 = time.monotonic_ns()+25000000
+    match net.tcp_accept_until(listener,if step < deadline {step}else{deadline}) {
+      ok(value)=>{return result.ok(value)},err(error)=>{if error.code != 3 {return result.err("[GA_PROGRAM_PIPE] The worker picture connection failed")}},
+    }
+    // Failed/unsupported commands report immediately on the independent text
+    // lane. Drain bounded diagnostics while waiting for a picture connection.
+    match proc.read_line(child,reader,proc.deadline_in(1)) {
+      err(_)=>{},ok(value)=>match value {none=>{return result.err("[GA_PROGRAM_PIPE] The worker exited before sending its picture")},
+        some(line)=>{
+          if str.starts_with(line,"ERR") {return result.err(text.concat("[GA_WORKER_REQUEST] ",line))}
+          if str.starts_with(line,"DONE") {
+            // A connection can become ready immediately after accept's deadline.
+            // The worker may already have sent a small picture and its text reply.
+            // Preserve that reply, then consume the pending socket rather than
+            // confusing this scheduling race with an unsupported command.
+            var restored: bytes = bytes.copy(str.bytes(line))
+            bytes.append(restored,b"\x{0a}")
+            bytes.append(restored,bytes.view(struct.borrow(reader,field=pending)))
+            let _ = struct.replace(reader,restored,field=pending)
+            let retry_deadline: u64 = time.monotonic_ns()+1000000000
+            return match net.tcp_accept_until(listener,if retry_deadline < deadline {retry_deadline}else{deadline}) {
+              ok(value)=>result.ok(value),err(_)=>result.err("[GA_PROGRAM_SIZE] The worker completed without a picture"),
+            }
+          }
+          diagnostics=diagnostics+1
+          if diagnostics >= 256 {return result.err("[GA_PROGRAM_PIPE] Too many worker diagnostics before the picture")}
+        },
+      },
+    }
+  }
+  result.err("[GA_PROGRAM_PIPE] The worker did not connect its picture transfer")
+}
+fn receive_picture_socket(socket: ref<Socket>, token: u64, sequence: u64,
+    width: u32, height: u32, deadline: u64) -> result<bytes,string> effects {alloc,net,time} {
+  let header: bytes = try picture_bytes(socket,40,deadline)
+  let data: view<byte> = bytes.view(header)
+  let magic: bool = match str.from_bytes(view.slice(data,0,8)) {some(value)=>value == "GAPIX001",none=>false,}
+  let wanted: u64 = cast.wrap(width)*cast.wrap(height)*4
+  if not magic or picture_number(data,8,8) != token or picture_number(data,16,8) != sequence or
+    picture_number(data,24,4) != cast.wrap(width) or picture_number(data,28,4) != cast.wrap(height) or
+    picture_number(data,32,8) != wanted {
+    return result.err("[GA_PROGRAM_HEADER] The worker picture identity, dimensions or byte count did not match the request")
+  }
+  let pixels: bytes = try picture_bytes(socket,wanted,deadline)
+  match net.tcp_recv_until(socket,1,deadline) {
+    ok(tail)=>{if view.len(tail) != 0 {return result.err("[GA_PROGRAM_SIZE] The worker picture exceeded its declared byte count")}},
+    err(_)=>{return result.err("[GA_PROGRAM_PIPE] The worker did not finish its bounded picture transfer")},
+  }
+  result.ok(pixels)
+}
 pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32) -> Frame
-                       effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+    effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
+  program_attempt(state,line,width,height,true)
+}
+fn program_attempt(state: ref<Provider>, line: str, width: u32, height: u32, retry: bool) -> Frame
+    effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   let total: u64 = cast.wrap(width)*cast.wrap(height)
-  if width == 0 or height == 0 or total > draw.max_pixels() {
+  if width == 0 or height == 0 or total > draw.max_pixels() or total > 16777216 {
     note_failure(state,"[GA_PREVIEW_SIZE] Invalid monitor dimensions")
     return failed_frame(state)
   }
-  var command: string = string.copy("PREVIEWFIT ")
-  string.append(command,str.view(string.from_int(width)))
-  string.append(command," ")
-  string.append(command,str.view(string.from_int(height)))
+  if not state.available or state.kind != kind_gcompose() {
+    note_failure(state,"[GA_WORKER_MISSING] The compositor is not available")
+    return failed_frame(state)
+  }
+  struct.set(state,state.calls+1,field=calls)
+  let sequence: u64 = state.calls
+  let token: u64 = time.monotonic_ns()
+  var listener: Socket = match net.tcp_listen("127.0.0.1",0,1) {
+    ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_PIPE] Cannot open the worker picture transport")
+      return failed_frame(state)},
+  }
+  let port: u16 = match net.tcp_local_port(listener) {
+    ok(value)=>value,err(_)=>{let _ = net.tcp_close(listener)
+      note_failure(state,"[GA_PROGRAM_PIPE] Cannot identify the worker picture transport")
+      return failed_frame(state)},
+  }
+  var child: Child = match ref.swap(struct.borrow(state,field=session),option.none()) {
+    some(value)=>value,none=>match start_worker(state) {
+      some(value)=>value,none=>{let _ = net.tcp_close(listener)
+        note_failure(state,"[GA_WORKER_START] The compositor could not be started")
+        return failed_frame(state)},
+    },
+  }
+  var fields: array<string> = ["PREVIEWTCP",string.from_int(width),string.from_int(height),
+    string.from_int(port),string.from_int(token),string.from_int(sequence)]
+  var command: string = text.join(fields," ")
   string.append(command," ")
   if str.starts_with(line,"PREVIEW ") {string.append(command,str.slice(line,8,str.len(line)))}
   else {string.append(command,line)}
-  let output: string = preview_path(state)
+  string.append(command,"\n")
+  let deadline: u64 = proc.deadline_in(30000)
   let started: u64 = if state.profile {time.monotonic_ns()}else{0}
-  match ask(state, str.view(command), "program.txt") {
-    none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
-      detail: last_error(state)},
-    some(reply) => {
-      let received: u64 = if state.profile {time.monotonic_ns()}else{0}
-      // The worker truncates this file in place after each completed frame.
-      // Keep its reader on this provider's owning thread; seek after DONE before
-      // reading again. Restart, Reload and failed reads retire the handle.
-      var input: File = match ref.swap(struct.borrow(state,field=program_input),option.none()) {
-        some(held)=>held,
-        none=>match fs.open(str.view(output),mode=read) {
-          ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be opened")
-            return failed_frame(state)},
-        },
+  let transferred: result<bytes,string> = match proc.write_all_stdin(child,str.bytes(command),deadline) {
+    err(_)=>result.err("[GA_PROGRAM_PIPE] The worker stopped accepting picture requests"),
+    ok(_)=>receive_picture(child,struct.borrow(state,field=reader),listener,token,sequence,width,height,deadline),
+  }
+  let _ = net.tcp_close(listener)
+  var raw: bytes = match transferred {
+    ok(value)=>value,err(problem)=>{
+      var exit_code: i32 = 0
+      var exit_signal: i32 = 0
+      let exited: bool = match proc.poll(child) {
+        some(status)=>{exit_code=status.exit_code
+          exit_signal=status.signal
+          true},none=>false,
       }
-      match fs.seek(input,0,whence=start) {
-        ok(_)=>{},err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be rewound")
-          return failed_frame(state)},
+      if retry and exited {
+        var recovery: string = text.concat("[GA_PROGRAM_RECOVERY] Retrying exited worker pid=",string.from_int(proc.child_pid(child)))
+        string.append(recovery,text.concat(" exit=",string.from_int(exit_code)))
+        string.append(recovery,text.concat(" signal=",string.from_int(exit_signal)))
+        string.append(recovery,text.concat(" sequence=",string.from_int(sequence)))
+        string.append(recovery,text.concat(": ",problem))
+        diagnostics.record(str.view(struct.borrow(state,field=scratch)),"GA_PROGRAM_RECOVERY",recovery,"media-retry")
       }
-      let opened: u64 = if state.profile {time.monotonic_ns()}else{0}
-      let wanted: u64 = total*4
-      var raw: bytes = match fs.read(input,wanted+1) {
-        ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be read")
-          return failed_frame(state)},
-      }
-      loop {
-        if view.len(raw) > wanted {break}
-        let next: bytes = match fs.read(input,wanted+1-view.len(raw)) {
-          ok(value)=>value,err(_)=>{note_failure(state,"[GA_PROGRAM_READ] The worker program frame could not be read")
-            return failed_frame(state)},
-        }
-        if view.len(next) == 0 {break}
-        bytes.append(raw,next)
-      }
-      let read_end: u64 = if state.profile {time.monotonic_ns()}else{0}
-      if view.len(raw) != wanted {
-        note_failure(state,"[GA_PROGRAM_SIZE] The worker program frame has the wrong byte count")
-        return failed_frame(state)
-      }
-      let _ = ref.swap(struct.borrow(state,field=program_input),option.some(input))
-      let decoded: option<draw.Surface> = rgba_surface(raw,width,height)
-      if state.profile {
-        let completed: u64 = time.monotonic_ns()
-        let record: string = text.concat(string.from_int(state.calls),text.concat("\t",
-          text.concat(string.from_int(received-started),text.concat("\t",
-          text.concat(string.from_int(opened-received),text.concat("\t",
-          text.concat(string.from_int(read_end-opened),text.concat("\t",
-          text.concat(string.from_int(completed-read_end),"\n")))))))))
-        let _ = files.append_text(path.join(str.view(struct.borrow(state,field=scratch)),"provider-profile.tsv"),record)
-      }
-      match decoded {
-        none => Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
-          detail: string.copy("the worker's program frame could not be read")},
-        some(pixels) => {
-          struct.set(state,width,field=program_width)
-          struct.set(state,height,field=program_height)
-          Frame {ok: true, width: width, height: height, pixels: pixels,
-            detail: string.copy("gcompose PREVIEWFIT")}
-        },
-      }
+      let _ = proc.terminate(child,200)
+      let _ = proc.close(child)
+      let _ = struct.replace(state,bytes.copy(b""),field=program_pixels)
+      if retry and exited {return program_attempt(state,line,width,height,false)}
+      note_failure(state,problem)
+      return failed_frame(state)},
+  }
+  var outcome: Exchange = exchange_reply(child,struct.borrow(state,field=reader),deadline)
+  if outcome.kind != 0 {
+    let _ = proc.terminate(child,200)
+    let _ = proc.close(child)
+    let _ = struct.replace(state,bytes.copy(b""),field=program_pixels)
+    note_failure(state,str.view(outcome.text))
+    return failed_frame(state)
+  }
+  let _ = ref.swap(struct.borrow(state,field=session),option.some(child))
+  let received: u64 = if state.profile {time.monotonic_ns()}else{0}
+  let decoded: option<draw.Surface> = rgba_surface(raw,width,height)
+  if state.profile {
+    let completed: u64 = time.monotonic_ns()
+    var values: array<string> = [string.from_int(state.calls),string.from_int(received-started),"0","0",string.from_int(completed-received)]
+    let record: string = text.concat(text.join(values,"\t"),"\n")
+    let _ = files.append_text(path.join(str.view(struct.borrow(state,field=scratch)),"provider-profile.tsv"),record)
+  }
+  match decoded {
+    none=>{note_failure(state,"[GA_PROGRAM_SIZE] The worker picture could not be decoded")
+      failed_frame(state)},
+    some(pixels)=>{
+      let _ = struct.replace(state,raw,field=program_pixels)
+      struct.set(state,width,field=program_width)
+      struct.set(state,height,field=program_height)
+      Frame {ok:true,width:width,height:height,pixels:pixels,detail:"gcompose PREVIEWTCP"}
     },
   }
 }
-
 pub fn program_plan(state: ref<Provider>, lines: ref<array<string>>, width: u32,
-                    height: u32, canvas_width: u32, canvas_height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+                    height: u32, canvas_width: u32, canvas_height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   set_canvas(state, canvas_width, canvas_height)
   if array.len(lines) == 0 {
     return Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),

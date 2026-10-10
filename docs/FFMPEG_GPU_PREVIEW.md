@@ -177,3 +177,80 @@ hardware. `tests/video_transfer.py` explicitly selects the reference color path
 to isolate decoder/readback equivalence from the new spatial preview kernel.
 The candidate also passes 4K ProRes fine-detail/exact PCM length, portrait/multicam,
 1024 distinct 16-bit master values and PQ title/HEVC metadata checks.
+
+## Native-window measurements on 2026-10-09
+
+The loopback-pixel candidate uses a bounded packet with frame identity checks instead of
+writing the final Program bitmap to disk. Float intermediate passes and exports
+retain their existing paths. A twenty-second retained-painter/device run delivered
+1,189 pictures (59.45/s), with 4.53/16.05 ms median/p95 program preparation.
+This excludes native display presentation.
+
+The same candidate was then measured in the ordinary maximized Windows editor
+with the supplied 3840×2160, 59.94 fps AV1/PQ source and its audio. After a one-second
+warmup, the Scopes tab delivered 2,970 changed pictures over 52.87 seconds
+(56.17/s); the Audio tab delivered 6,190 over 110.54 seconds (55.99/s).
+Median/p95 picture gaps were 16.70/33.25 ms and 16.70/33.27 ms respectively.
+Both intervals had no observed drained audio queues or early pictures, with at
+most two prepared frames. Device-clock drift was -0.86 ms and -1.85 ms.
+The rates count changed pictures rather than repeated window presentations.
+Physical speaker latency and display scanout are outside this measurement.
+
+Paused ruler scrubbing changed the Program picture and timecode to two seconds;
+Start restored frame zero with a visible picture. Timeline filmstrip bitmaps,
+live stereo meters, histogram, spatial RGB parade and luma waveform were visible.
+The user's project file retained its original SHA-256 after these checks.
+
+These results establish working native controls and expose remaining redraw
+pressure; they do not establish sustained interactive 4K60. A subsequent change
+limits clock/meter-only redraws while keeping new pictures and input immediate;
+the first native Audio-tab run delivered 3,540 changed pictures over 64.31 seconds
+(55.03/s) at 2560×1316, with no duplicate presentations and one-frame picture
+lateness throughout the measured interval. There were no observed drained queues
+or early pictures. This improves stale-picture delay, while throughput remains
+below 4K60; the viewport differs from the earlier run and is not an exact paired
+comparison.
+
+The final Audio-tab candidate retains pending meter changes, skips unchanged
+Source painting and repaints only the output-meter region when the remaining
+Audio controls are unchanged. Its 2560×1316 native interval delivers 4,496 distinct
+pictures over 79.20 seconds (56.76/s), with 16.58/28.37 ms median/p95 picture gaps
+and a 41.33 ms maximum gap. Median/p95 picture lateness after presentation is zero;
+the maximum is one frame (16.68 ms). No early pictures or drained audio queues are
+observed, and device-clock drift is -1.33 ms. Median painting is 1.42 ms, compared
+with 7.47 ms in the preceding held-Source candidate at the same viewport. Native
+presentation takes 5.06 ms median. This is a sequential comparison, not an
+alternating paired benchmark. Stop holds the picture and clears the meters; Start
+restores visible frame zero. The original project bytes remain unchanged.
+
+The measured application SHA-256 is
+`6BE80865F46091CC92605E4F0A0180479DDB1A143C85934D3EAD2E59B8BDDE8A`;
+the worker is `66EE15B507E15EEC67E69999411654C4893A0F9FF3EA8ACCBD1224CC5B62FD9C`.
+Retained painting is independently compared byte for byte with complete painting
+in 32 cases/656 checks, including scrolled meters, narrow/short windows, Source
+replacement and all three UI scales. The final source also fixes the status bar's
+expanded erasure at short-window track boundaries and clips narrow timecode text
+to its refreshed monitor band; these two subsequent paint fixes have pixel-exact
+acceptance, while the timing above belongs to the measured application hash.
+Sustained native 4K60 and complex effect-stack throughput remain open.
+
+A five-minute transport fixture reached
+all 18,000 exact picture identities but required one worker restart, so that run
+failed the no-restart requirement. Two subsequent five-minute diagnostic runs each
+passed all 18,000 identities in one worker with zero refusals/restarts; observed
+port reuse rules out deterministic exhaustion in those runs. The original failure
+remains unexplained and retained. `GA_PROGRAM_RECOVERY` now records a retry's
+original cause, child process identity and request number. Fullscreen 4K remains deferred.
+
+The window measurement is opt-in through `GENESIS_WINDOW_PROFILE`. Use
+`tests/window_timing.py PROFILE.tsv --require-active --report REPORT.json` to
+check frame identity, prepared-frame limits, timing and audio-clock observations.
+The TSV includes document/media revisions and viewport geometry so edits and
+resizes can be separated from steady playback intervals.
+
+For explicit long transport acceptance, set `GENESIS_TEST_PREVIEW_INPUT=1` and run
+`genesis-preview-input.exe FRESH_SCRATCH genesis-worker-wrapper.exe 18000`.
+The paced fixture checks every picture at 60 requests/second and requires one
+worker with no refusal. It writes `preview-lifetime-tests.json`, port receipts and
+a Winsock error receipt when available. Routine Windows gates retain the shorter
+fault suite; this five-minute check is separate.

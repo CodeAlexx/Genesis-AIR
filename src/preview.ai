@@ -27,7 +27,7 @@ fn program_signature(document: ref<editor.Document>) -> string effects {alloc} {
 pub type Images = struct {pictures: array<draw.Surface>, source_ns: u64, plan_ns: u64, program_ns: u64,
   source_key: string, source_held: bool, source_frame: i64, program_frame: i64}
 pub fn images(state: ref<app.App>, width: u32, height: u32) -> array<draw.Surface>
-    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+    effects {alloc,fs.meta,fs.read,fs.write,process,net,time} {
   var reply: Images = images_measured(state,width,height,false)
   struct.replace(reply,array.new(),field=pictures)
 }
@@ -41,11 +41,11 @@ pub fn strips_signature(document: ref<editor.Document>) -> string effects {alloc
   let _ = editor.clear_selection(copy)
   match editor_io.encode(copy) {ok(value)=>value,err(_)=>string.new(),}
 }
-pub fn images_measured(state: ref<app.App>, width: u32, height: u32, profile: bool) -> Images effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+pub fn images_measured(state: ref<app.App>, width: u32, height: u32, profile: bool) -> Images effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   images_with_source(state,width,height,profile,"")
 }
 fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: bool, previous_source: str)
-    -> Images effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+    -> Images effects {alloc,fs.meta,fs.read,fs.write,process,net,time} {
   var out: array<draw.Surface> = array.new()
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let monitor_source: u64 = document.monitor_source
@@ -104,7 +104,7 @@ fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: boo
     let output: string = provider.preview_path(struct.borrow(state, field=provider))
     var frame_cache: timeline_media.RenderCache = timeline_media.render_cache(
       struct.borrow(state, field=fonts))
-    timeline_media.configure_preview(document, frame_cache)
+    timeline_media.configure_monitor_preview(document, frame_cache, width, height)
     match timeline_media.frame_plan(document, program_frame, "PREVIEW", str.view(output),
       str.view(output), frame_cache) {
       ok(plan_lines) => {
@@ -404,7 +404,7 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
   true
 }
 
-fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+fn write_thumbnails(state: ref<app.App>, root: str, id: u64, geometry: str) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   var fields: array<string> = text.split(geometry, "\t")
   if array.len(fields) < 3 { return () }
   let start: i64 = match text.parse_i64(str.view(array.borrow(fields, 0))) {some(value) => value, none => 0,}
@@ -600,6 +600,12 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }
     let previous_source: string = if owned.pixel_stream {string.copy(str.view(held_source))}else{string.new()}
     var measured: Images = images_with_source(state,width,height,owned.profile,str.view(previous_source))
+    let media_error: string = provider.last_error(struct.borrow(state,field=provider))
+    if str.len(media_error) != 0 {
+      publish(str.view(root),"error.txt",media_error)
+      link.fail(wake,id,media_error)
+      continue
+    }
     let source_ns: u64 = measured.source_ns
     let plan_ns: u64 = measured.plan_ns
     let program_ns: u64 = measured.program_ns

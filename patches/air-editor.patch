@@ -1,0 +1,220 @@
+diff --git a/stdlib/editor.ai b/stdlib/editor.ai
+index 13f78f4..3e622f3 100644
+--- a/stdlib/editor.ai
++++ b/stdlib/editor.ai
+@@ -17,6 +17,7 @@
+ module std.editor
+ import std.curve as curve
+ import std.math as math
++import std.text as text
+ 
+ // ---------------------------------------------------------------------------
+ // Constants and kinds
+@@ -1097,7 +1098,9 @@ pub fn insert(doc: ref<Document>, track: u64, source: u64, source_in: i64, lengt
+   if track_locked(doc, track) { return option.none() }
+   let start: i64 = if at < 0 { 0 } else { at }
+   match clip_spanning(doc, track, start) {
+-    some(straddling) => { let _ = split(doc, straddling, start) },
++    some(straddling) => {
++      match split(doc, straddling, start) {none=>{return option.none()},some(_)=>{},}
++    },
+     none => { },
+   }
+   let want: i64 = if length < 1 { 1 } else { length }
+@@ -1117,6 +1120,7 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+   if track_locked(doc, track) { return option.none() }
+   let start: i64 = if at < 0 { 0 } else { at }
+   let want: i64 = if length < 1 { 1 } else { length }
++  if not lift_range_possible(doc, track, start, start + want) {return option.none()}
+   lift_range(doc, track, start, start + want)
+   place(doc, track, source, source_in, want, start)
+ }
+@@ -1129,28 +1133,142 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+ // / `ripple_trim_end` / `ripple_delete`, whose ripple-current-track-only rule is Shotcut's
+ // default and is kept here.
+ 
+-// SPLIT clip `id` at timeline frame `frame`, returning the new right half's id. Refused
+-// unless the frame is STRICTLY inside the clip's body. The right half advances the source by
+-// exactly the frames the left half kept, which is the source-continuity rule freeze frame and
+-// three-point insert both rely on. A fresh fade-in is not inherited, and the left half gives
+-// up its fade-out to the new right edge.
++// The static source-time protocol is shared by editing and rendering. Speed filters
++// multiply the clip rate in stack order; animated rates need integrated source-time
++// metadata and are deliberately outside this fixed-rate representation.
++pub fn playback_rate(doc: ref<Document>, value: Clip) -> f64 effects {alloc} {
++  var rate: f64 = value.speed
++  var i: u32 = 0
++  loop {
++    let id: u64 = match filter_at(doc,value.id,i) {none=>{break},some(found)=>found,}
++    let kind: string = filter_kind(doc,id)
++    if filter_enabled(doc,id) and str.eq(str.view(kind),"speed") {rate=rate*filter_param(doc,id,"rate",1.0)}
++    i=i+1}
++  rate
++}
++
++// A preflight must not intern names, allocate IDs, or change any document field.
++// source_in stores an integral LOWER source bound, including for reversed clips.
++// Reject cuts whose fractional phase or active fade cannot be represented by Clip.
++pub fn split_possible(doc: ref<Document>, id: u64, frame: i64) -> bool effects {alloc} {
++  let old: Clip = match clip(doc,id) {none=>{return false},some(value)=>value,}
++  let offset: i64 = frame-old.start
++  if offset <= 0 or offset >= old.length or track_locked(doc,old.track) {return false}
++  if old.source_in < 0 or old.fade_in < 0 or old.fade_out < 0 {return false}
++  if offset < old.fade_in or old.length-offset < old.fade_out {return false}
++  let rate: f64 = playback_rate(doc,old)
++  if not math.is_finite(rate) or rate < 0.0 {return false}
++  let advanced: f64 = cast.float(if old.reverse {old.length-offset} else {offset})*rate
++  if not math.is_finite(advanced) or advanced != math.floor(advanced) or
++      advanced >= cast.float(9223372036854775807-old.source_in) {return false}
++  var i: u64 = 0
++  loop {if i >= array.len(struct.borrow(doc,field=filters)) {break}
++    let filter: ref<Filter> = array.borrow(struct.borrow(doc,field=filters),i)
++    if filter.clip == id and filter.enabled {
++      let kind: ref<string> = struct.borrow(filter,field=kind)
++      // A cloned timer restarts local time; echo graphs lose the original delay
++      // history. Refuse until a preserved time/state context is represented.
++      if str.eq(kind,"timer") or str.eq(kind,"delay") or str.eq(kind,"reverb") {return false}
++    }
++    i=i+1}
++  i=0
++  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
++    let key: Key = array.get(struct.borrow(doc,field=keys),i)
++    if key.clip == id {
++      let named: string = name_text(doc,key.param)
++      if str.eq(str.view(named),"fade_in") or str.eq(str.view(named),"fade_out") or
++          str.eq(str.view(named),"speed") or str.eq(str.view(named),"speed.rate") or
++          (str.starts_with(str.view(named),"filter.") and text.ends_with(str.view(named),".speed.rate")) {return false}
++      // Rebasing the full context must stay inside the signed frame representation.
++      if key.frame < -9223372036854775807+offset {return false}
++    }
++    i=i+1}
++  true
++}
++
++// Preserve every control point, including context outside the new body. Truncating
++// a nonlinear segment or adding a new boundary key changes easing/Catmull tangents.
++fn split_content(doc: ref<Document>, left: u64, right: u64, offset: i64) -> unit effects {alloc} {
++  var old_ids: array<u64> = array.new()
++  var new_ids: array<u64> = array.new()
++  let count: u64 = array.len(struct.borrow(doc,field=filters))
++  var i: u64 = 0
++  loop {if i >= count {break}
++    let filter: ref<Filter> = array.borrow(struct.borrow(doc,field=filters),i)
++    if filter.clip == left {
++      let old: u64 = filter.id
++      var copied: Filter = Filter {id:0,clip:right,kind:string.copy(struct.borrow(filter,field=kind)),order:filter.order,enabled:filter.enabled}
++      let fresh: u64 = fresh_id(doc)
++      struct.set(copied,fresh,field=id)
++      array.push(old_ids,old)
++      array.push(new_ids,fresh)
++      array.push(struct.borrow(doc,field=filters),copied)
++      let numeric_count: u64 = array.len(struct.borrow(doc,field=filter_params))
++      var p: u64 = 0
++      loop {if p >= numeric_count {break}
++        let value: ref<FilterParam> = array.borrow(struct.borrow(doc,field=filter_params),p)
++        if value.filter == old {
++          let copied_param: FilterParam = FilterParam {filter:fresh,name:string.copy(struct.borrow(value,field=name)),value:value.value}
++          array.push(struct.borrow(doc,field=filter_params),copied_param)
++        }
++        p=p+1}
++      let text_count: u64 = array.len(struct.borrow(doc,field=filter_text_params))
++      p=0
++      loop {if p >= text_count {break}
++        let value: ref<FilterTextParam> = array.borrow(struct.borrow(doc,field=filter_text_params),p)
++        if value.filter == old {
++          let copied_param: FilterTextParam = FilterTextParam {filter:fresh,name:string.copy(struct.borrow(value,field=name)),value:string.copy(struct.borrow(value,field=value))}
++          array.push(struct.borrow(doc,field=filter_text_params),copied_param)
++        }
++        p=p+1}
++    }
++    i=i+1}
++  var copied_keys: array<Key> = array.new()
++  i=0
++  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
++    let key: Key = array.get(struct.borrow(doc,field=keys),i)
++    if key.clip == left {array.push(copied_keys,key)}
++    i=i+1}
++  i=0
++  loop {if i >= array.len(copied_keys) {break}
++    let key: Key = array.get(copied_keys,i)
++    var named: string = name_text(doc,key.param)
++    var f: u64 = 0
++    loop {if f >= array.len(old_ids) {break}
++      let prefix: string = text.concat("filter.",text.concat(string.from_int(array.get(old_ids,f)),"."))
++      if str.starts_with(str.view(named),str.view(prefix)) {
++        let tail: str = str.slice(str.view(named),str.len(str.view(prefix)),str.len(str.view(named)))
++        named=text.concat("filter.",text.concat(string.from_int(array.get(new_ids,f)),text.concat(".",tail)))
++        break
++      }
++      f=f+1}
++    let _ = set_key(doc,right,str.view(named),key.frame-offset,key.value,key.interp)
++    i=i+1}
++  ()
++}
++
++// SPLIT preserves source time, outer fades, ordered filters and complete automation.
++// Unsupported phase/envelope cuts return none with the entire document unchanged.
+ pub fn split(doc: ref<Document>, id: u64, frame: i64) -> option<u64> effects {alloc} {
++  if not split_possible(doc,id,frame) {return option.none()}
+   match clip_slot(doc, id) {
+     some(slot) => {
+       let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+       let offset: i64 = frame - old.start
+-      if offset <= 0 or offset >= old.length { return option.none() }
++      let phase: f64 = cast.float(if old.reverse {old.length-offset} else {offset})*playback_rate(doc,old)
++      let advance: i64 = cast.sat(phase)
+       put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
+-        nested: old.nested, source_in: old.source_in, length: offset, start: old.start,
++        nested: old.nested, source_in: if old.reverse {add.sat(old.source_in,advance)} else {old.source_in}, length: offset, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+         fade_in: if old.fade_in > offset { offset } else { old.fade_in }, fade_out: 0,
+         gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
+       let right: u64 = fresh_id(doc)
+       array.push(struct.borrow(doc, field=clips), Clip {id: right, owner: old.owner,
+-        source: old.source, nested: old.nested, source_in: add.sat(old.source_in, offset),
++        source: old.source, nested: old.nested, source_in: if old.reverse {old.source_in} else {add.sat(old.source_in,advance)},
+         length: old.length - offset, start: frame, track: old.track, group: old.group,
+         enabled: old.enabled, selected: false, fade_in: 0, fade_out: old.fade_out,
+         gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
++      split_content(doc,old.id,right,offset)
+       option.some(right)
+     },
+     none => option.none(),
+@@ -1165,7 +1283,8 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+   loop {
+     if index >= array.len(struct.borrow(doc, field=clips)) { break }
+     let value: Clip = array.get(struct.borrow(doc, field=clips), index)
+-    if value.owner == sequence and value.start < frame and clip_end(value) > frame {
++    if value.owner == sequence and value.start < frame and clip_end(value) > frame and not track_locked(doc,value.track) {
++      if not split_possible(doc,value.id,frame) {return 0}
+       array.push(targets, value.id)
+     }
+     index = index + 1
+@@ -1303,8 +1422,27 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+ // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
+ // up, because a clamped remnant would spill back into the range and never clear.
+ // Genesis `lift_range`.
++// Guard destructive callers before any trim/lift. Ordinary trim source/automation
++// rebasing remains separate from Split, so non-unit/reverse surviving trims refuse.
++pub fn lift_range_possible(doc: ref<Document>, track: u64, from: i64, to: i64) -> bool effects {alloc} {
++  if to <= from {return true}
++  if track_locked(doc,track) {return false}
++  var i: u64 = 0
++  loop {if i >= clip_count(doc) {break}
++    let value: Clip = array.get(struct.borrow(doc,field=clips),i)
++    let end: i64 = clip_end(value)
++    if value.track == track and value.start < to and end > from and
++        not (from <= value.start and end <= to) {
++      if value.reverse or playback_rate(doc,value) != 1.0 {return false}
++      if value.start < from and from < end and not split_possible(doc,value.id,from) {return false}
++      if value.start < to and to < end and not split_possible(doc,value.id,to) {return false}
++    }
++    i=i+1}
++  true
++}
+ pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
+   if to <= from { return () }
++  if not lift_range_possible(doc,track,from,to) {return ()}
+   var passes: u64 = array.len(struct.borrow(doc, field=clips)) * 4 + 8
+   loop {
+     if passes == 0 { break }
