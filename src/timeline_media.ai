@@ -2034,6 +2034,67 @@ fn audio_gain_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, fps
   result.ok(token)
 }
 
+// Fade lengths remain in raw sequence frames through interpolation, including
+// surrounding off-body keys. The worker converts each evaluated length to
+// seconds and applies independent in/out ramps in destination-sample time.
+fn audio_fade_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, end: i64, fps: f64, streaming: bool)
+    -> result<string, string> effects {alloc} {
+  var incoming: array<string> = array.new()
+  var outgoing: array<string> = array.new()
+  var previous_in: i64 = -9007199254740991
+  var previous_out: i64 = -9007199254740991
+  var sample_in: i64 = -9007199254740991
+  var sample_out: i64 = -9007199254740991
+  var at: u64 = 0
+  loop {if at >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),at)
+    at=at+1
+    if key.clip != clip.id {continue}
+    let name: string = editor.name_text(doc,key.param)
+    if not str.eq(str.view(name),"fade_in") and not str.eq(str.view(name),"fade_out") {continue}
+    if key.owner != clip.owner or not math.is_finite(key.value) or
+        math.abs(key.value) > 3.4028234663852886e38 or key.interp >= 38 or
+        key.frame < -9007199254740991 or key.frame > 9007199254740991 or
+        clip.start < 0 or clip.start > 9007199254740991 or begin < 0 or begin > 9007199254740991 or
+        not math.is_finite(fps) or fps <= 0.0 or not math.is_finite(3.4028234663852886e38/fps) {
+      return result.err("[GA_AUDIO_FADE_KEYS] Invalid clip fade keyframe")
+    }
+    let frame: f64 = cast.float(clip.start)+cast.float(key.frame)
+    let sample: f64 = math.floor(frame*48000.0/fps+0.5)
+    let origin: f64 = math.floor(cast.float(begin)*48000.0/fps+0.5)
+    let placement: f64 = math.floor(cast.float(clip.start)*48000.0/fps+0.5)
+    let last: f64 = if streaming {math.floor(cast.float(end)*48000.0/fps+0.5)-1.0}else{origin+1073741822.0}
+    if math.abs(frame) > 9007199254740991.0 or not math.is_finite(sample) or
+        math.abs(sample) > 9007199254740991.0 or not math.is_finite(origin) or
+        origin > 9007199254740991.0 or not math.is_finite(placement) or placement > 9007199254740991.0 or
+        not math.is_finite(last) or last > 9007199254740991.0 or (streaming and last < origin) {
+      return result.err("[GA_AUDIO_FADE_KEYS] Fade keyframe exceeds exact sample range")
+    }
+    let at_sample: i64 = cast.sat(sample)
+    let is_in: bool = str.eq(str.view(name),"fade_in")
+    if (is_in and array.len(incoming) >= 65536) or (not is_in and array.len(outgoing) >= 65536) or
+        (is_in and array.len(incoming) > 0 and (key.frame <= previous_in or at_sample <= sample_in)) or
+        (not is_in and array.len(outgoing) > 0 and (key.frame <= previous_out or at_sample <= sample_out)) {
+      return result.err("[GA_AUDIO_FADE_KEYS] Fade keyframe order or count is invalid")
+    }
+    var fields: array<string> = [string.from_int(at_sample),
+      string.from_int(key.frame),string.from_float(key.value),string.from_int(key.interp)]
+    let point: string = text.join(fields,",")
+    if is_in {array.push(incoming,point)
+      previous_in=key.frame
+      sample_in=at_sample
+    }else{array.push(outgoing,point)
+      previous_out=key.frame
+      sample_out=at_sample}
+  }
+  if array.len(incoming) == 0 and array.len(outgoing) == 0 {return result.ok(string.copy(""))}
+  var fields: array<string> = [string.copy("FADEKEYS"),string.from_int(audio_sample_frame(begin,fps)),
+    string.from_int(clip.start),string.from_float(fps),
+    if array.len(incoming) == 0 {string.copy("-")}else{text.join(incoming,"/")},
+    if array.len(outgoing) == 0 {string.copy("-")}else{text.join(outgoing,"/")}]
+  result.ok(text.join(fields,":"))
+}
+
 fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
                -> result<array<string>, string> effects {alloc} {
   var lines: array<string> = array.new()
@@ -2075,7 +2136,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
       if duration_s > remaining_s { duration_s = remaining_s }
     }
     if duration_s <= 0.0 { continue }
-    let destination_s: f64 = if streaming {
+    let legacy_destination_s: f64 = if streaming {
       cast.float(audio_sample_frame(begin, fps) - audio_sample_frame(start, fps)) / 48000.0
     } else { cast.float(begin - start) / fps }
     var stages: array<string> = array.new()
@@ -2118,6 +2179,12 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
     let gain_keys: string = match audio_gain_keys(doc, clip, begin, fps) {
       err(problem) => { return result.err(problem) }, ok(value) => value,
     }
+    let fade_keys: string = match audio_fade_keys(doc, clip, begin, end, fps, streaming) {
+      err(problem) => {return result.err(problem)},ok(value)=>value,
+    }
+    let destination_s: f64 = if str.len(str.view(fade_keys)) != 0 {
+      cast.float(audio_sample_frame(begin,fps)-audio_sample_frame(start,fps))/48000.0
+    }else{legacy_destination_s}
     var fields: array<string> = [
       string.copy(if streaming { "AUDIOSTREAM" } else { "AUDIO" }),
       provider.wire_path(str.view(struct.borrow(source, field=path))),
@@ -2143,6 +2210,7 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
       array.push(fields, string.from_int(audio_sample_frame(end, fps) - audio_sample_frame(begin, fps)))
     }
     if str.len(str.view(gain_keys)) != 0 { array.push(fields, gain_keys) }
+    if str.len(str.view(fade_keys)) != 0 { array.push(fields, fade_keys) }
     array.push(lines, text.join(fields, " "))
   }
   result.ok(lines)

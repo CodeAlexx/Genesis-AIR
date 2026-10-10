@@ -1,0 +1,324 @@
+module genesis.tests.fade_controls
+import std.editor as editor
+import std.editor_io as editor_io
+import std.curve as curve
+import std.files as files
+import std.math as math
+import std.path as path
+import std.testing as test
+import std.text as text
+import std.widgets as widgets
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn transaction(state: ref<app.App>) -> string effects {alloc} {
+  var out: string = encoded(struct.borrow(state,field=document))
+  let history: ref<editor.History> = struct.borrow(state,field=history)
+  string.append(out,text.concat("\ndepth ",string.from_int(history.depth)))
+  var direction: u64 = 0
+  loop {if direction == 2 {break}
+    string.append(out,if direction == 0 {"\nundo\n"}else{"\nredo\n"})
+    let count: u64 = if direction == 0 {editor.undo_depth(history)}else{editor.redo_depth(history)}
+    var i: u64 = 0
+    loop {if i >= count {break}
+      string.append(out,if direction == 0 {encoded(array.borrow(struct.borrow(history,field=undo),i))}
+        else{encoded(array.borrow(struct.borrow(history,field=redo),i))})
+      i=i+1
+    }
+    direction=direction+1
+  }
+  string.append(out,text.concat("\nrevision ",string.from_int(state.document_revision)))
+  string.append(out,text.concat("\nmedia ",string.from_int(state.media_revision)))
+  string.append(out,text.concat("\nepoch ",string.from_int(state.project_epoch)))
+  string.append(out,text.concat("\nfilter ",string.from_int(state.selected_filter)))
+  string.append(out,if app.dirty(state) {"\ndirty"}else{"\nclean"})
+  out
+}
+fn fixture(root: str, keyed: bool) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App = app.app(provider.fake(root))
+  let track: u64 = app.default_audio_track(state)
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let source: u64 = editor.add_source(doc,"fade.wav","Fade source",120,30.0)
+  let _ = editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let clip: u64 = option.unwrap(editor.place(doc,track,source,0,60,10))
+  let _ = editor.place(doc,track,source,0,10,100)
+  let _ = editor.set_fade_in(doc,clip,7)
+  let _ = editor.set_fade_out(doc,clip,9)
+  if keyed {
+    let _ = editor.set_key(doc,clip,"fade_in",0,10.0,curve.linear())
+    let _ = editor.set_key(doc,clip,"fade_in",20,30.0,curve.hold())
+    let _ = editor.set_key(doc,clip,"fade_out",0,20.0,curve.linear())
+    let _ = editor.set_key(doc,clip,"fade_out",20,40.0,curve.linear())
+  }
+  let _ = commands.select_only(state,clip)
+  let _ = commands.seek(state,20)
+  let _ = commands.set_clip_field(state,clip,"gain",0.6)
+  let _ = commands.set_clip_field(state,clip,"gain",0.8)
+  let _ = commands.undo(state)
+  let _ = commands.undo(state)
+  app.mark_dirty(state,false)
+  state
+}
+type Row = struct {area: layout.Rect, value: f64, enabled: bool}
+fn control(state: ref<app.App>, name: str, action: u32) -> Row effects {alloc} {
+  var controls: array<chrome.Control> = chrome.properties_panel(layout.frame(1600.0,1400.0),state)
+  var i: u64 = 0
+  loop {if i >= array.len(controls) {break}
+    let item: ref<chrome.Control> = array.borrow(controls,i)
+    let label: string = chrome.name_of(item)
+    if item.action == action and label == name {return Row {area:item.area,value:item.value,enabled:item.enabled}}
+    i=i+1
+  }
+  // A missing fader must fail the caller's explicit nonzero area assertion.
+  Row {area:layout.rect(0.0,0.0,0.0,0.0),value:-999.0,enabled:false}
+}
+fn key_mode(doc: ref<editor.Document>, clip: u64, name: str, frame: i64) -> u32 effects {alloc} {
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let point: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if point.clip == clip and editor.name_text(doc,point.param) == name and point.frame == frame {return point.interp}
+    i=i+1
+  }
+  999
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Genesis fade controls",false)
+  let _ = test.start(suite,"Evaluated faders and scalar compatibility")
+  var scalar: app.App = fixture(root,false)
+  let scalar_clip: u64 = app.current_clip(scalar)
+  let before_read: string = encoded(struct.borrow(scalar,field=document))
+  let scalar_row: Row = control(scalar,"fade_in",chrome.act_param_set())
+  let _ = test.near_f64(suite,scalar_row.value,7.0,0.0,"Unkeyed fader uses saved scalar")
+  let _ = test.eq_str(suite,encoded(struct.borrow(scalar,field=document)),before_read,"Reading unkeyed faders does not intern names")
+  let scalar_set: commands.Result = commands.set_parameter(scalar,chrome.domain_clip(),scalar_clip,"","fade_in",80.0)
+  let _ = test.check(suite,scalar_set.ok,"Unkeyed edit succeeds")
+  let _ = test.eq_i64(suite,option.unwrap(editor.clip(struct.borrow(scalar,field=document),scalar_clip)).fade_in,60,"Scalar retains SDK clip-length clamp")
+  let scalar_other: u64 = array.get(struct.borrow(struct.borrow(scalar,field=document),field=clips),1).id
+  let unselected_scalar: commands.Result = commands.set_clip_field(scalar,scalar_other,"fade_in",4.0)
+  let _ = test.check(suite,unselected_scalar.ok,"Generic scalar setter preserves unselected valid clip compatibility")
+  let _ = test.eq_i64(suite,option.unwrap(editor.clip(struct.borrow(scalar,field=document),scalar_other)).fade_in,4,"Generic scalar edit reaches supplied clip only")
+  let button: Row = control(scalar,"fade_out",chrome.act_param_key())
+  let _ = test.check(suite,button.enabled and layout.width_of(button.area)>0.0,"Audio clip exposes enabled Fade K")
+  let _ = input.pointer_down(scalar,1600.0,1400.0,(button.area.left+button.area.right)*0.5,(button.area.top+button.area.bottom)*0.5)
+  let _ = test.eq_u64(suite,cast.wrap(key_mode(struct.borrow(scalar,field=document),scalar_clip,"fade_out",10)),cast.wrap(curve.linear()),"Actual audio Fade K creates a clip-local key")
+  var state: app.App = fixture(root,true)
+  let clip: u64 = app.current_clip(state)
+  let row: Row = control(state,"fade_in",chrome.act_param_set())
+  let out_row: Row = control(state,"fade_out",chrome.act_param_set())
+  let _ = test.near_f64(suite,row.value,20.0,0.000001,"Fade in fader reads local-frame10 interpolation")
+  let _ = test.near_f64(suite,out_row.value,30.0,0.000001,"Fade out fader reads independent curve")
+  let _ = test.check(suite,row.enabled and layout.width_of(row.area)>0.0,"Audio clip exposes enabled fade fader")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Key writes preserve interpolation and signed saved context")
+  let _ = commands.seek(state,30)
+  let changed: commands.Result = commands.set_parameter(state,chrome.domain_clip(),clip,"","fade_in",35.0)
+  let _ = test.check(suite,changed.ok,"Existing-key fader succeeds on an audio clip")
+  let _ = test.eq_u64(suite,cast.wrap(key_mode(struct.borrow(state,field=document),clip,"fade_in",20)),cast.wrap(curve.hold()),"Existing hold interpolation survives edit")
+  let _ = test.eq_i64(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),clip)).fade_in,7,"Keyed edit preserves scalar fallback")
+  let _ = commands.seek(state,25)
+  let created: commands.Result = commands.keyframe_parameter(state,chrome.domain_clip(),clip,"","fade_out",22.0)
+  let _ = test.check(suite,created.ok,"Audio fade K is supported")
+  let _ = test.eq_u64(suite,cast.wrap(key_mode(struct.borrow(state,field=document),clip,"fade_out",15)),cast.wrap(curve.linear()),"New key uses clip-local frame15 and linear interpolation")
+  let _ = editor.set_key(struct.borrow(state,field=document),clip,"fade_in",0,-10.0,curve.linear())
+  let _ = commands.seek(state,10)
+  let negative_row: Row = control(state,"fade_in",chrome.act_param_set())
+  let _ = test.near_f64(suite,negative_row.value,0.0,0.0,"Negative evaluated saved length displays zero")
+  let _ = commands.seek(state,15)
+  let signed_edit: commands.Result = commands.set_parameter(state,chrome.domain_clip(),clip,"","fade_in",8.0)
+  let _ = test.check(suite,signed_edit.ok,"Finite signed surrounding knots remain valid context")
+  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(state,field=document),clip,"fade_in",10,0.0),-10.0,0.0,"Editing a later key preserves signed saved knot")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Actual fader drag captures one Undo and Escape restores curve")
+  var dragged: app.App = fixture(root,true)
+  let dragged_clip: u64 = app.current_clip(dragged)
+  let original: string = encoded(struct.borrow(dragged,field=document))
+  let depth: u64 = editor.undo_depth(struct.borrow(dragged,field=history))
+  let bar: layout.Rect = control(dragged,"fade_in",chrome.act_param_set()).area
+  let y: f64 = (bar.top+bar.bottom)*0.5
+  let _ = input.pointer_down(dragged,1600.0,1400.0,bar.left+layout.width_of(bar)*0.25,y)
+  let _ = test.check(suite,app.parameter_dragging(dragged),"Pointer down starts fade drag")
+  let _ = input.pointer_move(dragged,1600.0,1400.0,bar.left+layout.width_of(bar)*0.5,y)
+  let _ = input.pointer_move(dragged,1600.0,1400.0,bar.left+layout.width_of(bar)*0.75,y)
+  let _ = input.pointer_up(dragged,1600.0,1400.0,bar.left+layout.width_of(bar)*0.75,y)
+  let _ = test.eq_u64(suite,editor.undo_depth(struct.borrow(dragged,field=history)),depth+1,"Many drag writes capture one snapshot")
+  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(dragged,field=document),dragged_clip,"fade_in",20,0.0),180.0,0.0,"Drag changes current local-time key")
+  let finished: string = encoded(struct.borrow(dragged,field=document))
+  let _ = commands.undo(dragged)
+  let _ = test.eq_str(suite,encoded(struct.borrow(dragged,field=document)),original,"One Undo restores complete original curve")
+  let _ = commands.redo(dragged)
+  let _ = test.eq_str(suite,encoded(struct.borrow(dragged,field=document)),finished,"Redo restores complete drag")
+  let _ = input.pointer_down(dragged,1600.0,1400.0,bar.left+layout.width_of(bar)*0.125,y)
+  let _ = input.pointer_move(dragged,1600.0,1400.0,bar.left+layout.width_of(bar)*0.25,y)
+  let _ = input.key(dragged,widgets.key_escape(),false,false)
+  let _ = test.check(suite,not app.parameter_dragging(dragged),"Escape ends drag")
+  let _ = test.eq_str(suite,encoded(struct.borrow(dragged,field=document)),finished,"Escape restores all pre-drag project bytes")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Fade curves survive project save/open")
+  let where: string = path.join(root,"fade-roundtrip.air")
+  let before_save: string = encoded(struct.borrow(state,field=document))
+  let saved: commands.Result = commands.save_project(state,where)
+  let opened: commands.Result = commands.open_project(state,where)
+  let _ = test.check(suite,saved.ok and opened.ok,"Save and Open succeed")
+  let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before_save,"Roundtrip preserves values, local frames, interpolation and scalar fallbacks")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Invalid values and targets preserve complete transaction")
+  var refusal: u64 = 0
+  loop {if refusal == 8 {break}
+    var refused_state: app.App = fixture(root,refusal != 7)
+    let target: u64 = if refusal == 4 {999999}else{app.current_clip(refused_state)}
+    if refusal == 5 {let _ = commands.seek(refused_state,9)}
+    if refusal == 6 {let _ = commands.seek(refused_state,70)}
+    let value: f64 = if refusal == 0 or refusal == 7 {-1.0}else if refusal == 1 {math.nan()}
+      else if refusal == 2 {math.infinity()}else if refusal == 3 {1.0e39}else{12.0}
+    let before: string = transaction(refused_state)
+    let _ = test.eq_u64(suite,editor.redo_depth(struct.borrow(refused_state,field=history)),2,"Fixture contains two real Redo snapshots")
+    var result: commands.Result = commands.set_parameter(refused_state,chrome.domain_clip(),target,"","fade_in",value)
+    let _ = test.check(suite,not result.ok and text.contains(commands.message(result),"GA_"),"Invalid edit returns a diagnostic code")
+    let _ = test.eq_str(suite,transaction(refused_state),before,"Refusal preserves every document/history/revision/selection field")
+    result=commands.keyframe_parameter(refused_state,chrome.domain_clip(),target,"","fade_in",value)
+    let _ = test.check(suite,not result.ok,"Invalid K is also refused")
+    let _ = test.eq_str(suite,transaction(refused_state),before,"Refused K preserves complete transaction")
+    refusal=refusal+1
+  }
+  let _ = test.done(suite)
+
+  let _ = test.start(suite,"Pointer refusal never starts drag or clears Redo")
+  var outside: app.App = fixture(root,true)
+  let _ = commands.seek(outside,70)
+  let refused_bar: layout.Rect = control(outside,"fade_out",chrome.act_param_set()).area
+  let before_pointer: string = transaction(outside)
+  let pointer_note: string = input.pointer_down(outside,1600.0,1400.0,(refused_bar.left+refused_bar.right)*0.5,(refused_bar.top+refused_bar.bottom)*0.5)
+  let _ = test.check(suite,text.contains(pointer_note,"GA_KEY_RANGE"),"Actual pointer path reports out-of-clip refusal")
+  let _ = test.check(suite,not app.parameter_dragging(outside),"Refused pointer path cannot begin a parameter drag")
+  let _ = test.eq_str(suite,transaction(outside),before_pointer,"Refused pointer leaves two Redo snapshots and full project intact")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Malformed curves, inactive ownership and seconds overflow refuse safely")
+  var malformed: u64 = 0
+  loop {if malformed == 10 {break}
+    var rejected: app.App = fixture(root,true)
+    let rejected_clip: u64 = app.current_clip(rejected)
+    if malformed == 0 {
+      struct.set(array.borrow(struct.borrow(struct.borrow(rejected,field=document),field=keys),0),38,field=interp)
+    } else if malformed == 1 {
+      struct.set(array.borrow(struct.borrow(struct.borrow(rejected,field=document),field=keys),0),math.nan(),field=value)
+    } else if malformed == 2 {
+      struct.set(array.borrow(struct.borrow(struct.borrow(rejected,field=document),field=keys),1),0,field=frame)
+    } else if malformed == 3 {
+      struct.set(array.borrow(struct.borrow(struct.borrow(rejected,field=document),field=keys),0),999999,field=owner)
+    } else if malformed == 4 {
+      let doc: ref<editor.Document> = struct.borrow(rejected,field=document)
+      let clip_slot: u64 = option.unwrap(editor.clip_slot(doc,rejected_clip))
+      struct.set(array.borrow(struct.borrow(doc,field=clips),clip_slot),0,field=start)
+      let _ = editor.seek(doc,0)
+      let sequence_slot: u64 = option.unwrap(editor.sequence_slot(doc,doc.active))
+      struct.set(array.borrow(struct.borrow(doc,field=sequences),sequence_slot),1.0e-310,field=fps)
+    } else if malformed == 6 {
+      // Existing points are sample-distinct, but the prospective frame1 key
+      // collides with frame0 when rounded to destination samples at 192kfps.
+      let doc: ref<editor.Document> = struct.borrow(rejected,field=document)
+      let sequence_slot: u64 = option.unwrap(editor.sequence_slot(doc,doc.active))
+      struct.set(array.borrow(struct.borrow(doc,field=sequences),sequence_slot),192000.0,field=fps)
+      let _ = editor.seek(doc,11)
+    } else if malformed == 7 {
+      // The edited fade-in is valid, but the other envelope cannot be rendered.
+      struct.set(array.borrow(struct.borrow(struct.borrow(rejected,field=document),field=keys),2),38,field=interp)
+    } else if malformed == 8 or malformed == 9 {
+      let doc: ref<editor.Document> = struct.borrow(rejected,field=document)
+      let clip_slot: u64 = option.unwrap(editor.clip_slot(doc,rejected_clip))
+      let start: i64 = if malformed == 8 {9007199254740992}else{9007199254740980}
+      struct.set(array.borrow(struct.borrow(doc,field=clips),clip_slot),start,field=start)
+      let sequence_slot: u64 = option.unwrap(editor.sequence_slot(doc,doc.active))
+      struct.set(array.borrow(struct.borrow(doc,field=sequences),sequence_slot),96000.0,field=fps)
+      let _ = editor.seek(doc,start+2)
+    }
+    if malformed == 5 {
+      let other: u64 = array.get(struct.borrow(struct.borrow(rejected,field=document),field=clips),1).id
+      let _ = editor.set_key(struct.borrow(rejected,field=document),other,"fade_in",0,2.0,curve.linear())
+    }
+    let target: u64 = if malformed == 5 {array.get(struct.borrow(struct.borrow(rejected,field=document),field=clips),1).id}else{rejected_clip}
+    let before: string = transaction(rejected)
+    let invalid: commands.Result = commands.set_parameter(rejected,chrome.domain_clip(),target,"","fade_in",12.0)
+    let _ = test.check(suite,not invalid.ok,"Malformed or stale fader context is refused")
+    let _ = test.eq_str(suite,transaction(rejected),before,"Context refusal preserves every snapshot and revision")
+    let invalid_key: commands.Result = commands.keyframe_parameter(rejected,chrome.domain_clip(),target,"","fade_in",12.0)
+    let _ = test.check(suite,not invalid_key.ok,"Malformed or stale K context is refused")
+    let _ = test.eq_str(suite,transaction(rejected),before,"K context refusal preserves every snapshot and revision")
+    if malformed == 0 {
+      let bad_bar: layout.Rect = control(rejected,"fade_in",chrome.act_param_set()).area
+      let pointer_error: string = input.pointer_down(rejected,1600.0,1400.0,(bad_bar.left+bad_bar.right)*0.5,(bad_bar.top+bad_bar.bottom)*0.5)
+      let _ = test.check(suite,text.contains(pointer_error,"GA_AUDIO_FADE_KEYS"),"Malformed actual fader pointer returns fade error")
+      let _ = test.check(suite,not app.parameter_dragging(rejected),"Malformed curve cannot start a drag")
+      let _ = test.eq_str(suite,transaction(rejected),before,"Malformed pointer preserves Redo and document")
+    }
+    malformed=malformed+1
+  }
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Animated fade context still refuses trim and Split transactionally")
+  var context: app.App = fixture(root,true)
+  let context_clip: u64 = app.current_clip(context)
+  let original_context: string = transaction(context)
+  let head: commands.Result = commands.trim_start(context,context_clip,15)
+  let tail: commands.Result = commands.trim_end(context,context_clip,50)
+  let ripple: commands.Result = commands.ripple_trim_end(context,context_clip,50)
+  let cut: commands.Result = commands.split_at_playhead(context)
+  let _ = test.check(suite,not head.ok and not tail.ok and not ripple.ok and not cut.ok,"Unsupported animated fade edge edits stay refused")
+  let _ = test.eq_str(suite,transaction(context),original_context,"Refused trim/Split preserve complete project, curve and history")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Full fade curves allow replacements and refuse excess insertion before capture")
+  var full: app.App = fixture(root,true)
+  let full_clip: u64 = app.current_clip(full)
+  var points: array<editor.Key> = array.new()
+  let prototype: editor.Key = array.get(struct.borrow(struct.borrow(full,field=document),field=keys),0)
+  var point_index: u64 = 0
+  loop {if point_index == 65536 {break}
+    var point: editor.Key = prototype
+    let local_frame: i64 = cast.sat(point_index*2)
+    struct.set(point,local_frame,field=frame)
+    array.push(points,point)
+    point_index=point_index+1
+  }
+  let _ = struct.replace(struct.borrow(full,field=document),points,field=keys)
+  let _ = commands.seek(full,21)
+  let before_full: string = transaction(full)
+  var excess: commands.Result = commands.set_parameter(full,chrome.domain_clip(),full_clip,"","fade_in",12.0)
+  let _ = test.check(suite,not excess.ok and text.contains(commands.message(excess),"GA_AUDIO_FADE_KEYS"),"A 65537th key is refused with a fade code")
+  let _ = test.eq_str(suite,transaction(full),before_full,"Point-cap refusal preserves complete Redo and document")
+  let _ = commands.seek(full,20)
+  let replacement: commands.Result = commands.set_parameter(full,chrome.domain_clip(),full_clip,"","fade_in",13.0)
+  let _ = test.check(suite,replacement.ok,"Replacing an existing key at the cap remains supported")
+  let _ = test.eq_u64(suite,array.len(struct.borrow(struct.borrow(full,field=document),field=keys)),65536,"Replacement never grows capped curve")
+  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(full,field=document),full_clip,"fade_in",20,0.0),13.0,0.0,"Replacement changes current key value")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Fade-only edit invalidates audio while Undo and picture keys preserve identity")
+  var identity: app.App = fixture(root,true)
+  let identity_clip: u64 = app.current_clip(identity)
+  let before_audio: string = media.audio_signature(struct.borrow(identity,field=document))
+  let _ = test.check(suite,text.contains(before_audio,"FADEKEYS"),"Fixture audio signature contains an actual fade envelope")
+  let fade_only: commands.Result = commands.set_parameter(identity,chrome.domain_clip(),identity_clip,"","fade_in",24.0)
+  let _ = test.check(suite,fade_only.ok,"Single fade-only fader edit succeeds")
+  let after_audio: string = media.audio_signature(struct.borrow(identity,field=document))
+  let _ = test.check(suite,text.contains(after_audio,"FADEKEYS"),"Edited signature remains a valid fade envelope")
+  let _ = test.check(suite,after_audio != before_audio,"Fade edit alone invalidates queued-audio identity")
+  let _ = commands.undo(identity)
+  let _ = test.eq_str(suite,media.audio_signature(struct.borrow(identity,field=document)),before_audio,"Undo restores exact original audio signature")
+  let picture_key: bool = editor.set_key(struct.borrow(identity,field=document),identity_clip,"opacity",10,0.4,curve.linear())
+  let _ = test.check(suite,picture_key,"Independent picture-only key is authored successfully")
+  let _ = test.eq_str(suite,media.audio_signature(struct.borrow(identity,field=document)),before_audio,"Picture-only automation does not invalidate audio identity")
+  let _ = test.done(suite)
+  test.conclude(suite,path.join(root,"fade-controls-tests.json"),10)
+}

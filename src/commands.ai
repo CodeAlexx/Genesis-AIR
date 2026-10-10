@@ -829,12 +829,101 @@ fn chrome_filter_of_kind(state: ref<app.App>, clip: u64, kind: str) -> u64 effec
   0
 }
 
+fn fade_field(name: str) -> bool effects {} {name == "fade_in" or name == "fade_out"}
+
+// Refusal must precede capture, name interning, and a pointer drag's first write.
+// Validate existing curves too: an edit cannot silently repair or extend a
+// malformed envelope which the audio worker will refuse.
+fn fade_problem(state: ref<app.App>, clip: u64, name: str, value: f64, key: bool)
+    -> option<string> effects {alloc} {
+  if not fade_field(name) {return option.none()}
+  let current: u64 = app.current_clip(state)
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let selected: editor.Clip = match editor.clip(doc,clip) {
+    none=>{return option.some(string.copy("[GA_KEY_TARGET] Fade target no longer exists"))},some(found)=>found,
+  }
+  if not math.is_finite(value) or value < 0.0 or value > 3.4028234663852886e38 {
+    return option.some(string.copy("[GA_AUDIO_FADE_KEYS] Fade length must be finite and nonnegative"))
+  }
+  if not key and not filter_keys.has(doc,clip,name) {return option.none()}
+  if clip != current {
+    return option.some(string.copy("[GA_KEY_TARGET] Fade target is not the selected clip"))
+  }
+  let fps: f64 = editor.sequence_fps(doc,selected.owner)
+  if selected.owner != doc.active or not math.is_finite(fps) or fps <= 0.0 or
+      not math.is_finite(3.4028234663852886e38/fps) or not math.is_finite(value/fps) {
+    return option.some(string.copy("[GA_AUDIO_FADE_KEYS] Fade keys require an active clip with a valid frame rate"))
+  }
+  let playhead: i64 = editor.playhead(doc)
+  if playhead < selected.start or playhead >= editor.clip_end(selected) {
+    return option.some(string.copy("[GA_KEY_RANGE] Playhead is outside the keyed fade clip"))
+  }
+  let origin: f64 = math.floor(cast.float(playhead)*48000.0/fps+0.5)
+  let placement: f64 = math.floor(cast.float(selected.start)*48000.0/fps+0.5)
+  let local: i64 = playhead-selected.start
+  let local_frame: f64 = cast.float(local)
+  if not math.is_finite(origin) or origin < 0.0 or origin > 9007199254740991.0 or
+      local_frame > 9007199254740991.0 or selected.start < 0 or selected.start > 9007199254740991 or
+      playhead > 9007199254740991 or not math.is_finite(placement) or placement > 9007199254740991.0 {
+    return option.some(string.copy("[GA_AUDIO_FADE_KEYS] Fade sample position exceeds the supported range"))
+  }
+  var curve_index: u64 = 0
+  loop {if curve_index == 2 {break}
+    let curve_name: string = if curve_index == 0 {string.copy(name)}else{if name == "fade_in" {string.copy("fade_out")}else{string.copy("fade_in")}}
+    var previous_frame: i64 = 0
+    var previous_sample: f64 = 0.0
+    var count: u64 = 0
+    var replaces: bool = false
+    var index: u64 = 0
+    loop {if index >= array.len(struct.borrow(doc,field=keys)) {break}
+      let point: editor.Key = array.get(struct.borrow(doc,field=keys),index)
+      index=index+1
+      if point.clip != clip or editor.name_text(doc,point.param) != curve_name {continue}
+      let absolute_frame: f64 = cast.float(selected.start)+cast.float(point.frame)
+      let sample: f64 = math.floor(absolute_frame*48000.0/fps+0.5)
+      if point.owner != selected.owner or not math.is_finite(point.value) or
+          math.abs(point.value) > 3.4028234663852886e38 or not math.is_finite(point.value/fps) or point.interp >= 38 or
+          math.abs(cast.float(point.frame)) > 9007199254740991.0 or math.abs(absolute_frame) > 9007199254740991.0 or
+          not math.is_finite(sample) or math.abs(sample) > 9007199254740991.0 or count >= 65536 or
+          (count != 0 and (point.frame <= previous_frame or sample <= previous_sample)) or
+          (curve_index == 0 and point.frame != local and sample == origin) {
+        return option.some(string.copy("[GA_AUDIO_FADE_KEYS] Existing fade curve is invalid"))
+      }
+      previous_frame=point.frame
+      previous_sample=sample
+      if point.frame == local {replaces=true}
+      count=count+1
+    }
+    if curve_index == 0 and count == 65536 and not replaces {
+      return option.some(string.copy("[GA_AUDIO_FADE_KEYS] Fade curve has reached the supported key count"))
+    }
+    curve_index=curve_index+1
+  }
+  option.none()
+}
+
 pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
+  match fade_problem(state,clip,name,value,false) {none=>{},some(problem)=>{return refused(problem)},}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   set_clip_field_live(state, clip, name, value)
 }
 
+fn write_fade_key(doc: ref<editor.Document>, clip: u64, name: str, value: f64) -> bool effects {alloc} {
+  let selected: editor.Clip = option.unwrap(editor.clip(doc,clip))
+  let frame: i64 = editor.playhead(doc)-selected.start
+  let interp: u32 = parameter_key_interp(doc,clip,name,frame)
+  editor.set_key(doc,clip,name,frame,value,interp)
+}
+
 fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
+  match fade_problem(state,clip,name,value,false) {none=>{},some(problem)=>{return refused(problem)},}
+  if fade_field(name) and filter_keys.has(struct.borrow(state,field=document),clip,name) {
+    if not write_fade_key(struct.borrow(state,field=document),clip,name,value) {
+      return refused("[GA_AUDIO_FADE_KEYS] Fade length could not be keyed")
+    }
+    app.document_changed(state)
+    return done("fade keyframe set",clip)
+  }
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   if str.eq(name, "gain") {
     if not math.is_finite(value) or value < 0.0 {
@@ -978,6 +1067,9 @@ fn parameter_key_interp(doc: ref<editor.Document>, clip: u64, param: str, frame:
 
 pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str,
                           name: str, value: f64) -> Result effects {alloc} {
+  if domain == 1 and str.len(kind) == 0 and fade_field(name) {
+    match fade_problem(state,target,name,value,true) {none=>{},some(problem)=>{return refused(problem)},}
+  }
   let clip: u64 = app.current_clip(state)
   if clip == 0 { return refused("no clip selected") }
   let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
@@ -1002,11 +1094,12 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
   if str.len(kind) != 0 { string.append(qualified, ".") }
   string.append(qualified, name)
   let audio_gain: bool = domain == 1 and str.eq(str.view(qualified), "gain")
+  let clip_fade: bool = domain == 1 and str.len(kind) == 0 and fade_field(name)
   if audio_gain and (not math.is_finite(value) or value < 0.0) {
     return refused("[GA_AUDIO_GAIN_KEYS] Gain must be finite and nonnegative")
   }
   if not timeline_media.key_supported(str.view(qualified)) or
-     (not audio_gain and editor.track_kind(struct.borrow(state, field=document), selected.track) !=
+     (not audio_gain and not clip_fade and editor.track_kind(struct.borrow(state, field=document), selected.track) !=
        editor.track_video()) or (domain == 1 and str.len(kind) != 0) or
      (domain == 2 and str.len(kind) == 0) or (domain != 1 and domain != 2) {
     return refused("[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet")

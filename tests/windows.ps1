@@ -112,6 +112,9 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_mix_project.py') --worker $worker `
       --binary (Join-Path $Bin 'Genesis-AIR.exe') --report (Join-Path $root 'audio-mix-project.json')
     if ($LASTEXITCODE -ne 0) { throw 'Saved-project overlap audio audition/export acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_fade_project.py') --worker $worker `
+      --binary (Join-Path $Bin 'Genesis-AIR.exe') --report (Join-Path $root 'audio-fade-project.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Saved-project keyed fade audition/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'playback_timing.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $root 'playback-timing-fixture.json')
     if ($LASTEXITCODE -ne 0) { throw 'Audio-timed picture, histogram and timeline acceptance failed.' }
@@ -121,6 +124,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Continuous audio and active cancellation acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-playback.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Clip gain automation PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_fade_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-fade-keys.exe') `
+      --report (Join-Path $root 'audio-fade-keys.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Clip fade automation SDK/PCM acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_continuity.py') --worker $worker --report (Join-Path $root 'audio-continuity.json')
     if ($LASTEXITCODE -ne 0) { throw 'Long fractional-rate audio continuity and resumed-seek acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_reverse.py') --worker $worker --report (Join-Path $root 'reverse-audio-profile.json')
@@ -154,6 +160,9 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'live-paint-tests.json') -Destination (Join-Path $root 'live-paint-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'inspector-tests.json') -Destination (Join-Path $root 'inspector-tests.json') -Force
+  $fadeControls = Join-Path $work 'fade-controls'
+  Write-Host (Invoke-Native 'genesis-fade-controls.exe' @($fadeControls)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $fadeControls 'fade-controls-tests.json') -Destination (Join-Path $root 'fade-controls-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'native-tests.json') -Destination (Join-Path $root 'native-tests.json') -Force
 
   $headless = Invoke-Native 'genesis-headless.exe' @($work, (Join-Path $work 'project.air'), (Join-Path $work 'frame.png'))

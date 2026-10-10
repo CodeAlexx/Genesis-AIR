@@ -89,7 +89,10 @@ The right-hand dock has four tabs:
   expose their own gain, pan, EQ and audio effects. Waveforms also cover embedded video audio.
   Clip gain supports K keyframes on both audio and video lanes. After the first gain key,
   editing the fader writes a key at the playhead; its reading follows the curve when seeking.
-  Gain drags remain one undo step. Track faders and audio-filter parameters remain static.
+  Fade in/out also support K on audio and video lanes. Their readings follow the curve;
+  after the first key, a fader edits the clip-local key at the playhead and preserves its
+  interpolation. Gain and Fade drags remain one undo step. Track faders and audio-filter
+  parameters remain static.
 
 Video-filter faders also show evaluated keys and edit the envelope after the first
 K key. A drag creates or updates one clip-local key in one undo step. Unsupported
@@ -365,6 +368,15 @@ key boundaries and all 38 interpolation modes from the pinned `std.curve` contra
 Automation changes do not rebuild the retained effect graph between chunks; a seek or
 actual key edit invalidates queued sound. Negative curve overshoot clamps to zero.
 Malformed gain envelopes report `GA_AUDIO_GAIN_KEYS` and the next request can recover.
+
+Fade-length keys follow the same destination sample clock. Each curve retains raw
+sequence-frame coordinates and values through interpolation, then converts the length
+to seconds. Audio multiplies the separate fade-in and fade-out ramps, preserving the
+existing scalar fade convention; picture opacity uses the smaller ramp. Source trim,
+speed and reverse affect decoding while the fade curves stay in timeline time. Complete
+surrounding keys remain part of the curve after a seek, including signed and off-body
+context. Negative evaluated lengths clamp to zero. Invalid fade envelopes report
+`GA_AUDIO_FADE_KEYS` before changing decoder state. Fade edits invalidate queued audio.
 
 Playback pipe reads and writes check Stop and superseding requests in bounded 50 ms
 steps. The owning thread terminates a stale worker and removes its partial WAV;
@@ -774,6 +786,33 @@ round-trip project serialization, including embedded audio on a video lane.
 Seven malformed envelopes verify coded refusal and clean recovery. The real-media
 gate also decodes an exported MP4's AAC to measure the keyed 4:1 gain step.
 
+Fade controls have a separate ten-case / 128-check controller gate for evaluated
+readings, audio K buttons, interpolation-preserving writes, one Undo per drag,
+Escape cancellation, save/open and exact refusal state including Redo. A fade-only
+write changes the audio signature; Undo restores it and a picture-only key leaves
+it intact. The 49-case fade PCM gate compares every intended sample in whole WAVs,
+uneven retained chunks and fresh seeks against 2,829,783 SDK sample values, with
+2,350 integer editor checks and 32 coded refusal/recovery requests. It covers all
+38 curve modes, raw signed/off-body context, trim/reverse/2x, fractional placement,
+scalar fallback and the independent product of gain and both fade ramps. Whole-WAV
+allocation uses the ceiling of duration in samples; the gate allows at most one
+extra stereo sample frame and requires it to be silent. Retained chunks use rounded
+absolute endpoints.
+
+Seven independently authored saved-project cases verify every audition and lossless
+master sample; three AAC amplitude windows verify a held fade-length change. Source
+and saved-project bytes stay unchanged. The seek comparisons isolate fade-envelope
+timing from fresh unkeyed decoder output; they do not independently establish source
+phase for every codec. These are sample-processing and controller checks, with no
+new sustained presentation, sound-device timing or physical hearing claim. See the
+[fade acceptance ledger](docs/CONTROL_COVERAGE.md#clip-fade-controls-and-audio-on-2026-10-10).
+
+```powershell
+.\build-windows\native-pro\bin\Release\genesis-fade-controls.exe .\build-windows\fade-controls-fixture
+python tests/audio_fade_keys.py --worker .\genesis-gcompose.exe --client .\build-windows\native-pro\bin\Release\genesis-audio-fade-keys.exe --report .\build-windows\audio-fade-keys.json
+python tests/audio_fade_project.py --binary .\Genesis-AIR.exe --worker .\genesis-gcompose.exe --report .\build-windows\audio-fade-project.json
+```
+
 The Windows gate also checks a lossless fixture with a different RGB color on every
 frame, independently decoded by FFmpeg. Forty-four source/program picture pairs and
 their time stamps, plus 128 actual timeline bitmaps, match the expected native frames.
@@ -1007,9 +1046,7 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.
 - Nested sequence rendering, track/audio-filter automation, animated speed and some filter combinations
-  remain unfinished. Clip fade-length keys currently affect pictures but audio
-  still reads scalar fades; the Fade slider's display/write path also needs to
-  follow existing keys. Imported nested audio can be silently omitted and needs
+  remain unfinished. Imported nested audio can be silently omitted and needs
   an explicit refusal until recursive sequence mixing is implemented.
   Overlapping signed audio now retains float headroom until final output, so
   rearranging clip storage no longer changes levels through intermediate clipping.

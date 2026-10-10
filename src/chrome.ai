@@ -1110,9 +1110,9 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
     none => { },
     some(value) => {
       cursor = param_row(out, area, cursor, domain_clip(), clip, "", "fade_in", "Fade in",
-        cast.float(value.fade_in), 0.0, 240.0, 1.0, clip != 0)
+        math.max(0.0,animated_value(doc,clip,"fade_in",cast.float(value.fade_in))), 0.0, 240.0, 1.0, clip != 0)
       cursor = param_row(out, area, cursor, domain_clip(), clip, "", "fade_out", "Fade out",
-        cast.float(value.fade_out), 0.0, 240.0, 1.0, clip != 0)
+        math.max(0.0,animated_value(doc,clip,"fade_out",cast.float(value.fade_out))), 0.0, 240.0, 1.0, clip != 0)
     },
   }
 

@@ -423,5 +423,68 @@ all other source bytes. MM-AIR's existing media runtime is reused. The sanitized
 
 The separate audit reproduced ignored audio fade keys and omitted nested audio
 on the earlier worker. Those planning paths remain unchanged by this mixer fix.
-Fade controls/audio automation and explicit nested-audio handling are next;
-this checkpoint does not establish complete professional editing acceptance.
+At that headroom checkpoint, fade controls/audio automation and explicit nested-audio
+handling were still open. It does not establish complete professional editing acceptance.
+
+## Clip fade controls and audio on 2026-10-10
+
+Fade in/out now display their evaluated values and support K on audio and video
+lanes. After the first key, a fader writes a clip-local key at the playhead,
+preserving an existing key's interpolation. Unkeyed scalar editing retains its
+prior behavior. New fader writes must be finite and nonnegative; saved signed
+knots remain part of the raw curve, and negative evaluated lengths clamp to zero.
+
+Audio evaluates raw fade lengths in sequence-frame units at each destination
+sample using the 38 pinned SDK curve modes, then converts the result to seconds.
+The separate fade-in and fade-out ramps multiply each other and gain, preserving
+the authored scalar audio convention. Picture opacity uses the smaller fade ramp.
+Surrounding signed and off-body keys remain part of interpolation after a seek.
+Animated fade trims and Split still refuse unsupported context with `GA_TRIM_CONTEXT`
+or `GA_SPLIT_CONTEXT`; this stage does not relax those safeguards.
+
+| Gate | Accepted evidence |
+|---|---|
+| Fade controls | Ten cases / 128 checks in Windows and Linux native fixtures: evaluated readings, an actual audio Fade K click, existing interpolation, signed surrounding knots, clip-local writes, a multi-move pointer drag in one Undo, Escape cancellation, save/open, and complete document/history/Redo/revision/selection preservation on refusal. Invalid values, missing/stale targets, out-of-clip pointer clicks, malformed either-side curves, invalid frame rates, sample collisions and frame/count bounds are checked. A 65,536-key curve permits replacement but refuses insertion. A fade-only write invalidates the audio signature; Undo restores it exactly and picture-only automation preserves it. |
+| Fade PCM and SDK curves | 49 native cases compare every intended stereo sample of whole WAV, uneven retained chunks and fresh seek output against independent ramps and 2,829,783 SDK sample values. All 38 interpolation modes, raw signed Catmull context, off-body knots, source trim/reverse/2x, 59.94 fps placement/seek, overlap, gain multiplication, zero lengths and scalar fallback are covered. There are 2,350 integer checks against `editor.clip_value_at`; PCM differs by at most two signed-16 units. |
+| Fade refusal/recovery | 32 malformed worker requests report the expected fade/gain code. Both token orders agree; zero frames and an overflowing final sample are refused, while the exact final sample bound is accepted. A primed changing source checks retained decoder continuation after invalid requests against an unaffected state and a fresh reference. |
+| Saved-project audition and export | Seven independently authored linear/hold cases check every audition WAV and independently decoded lossless-master sample, with exact intended lengths and finite master values. Three AAC amplitude windows verify the held fade-length change. Sources and authored saved-project bytes remain unchanged. |
+
+Whole-WAV and master allocation use the ceiling of range duration in 48 kHz samples, while
+retained chunk lengths use differences of rounded absolute endpoints. The PCM gate
+allows at most one extra stereo sample frame in the whole WAV and requires that
+frame to be silent. It compares every intended sample rather than trimming a
+larger unexplained length difference.
+
+Fresh-seek fade comparisons use independently requested unkeyed PCM to isolate
+source decoding/resampling/rate/reverse from destination-envelope timing. They
+catch retained decoder drift but do not independently establish the authored
+source phase for every codec. The independently authored constant-source project
+oracle establishes fade/gain amplitude and timing rather than source phase.
+These new gates make no sound-device timing, physical hearing or sustained native
+presentation claim. The earlier native playback measurements retain their own
+build hashes and scope.
+
+The complete combined Windows suite passed, including the 749 control outcomes,
+long fractional-rate/reverse audio, cancellation, project recovery and the new
+fade gates. The broader generated-media workflow also passed. Native UI validation
+with the supplied 4K video verified active stereo meters, Stop, visible frame-zero
+rewind, timeline filmstrip, and scrub picture/time/scopes agreement. At frame 60,
+the keyed Fade controls showed 150/30; a fader edit saved a frame-local value of
+151 with interpolation 2, and Undo restored the value and key count. The original
+project bytes remained unchanged; Genesis was left paused at frame zero.
+
+The installed application has SHA-256
+`7ebfe8eb2ddebf3ad15090e1baeaab37df7d92905e7960f79627f4df5a4f13f5`;
+the installed worker is
+`a98f186ca7fb872c6a4c113510f3b8728d3b85df80149b732adeca8a455edd9b`.
+The canonical worker migration preserved the other six source files and passed
+the maintained overlay reverse check. The 27-entry sanitized acceptance bundle
+[`archive/audio-fade-2026-10-10.tar.gz`](../archive/audio-fade-2026-10-10.tar.gz)
+has SHA-256 `fcd57f506a3d03e366b0baa67ecc87775e073aa819e46c24b98bbe8958b4e5df`.
+The [native UI receipt](../archive/native-audio-fade-ui-2026-10-10.json) records
+the observed values and original-project hashes. The earlier app/worker fail the
+same saved-project fade test with a 7,200-unit PCM error; that baseline is archived.
+MM-AIR's shared media runtime is reused, with no separate Genesis FFmpeg bundle.
+Nested sequence audio can still be silently omitted; explicit refusal and recursive
+mixing remain open. This stage does not establish complete professional editing
+acceptance.

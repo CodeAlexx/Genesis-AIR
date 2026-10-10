@@ -1,0 +1,214 @@
+module genesis.tests.audio_fade_keys
+import std.curve as curve
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.math as math
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+
+fn evaluated(frames: ref<array<i64>>, values: ref<array<f64>>, mode: u32,
+    position: i64, placement: i64, fps: f64) -> f64 effects {} {
+  let first: i64 = media.audio_sample_frame(placement+array.get(frames,0),fps)
+  let last: u64 = array.len(frames)-1
+  if position <= first {return array.get(values,0)}
+  if position >= media.audio_sample_frame(placement+array.get(frames,last),fps) {return array.get(values,last)}
+  var at: u64 = 0
+  loop {
+    let a: i64 = media.audio_sample_frame(placement+array.get(frames,at),fps)
+    let b: i64 = media.audio_sample_frame(placement+array.get(frames,at+1),fps)
+    if position >= b {at=at+1
+      continue}
+    let av: f64 = array.get(values,at)
+    let bv: f64 = array.get(values,at+1)
+    if mode == curve.hold() {return av}
+    let progress: f64 = cast.float(position-a)/cast.float(b-a)
+    match curve.catmull_alpha(mode) {
+      some(alpha)=>{
+        let before: u64 = if at > 0 {at-1}else{at}
+        let after: u64 = if at+2 <= last {at+2}else{at+1}
+        return curve.catmull_rom(cast.float(array.get(frames,before)),array.get(values,before),
+          cast.float(array.get(frames,at)),av,cast.float(array.get(frames,at+1)),bv,
+          cast.float(array.get(frames,after)),array.get(values,after),progress,alpha,curve.catmull_tension(mode))
+      },
+      none=>{let blend: f64 = if mode == curve.smooth() {progress*progress*(3.0-2.0*progress)}
+          else {match curve.ease_factor(mode,progress) {some(value)=>value,none=>progress,}}
+        return av+(bv-av)*blend},
+    }
+  }
+  0.0
+}
+
+fn packed(out: ref<array<byte>>, value: f64) -> unit effects {alloc} {
+  let bits: u64 = cast.bits(value)
+  var shift: u64 = 0
+  loop {if shift == 64 {break}
+    let octet: u8 = cast.wrap(shr(bits,shift))
+    array.push(out,cast.bits(octet))
+    shift=shift+8}
+  ()
+}
+
+fn filename(root: str, variant: u64, suffix: str) -> string effects {alloc} {
+  path.join(root,text.concat("fade-",text.concat(string.from_int(variant),suffix)))
+}
+
+fn pull(peer: ref<link.Link>, root: str, request: u64, generation: u64, plan: ref<media.AudioPlan>)
+    -> bool effects {alloc,fs.write,io.write,net,time} {
+  if not playback.request(root,request,generation,plan) {return false}
+  if not match link.wake(peer,false) {ok(_)=>true,err(_)=>false,} {return false}
+  match link.await_ready(peer,request,time.monotonic_ns()+30000000000) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+    false},}
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) != 4 {return 2}
+  let worker: str = view.get(args,1)
+  let source_path: str = view.get(args,2)
+  let root: str = view.get(args,3)
+  let _ = files.mkdirs(root)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var good: bool = true
+  var request: u64 = 0
+  var metadata: string = string.copy("variant\tmode\tfps\tstart\tplacement\tlength\tin_keys\tout_keys\tgain_keys\tstatic_in\tstatic_out\tinteger_checks\n")
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    good=match link.connect(peer) {ok(_)=>true,err(_)=>false,}
+    var variant: u64 = 0
+    loop {if variant == 49 or not good {break}
+      let fps: f64 = if variant == 40 or variant == 41 or variant == 48 {60000.0/1001.0}else{60.0}
+      let mode: u32 = if variant < 38 {cast.wrap(variant)}else if variant == 47 {curve.smooth_loose()}else{curve.linear()}
+      let placement: i64 = if variant == 40 or variant == 41 {7}else if variant == 48 {3}else{0}
+      let start: i64 = if variant == 41 {13}else if variant == 48 {1}else{0}
+      let length: i64 = 24
+      let in_keys: bool = variant != 44 and variant != 45
+      let out_keys: bool = variant != 43 and variant != 45
+      let gain_keys: bool = variant != 45
+      let static_in: i64 = if variant == 44 or variant == 45 {9}else{0}
+      let static_out: i64 = if variant == 43 or variant == 45 {12}else{0}
+      var frames: array<i64> = [-5,0,5,11,19,30]
+      var incoming: array<f64> = if variant == 46 {[0.0,0.0,0.0,0.0,0.0,0.0]}
+        else if variant == 47 {[-7.0,12.0,-4.0,27.0,8.0,-3.0]}else{[4.0,18.0,0.0,27.0,8.0,16.0]}
+      var outgoing: array<f64> = if variant == 46 {[0.0,0.0,0.0,0.0,0.0,0.0]}
+        else if variant == 47 {[-2.0,17.0,-6.0,0.0,19.0,-4.0]}else{[17.0,2.0,23.0,0.0,19.0,4.0]}
+      var gains: array<f64> = [0.6,1.1,0.25,0.85,0.4,0.7]
+      var doc: editor.Document = editor.document(fps,640,360)
+      let source: u64 = editor.add_source(doc,source_path,"Fade sample oracle",cast.sat(8.0*fps),fps)
+      let _ = editor.describe_source(doc,source,0,0,false,true,44100,2)
+      let track: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+      let clip: u64 = option.unwrap(editor.place(doc,track,source,3,length,placement))
+      let _ = editor.set_track_gain(doc,track,0.5)
+      if variant == 38 {let _ = editor.set_clip_reverse(doc,clip,true)}
+      if variant == 39 {let _ = editor.set_clip_speed(doc,clip,2.0)}
+      var clips: array<u64> = [clip]
+      if variant == 42 {
+        let second_track: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A2")
+        let _ = editor.set_track_gain(doc,second_track,0.25)
+        array.push(clips,option.unwrap(editor.place(doc,second_track,source,3,length,placement)))
+      }
+      let base: string = filename(root,variant,"-base.wav")
+      var base_plan: media.AudioPlan = match media.audio_plan_range(doc,worker,start,placement+length,base) {
+        ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+          good=false
+          break},}
+      good=match media.execute_audio_plan(base_plan) {ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+        false},} and good
+      var seek_base: media.AudioPlan = match media.audio_plan_range(doc,worker,placement+9,placement+length,filename(root,variant,"-seek-base.wav")) {
+        ok(value)=>value,err(_)=>{good=false
+          break},}
+      good=match media.execute_audio_plan(seek_base) {ok(value)=>value,err(_)=>false,} and good
+      let original_signature: string = media.audio_signature(doc)
+      var at_clip: u64 = 0
+      loop {if at_clip >= array.len(clips) {break}
+        let id: u64 = array.get(clips,at_clip)
+        let _ = editor.set_fade_in(doc,id,static_in)
+        let _ = editor.set_fade_out(doc,id,static_out)
+        var at: u64 = 0
+        loop {if at >= array.len(frames) {break}
+          if in_keys {good=editor.set_key(doc,id,"fade_in",array.get(frames,at),array.get(incoming,at),mode) and good}
+          if out_keys {good=editor.set_key(doc,id,"fade_out",array.get(frames,at),array.get(outgoing,at),mode) and good}
+          if gain_keys {good=editor.set_key(doc,id,"gain",array.get(frames,at),array.get(gains,at),curve.linear()) and good}
+          at=at+1}
+        at_clip=at_clip+1}
+      good=original_signature != media.audio_signature(doc) and good
+      let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{good=false
+        break},}
+      let _ = files.write_text(filename(root,variant,".air"),encoded)
+      let signature: string = media.audio_signature(doc)
+      doc=match editor_io.decode(encoded) {ok(value)=>value,err(_)=>{good=false
+        break},}
+      good=signature == media.audio_signature(doc) and good
+      // Integer-frame values independently check the SDK oracle's frame metric
+      // against editor.clip_value_at, including all surrounding signed knots.
+      var frame: i64 = 0
+      var integer_checks: u64 = 0
+      loop {if frame > length {break}
+        if in_keys {good=math.abs(editor.clip_value_at(doc,clip,"fade_in",placement+frame,0.0)-
+          evaluated(frames,incoming,mode,frame,0,48000.0)) < 1.0e-9 and good
+          integer_checks=integer_checks+1}
+        if out_keys {good=math.abs(editor.clip_value_at(doc,clip,"fade_out",placement+frame,0.0)-
+          evaluated(frames,outgoing,mode,frame,0,48000.0)) < 1.0e-9 and good
+          integer_checks=integer_checks+1}
+        frame=frame+1}
+      let whole: string = filename(root,variant,"-whole.wav")
+      good=match media.prepare_audio(doc,worker,start,whole) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+        false},} and good
+      var at: i64 = start
+      var chunk: u64 = 0
+      loop {if at >= placement+length or not good {break}
+        let size: i64 = if chunk == 0 {5}else if chunk == 1 {7}else{9}
+        let end: i64 = if at+size > placement+length {placement+length}else{at+size}
+        var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,end,filename(root,variant,text.concat("-chunk",text.concat(string.from_int(chunk),".wav")))) {
+          ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+            good=false
+            break},}
+        request=request+1
+        good=pull(peer,root,request,variant+1,plan) and good
+        chunk=chunk+1
+        at=end}
+      // One fresh seek followed by another pull exercises retained decoder
+      // positioning independently of the uninterrupted range above.
+      at=placement+9
+      chunk=0
+      loop {if at >= placement+length or not good {break}
+        let end: i64 = if at+7 > placement+length {placement+length}else{at+7}
+        var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,end,filename(root,variant,text.concat("-seek",text.concat(string.from_int(chunk),".wav")))) {
+          ok(value)=>value,err(_)=>{good=false
+            break},}
+        request=request+1
+        good=pull(peer,root,request,100+variant,plan) and good
+        chunk=chunk+1
+        at=end}
+      let count: i64 = media.audio_sample_frame(placement+length,fps)-media.audio_sample_frame(start,fps)
+      var oracle: array<byte> = array.new()
+      var sample: i64 = 0
+      loop {if sample >= count {break}
+        let absolute: i64 = media.audio_sample_frame(start,fps)+sample
+        packed(oracle,if in_keys {evaluated(frames,incoming,mode,absolute,placement,fps)}else{cast.float(static_in)})
+        packed(oracle,if out_keys {evaluated(frames,outgoing,mode,absolute,placement,fps)}else{cast.float(static_out)})
+        packed(oracle,if gain_keys {evaluated(frames,gains,curve.linear(),absolute,placement,fps)}else{1.0})
+        sample=sample+1}
+      let _ = files.write_bytes(filename(root,variant,"-oracle.f64"),array.view(oracle))
+      var fields: array<string> = [string.from_int(variant),string.from_int(mode),string.from_float(fps),string.from_int(start),
+        string.from_int(placement),string.from_int(length),string.from_int(if in_keys {1}else{0}),string.from_int(if out_keys {1}else{0}),
+        string.from_int(if gain_keys {1}else{0}),string.from_int(static_in),string.from_int(static_out),string.from_int(integer_checks)]
+      string.append(metadata,text.join(fields,"\t"))
+      string.append(metadata,"\n")
+      variant=variant+1}
+    let _ = files.write_text(path.join(root,"fade-cases.tsv"),metadata)
+    playback.stop(root)
+    let _ = link.wake(peer,true)
+    good=match tasks.join_next<bool>(jobs,10000) {some(value)=>value,none=>false,} and good
+    link.close_commands(peer)
+  }
+  if good {io.write("Fade keys: 38 SDK curves, trim/reverse/2x, 59.94 placement/seek, overlap, scalar fallback, zero and signed Catmull context planned and rendered\n")
+    0}else{io.write("[GA_TEST_AUDIO_FADE_KEYS] Planning, identity, SDK metric or worker request failed\n")
+    1}
+}
