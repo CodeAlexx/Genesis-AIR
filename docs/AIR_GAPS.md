@@ -960,3 +960,22 @@ Single bottom-clip adjustments now run before upper composition, fixing a grade
 leaking onto an upper clip in ordinary and child sequences. Compound parent
 adjustments continue to operate on the child sum. The direct single-visible
 fast path remains. See the [focused acceptance and remaining scope](CONTROL_COVERAGE.md#clip-content-and-streamed-direct-waveforms-on-2026-10-10).
+
+## Native decode reserve and locked edits
+
+The next shared application changes protect locked Lift, Ripple Delete and track
+removal before capturing history. Refusals preserve project bytes and Undo/Redo
+branches. Windows, Linux and interpreter safety checks pass seven cases/29 checks.
+
+Native preview experiments add individual IDs to bounded consecutive decode
+windows and retain complete packets in order. Program/Source pixels keep their
+own completed content identities; initial PCM waits for actual decoded future
+pictures and a presented origin. Device samples remain authoritative for due
+release. Stop, seeks, content/media changes and errors retire pending ownership.
+
+The three-picture native experiment passed its capacity invariant and separate
+1080p control checks, but failed the unchanged 4K lateness gate. The next private
+experiment increases actual preparation to eight total credits, keeps worker
+windows and packet FIFO at two, and requests consecutive refill independently of
+the old adaptive 50 ms lead horizon. Its native acceptance remains pending. See
+the [exact experiments and limitations](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md).

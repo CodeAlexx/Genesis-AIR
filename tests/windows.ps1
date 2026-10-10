@@ -54,6 +54,13 @@ try {
   Set-Content -LiteralPath (Join-Path $root 'ui-clipboard-windows.log') -Value $clipboardResult
   Write-Host (Invoke-Native 'genesis-clip-clipboard.exe' @((Join-Path $work 'clip-clipboard'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'clip-clipboard/clip-clipboard-tests.json') -Destination (Join-Path $root 'clip-clipboard-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-editing-safety.exe' @((Join-Path $work 'editing-safety'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'editing-safety/editing-safety-tests.json') -Destination (Join-Path $root 'editing-safety-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-picture-clock.exe' @((Join-Path $root 'picture-clock-tests.json'))).TrimEnd()
+  Write-Host (Invoke-Native 'genesis-preview-batch.exe' @((Join-Path $work 'preview-batch'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'preview-batch/preview-batch-tests.json') -Destination (Join-Path $root 'preview-batch-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-preview-fifo.exe' @((Join-Path $work 'preview-fifo'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'preview-fifo/preview-fifo-tests.json') -Destination (Join-Path $root 'preview-fifo-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-timeline-track-scroll.exe' @((Join-Path $work 'track-scroll'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'track-scroll/timeline-track-scroll-tests.json') -Destination (Join-Path $root 'timeline-track-scroll-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-waveform-view.exe' @((Join-Path $work 'waveform-view'))).TrimEnd()

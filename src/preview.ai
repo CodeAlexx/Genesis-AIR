@@ -399,9 +399,55 @@ fn number(root: str, name: str) -> u64 effects {alloc, fs.read} {
 // Connection-wide failures have no retired picture identity to discard.
 pub fn current_failure(transport: ref<link.Link>, request_current: bool) -> option<string> effects {alloc} {
   let detail: str = str.view(struct.borrow(transport,field=error))
-  if str.len(detail) == 0 {return option.none()}
+  if str.len(detail) == 0 {
+    if transport.closed {return option.some(string.copy("[GA_PREVIEW_CHANNEL] Preview producer is closed"))}
+    return option.none()}
   if not transport.closed and transport.error_generation != 0 and not request_current {return option.none()}
   option.some(string.copy(detail))
+}
+// A broken event socket cannot carry its own fatal error. Keep the original
+// request/snapshot beside the mailbox; only a closed producer can promote that
+// terminal cause across retired document epochs. Ordinary cancellations never
+// write this record and healthy Links never consume it.
+fn terminal_failure(root:str,generation:u64,snapshot:u64,detail:str) -> unit
+    effects {alloc,fs.meta,fs.read,fs.write} {
+  if tasks.requested_at(path.join(root,"stop")) {return ()}
+  var data:string=text.concat("1\t",text.concat(string.from_int(generation),
+    text.concat("\t",string.from_int(snapshot))))
+  string.append(data,"\n")
+  string.append(data,detail)
+  let _=publish_checked(root,"producer-failure.tsv",data)
+  ()
+}
+pub fn producer_failure(root:str,generation:u64,snapshot:u64) -> option<string>
+    effects {alloc,fs.read} {
+  let data:string=match files.read_text(path.join(root,"producer-failure.tsv")) {
+    ok(value)=>value,err(_)=>{return option.none()},}
+  let newline:u64=match str.find(data,"\n") {some(value)=>value,none=>{return option.none()},}
+  var fields:array<string> = text.split(str.slice(data,0,newline),"\t")
+  if array.len(fields)!=3 or not str.eq(array.borrow(fields,0),"1") {return option.none()}
+  let id:u64=match text.parse_u64(array.borrow(fields,1)) {some(value)=>value,none=>{return option.none()},}
+  let base:u64=match text.parse_u64(array.borrow(fields,2)) {some(value)=>value,none=>{return option.none()},}
+  if id!=generation or base!=snapshot or newline+1>=str.len(data) {return option.none()}
+  option.some(string.copy(str.slice(data,newline+1,str.len(data))))
+}
+pub fn poll_failure(root:str,transport:ref<link.Link>) -> unit effects {alloc,fs.read} {
+  if not transport.closed {return ()}
+  let data:string=match files.read_text(path.join(root,"producer-failure.tsv")) {
+    ok(value)=>value,err(_)=>{return ()},}
+  let newline:u64=match str.find(data,"\n") {some(value)=>value,none=>{return ()},}
+  var fields:array<string> = text.split(str.slice(data,0,newline),"\t")
+  if array.len(fields)!=3 or not str.eq(array.borrow(fields,0),"1") {return ()}
+  let id:u64=match text.parse_u64(array.borrow(fields,1)) {some(value)=>value,none=>{return ()},}
+  let base:u64=match text.parse_u64(array.borrow(fields,2)) {some(value)=>value,none=>{return ()},}
+  let detail:string=match producer_failure(root,id,base) {some(value)=>value,none=>{return ()},}
+  var message:string=text.concat("[GA_PREVIEW_CHANNEL] Producer ended at request ",string.from_int(id))
+  string.append(message,text.concat(" snapshot ",string.from_int(base)))
+  string.append(message,": ")
+  string.append(message,detail)
+  let _=struct.replace(transport,message,field=error)
+  struct.set(transport,0,field=error_generation)
+  ()
 }
 // request.id is committed before the command wake. Check that authoritative
 // marker after decoding without consuming the next queued frame command.
@@ -412,6 +458,7 @@ pub fn fail_current(peer: ref<link.Peer>, root: str, generation: u64, detail: st
   true
 }
 pub fn reset(root: str) -> unit effects {alloc, fs.write} {
+  publish(root,"producer-failure.tsv","")
   let _ = files.remove(str.view(path.join(root, "stop")))
   publish(root, "request.id", "0")
   publish(root, "ready.id", "0")
@@ -502,6 +549,160 @@ pub fn request_frame(state: ref<app.App>, root: str, transport: ref<link.Link>, 
   match link.frame(transport,generation,transport.snapshot_generation,program_frame,source_frame,state.media_revision) {
     ok(_)=>true,err(_)=>false,
   }
+}
+// A GUI-issued window decodes at most two frames within the caller's eight-slot
+// owned-plus-reserved budget. Its final ID is the retirement marker; each
+// completion keeps its own ID and actual frame time. The Link FIFO owns at most
+// two completed packets until the caller transfers them into its picture queue.
+pub type FrameWindow = struct {first:u64,last:u64,snapshot:u64,program:i64,source:i64,
+  revision:u64,source_playing:bool}
+pub fn frame_window(command: str) -> result<FrameWindow,str> effects {alloc} {
+  var fields: array<string> = text.split(command,"\t")
+  if array.len(fields) != 7 {return result.err("[GA_PREVIEW_REQUEST] Invalid decode window")}
+  let first: u64 = match text.parse_u64(array.borrow(fields,0)) {some(value)=>value,none=>0,}
+  let last: u64 = match text.parse_u64(array.borrow(fields,1)) {some(value)=>value,none=>0,}
+  let snapshot: u64 = match text.parse_u64(array.borrow(fields,2)) {some(value)=>value,none=>0,}
+  let program: i64 = match text.parse_i64(array.borrow(fields,3)) {some(value)=>value,none=>-1,}
+  let source: i64 = match text.parse_i64(array.borrow(fields,4)) {some(value)=>value,none=>-1,}
+  let revision: u64 = match text.parse_u64(array.borrow(fields,5)) {some(value)=>value,none=>{
+    return result.err("[GA_PREVIEW_REQUEST] Invalid window media revision")},}
+  let mode: u64 = match text.parse_u64(array.borrow(fields,6)) {some(value)=>value,none=>2,}
+  if first == 0 or last < first or last-first > 1 or snapshot == 0 or snapshot > first or
+      program < 0 or source < 0 or mode > 1 {
+    return result.err("[GA_PREVIEW_REQUEST] Invalid decode window bounds")
+  }
+  result.ok(FrameWindow {first:first,last:last,snapshot:snapshot,program:program,source:source,
+    revision:revision,source_playing:mode==1})
+}
+pub fn window_positions(document: ref<editor.Document>, program: i64, source: i64,
+    count: u64, source_playing: bool) -> bool effects {} {
+  if count == 0 or count > 2 or program < 0 or source < 0 {return false}
+  let extra: i64 = cast.sat(count-1)
+  if (source_playing and source > 9223372036854775807-extra) or
+      (not source_playing and program > 9223372036854775807-extra) {return false}
+  if count == 2 {
+    let monitor_playing: bool = struct.get(struct.borrow(document,field=monitor),field=playing)
+    if source_playing {if not monitor_playing or editor.playing(document) {return false}}
+    else if not editor.playing(document) or monitor_playing {return false}
+  }
+  // Use the same bounds as seek/seek_monitor without copying a full project for
+  // each moving request. A clamped frame cannot acquire an exact request stamp.
+  let total_program: i64 = editor.sequence_duration(document,document.active)
+  let total_source: i64 = editor.source_frames(document,document.monitor_source)
+  let last_program: i64 = if total_program > 0 {total_program-1}else{0}
+  let last_source: i64 = if total_source > 0 {total_source-1}else{0}
+  let end_program: i64 = if source_playing {program}else{program+extra}
+  let end_source: i64 = if source_playing {source+extra}else{source}
+  end_program <= last_program and end_source <= last_source
+}
+fn request_problem(transport:ref<link.Link>,detail:str) -> bool effects {alloc} {
+  // A current publication fault has not acquired a queue stamp. Retired decode
+  // errors must not masquerade as its cause; a terminal producer cause survives.
+  if not transport.closed or str.len(struct.borrow(transport,field=error))==0 {
+    let _=struct.replace(transport,string.copy(detail),field=error)
+  }
+  struct.set(transport,0,field=error_generation)
+  false
+}
+pub fn request_window(state: ref<app.App>, root: str, transport: ref<link.Link>, first_id: u64,
+    count: u64, content: str, program_frame: i64, source_frame: i64, width: u32, height: u32,
+    source_playing: bool) -> bool effects {alloc,fs.read,fs.write,net,time} {
+  if transport.closed {poll_failure(root,transport)
+    return request_problem(transport,"[GA_PREVIEW_CHANNEL] Preview command lane is closed")}
+  if not transport.pixel_stream or first_id == 0 or count == 0 or count > 2 or
+      first_id > 18446744073709551615-(count-1) or width == 0 or height == 0 or width > 1280 or height > 720 {
+    return request_problem(transport,"[GA_PREVIEW_REQUEST] Invalid decode-window identity or dimensions")}
+  let document: ref<editor.Document> = struct.borrow(state,field=document)
+  if not window_positions(document,program_frame,source_frame,count,source_playing) {
+    return request_problem(transport,"[GA_PREVIEW_REQUEST] Decode window exceeds its transport bounds")}
+  let last_id: u64 = first_id+count-1
+  var key: string = string.copy(content)
+  var fields: array<string> = [string.from_int(document.monitor_source),
+    string.from_int(if editor.playing(document) {1}else{0}),
+    string.from_int(if struct.get(struct.borrow(document,field=monitor),field=playing) {1}else{0}),
+    string.from_int(state.media_revision),string.from_int(width),string.from_int(height)]
+  string.append(key,"\n")
+  string.append(key,text.join(fields,"\t"))
+  if transport.snapshot_generation == 0 or not str.eq(key,struct.borrow(transport,field=snapshot_key)) {
+    var snapshot: editor.Document = editor.copy_document(document)
+    let _ = editor.seek(snapshot,program_frame)
+    let _ = editor.seek_monitor(snapshot,source_frame)
+    let encoded: string = match editor_io.encode(snapshot) {ok(value)=>value,err(_)=>{
+      return request_problem(transport,"[GA_PREVIEW_REQUEST] Cannot encode the preview snapshot")},}
+    if not request_revision(root,encoded,first_id,0,2.4,450,width,height,state.media_revision) {
+      return request_problem(transport,"[GA_PREVIEW_REQUEST] Cannot publish the preview snapshot")}
+    struct.set(transport,first_id,field=snapshot_generation)
+    let _ = struct.replace(transport,key,field=snapshot_key)
+  }
+  if not publish_checked(root,"request.id",string.from_int(last_id)) {
+    return request_problem(transport,"[GA_PREVIEW_REQUEST] Cannot publish the preview retirement marker")}
+  match link.window_frame(transport,first_id,last_id,transport.snapshot_generation,program_frame,source_frame,
+      state.media_revision,source_playing) {ok(_)=>true,err(problem)=>request_problem(transport,problem),}
+}
+// Retire live work before a synchronous picker holds the event consumer. This
+// cancellation-only ID carries no decode or wake; the next real request installs
+// a fresh snapshot. A failed marker write preserves all owned transport state.
+pub fn retire_request(root:str,transport:ref<link.Link>,id:u64) -> bool effects {alloc,fs.write} {
+  if id == 0 or id <= transport.ready or id <= transport.window_last or
+      id <= transport.retired_through or id <= transport.snapshot_generation {return false}
+  if not publish_checked(root,"request.id",string.from_int(id)) {return false}
+  link.retire_window(transport)
+  struct.set(transport,id,field=retired_through)
+  struct.set(transport,0,field=snapshot_generation)
+  let _=struct.replace(transport,string.new(),field=snapshot_key)
+  true
+}
+fn window_current(root: str, last: u64) -> bool effects {alloc,fs.meta,fs.read} {
+  not tasks.requested_at(path.join(root,"stop")) and number(root,"request.id") == last
+}
+fn fail_window(peer: ref<link.Peer>, root: str, last: u64, failed: u64, detail: str)
+    -> unit effects {alloc,fs.meta,fs.read,net,time} {
+  if window_current(root,last) {link.fail(peer,failed,detail)}
+  ()
+}
+fn render_window(state: ref<app.App>, peer: ref<link.Peer>, root: str, window: FrameWindow,
+    width: u32, height: u32, profile: bool, request_ns: u64, held_source: ref<string>)
+    -> result<bool,string> effects {alloc,fs.meta,fs.read,fs.write,process,net,time} {
+  var offset: u64 = 0
+  loop {if offset > window.last-window.first {break}
+    if not window_current(root,window.last) {return result.ok(false)}
+    let id: u64 = window.first+offset
+    let delta: i64 = cast.sat(offset)
+    let program_frame: i64 = if window.source_playing {window.program}else{window.program+delta}
+    let source_frame: i64 = if window.source_playing {window.source+delta}else{window.source}
+    let _ = editor.seek(struct.borrow(state,field=document),program_frame)
+    let _ = editor.seek_monitor(struct.borrow(state,field=document),source_frame)
+    let _ = struct.replace(struct.borrow(state,field=provider),string.new(),field=last_error)
+    var measured: Images = images_with_source(state,width,height,profile,str.view(held_source))
+    if not window_current(root,window.last) {return result.ok(false)}
+    let problem: string = provider.last_error(struct.borrow(state,field=provider))
+    if str.len(problem) != 0 {fail_window(peer,root,window.last,id,problem)
+      return result.ok(false)}
+    if measured.program_frame != program_frame or measured.source_frame != source_frame {
+      fail_window(peer,root,window.last,id,"[GA_PREVIEW_REQUEST] Decode window frame was clamped")
+      return result.ok(false)
+    }
+    var rendered: array<draw.Surface> = struct.replace(measured,array.new(),field=pictures)
+    var program: draw.Surface = match array.pop(rendered) {some(value)=>value,none=>draw.empty_surface(),}
+    var source: draw.Surface = match array.pop(rendered) {some(value)=>value,none=>draw.empty_surface(),}
+    let begin: u64 = time.monotonic_ns()
+    let timing: link.FrameTiming = link.FrameTiming {generation:id,request_ns:request_ns,source_ns:measured.source_ns,
+      plan_ns:measured.plan_ns,program_ns:measured.program_ns,publish_ns:0,coalesce_ns:peer.last_drain_ns}
+    match link.notify_pixels_window(peer,root,window.last,source,program,"",measured.source_held,timing,
+        link.FramePosition {source_frame:source_frame,program_frame:program_frame,revision:window.revision},begin) {
+      ok(sent)=>{if not sent {return result.ok(false)}},
+      err(problem)=>{
+        // A superseding marker may retire this window while a blocked send
+        // returns. That old send error must not close the current producer.
+        fail_window(peer,root,window.last,id,problem)
+        if not window_current(root,window.last) and not struct.get(struct.borrow(peer,field=events),field=failed) {
+          return result.ok(false)}
+        return result.err(problem)},
+    }
+    let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))
+    offset=offset+1
+  }
+  result.ok(true)
 }
 pub fn stop(root: str) -> unit effects {alloc, fs.write} { let _ = files.write_text(str.view(path.join(root, "stop")), "stop")
  () }
@@ -830,7 +1031,9 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
   var held_source: string = string.new()
   loop {
     if tasks.requested_at(str.view(path.join(str.view(root), "stop"))) { break }
-    if not link.next(wake) { break }
+    match link.next_checked(wake) {ok(active)=>{if not active {break}},err(problem)=>{
+      terminal_failure(str.view(root),seen,snapshot_generation,problem)
+      break},}
     let request_begin: u64 = if owned.profile {time.monotonic_ns()}else{0}
     let id: u64 = number(str.view(root), "request.id")
     if id == 0 or id == seen { continue }
@@ -838,8 +1041,23 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     var program_frame: i64 = 0
     var source_frame: i64 = 0
     var tick_revision: u64 = 0
-    let tick: bool = wake.command_kind == 8
-    if tick {
+    let batch: bool = wake.command_kind == 10
+    var window: FrameWindow = FrameWindow {first:id,last:id,snapshot:id,program:0,source:0,revision:0,source_playing:false}
+    let tick: bool = wake.command_kind == 8 or batch
+    if batch {
+      if not owned.pixel_stream or owned.strips_only {
+        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Decode windows require a pixel stream")
+        continue
+      }
+      window=match frame_window(struct.borrow(wake,field=command)) {ok(value)=>value,err(problem)=>{
+        let _ = fail_current(wake,str.view(root),id,problem)
+        continue},}
+      if window.last != id {continue}
+      base=window.snapshot
+      program_frame=window.program
+      source_frame=window.source
+      tick_revision=window.revision
+    } else if tick {
       var fields: array<string> = text.split(struct.borrow(wake,field=command),"\t")
       if array.len(fields) != 5 {
         let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame command")
@@ -877,6 +1095,9 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
           continue }, }
       if number(str.view(root), "request.id") != id { continue }
       let _ = struct.replace(state, document, field=document)
+      // Sent Source bytes may still be unreceived when an epoch is retired.
+      // Only moving windows within this immutable snapshot may hold that key.
+      let _ = ref.swap(held_source,string.new())
       snapshot_generation=base
       let _ = ref.swap(snapshot_geometry,string.copy(geometry))
     }
@@ -890,6 +1111,11 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     if tick {
       if tick_revision != revision {
         let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Frame media revision differs from its snapshot")
+        continue
+      }
+      if batch and not window_positions(struct.borrow(state,field=document),program_frame,source_frame,
+          window.last-window.first+1,window.source_playing) {
+        fail_window(wake,str.view(root),id,window.first,"[GA_PREVIEW_REQUEST] Decode window exceeds its transport bounds")
         continue
       }
       let _ = editor.seek(struct.borrow(state,field=document),program_frame)
@@ -909,6 +1135,14 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       continue
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
+    if batch {
+      match render_window(state,wake,str.view(root),window,width,height,owned.profile,request_ns,held_source) {
+        ok(_)=>{},err(problem)=>{
+          terminal_failure(str.view(root),window.last,window.snapshot,problem)
+          break},
+      }
+      continue
+    }
     if owned.strips_only {
       let viewport: StripGeometry = match strip_geometry(str.view(geometry)) {
         err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
@@ -962,7 +1196,8 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
           link.FramePosition {source_frame:measured.source_frame,program_frame:measured.program_frame,revision:revision},publish_begin) {
         ok(delivered)=>{if not delivered {continue}
           let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))},
-        err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
+        err(problem)=>{terminal_failure(str.view(root),id,base,problem)
+          let _ = fail_current(wake,str.view(root),id,str.view(problem))
           break},
       }
     } else {

@@ -1,5 +1,6 @@
 // Decode ahead of the heard playhead, then release complete pictures when due.
-// The worker coalesces its single latest mailbox; at most two owned pictures wait.
+// Legacy single-frame requests retain two slots; native decode windows own eight
+// complete-or-reserved slots and at most two consecutive frames per request.
 module genesis.picture_queue
 import std.draw as draw
 import std.editor as editor
@@ -14,17 +15,17 @@ pub type Frame = struct {
   source: draw.Surface, program: draw.Surface,
   position: link.FramePosition, held_source: bool
 }
-type Request = struct {id:u64,at:u64}
+type Request = struct {id:u64,at:u64,frame:i64}
 pub type Queue = struct {
   frames: array<Frame>, in_flight: u64, request_ns: u64,
   last_requested: i64, latency_ns: u64, key: string, epoch: u64,
   playing: bool, source: bool, width: u32, height: u32, initialized: bool,
-  requests:array<Request>,first_id:u64,received:u64
+  requests:array<Request>,first_id:u64,received:u64,window_next:u64,window_last:u64,window_mode:bool
 }
 pub fn queue() -> Queue effects {alloc} {
   Queue {frames:array.new(),in_flight:0,request_ns:0,last_requested:-1,
     latency_ns:16000000,key:string.new(),epoch:0,playing:false,source:false,
-    width:0,height:0,initialized:false,requests:array.new(),first_id:0,received:0}
+    width:0,height:0,initialized:false,requests:array.new(),first_id:0,received:0,window_next:0,window_last:0,window_mode:false}
 }
 // During playback the moving transport is excluded from content identity. A
 // parked monitor, paused seek, edit, media revision or audio restart invalidates
@@ -74,6 +75,9 @@ pub fn configure(queue: ref<Queue>, key: str, epoch: u64, playing: bool,
   struct.set(queue,0,field=first_id)
   struct.set(queue,0,field=received)
   struct.set(queue,0,field=in_flight)
+  struct.set(queue,0,field=window_next)
+  struct.set(queue,0,field=window_last)
+  struct.set(queue,false,field=window_mode)
   struct.set(queue,-1,field=last_requested)
   let _ = struct.replace(queue,string.copy(key),field=key)
   struct.set(queue,epoch,field=epoch)
@@ -91,9 +95,47 @@ pub fn pending_frame(queue: ref<Queue>, index: u64) -> i64 effects {} {
   let position: link.FramePosition = struct.get(array.borrow(frames,index),field=position)
   if queue.source {position.source_frame}else{position.program_frame}
 }
+// The first PCM block starts the authored device clock. Before that queue,
+// require real consecutive owned pictures after the already displayed origin.
+// Requests and predicted future times are not readiness; short tails require
+// only the actual remaining pictures. This never consumes or releases pixels.
+pub fn primed(queue: ref<Queue>, origin: i64, last: i64, source: bool,
+    epoch: u64, shown: i64) -> bool effects {} {
+  if not queue.initialized or not queue.playing or queue.source != source or
+      queue.epoch != epoch or shown != origin or origin < 0 or last < origin {
+    return false
+  }
+  let remaining: i64 = last-origin
+  if remaining == 0 {return true}
+  if pending_frame(queue,0) != origin+1 {return false}
+  if remaining == 1 {return true}
+  // last-origin >= 2 proves this addition cannot overflow the valid last.
+  pending_frame(queue,1) == origin+2
+}
+// Native windows require all eight actual consecutive futures before PCM starts.
+// Reservations/FIFO headers are not pixels. Legacy primed() above stays two-slot.
+pub fn window_primed(queue:ref<Queue>,origin:i64,last:i64,source:bool,
+    epoch:u64,shown:i64) -> bool effects {} {
+  if not queue.initialized or not queue.playing or queue.source != source or
+      queue.epoch != epoch or shown != origin or origin < 0 or last < origin {
+    return false
+  }
+  let remaining:i64=last-origin
+  let required:u64=if remaining>=8 {8}else{cast.sat(remaining)}
+  var at:u64=0
+  loop {if at>=required {break}
+    // required<=last-origin proves the authored addition cannot overflow.
+    if pending_frame(queue,at) != origin+cast.wrap(at)+1 {return false}
+    at=at+1}
+  true
+}
 pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
     -> option<i64> effects {} {
-  if array.len(struct.borrow(queue,field=frames)) >= 2 {return option.none()}
+  target_capacity(queue,wanted,last,fps,shown,2)
+}
+fn target_capacity(queue:ref<Queue>,wanted:i64,last:i64,fps:f64,shown:i64,capacity:u64)
+    -> option<i64> effects {} {
+  if array.len(struct.borrow(queue,field=frames)) >= capacity {return option.none()}
   if not queue.playing {
     return if queue.last_requested == wanted {option.none()}else{option.some(wanted)}
   }
@@ -101,17 +143,23 @@ pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
   // Keep one future decode reserved until its matching completion. Replacing
   // on-time requests in the latest mailbox loses consecutive pictures even
   // when the decoder and presenter each fit within one frame's budget.
-  // An already late request may still be superseded by the bounded catch-up
-  // target below; seeks, Stop and content changes retire the whole reservation.
+  // A decode that has fallen behind the actual heard time may be superseded.
+  // Holding past requests through two frames of lateness prevents preparation
+  // from catching up after a stall. Seeks, Stop and edits retire the reservation.
   if queue.in_flight != 0 and queue.last_requested >= wanted {return option.none()}
-  if queue.last_requested < 0 and shown != wanted {return option.some(wanted)}
+  if queue.last_requested < 0 {
+    // Play already owns its paused frame. Prepare the immediately following
+    // sample rather than decoding that same frame again or skipping frame one.
+    if shown != wanted {return option.some(wanted)}
+    return if wanted < last {option.some(wanted+1)}else{option.none()}
+  }
   // Bound preparation to 50 ms even after a cold decoder or slow disk. A slow
   // render skips intermediate frames instead of accumulating an unbounded lag.
   // Leave room for the event wait and retained CPU paint. A matching completion
   // permits the next decode before painting, overlapping the native presenter.
   let lead_ns: u64 = if queue.latency_ns + 16000000 > 50000000 {50000000}else{queue.latency_ns + 16000000}
   let lead: i64 = cast.sat(math.ceil(cast.float(lead_ns)*fps/1000000000.0))
-  let next: i64 = wanted + if lead > 0 {lead}else{1}
+  let next: i64 = add.sat(wanted,if lead > 0 {lead}else{1})
   let bounded: i64 = if next > last {last}else{next}
   if bounded <= queue.last_requested {option.none()}else{
     // A changing preparation estimate must not skip a future picture that is
@@ -119,12 +167,80 @@ pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
     // coalesce to the current target only when the renderer has fallen behind.
     if queue.last_requested >= wanted {option.some(queue.last_requested+1)}
     else if queue.last_requested >= 0 and wanted-queue.last_requested == 1 {
-      // A slightly late decode must not make us skip the current heard sample
-      // and several still-future pictures. Recover this sample, then prepare
-      // consecutively again. Larger lag keeps the bounded latest-target path.
+      // One-frame lateness recovers the exact current heard sample. A larger
+      // backlog reseeds bounded future preparation instead of chasing history.
       option.some(wanted)
     }else{option.some(bounded)}
   }
+}
+// The native window admits at most eight complete-or-reserved frames. Transport
+// FIFO packets occupy those reservations; they are never extra picture credit.
+pub fn reserved(queue:ref<Queue>) -> u64 effects {} {
+  if queue.window_next == 0 {0}else{queue.window_last-queue.window_next+1}
+}
+pub fn credit(queue:ref<Queue>) -> u64 effects {} {
+  let used:u64=array.len(struct.borrow(queue,field=frames))+reserved(queue)
+  if used >= 8 {0}else{8-used}
+}
+pub fn window_target(queue:ref<Queue>,wanted:i64,last:i64,fps:f64,shown:i64)
+    -> option<i64> effects {} {
+  // A bounded window is ordered work. Never replace its remaining packet while
+  // the decoder or FIFO owns it, even if the real device clock has advanced.
+  if queue.window_next != 0 or queue.in_flight != 0 or credit(queue)==0 {return option.none()}
+  if wanted<0 or last<wanted or not math.is_finite(fps) or fps<=0.0 {return option.none()}
+  if not queue.playing {
+    return if queue.last_requested==wanted {option.none()}else{option.some(wanted)}
+  }
+  if queue.last_requested>=last {return option.none()}
+  if queue.last_requested<0 {
+    if shown!=wanted {return option.some(wanted)}
+    return if wanted<last {option.some(wanted+1)}else{option.none()}
+  }
+  // Fill fixed actual credit independently of legacy adaptive time prediction.
+  // On-time work is consecutive even beyond 50ms. If the reserve was exhausted,
+  // recover the actual heard frame, not a speculative future that leaves a gap.
+  if queue.last_requested<wanted {option.some(wanted)}
+  else{option.some(queue.last_requested+1)}
+}
+pub fn window_count(queue:ref<Queue>,first:i64,last:i64) -> u64 effects {} {
+  if first < 0 or last < first or queue.window_next != 0 or queue.in_flight != 0 {return 0}
+  let free:u64=credit(queue)
+  if not queue.playing or last==first {if free>0 {1}else{0}}
+  else{if free>=2 {2}else{free}}
+}
+pub fn requested_window(queue:ref<Queue>,first_id:u64,count:u64,first:i64,last:i64,now:u64)
+    -> bool effects {alloc} {
+  if not queue.initialized or first_id==0 or first_id<=queue.received or count==0 or count>2 or count>window_count(queue,first,last) or
+      first_id>18446744073709551615-(count-1) or (count==2 and first==last) {return false}
+  struct.set(queue,true,field=window_mode)
+  struct.set(queue,first_id,field=window_next)
+  struct.set(queue,first_id+count-1,field=window_last)
+  var at:u64=0
+  loop {if at>=count {break}
+    requested(queue,first_id+at,first+cast.wrap(at),now)
+    at=at+1}
+  true
+}
+// Wake no later than the first owned picture's actual 48 kHz due boundary.
+// This controls waiting only: take_due still admits pixels using the observed
+// device frame, never a predicted clock. Invalid/empty clocks retain fallback.
+pub fn next_due_wait(queue: ref<Queue>, wanted: i64, current_samples: u64,
+    origin: i64, fps: f64, default_ms: u32) -> u32 effects {} {
+  if not queue.playing {return default_ms}
+  let at: i64 = pending_frame(queue,0)
+  if at < 0 {return default_ms}
+  if at <= wanted {return 0}
+  if not math.is_finite(fps) or fps <= 0.0 or at < origin or
+      math.abs(cast.float(at)) > 9007199254740991.0 or
+      math.abs(cast.float(origin)) > 9007199254740991.0 or
+      current_samples > 9007199254740991 {return default_ms}
+  let boundary: f64 = math.ceil((cast.float(at)-cast.float(origin))*48000.0/fps)
+  if not math.is_finite(boundary) or boundary < 0.0 or
+      boundary > 9007199254740991.0 {return default_ms}
+  let sample: u64 = cast.sat(boundary)
+  if sample <= current_samples {return 0}
+  let ms: u64 = (sample-current_samples)/48
+  if ms >= cast.sat(default_ms) {default_ms}else{cast.sat(ms)}
 }
 pub fn requested(queue: ref<Queue>, id: u64, frame: i64, now: u64) -> unit effects {alloc} {
   if queue.first_id == 0 {struct.set(queue,id,field=first_id)}
@@ -132,16 +248,41 @@ pub fn requested(queue: ref<Queue>, id: u64, frame: i64, now: u64) -> unit effec
   struct.set(queue,frame,field=last_requested)
   struct.set(queue,now,field=request_ns)
   let requests: ref<array<Request>> = struct.borrow(queue,field=requests)
-  // Only timing metadata is retained for coalesced requests, never their pixels.
-  if array.len(requests) == 16 {array.set(requests,id%16,Request {id:id,at:now})}
-  else {array.push(requests,Request {id:id,at:now})}
+  // Window members share their issue timestamp. The second receipt includes the
+  // preceding decode; this is issue-to-receipt latency, not independent decode cost.
+  // Only timing/position metadata is retained for requests, never their pixels.
+  if array.len(requests) == 16 {array.set(requests,id%16,Request {id:id,at:now,frame:frame})}
+  else {array.push(requests,Request {id:id,at:now,frame:frame})}
   ()
 }
 pub fn accepts(queue: ref<Queue>, id: u64) -> bool effects {} {
-  queue.first_id != 0 and id >= queue.first_id and id > queue.received and id <= queue.in_flight
+  queue.first_id != 0 and id >= queue.first_id and id > queue.received and id <= queue.in_flight and
+    (queue.window_next == 0 or id == queue.window_next)
+}
+// A producer error can belong to either not-yet-received member of the window.
+// Successful packet consumption is stricter and must stay in sequence.
+pub fn failure_accepts(queue:ref<Queue>,id:u64) -> bool effects {} {
+  if queue.window_next != 0 {id>=queue.window_next and id<=queue.window_last}
+  else{accepts(queue,id)}
+}
+pub fn matches(queue:ref<Queue>,id:u64,source:i64,program:i64) -> bool effects {} {
+  if queue.window_next==0 {return true}
+  let requests:ref<array<Request>> =struct.borrow(queue,field=requests)
+  var at:u64=0
+  loop {if at>=array.len(requests) {break}
+    let issued:Request=array.get(requests,at)
+    if issued.id==id {return issued.frame==(if queue.source {source}else{program})}
+    at=at+1}
+  false
 }
 pub fn receive(queue: ref<Queue>, id: u64, frame: Frame own, now: u64) -> bool effects {alloc} {
-  if not accepts(queue,id) {return false}
+  if not accepts(queue,id) or array.len(struct.borrow(queue,field=frames))>=(if queue.window_mode {8}else{2}) or
+      not matches(queue,id,frame.position.source_frame,frame.position.program_frame) {return false}
+  if queue.window_next != 0 {
+    if id==queue.window_last {struct.set(queue,0,field=window_next)
+      struct.set(queue,0,field=window_last)}
+    else{struct.set(queue,id+1,field=window_next)}
+  }
   struct.set(queue,id,field=received)
   if id == queue.in_flight {struct.set(queue,0,field=in_flight)}
   var at: u64 = 0
@@ -153,13 +294,15 @@ pub fn receive(queue: ref<Queue>, id: u64, frame: Frame own, now: u64) -> bool e
       struct.set(queue,(queue.latency_ns*3+bounded)/4,field=latency_ns)
       break}
     at=at+1}
-  if array.len(struct.borrow(queue,field=frames)) >= 2 {return false}
   array.push(struct.borrow(queue,field=frames),frame)
   true
 }
 fn first(queue: ref<Queue>) -> option<Frame> effects {} {
   let frames: ref<array<Frame>> = struct.borrow(queue,field=frames)
-  if array.len(frames) == 2 {array.swap(frames,0,1)}
+  var at:u64=0
+  loop {if at+1>=array.len(frames) {break}
+    array.swap(frames,at,at+1)
+    at=at+1}
   array.pop(frames)
 }
 pub fn take_due(queue: ref<Queue>, wanted: i64) -> option<Frame> effects {} {

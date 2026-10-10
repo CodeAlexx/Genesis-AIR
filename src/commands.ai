@@ -293,12 +293,15 @@ pub fn add_track(state: ref<app.App>, kind: u32, name: str) -> Result effects {a
 }
 
 pub fn remove_track(state: ref<app.App>, track: u64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.remove_track(struct.borrow(state, field=document), track) {
-    return refused("that track is locked or unknown")
-  }
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  match editor.track_slot(doc,track) {none=>{return refused("[GA_EDIT_TARGET] No such track")},some(_)=>{},}
+  if editor.track_locked(doc,track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.remove_track(candidate,track) {return refused("[GA_EDIT_CONTEXT] Track could not be removed")}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("track removed", track)
+  done("track removed",track)
 }
 
 pub fn rename_track(state: ref<app.App>, track: u64, name: str) -> Result effects {alloc} {
@@ -466,21 +469,28 @@ pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result ef
   done("ripple trimmed", clip)
 }
 pub fn ripple_delete(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.ripple_delete(struct.borrow(state, field=document), clip) {
-    return refused("no such clip")
-  }
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  let value:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("[GA_EDIT_TARGET] No such clip")},some(found)=>found,}
+  if editor.track_locked(doc,value.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.ripple_delete(candidate,clip) {return refused("[GA_EDIT_CONTEXT] Clip could not be ripple deleted")}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("ripple deleted", clip)
+  done("ripple deleted",clip)
 }
 pub fn lift(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.lift(struct.borrow(state, field=document), clip) {
-    return refused("no such clip")
-  }
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  let value:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("[GA_EDIT_TARGET] No such clip")},some(found)=>found,}
+  if editor.track_locked(doc,value.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.lift(candidate,clip) {return refused("[GA_EDIT_CONTEXT] Clip could not be lifted")}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("lifted", clip)
+  done("lifted",clip)
 }
+
 pub fn slip(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.slip(struct.borrow(state, field=document), clip, delta) {

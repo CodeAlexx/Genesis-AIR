@@ -37,9 +37,17 @@ with FP32 intermediate math and 16-bit channel quantization. Set
 `GENESIS_GPU_PREVIEW=0` to use the reference CPU transform. Masters retain that
 reference transform. The current validated candidate also has a runtime-qualified
 native-size P010/PQ preview shader; unsupported configurations use the reference.
-Sustained interactive 4K60 remains
-unfinished; [measured results and restrictions](docs/FFMPEG_GPU_PREVIEW.md) distinguish
+The current native editor passes a bounded 133.89-second playback check from the
+supplied 4K/59.94 source with live stereo audio and fitted 480x270 monitors. Its
+steady interval presents 59.9377 changed pictures/s without skipped positions or
+presentations beyond the existing two-frame lateness limit. Fullscreen 4K,
+whole-duration and compound 4K60, and physical audio/display synchronization remain
+unqualified; [measured results and restrictions](docs/FFMPEG_GPU_PREVIEW.md) distinguish
 headless preparation from actual display performance.
+
+The [current native playback validation](docs/WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md)
+records the installed build's editing, modal recovery, export and native cadence
+checks alongside the retained failed and incomplete timing experiments.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -1258,6 +1266,42 @@ preview requests and five audition/master audio bodies. Streamed peaks pass
 11 coded refusals. The combined native release gate is recorded in the
 [acceptance ledger](docs/CONTROL_COVERAGE.md#clip-content-and-streamed-direct-waveforms-on-2026-10-10).
 
+## Native playback reserve and editing recovery (2026-10-10)
+
+The installed application is
+`1A49B8AF32B9A9169DFCDEBB78D4F523BF742C4C34A006F90551C2B8251EB4B6`, with
+unchanged worker `AA40B96C631C82CFC834D027678E95A00BD8D5F61DB54F15E7C7ECEFCF74228C`.
+Playback prepares eight actual consecutive future pictures before first PCM
+(or the available short tail), then refills a fixed eight-picture owned/reserved
+budget using producer windows and completed-packet FIFOs capped at two. Stop,
+seek, content changes and modal actions retire old work before reusing owned PCM
+paths. Closed preview failures remain visible and pause both transports.
+
+The complete Windows suite passes, including 757 control outcomes, 153 application
+facts and three native-drop checks. An owned native 1080p run verifies live
+Gain/Pan, Mute, natural EOF, independent Source playback, a native Open cancellation
+held longer than two seconds, Split/Undo/Redo, locked-edit refusals and Save/Reopen.
+A separate 1,032-clip/8,192-key graph cancels a 240-frame native export at observed
+29% progress without a final, partial or signal file; its 12-frame retry passes
+independent title/grade/background checks and AAC agreement with zero padding.
+
+The exact-binary 4K cadence check retains the complete 133.890-second epoch. The
+fixed first-second and final-half-second exclusions yield 7,923 changed pictures
+over 132.171 seconds, with zero steady repeats, omissions, backward/early pictures,
+lateness beyond two frames, queue drains or overwrites. Two frame-zero repeats and
+two startup drains remain in the raw evidence; its maximum raw gap is 171.343 ms.
+This is ordinary maximized editor playback, not fullscreen or full-project proof.
+
+Publication and a fresh installed-root launch pass. The root window is left
+paused at nonblank frame zero, with the whole 76,701-frame project fitted, 23 mapped
+bitmaps, 25,567 processed peak cells and populated histogram/RGB/luma scopes.
+Original projects/media and the shared MM-AIR runtime remain unchanged; existing
+user processes were preserved. See the [detailed acceptance record](docs/WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md)
+and [control ledger](docs/CONTROL_COVERAGE.md#native-playback-reserve-and-recovery-on-2026-10-10).
+The [evidence archive](archive/native-playback-reserve-2026-10-10.tar.gz) preserves
+the source and receipts; its digest is recorded in the archive receipt and publication commit. Professional editing acceptance
+remains incomplete.
+
 ## Known gaps
 
 The earlier published session-safety and
@@ -1271,7 +1315,7 @@ measurement. Its combined Windows suite, broader generated-media workflow and na
 window check passed. Exact checkpoint hashes and archived receipts are in the
 [nested audio ledger](docs/CONTROL_COVERAGE.md#recursive-nested-audio-on-2026-10-10).
 
-The 2026-10-10 native-window recovery candidate delivers 59.87 distinct pictures/s
+The earlier 2026-10-10 native-window recovery candidate delivered 59.87 distinct pictures/s
 over 131.88 seconds from the supplied 4K/59.94 AV1/PQ source, with live stereo
 audio and fitted 480x270 monitors on a 2560x1316 canvas. Eight frame positions are
 skipped in two catch-up jumps; median after-presentation lateness is 16.68 ms,

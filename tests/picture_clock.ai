@@ -1,0 +1,348 @@
+module genesis.tests.picture_clock
+import std.editor as editor
+import std.editor_io as editor_io
+import std.testing as test
+import "../src/app.ai" as app
+import "../src/provider.ai" as provider
+import "../src/main.ai" as window
+import "../src/native_audio.ai" as audio
+import "../src/picture_queue.ai" as pictures
+import "../src/preview_link.ai" as link
+import std.draw as draw
+import std.files as files
+import std.path as path
+fn encoded(state: ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+}
+fn picture(frame: i64) -> pictures.Frame effects {alloc} {
+  pictures.Frame {source:draw.empty_surface(),program:draw.empty_surface(),
+    position:link.FramePosition {source_frame:0,program_frame:frame,revision:1},held_source:false}
+}
+fn supply(queue:ref<pictures.Queue>,id:u64,first:i64,count:u64,last:i64,parked:i64) -> bool effects {alloc} {
+  var offset:u64=0
+  loop {if offset>=count {break}
+    let n:u64=if count-offset>=2 {2}else{1}
+    if not pictures.requested_window(queue,id+offset,n,first+cast.wrap(offset),last,100+offset) {return false}
+    var at:u64=0
+    loop {if at>=n {break}
+      let target:i64=first+cast.wrap(offset+at)
+      var pixels:pictures.Frame=picture(if queue.source {parked}else{target})
+      if queue.source {struct.set(struct.borrow(pixels,field=position),target,field=source_frame)}
+      if not pictures.receive(queue,id+offset+at,pixels,200+offset+at) {return false}
+      at=at+1}
+    offset=offset+n}
+  true
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,time} {
+  var suite:test.Suite=test.suite("Fresh device picture selection",true)
+  var state:app.App=app.app(provider.fake(""))
+  var doc:editor.Document=editor.document(60000.0/1001.0,64,64)
+  let source:u64=editor.add_source(doc,"sample.mov","sample",300,60000.0/1001.0)
+  let track:u64=editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let _=editor.append(doc,track,source,0,300)
+  let _=ref.swap(struct.borrow(state,field=document),doc)
+  let _=editor.program_action(struct.borrow(state,field=document),editor.play())
+  let revision:u64=state.document_revision
+  let media:u64=state.media_revision
+  var previous:i64=30
+  var device:audio.Clock=audio.Clock {ok:true,samples:1601,queued:2,error:string.new()}
+  let _=test.start(suite,"Real fractional sample boundaries select current pixels only")
+  let first=window.apply_picture_clock(state,device,30,60000.0/1001.0,299,false,5,5,revision,media,previous)
+  let _=test.eq_i64(suite,option.unwrap(first),31,"1601samples remains before the next59.94frame boundary")
+  struct.set(device,1602,field=samples)
+  let next=window.apply_picture_clock(state,device,30,60000.0/1001.0,299,false,5,5,revision,media,previous)
+  let _=test.eq_i64(suite,option.unwrap(next),32,"1602actualsamples reaches the next frame")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),32,"Document follows fresh device clock")
+  let _=test.eq_i64(suite,previous,32,"Restart detector follows clock-onlyseek too")
+  let _=test.eq_u64(suite,state.document_revision,revision,"Clock tick is not an authored edit")
+  var queue:pictures.Queue=pictures.queue()
+  let _=pictures.configure(queue,"clip",5,true,false,64,64)
+  pictures.requested(queue,1,32,100)
+  let _=pictures.receive(queue,1,picture(32),200)
+  pictures.requested(queue,2,33,300)
+  let _=pictures.receive(queue,2,picture(33),400)
+  let due:pictures.Frame=option.unwrap(pictures.take_due(queue,option.unwrap(next)))
+  let _=test.eq_i64(suite,due.position.program_frame,32,"Fresh clock releases the actual due stamped picture")
+  let _=test.eq_i64(suite,pictures.pending_frame(queue,0),33,"Future frame stays owned and unpublished")
+  let _=test.check(suite,not option.is_some(pictures.take_due(queue,32)),"No future clock extrapolation")
+  let _=test.done(suite)
+  let _=test.start(suite,"Retired epochs and replacement documents reject device updates")
+  let before:string=encoded(state)
+  struct.set(device,48000,field=samples)
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,60.0,299,false,5,6,revision,media,previous)),"Retired audioepoch cannot follow current pictureepoch")
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,60.0,299,false,5,5,revision+1,media,previous)),"Different document revision rejects old clock")
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,60.0,299,false,5,5,revision,media+1,previous)),"Reloaded media rejects old clock")
+  let _=test.eq_str(suite,encoded(state),before,"Refusals preserve entire document bytes")
+  let _=test.eq_i64(suite,previous,32,"Refusals preserve restart detector")
+  let _=test.done(suite)
+  let _=test.start(suite,"Paused and switched Source modes preserve user transport")
+  let _=editor.program_action(struct.borrow(state,field=document),editor.pause())
+  let paused:string=encoded(state)
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,60.0,299,false,5,5,revision,media,previous)),"Paused user seek does not follow old playing sample")
+  let _=test.eq_str(suite,encoded(state),paused,"Paused document remains exact")
+  struct.set(struct.borrow(state,field=document),source,field=monitor_source)
+  let _=editor.monitor_action(struct.borrow(state,field=document),editor.play())
+  let changed:string=encoded(state)
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,60.0,299,false,5,5,revision,media,previous)),"Program clock is rejected after switching Source")
+  let _=test.eq_str(suite,encoded(state),changed,"Mode mismatch does not move either transport")
+  let parked:i64=editor.playhead(struct.borrow(state,field=document))
+  struct.set(device,1602,field=samples)
+  let valid=window.apply_picture_clock(state,device,30,60000.0/1001.0,299,true,5,5,revision,media,previous)
+  let _=test.eq_i64(suite,option.unwrap(valid),32,"Correct Source clock follows same exact sample metric")
+  let _=test.eq_i64(suite,state.document.monitor.frame,32,"Source advances independently")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),parked,"Program remains parked during Source playback")
+  let _=test.done(suite)
+  let _=test.start(suite,"Failed clocks and invalid rate never move pictures")
+  let held:string=encoded(state)
+  struct.set(device,false,field=ok)
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,60.0,299,true,5,5,revision,media,previous)),"Failed device sample is rejected")
+  struct.set(device,true,field=ok)
+  let _=test.check(suite,not option.is_some(window.apply_picture_clock(state,device,30,0.0,299,true,5,5,revision,media,previous)),"Invalid fps cannot create a clock")
+  let _=test.eq_str(suite,encoded(state),held,"Failed samples preserve exact document")
+  let _=test.eq_i64(suite,previous,32,"Failed samples preserve restart detector")
+  let _=test.done(suite)
+  // These call the same first-PCM admission/ownership helpers used by run_window.
+  let _=editor.monitor_action(struct.borrow(state,field=document),editor.pause())
+  let _=editor.program_action(struct.borrow(state,field=document),editor.play())
+  let _=editor.seek(struct.borrow(state,field=document),30)
+  var warm:window.PcmPreroll=window.first_pcm_begin(state,9,false,30)
+  var ahead:pictures.Queue=pictures.queue()
+  let _=pictures.configure(ahead,"prime",9,true,false,64,64)
+  let _=test.start(suite,"First PCM stays held while callbacks can fill actual future pictures")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,100,30)),0,"Decoder not completed: no firstqueue")
+  let _=test.check(suite,window.first_pcm_received(warm,9,100),"Current firstcompletion acquires PCM ownership")
+  let _=test.check(suite,pictures.requested_window(ahead,1,2,31,299,100),"Actual window reserves both preroll packet credits")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,101,30)),0,"Request alone does not qualify as actualpreparedpixels")
+  let _=pictures.receive(ahead,1,picture(31),200)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,201,30)),0,"Oneactualfuturepicture is insufficient for a long clip")
+  let _=pictures.receive(ahead,2,picture(32),400)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,-1)),0,"Preparedorigin notyetnativepresented cannot start firstPCM")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),0,"Presentedorigin and two pictures still wait for actual eight-picture reserve")
+  let _=test.check(suite,supply(ahead,3,33,5,299,0),"Three additional windows can fill seven actual futures while PCM stays held")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,402,30)),0,"Seven actual future pictures are insufficient")
+  let _=test.check(suite,pictures.requested_window(ahead,8,1,38,299,403),"Reserve actual eighth future without extrapolating heard time")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,404,30)),0,"Eighth request without pixels cannot start PCM")
+  let _=pictures.receive(ahead,8,picture(38),405)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,406,30)),1,"Native origin and all eight actual futures admit firstPCM")
+  let _=test.eq_i64(suite,pictures.pending_frame(ahead,0),31,"Preroll never consumes futurepixels")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),30,"Preroll never predicts a clock tick")
+  let _=test.check(suite,warm.ready and warm.waiting,"PCM remainsowned until actualnativequeue succeeds")
+  let _=test.done(suite)
+  let _=test.start(suite,"Repeated completions cannot reset the exact two-second picture deadline")
+  let _=test.check(suite,not window.first_pcm_received(warm,9,2000000099),"Duplicatecompletion doesnotresetdeadline")
+  let _=test.eq_u64(suite,warm.ready_ns,100,"Firstcompletion owns the originalmonotonictimestamp")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,2000000099,30)),1,"Readybeforeexactdeadline remainsadmissible")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,2000000100,30)),3,"Exact2sdeadline refuses evenlateprimedpixels")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,99,30)),3,"Backwardsclockcannotextenddeadline")
+  let _=test.done(suite)
+  let _=test.start(suite,"Stop seek replacement revision and Source changes retire held PCM")
+  let held_before:string=encoded(state)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,10,401,30)),2,"DifferentaudioepochretiresfirstPCM")
+  struct.set(state,state.document_revision+1,field=document_revision)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),2,"ReplaceddocumentrevisionretiresfirstPCM")
+  struct.set(state,state.document_revision-1,field=document_revision)
+  struct.set(state,state.media_revision+1,field=media_revision)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),2,"ReloadedmediaretiresfirstPCM")
+  struct.set(state,state.media_revision-1,field=media_revision)
+  let _=editor.seek(struct.borrow(state,field=document),31)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),2,"UserseekretiresheldPCM")
+  let _=editor.seek(struct.borrow(state,field=document),30)
+  let _=editor.program_action(struct.borrow(state,field=document),editor.pause())
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),2,"StopretiresheldPCM")
+  let _=editor.program_action(struct.borrow(state,field=document),editor.play())
+  let _=editor.monitor_action(struct.borrow(state,field=document),editor.play())
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),2,"SourceProgrammodeswitchretiresheldPCM")
+  let _=editor.monitor_action(struct.borrow(state,field=document),editor.pause())
+  struct.set(struct.borrow(state,field=document),source+1,field=monitor_source)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,warm,ahead,9,401,30)),2,"SourceidentityswitchretiresheldPCM")
+  struct.set(struct.borrow(state,field=document),source,field=monitor_source)
+  let _=test.eq_str(suite,encoded(state),held_before,"Helperrefusalsleavefullauthoredstateandtransportunchanged")
+  let _=test.done(suite)
+  let _=test.start(suite,"Short tail needs only available future frames")
+  let _=editor.seek(struct.borrow(state,field=document),299)
+  var final:window.PcmPreroll=window.first_pcm_begin(state,10,false,299)
+  var tail:pictures.Queue=pictures.queue()
+  let _=pictures.configure(tail,"final",10,true,false,64,64)
+  let _=window.first_pcm_received(final,10,100)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,final,tail,10,101,299)),1,"Lastframeadmitsownednativeoriginwithoutnonexistentfutureframes")
+  let _=editor.seek(struct.borrow(state,field=document),298)
+  final=window.first_pcm_begin(state,10,false,298)
+  let _=window.first_pcm_received(final,10,100)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,final,tail,10,101,298)),0,"Oneframetailrequiresactualnextframe")
+  pictures.requested(tail,1,299,100)
+  let _=pictures.receive(tail,1,picture(299),200)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,final,tail,10,201,298)),1,"ActualoneframetailadmitsPCM")
+  let _=test.done(suite)
+  let _=test.start(suite,"Source preroll owns independent stamped future frames")
+  let _=editor.program_action(struct.borrow(state,field=document),editor.pause())
+  let parked_program:i64=editor.playhead(struct.borrow(state,field=document))
+  let _=editor.seek_monitor(struct.borrow(state,field=document),30)
+  let _=editor.monitor_action(struct.borrow(state,field=document),editor.play())
+  var source_prime:window.PcmPreroll=window.first_pcm_begin(state,11,true,30)
+  var source_ahead:pictures.Queue=pictures.queue()
+  let _=pictures.configure(source_ahead,"source-prime",11,true,true,64,64)
+  let _=test.check(suite,not window.first_pcm_received(source_prime,10,50),"RetiredcompletioncannotacquirecurrentfirstPCM")
+  let _=test.check(suite,not source_prime.ready,"RetiredcompletionleavesfirstPCMnotready")
+  let _=window.first_pcm_received(source_prime,11,100)
+  var source31:pictures.Frame=picture(parked_program)
+  struct.set(struct.borrow(source31,field=position),31,field=source_frame)
+  let _=test.check(suite,pictures.requested_window(source_ahead,1,2,31,299,100),"Source window reserves exact independent future positions")
+  let _=pictures.receive(source_ahead,1,source31,200)
+  var source32:pictures.Frame=picture(parked_program)
+  struct.set(struct.borrow(source32,field=position),32,field=source_frame)
+  let _=pictures.receive(source_ahead,2,source32,400)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,source_prime,source_ahead,11,401,30)),0,"Two actual Source frames still hold PCM until eight")
+  let _=test.check(suite,supply(source_ahead,3,33,6,299,parked_program),"All additional Source pictures preserve parked Program time")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,source_prime,source_ahead,11,402,30)),1,"Source PCM requires eight actual independent Source futures")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),parked_program,"SourceprimingkeepsProgramparked")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,source_prime,ahead,11,401,30)),0,"ProgramqueuecannotprimeSourcePCM")
+  let _=editor.monitor_action(struct.borrow(state,field=document),editor.pause())
+  let _=editor.program_action(struct.borrow(state,field=document),editor.play())
+  let _=test.done(suite)
+  let _=test.start(suite,"Native origin ledger uses completed pixels rather than repaint revision")
+  let _=test.eq_i64(suite,window.first_pcm_presented(final,298,final.revision+1,final.media,30,final.revision,final.media,final.source_id),-1,"Programrepaintcannotrelabeloldcompletedpixels")
+  let _=test.eq_i64(suite,window.first_pcm_presented(final,298,final.revision,final.media+1,30,final.revision,final.media,final.source_id),-1,"ReloadedProgrammediamustcompletebeforepreroll")
+  let _=test.eq_i64(suite,window.first_pcm_presented(final,298,final.revision,final.media,30,0,0,0),298,"ValidProgramidentityisindependentofparkedSource")
+  let _=test.eq_i64(suite,window.first_pcm_presented(source_prime,298,0,0,30,source_prime.revision,source_prime.media,source_prime.source_id+1),-1,"NativeSourceoriginmustmatchactualsourceID")
+  let _=test.eq_i64(suite,window.first_pcm_presented(source_prime,298,0,0,30,source_prime.revision,source_prime.media,source_prime.source_id),30,"ValidSourceidentityisindependentofparkedProgram")
+  let _=test.done(suite)
+  let _=test.start(suite,"Stop between file completion and channel receipt cleans caller-owned PCM")
+  var unreceived:window.PcmPreroll=window.first_pcm_begin(state,12,false,298)
+  let race_folder:string=match test.temp_dir(suite,"unreceived-pcm") {ok(value)=>value,err(_)=>{return 1},}
+  let race_pcm:string=path.join(race_folder,"first.wav")
+  let _=files.write_text(race_pcm,"producer-completed-before-receipt")
+  let _=test.check(suite,not unreceived.ready and unreceived.waiting,"GUIhasnotreceivedfirstcompletionyet")
+  window.first_pcm_release(unreceived,race_pcm)
+  let _=test.check(suite,not match files.exists(race_pcm) {ok(value)=>value,err(_)=>true,},"StopcleansalreadywrittenfirstPCMwithoutareadyreceipt")
+  let _=test.check(suite,not window.first_pcm_received(unreceived,12,100),"LatechannelreceiptcannotreacquirecancelledPCM")
+  let _=test.done(suite)
+  let _=test.start(suite,"Owned file survives waiting and is released once on queue error Stop or close")
+  let folder:string=match test.temp_dir(suite,"first-pcm") {ok(value)=>value,err(_)=>{return 1},}
+  let pcm:string=path.join(folder,"ready.wav")
+  let _=files.write_text(pcm,"exact-first-PCM")
+  let _=test.check(suite,match files.exists(pcm) {ok(value)=>value,err(_)=>false,},"Firstcompletedfileexists")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,final,tail,10,201,-1)),0,"Unpresentedoriginholdsreadyfile")
+  let _=test.eq_str(suite,match files.read_text(pcm) {ok(value)=>value,err(_)=>string.new(),},"exact-first-PCM","WaitdoesnotdeleteoroverwritefirstPCM")
+  window.first_pcm_release(final,pcm)
+  let _=test.check(suite,not match files.exists(pcm) {ok(value)=>value,err(_)=>true,},"QueueStoperrororclose release deletesheldfile")
+  let _=test.check(suite,not final.ready and not final.waiting,"Releasedownershipcannotqueueagain")
+  let _=test.check(suite,not window.first_pcm_received(final,10,500),"Latecompletioncannotresurrectretiredownership")
+  let _=files.write_text(pcm,"different-owned-file")
+  window.first_pcm_release(final,pcm)
+  let _=test.eq_str(suite,match files.read_text(pcm) {ok(value)=>value,err(_)=>string.new(),},"different-owned-file","Repeatreleasecannotdeleteanunownedreplacement")
+  let _=files.remove(pcm)
+  let _=test.done(suite)
+  let _=test.start(suite,"Retired later PCM cleanup owns the window output independently of first PCM")
+  var later:window.PcmPreroll=window.pcm_preroll()
+  let later_pcm:string=path.join(folder,"retired-later-pcm.wav")
+  let _=files.write_text(later_pcm,"later-chunk-completed-before-receipt")
+  let _=test.check(suite,not later.ready and not later.waiting,"First PCM ownership has already ended")
+  window.release_playback_output(later,later_pcm)
+  let _=test.check(suite,not match files.exists(later_pcm) {ok(value)=>value,err(_)=>true,},"Retired window still releases a completed later chunk")
+  window.release_playback_output(later,later_pcm)
+  window.release_playback_output(later,"")
+  let _=test.check(suite,not later.ready and not later.waiting,"Missing or empty owned output remains safely retired")
+  let _=test.done(suite)
+  let _=test.start(suite,"Edited origin is repaired before native priming across bounded refill windows")
+  let _=editor.program_action(struct.borrow(state,field=document),editor.play())
+  let _=editor.seek(struct.borrow(state,field=document),30)
+  struct.set(state,state.document_revision+1,field=document_revision)
+  var repaired:window.PcmPreroll=window.first_pcm_begin(state,12,false,30)
+  var repair_queue:pictures.Queue=pictures.queue()
+  let _=pictures.configure(repair_queue,"edited-origin",12,true,false,64,64)
+  let old_native:i64=window.first_pcm_presented(repaired,30,repaired.revision-1,repaired.media,0,0,0,0)
+  let origin:i64=option.unwrap(pictures.window_target(repair_queue,30,299,60000.0/1001.0,old_native))
+  let _=test.eq_i64(suite,origin,30,"Old revision pixels cannot skip the exact edited origin")
+  let _=test.check(suite,pictures.requested_window(repair_queue,300,2,origin,299,100),"Repair window reserves actual origin30 and future31")
+  let _=pictures.receive(repair_queue,300,picture(30),200)
+  let _=pictures.receive(repair_queue,301,picture(31),300)
+  let repaired_origin:pictures.Frame=option.unwrap(pictures.take_due(repair_queue,30))
+  let _=test.eq_i64(suite,repaired_origin.position.program_frame,30,"Only actual edited origin becomes due before PCM")
+  let _=window.first_pcm_received(repaired,12,400)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,repaired,repair_queue,12,401,old_native)),0,"One future plus old native identity cannot start PCM")
+  let refill:i64=option.unwrap(pictures.window_target(repair_queue,30,299,60000.0/1001.0,30))
+  let _=test.eq_i64(suite,refill,32,"Partial origin repair refills next exact consecutive future")
+  let _=test.check(suite,pictures.requested_window(repair_queue,302,2,refill,299,500),"One owned future permits two reserved refill packets")
+  let _=pictures.receive(repair_queue,302,picture(32),600)
+  let _=pictures.receive(repair_queue,303,picture(33),700)
+  let _=test.check(suite,pictures.reserved(repair_queue)==0 and array.len(struct.borrow(repair_queue,field=frames))==3,"Three actual future pictures remain bounded after repair")
+  let fresh_native:i64=window.first_pcm_presented(repaired,30,repaired.revision,repaired.media,0,0,0,0)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,repaired,repair_queue,12,701,fresh_native)),0,"Repaired origin and three actual futures remain below native readiness")
+  let _=test.check(suite,supply(repair_queue,304,34,5,299,0),"Origin repair continues consecutive refill until eight actual futures")
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,repaired,repair_queue,12,702,fresh_native)),1,"Real repaired native origin and eight actual futures admit firstPCM")
+  let _=test.check(suite,not option.is_some(pictures.take_due(repair_queue,30)),"Preroll admission still cannot release future pixels")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),30,"No repair or priming helper predicts an audio clock")
+  let _=test.done(suite)
+  let _=test.start(suite,"All short-tail first PCM admissions use only completed authored pictures")
+  var tail_count:u64=0
+  loop {if tail_count>=8 {break}
+    let origin:i64=299-cast.wrap(tail_count)
+    let _=editor.seek(struct.borrow(state,field=document),origin)
+    var short:window.PcmPreroll=window.first_pcm_begin(state,30+tail_count,false,origin)
+    var short_queue:pictures.Queue=pictures.queue()
+    let _=pictures.configure(short_queue,"short-tail",30+tail_count,true,false,64,64)
+    let _=window.first_pcm_received(short,30+tail_count,100)
+    let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,short,short_queue,30+tail_count,101,origin)),if tail_count==0 {1}else{0},"Empty firstPCM readiness admits only zero remaining frames")
+    if tail_count>0 {
+      if tail_count>1 {let _=test.check(suite,supply(short_queue,1,origin+1,tail_count-1,299,0),"Prepare short tail except its final actual frame")}
+      let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,short,short_queue,30+tail_count,102,origin)),0,"Missing last tail picture keeps PCM held")
+      let _=test.check(suite,supply(short_queue,20,299,1,299,0),"Complete the final legal tail frame")
+      let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(state,short,short_queue,30+tail_count,103,origin)),1,"All actual short-tail pictures admit PCM")}
+    tail_count=tail_count+1}
+  let _=test.done(suite)
+  var scenario:u64=0
+  loop {if scenario>=3 {break}
+    let stall:u64=if scenario==0 {40}else if scenario==1 {54}else{75}
+    let _=test.start(suite,string.from_int(stall))
+    let _=editor.seek(struct.borrow(state,field=document),0)
+    var stalled:pictures.Queue=pictures.queue()
+    let epoch:u64=50+scenario
+    let _=pictures.configure(stalled,"real-sample-stall",epoch,true,false,64,64)
+    let _=test.check(suite,supply(stalled,1,1,8,299,0),"Eight actual future pictures exist before the native clock starts")
+    let _=test.check(suite,pictures.window_primed(stalled,0,299,false,epoch,0),"Stall model starts from real owned readiness")
+    var now:u64=1
+    var next_id:u64=9
+    var end_ms:u64=0
+    var batch_first:i64=0
+    var batch_id:u64=0
+    var batch_count:u64=0
+    var first_stall:bool=true
+    var shown:i64=0
+    var previous_clock:i64=0
+    loop {if now>250 {break}
+      if batch_id!=0 {
+        if stalled.window_next==batch_id and now>=(if batch_count==2 {end_ms-8}else{end_ms}) {
+          let _=test.check(suite,pictures.receive(stalled,batch_id,picture(batch_first),now*1000000),"First actual FIFO packet arrives after bounded stall")
+          if batch_count==1 {batch_id=0}}
+        if batch_id!=0 and stalled.window_next==batch_id+1 and now>=end_ms {
+          let _=test.check(suite,pictures.receive(stalled,batch_id+1,picture(batch_first+1),now*1000000),"Second actual packet completes the same ordered window")
+          batch_id=0}
+      }
+      var sampled:audio.Clock=audio.Clock {ok:true,samples:now*48,queued:2,error:string.new()}
+      let wanted:i64=option.unwrap(window.apply_picture_clock(state,sampled,0,60000.0/1001.0,299,false,epoch,epoch,state.document_revision,state.media_revision,previous_clock))
+      let _=test.eq_i64(suite,wanted,cast.wrap((now*60)/1001),"Independent rational48k sample metric selects the actual heard frame")
+      match pictures.take_due(stalled,wanted) {none=>{let _=test.eq_i64(suite,shown,wanted,"No current due picture is missing through the observed stall")},some(pixels)=>{
+        let _=test.eq_i64(suite,pixels.position.program_frame,wanted,"Every released picture matches actual heard time")
+        let _=test.eq_i64(suite,pixels.position.program_frame,shown+1,"No prepared consecutive picture is skipped")
+        shown=pixels.position.program_frame},}
+      match pictures.window_target(stalled,wanted,299,60000.0/1001.0,shown) {none=>{},some(target)=>{
+        let _=test.eq_i64(suite,target,stalled.last_requested+1,"Healthy reserve issues the next consecutive frame")
+        let count:u64=pictures.window_count(stalled,target,299)
+        let _=test.check(suite,count>0 and count<=2,"Actual available credit bounds each producer request")
+        let _=test.check(suite,pictures.requested_window(stalled,next_id,count,target,299,now*1000000),"Every one or two-member window reserves only available physical slots")
+        batch_id=next_id
+        batch_count=count
+        batch_first=target
+        end_ms=now+(if first_stall {stall}else{if count==2 {16}else{8}})
+        first_stall=false
+        next_id=next_id+count
+      },}
+      let _=test.check(suite,array.len(struct.borrow(stalled,field=frames))+pictures.reserved(stalled)<=8,"All GUI owned and transport reserved pixels stay within eight")
+      let _=test.check(suite,not option.is_some(pictures.take_due(stalled,wanted)),"Future pixels stay unpublished before the next real sample boundary")
+      now=now+1}
+    let _=test.eq_i64(suite,shown,14,"All fourteen real boundaries survive the measured40/54/75ms stall")
+    let _=test.done(suite)
+    scenario=scenario+1}
+  let report:string=if view.len(args)>1 {string.copy(view.get(args,1))}else{string.copy("picture-clock-tests.json")}
+  test.conclude(suite,report,32)
+}

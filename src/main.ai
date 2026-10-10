@@ -17,6 +17,7 @@ import std.editor_io as editor_io
 import std.files as files
 import std.gui as gui
 import std.image as image
+import std.math as math
 import std.path as path
 import std.process as proc
 import std.png_tools as png_tools
@@ -274,6 +275,85 @@ fn pause_transport(state: ref<app.App>, source: bool) -> unit effects {alloc} {
   ()
 }
 
+// A device sample may advance only the document and picture epoch it belongs to.
+// Keep the restart detector in step with clock-only seeks; user seeks remain edits.
+pub fn apply_picture_clock(state: ref<app.App>, device: ref<native_audio.Clock>,
+    origin: i64, fps: f64, last: i64, source: bool, epoch: u64, picture_epoch: u64,
+    revision: u64, media_revision: u64, previous: ref<i64>) -> option<i64> effects {} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  if not device.ok or not math.is_finite(fps) or fps <= 0.0 or last < 0 or origin < 0 or
+      epoch != picture_epoch or state.document_revision != revision or
+      state.media_revision != media_revision or doc.monitor.playing != source or
+      (not source and not editor.playing(doc)) {return option.none()}
+  let actual: i64 = transport_clock.frame_at_samples(origin,device.samples,fps,last)
+  let _ = if source {editor.seek_monitor(doc,actual)}else{editor.seek(doc,actual)}
+  let _ = ref.swap(previous,actual)
+  option.some(actual)
+}
+
+// First PCM remains caller-owned while actual future pictures are prepared.
+// The two-second picture deadline starts at PCM completion, not decoder startup.
+pub type PcmPreroll = struct {waiting:bool,ready:bool,ready_ns:u64,epoch:u64,
+  revision:u64,media:u64,source:bool,source_id:u64,origin:i64}
+pub fn pcm_preroll() -> PcmPreroll effects {} {
+  PcmPreroll {waiting:false,ready:false,ready_ns:0,epoch:0,revision:0,media:0,
+    source:false,source_id:0,origin:0}
+}
+pub fn first_pcm_begin(state:ref<app.App>,epoch:u64,source:bool,origin:i64) -> PcmPreroll effects {} {
+  PcmPreroll {waiting:true,ready:false,ready_ns:0,epoch:epoch,
+    revision:state.document_revision,media:state.media_revision,source:source,
+    source_id:state.document.monitor_source,origin:origin}
+}
+pub fn first_pcm_valid(state:ref<app.App>,preroll:ref<PcmPreroll>,epoch:u64) -> bool effects {} {
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  preroll.waiting and preroll.epoch == epoch and state.document_revision == preroll.revision and
+    state.media_revision == preroll.media and doc.monitor_source == preroll.source_id and
+    doc.monitor.playing == preroll.source and (preroll.source or editor.playing(doc)) and
+    (if preroll.source {doc.monitor.frame}else{editor.playhead(doc)}) == preroll.origin
+}
+pub fn first_pcm_received(preroll:ref<PcmPreroll>,epoch:u64,now:u64) -> bool effects {} {
+  if not preroll.waiting or preroll.ready or preroll.epoch != epoch {return false}
+  struct.set(preroll,true,field=ready)
+  struct.set(preroll,now,field=ready_ns)
+  true
+}
+// 0 waits without consuming PCM, 1 queues once, 2 retires stale ownership,
+// 3 refuses an expired picture-prime deadline. None of these predicts a clock.
+pub fn first_pcm_action(state:ref<app.App>,preroll:ref<PcmPreroll>,
+    pictures:ref<picture_queue.Queue>,epoch:u64,now:u64,native_shown:i64) -> u32 effects {} {
+  if not first_pcm_valid(state,preroll,epoch) {return 2}
+  if not preroll.ready {return 0}
+  if now < preroll.ready_ns or now-preroll.ready_ns >= 2000000000 {return 3}
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  let finish:i64 = if preroll.source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
+  if finish <= 0 {return 2}
+  if picture_queue.window_primed(pictures,preroll.origin,finish-1,preroll.source,epoch,native_shown) {1}else{0}
+}
+pub fn first_pcm_presented(preroll:ref<PcmPreroll>,program:i64,program_revision:u64,
+    program_media:u64,source:i64,source_revision:u64,source_media:u64,source_id:u64) -> i64 effects {} {
+  if preroll.source {
+    if source_revision == preroll.revision and source_media == preroll.media and
+        source_id == preroll.source_id {source}else{-1}
+  }else{if program_revision == preroll.revision and program_media == preroll.media {program}else{-1}}
+}
+pub fn first_pcm_release(preroll:ref<PcmPreroll>,output:str) -> unit effects {fs.write} {
+  // A completed file can precede its channel receipt. Waiting owns that path
+  // too; the serial producer rechecks supersession and removes late output.
+  if preroll.waiting or preroll.ready {let _ = files.remove(output)}
+  struct.set(preroll,false,field=ready)
+  struct.set(preroll,false,field=waiting)
+  ()
+}
+
+// Only the window's session-owned chunk path is passed here. Call after a
+// superseding producer marker, or after its shutdown join, before path reuse.
+pub fn release_playback_output(preroll:ref<PcmPreroll>,output:str) -> unit effects {fs.write} {
+  if str.len(output) != 0 {let _ = files.remove(output)}
+  struct.set(preroll,false,field=ready)
+  struct.set(preroll,false,field=waiting)
+  ()
+}
+
 fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
   var window: Window = match gui.open_canvas(title, 1600, 980) {
     ok(value) => value,
@@ -317,6 +397,19 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var previous_frame: i64 = editor.playhead(struct.borrow(state, field=document))
   var audio_preparing: bool = false
   var audio_pending: bool = false
+  var first_pcm: PcmPreroll = pcm_preroll()
+  var native_program_frame:i64 = -1
+  var native_source_frame:i64 = -1
+  var program_pixels_revision:u64 = 0
+  var program_pixels_media:u64 = 0
+  var source_pixels_revision:u64 = 0
+  var source_pixels_media:u64 = 0
+  var source_pixels_id:u64 = 0
+  var native_program_revision:u64 = 0
+  var native_program_media:u64 = 0
+  var native_source_revision:u64 = 0
+  var native_source_media:u64 = 0
+  var native_source_id:u64 = 0
   var audio_request: u64 = 0
   task.scope {
   var audio_jobs: array<task<bool>> = array.new()
@@ -376,7 +469,6 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var strip_body_height: f64 = 0.0
   var strip_error: string = string.new()
   var preview_requested: u64 = 0
-  var preview_seen: u64 = 0
   var waveform_seen: u64 = 0
   var thumbnail_seen: u64 = 0
   var preview_media_revision: u64 = 0
@@ -410,12 +502,22 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       let _ = ref.swap(program_image, draw.empty_surface())
       let _ = ref.swap(source_image, draw.empty_surface())
       source_pixels_pending = true
-      preview_seen = preview_requested
       waveform_seen = strip_requested
       thumbnail_seen = strip_requested
     }
     preview_link.poll(preview_transport)
+    preview.poll_failure(str.view(preview_root),preview_transport)
     preview_link.poll(strip_transport)
+    preview.poll_failure(str.view(strip_root),strip_transport)
+    // Input from the previous loop may have requested Play. A closed preview
+    // lane cannot start or queue audio before the later picture-epoch check.
+    // Request-specific failures remain eligible only after queue configuration.
+    match preview.current_failure(preview_transport,false) {
+      none=>{},some(_)=>{
+        pause_transport(state,true)
+        pause_transport(state,false)
+      },
+    }
     let strip_problem: string = match preview.current_failure(strip_transport,strip_transport.error_generation==strip_requested) {
       none=>string.new(),some(detail)=>detail,
     }
@@ -495,12 +597,15 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       some(opened) => {
         var library: CAbiLibrary = opened
         if not playing_now and audio_active {
+          audio_preparing=false
           let _ = native_audio.request(library, "stop", "")
           audio_active = false
           audio_generation = audio_generation + 1
           audio_request=audio_request+1
           audio_pending=false
-          let _ = audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
+          if audio_playback.discard(str.view(audio_root),audio_request,audio_generation) {
+            release_playback_output(first_pcm,str.view(audio_task_output))
+          }else{app.set_status(state,"[GA_AUDIO_RETIRE] Cannot retire playback output")}
           let _ = preview_link.wake(audio_transport,false)
         }
         let signature_begin: u64 = window_profile.stamp(window_measure)
@@ -518,22 +623,42 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         }
         sound_revision = state.media_revision
         struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
-        if playing_now and (not previous_playing or source_playing != previous_source or frame_now != previous_frame or mix_changed) {
-          audio_pending=false
-          audio_generation = audio_generation + 1
-          audio_origin = frame_now
-          audio_next = frame_now
-          let started: string = native_audio.request(library, "start", "")
-          audio_active = str.eq(str.view(started), "ok")
-          audio_preparing = audio_active
-          if not audio_active {
-            app.set_status(state, str.view(started))
+        if playing_now and (not audio_active or not previous_playing or source_playing != previous_source or frame_now != previous_frame or mix_changed or
+            (audio_preparing and not first_pcm_valid(state,first_pcm,audio_generation))) {
+          // A mix edit may retire a later completed chunk after the first PCM
+          // flags are clear. Supersede its producer before releasing the owned
+          // output, and only then reuse that path for the new device epoch.
+          let _ = native_audio.request(library,"stop","")
+          audio_active=false
+          audio_preparing=false
+          if audio_generation == 18446744073709551615 or audio_request >= 18446744073709551614 {
+            app.set_status(state,"[GA_AUDIO_RETIRE] Playback generation exhausted")
             pause_transport(state, source_playing)
+          }else{
+            audio_generation=audio_generation+1
+            audio_request=audio_request+1
+            if audio_playback.discard(str.view(audio_root),audio_request,audio_generation) {
+              release_playback_output(first_pcm,str.view(audio_task_output))
+              audio_pending=false
+              let _ = preview_link.wake(audio_transport,false)
+              audio_origin = frame_now
+              audio_next = frame_now
+              let started: string = native_audio.request(library, "start", "")
+              audio_active = str.eq(str.view(started), "ok")
+              audio_preparing = audio_active
+              first_pcm=first_pcm_begin(state,audio_generation,source_playing,audio_origin)
+              if not audio_active {
+                app.set_status(state, str.view(started))
+                pause_transport(state, source_playing)
+              }
+            }else{
+              app.set_status(state,"[GA_AUDIO_RETIRE] Cannot retire playback output before restart")
+              pause_transport(state,source_playing)
+            }
           }
         }
         preview_link.poll(audio_transport)
-        if audio_pending and (audio_transport.ready == audio_request or audio_transport.error_generation == audio_request or audio_transport.closed) {
-          audio_pending=false
+        if audio_pending and not first_pcm.ready and (audio_transport.ready == audio_request or audio_transport.error_generation == audio_request or audio_transport.closed) {
           if audio_task_generation == audio_generation and playing_now and audio_active {
             if audio_transport.ready != audio_request {
               if audio_transport.closed {app.set_status(state,"[GA_AUDIO_TASK_CLOSED] Playback worker ended")}
@@ -541,6 +666,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               pause_transport(state,source_playing)
               let _ = native_audio.request(library,"stop","")
               audio_active=false
+            } else if audio_preparing {
+              // Retain this completed file and request until actual picture priming.
+              let _ = first_pcm_received(first_pcm,audio_generation,clock.start())
             } else {
               let queued: string = native_audio.request(library,"queue",str.view(audio_task_output))
               if not str.eq(str.view(queued),"ok") {
@@ -554,7 +682,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               }
             }
           }
-          let _ = files.remove(str.view(audio_task_output))
+          if not first_pcm.ready {
+            audio_pending=false
+            let _ = files.remove(str.view(audio_task_output))
+          }
         }
         if audio_active and playing_now {
           var device: native_audio.Clock = native_audio.clock(library)
@@ -620,10 +751,17 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           }
         }
         if not audio_active and (audio_pending or playing_now) {
-          audio_pending=false
-          audio_request=audio_request+1
-          let _ = audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
-          let _ = preview_link.wake(audio_transport,false)
+          audio_preparing=false
+          if audio_request == 18446744073709551615 {
+            app.set_status(state,"[GA_AUDIO_RETIRE] Playback request generation exhausted")
+          }else{
+            audio_request=audio_request+1
+            if audio_playback.discard(str.view(audio_root),audio_request,audio_generation) {
+              release_playback_output(first_pcm,str.view(audio_task_output))
+              audio_pending=false
+            }else{app.set_status(state,"[GA_AUDIO_RETIRE] Cannot retire playback output")}
+            let _ = preview_link.wake(audio_transport,false)
+          }
         }
         if audio_active and playing_now {
           var levels: native_audio.Levels = native_audio.levels(library)
@@ -641,6 +779,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       struct.set(state, 0.0, field=audio_left)
       struct.set(state, 0.0, field=audio_right)
     }
+    // A dropped-file import below can replace/edit the document after the audio
+    // clock was selected. Never apply that old device epoch to the new content.
+    let audio_follow_revision: u64 = state.document_revision
+    let audio_follow_media: u64 = state.media_revision
     previous_source = source_playing
     previous_playing = if source_playing { struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) }
       else { editor.playing(struct.borrow(state, field=document)) }
@@ -671,11 +813,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let doc: ref<editor.Document> = struct.borrow(state,field=document)
     let picture_source: bool = struct.get(struct.borrow(doc,field=monitor),field=playing)
     let picture_playing: bool = picture_source or editor.playing(doc)
-    let wanted: i64 = if picture_source {struct.get(struct.borrow(doc,field=monitor),field=frame)}else{editor.playhead(doc)}
+    var wanted: i64 = if picture_source {struct.get(struct.borrow(doc,field=monitor),field=frame)}else{editor.playhead(doc)}
     let parked_program: i64 = editor.playhead(doc)
     let parked_source: i64 = struct.get(struct.borrow(doc,field=monitor),field=frame)
     let fps: f64 = if picture_source {timeline_media.monitor_fps(doc)}else{editor.sequence_fps(doc,doc.active)}
     let finish: i64 = if picture_source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
+    let picture_source_id:u64 = doc.monitor_source
     if window_measure.enabled {
       window_profile.context(window_row,picture_source,picture_playing,audio_origin,fps,
         if finish > 0 {finish-1}else{0},state.presented_program_frame,state.presented_source_frame)
@@ -693,7 +836,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         pictures.width != monitor_width or pictures.height != monitor_height {
       let signature_begin: u64 = window_profile.stamp(window_measure)
       let key: string = picture_queue.identity_revision(state,picture_source,picture_playing)
-      if picture_queue.configure(pictures,key,audio_generation,picture_playing,picture_source,monitor_width,monitor_height) {dirty=true}
+      if picture_queue.configure(pictures,key,audio_generation,picture_playing,picture_source,monitor_width,monitor_height) {
+        preview_link.retire_window(preview_transport)
+        dirty=true}
       struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
     }
     // A failed old decode belongs to the retired request range after Stop,
@@ -701,7 +846,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     // configuring that range, and distinguish repeated codes by generation.
     var picture_failed: bool = false
     match preview.current_failure(preview_transport,
-        picture_queue.accepts(pictures,preview_transport.error_generation)) {
+        picture_queue.failure_accepts(pictures,preview_transport.error_generation)) {
       none=>{
         // Recovery clears deduplication too: a later generation-zero channel
         // failure can have the same text as the earlier recovered failure.
@@ -710,32 +855,39 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           preview_channel_error=string.new()
         }
       },some(channel_error)=>{
+        // Deduplicate status text, not the failure itself. A latched terminal
+        // channel error must continue to prevent new requests and PCM starts.
+        picture_failed=true
         if preview_channel_generation != preview_transport.error_generation or
-            not str.eq(str.view(channel_error),str.view(preview_channel_error)) {
+            not str.eq(str.view(channel_error),str.view(preview_channel_error)) or
+            not str.eq(str.view(channel_error),str.view(struct.borrow(state,field=status))) {
           app.set_status(state,str.view(channel_error))
-          pause_transport(state,true)
-          pause_transport(state,false)
-          picture_failed=true
           dirty=true
         }
+        pause_transport(state,true)
+        pause_transport(state,false)
         preview_channel_generation=preview_transport.error_generation
         preview_channel_error=channel_error
       },
     }
     preview_media_revision=state.media_revision
-    let ready: u64 = preview_transport.ready
-    if ready > preview_seen {
+    loop {
+      let ready:u64=preview_link.next_completed(preview_transport)
+      if ready==0 {break}
+      if not preview_link.select_completed(preview_transport,ready) {break}
       // Configure after following the audio clock, before consuming a completion:
       // a seek or restart must retire the previous epoch's prepared pictures.
-      preview_seen=ready
       if picture_queue.accepts(pictures,ready) {
         var images: array<draw.Surface> = preview_link.take_images(preview_transport,ready)
         let position: preview_link.FramePosition = preview_transport.position
-        if array.len(images) == 2 and position.revision == state.media_revision {
+        if array.len(images) == 2 and position.revision == state.media_revision and
+            picture_queue.matches(pictures,ready,position.source_frame,position.program_frame) {
           var next_program: draw.Surface = option.unwrap(array.pop(images))
           var next_source: draw.Surface = option.unwrap(array.pop(images))
           var held: bool = preview_link.holds_source(preview_transport)
-          if held and (source_image.width == 0 or state.presented_source_frame != position.source_frame) {
+          if held and (source_image.width == 0 or state.presented_source_frame != position.source_frame or
+              source_pixels_revision != state.document_revision or source_pixels_media != state.media_revision or
+              source_pixels_id != picture_source_id) {
             next_source=preview_link.restore_source(preview_transport)
             held=false
           }
@@ -746,11 +898,26 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
             source_pixels_pending = true
             next_source=draw.empty_surface()
             struct.set(state,position.source_frame,field=presented_source_frame)
+            source_pixels_revision=state.document_revision
+            source_pixels_media=state.media_revision
+            source_pixels_id=picture_source_id
             held=true
             dirty=true
           }
-          let _ = picture_queue.receive(pictures,ready,picture_queue.Frame {
-            source:next_source,program:next_program,position:position,held_source:held},clock.start())
+          if not picture_queue.receive(pictures,ready,picture_queue.Frame {
+              source:next_source,program:next_program,position:position,held_source:held},clock.start()) {
+            app.set_status(state,"[GA_PREVIEW_CREDIT] Completed packet cannot acquire its reserved picture slot")
+            pause_transport(state,true)
+            pause_transport(state,false)
+            picture_failed=true
+            dirty=true
+          }
+        }else{
+          app.set_status(state,"[GA_PREVIEW_PACKET] Completed picture does not match the current media generation")
+          pause_transport(state,true)
+          pause_transport(state,false)
+          picture_failed=true
+          dirty=true
         }
         let problem: string = string.copy(str.view(struct.borrow(preview_transport,field=pixel_error)))
         if str.len(problem) != 0 and problem != preview_error {app.set_status(state,problem)
@@ -760,24 +927,89 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         preview_error=problem
       }
     }
-    match picture_queue.take_due(pictures,wanted) {none=>{},some(frame)=>{
-      if not frame.held_source { source_pixels_pending = true }
-      picture_queue.apply(state,frame,source_image,program_image)
-      dirty=true},}
-    let shown: i64 = if picture_source {state.presented_source_frame}else{state.presented_program_frame}
+    // Completion processing may take time. Choose due pixels from a fresh real
+    // device sample, never a projected future clock or a retired document epoch.
+    if audio_active and not audio_preparing and picture_playing and
+        picture_source == source_playing and audio_generation == pictures.epoch and
+        state.document_revision == audio_follow_revision and state.media_revision == audio_follow_media and
+        not picture_failed {
+      match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
+        var library: CAbiLibrary = opened
+        var device: native_audio.Clock = native_audio.clock(library)
+        if not device.ok {
+          app.set_status(state,str.view(struct.borrow(device,field=error)))
+          pause_transport(state,picture_source)
+          picture_failed=true
+          dirty=true
+        } else {
+          match apply_picture_clock(state,device,audio_origin,fps,if finish > 0 {finish-1}else{0},
+              picture_source,audio_generation,pictures.epoch,audio_follow_revision,audio_follow_media,previous_frame) {
+            none=>{},some(actual)=>{if actual != wanted {passive_changed=true}
+              wanted=actual},
+          }
+        }
+        audio_library=option.some(library)
+      },}
+    }
+    if not picture_failed {
+      match picture_queue.take_due(pictures,wanted) {none=>{},some(frame)=>{
+        if not frame.held_source {
+          source_pixels_pending = true
+          source_pixels_revision=state.document_revision
+          source_pixels_media=state.media_revision
+          source_pixels_id=picture_source_id
+        }
+        picture_queue.apply(state,frame,source_image,program_image)
+        program_pixels_revision=state.document_revision
+        program_pixels_media=state.media_revision
+        dirty=true},}
+    }
+    let shown_identity:bool = if picture_source {
+      source_pixels_revision == state.document_revision and source_pixels_media == state.media_revision and
+        source_pixels_id == picture_source_id
+    }else{program_pixels_revision == state.document_revision and program_pixels_media == state.media_revision}
+    let shown: i64 = if audio_preparing and not shown_identity {-1}else{
+      if picture_source {state.presented_source_frame}else{state.presented_program_frame}}
+
     let next_target: option<i64> = if picture_failed {option.none()}else{
-      picture_queue.target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown)
+      picture_queue.window_target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown)
     }
     match next_target {
       none=>{},some(target)=>{
-        preview_requested=preview_requested+1
+        let last:i64=if finish>0 {finish-1}else{0}
+        let count:u64=picture_queue.window_count(pictures,target,last)
         let program_frame: i64 = if picture_source {parked_program}else{target}
         let source_frame: i64 = if picture_source {target}else{parked_source}
         let signature_begin: u64 = window_profile.stamp(window_measure)
-        if preview.request_frame(state,preview_root,preview_transport,preview_requested,
-            struct.borrow(pictures,field=key),program_frame,source_frame,monitor_width,monitor_height) {
-          picture_queue.requested(pictures,preview_requested,target,clock.start())
-        }else{app.set_status(state,"[GA_PREVIEW_REQUEST] Cannot publish the preview request")
+        if count>0 and preview_requested<=18446744073709551615-count {
+          let first_id:u64=preview_requested+1
+          let last_id:u64=preview_requested+count
+          if preview.request_window(state,preview_root,preview_transport,first_id,count,
+              struct.borrow(pictures,field=key),program_frame,source_frame,monitor_width,monitor_height,picture_source) {
+            preview_requested=last_id
+            if not picture_queue.requested_window(pictures,first_id,count,target,last,clock.start()) {
+              app.set_status(state,"[GA_PREVIEW_CREDIT] Cannot reserve the published decode window")
+              pause_transport(state,true)
+              pause_transport(state,false)
+              dirty=true
+            }
+            if window_measure.enabled {
+              struct.set(window_row,first_id,field=window_first_id)
+              struct.set(window_row,last_id,field=window_last_id)
+              struct.set(window_row,target,field=window_first_frame)
+              struct.set(window_row,target+cast.wrap(count-1),field=window_last_frame)
+              struct.set(window_row,count,field=window_count)
+            }
+          }else{
+            match preview.current_failure(preview_transport,
+                picture_queue.failure_accepts(pictures,preview_transport.error_generation)) {
+              some(problem)=>{app.set_status(state,str.view(problem))},
+              none=>{app.set_status(state,"[GA_PREVIEW_REQUEST] Cannot publish the preview window")},
+            }
+            pause_transport(state,true)
+            pause_transport(state,false)
+            dirty=true}
+        }else{app.set_status(state,"[GA_PREVIEW_CREDIT] Invalid or exhausted decode-window identity")
           pause_transport(state,true)
           pause_transport(state,false)
           dirty=true}
@@ -792,6 +1024,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       struct.set(window_row,pictures.received,field=received)
       struct.set(window_row,preview_transport.completed_total,field=completed)
       struct.set(window_row,preview_transport.overwritten_total,field=overwritten)
+      struct.set(window_row,array.len(struct.borrow(pictures,field=frames)),field=owned_credit)
+      struct.set(window_row,picture_queue.reserved(pictures),field=reserved_credit)
     }
     // Fresh pictures and user actions repaint immediately. Clock/meter-only
     // updates get a bounded interval so repeated old frames cannot monopolize
@@ -840,7 +1074,14 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           ok(_) => {struct.set(window_row,true,field=present_ok)
             last_present_ns = clock.start()
             passive_pending = false
-            source_pixels_pending = false},
+            source_pixels_pending = false
+            native_program_frame=state.presented_program_frame
+            native_source_frame=state.presented_source_frame
+            native_program_revision=program_pixels_revision
+            native_program_media=program_pixels_media
+            native_source_revision=source_pixels_revision
+            native_source_media=source_pixels_media
+            native_source_id=source_pixels_id},
           err(_) => {app.set_status(state,"[GA_UI_PRESENT] Native presenter could not display the window frame")},
         }
         if window_measure.enabled {
@@ -858,10 +1099,91 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         dirty = true
       }
     }
+    // The first waveOut queue starts the real device clock. Hold that exact
+    // completed PCM while callbacks/input continue and the bounded future queue
+    // fills. A paused origin must have actually passed through native EndDraw.
+    if audio_active and audio_preparing and audio_pending and first_pcm.ready {
+      let native_shown:i64 = first_pcm_presented(first_pcm,native_program_frame,native_program_revision,
+        native_program_media,native_source_frame,native_source_revision,native_source_media,native_source_id)
+      let action:u32 = first_pcm_action(state,first_pcm,pictures,audio_generation,clock.start(),native_shown)
+      let channel_failed:bool = audio_transport.closed or audio_transport.error_generation == audio_request
+      if action == 1 and not picture_failed and not channel_failed {
+        match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
+          var library:CAbiLibrary = opened
+          let queued:string = native_audio.request(library,"queue",str.view(audio_task_output))
+          if queued == "ok" {
+            audio_next=audio_task_end
+            audio_preparing=false
+          }else{
+            app.set_status(state,str.view(queued))
+            pause_transport(state,first_pcm.source)
+            let _ = native_audio.request(library,"stop","")
+            audio_active=false
+            audio_preparing=false
+            dirty=true
+          }
+          audio_pending=false
+          first_pcm_release(first_pcm,str.view(audio_task_output))
+          audio_library=option.some(library)
+        },}
+        if not audio_active {
+          audio_generation=audio_generation+1
+          audio_request=audio_request+1
+          let _ = audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
+          let _ = preview_link.wake(audio_transport,false)
+        }
+      }else if action >= 2 or picture_failed or channel_failed {
+        if action == 3 {
+          app.set_status(state,"[GA_PREVIEW_PREROLL] Future pictures were not ready within two seconds of first PCM completion")
+          pause_transport(state,first_pcm.source)
+          dirty=true
+        }else if channel_failed {
+          if audio_transport.closed {app.set_status(state,"[GA_AUDIO_TASK_CLOSED] Playback worker ended during picture priming")}
+          else {app.set_status(state,str.view(struct.borrow(audio_transport,field=error)))}
+          pause_transport(state,first_pcm.source)
+          dirty=true
+        }
+        match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
+          var library:CAbiLibrary = opened
+          let _ = native_audio.request(library,"stop","")
+          audio_library=option.some(library)
+        },}
+        audio_active=false
+        audio_preparing=false
+        audio_pending=false
+        audio_generation=audio_generation+1
+        audio_request=audio_request+1
+        if audio_playback.discard(str.view(audio_root),audio_request,audio_generation) {
+          release_playback_output(first_pcm,str.view(audio_task_output))
+        }else{app.set_status(state,"[GA_AUDIO_RETIRE] Cannot retire playback output")}
+        let _ = preview_link.wake(audio_transport,false)
+      }
+    }
+    // EndDraw can block through a refresh. Re-read the device after presenting
+    // before waiting for an already prepared picture; its deadline owns this wait.
+    var event_wait: u64 = if picture_playing {8}else{20}
+    if audio_active and not audio_preparing and picture_playing and not picture_failed and
+        audio_generation == pictures.epoch and state.document_revision == audio_follow_revision and
+        state.media_revision == audio_follow_media and picture_queue.pending_frame(pictures,0) >= 0 {
+      match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
+        var library: CAbiLibrary = opened
+        var device: native_audio.Clock = native_audio.clock(library)
+        if device.ok {
+          let heard: i64 = transport_clock.frame_at_samples(audio_origin,device.samples,fps,if finish > 0 {finish-1}else{0})
+          event_wait=cast.wrap(picture_queue.next_due_wait(pictures,heard,device.samples,audio_origin,fps,8))
+        } else {
+          app.set_status(state,str.view(struct.borrow(device,field=error)))
+          pause_transport(state,picture_source)
+          dirty=true
+          event_wait=0
+        }
+        audio_library=option.some(library)
+      },}
+    }
     var drained: u64 = 0
     loop {
       let wait_begin: u64 = window_profile.stamp(window_measure)
-      let event: ui.event = preview_link.wait(window,preview_transport,if drained == 0 {if playing_now {8}else{20}}else{0})
+      let event: ui.event = preview_link.wait(window,preview_transport,if drained == 0 {event_wait}else{0})
       struct.set(window_row,window_row.wait+window_profile.stamp(window_measure)-wait_begin,field=wait)
       if event.kind == 0 or event.kind == 14 { break }
       if event.kind == 1 {
@@ -993,6 +1315,38 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         else { "Relink media" }
       let saving: bool = action == chrome.act_save() or action == chrome.act_render()
       let suggested: string = app.prompt_text(state)
+      // A native picker suspends this consumer. Retire the producer's marker
+      // before blocking, so bounded pixel credit never expires behind a dialog.
+      pause_transport(state,true)
+      pause_transport(state,false)
+      match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
+        var library:CAbiLibrary=opened
+        let _=native_audio.request(library,"stop","")
+        audio_library=option.some(library)
+      },}
+      audio_active=false
+      audio_preparing=false
+      dirty=true
+      repaint_all=true
+      if audio_generation == 18446744073709551615 or audio_request == 18446744073709551615 or
+          preview_requested == 18446744073709551615 {
+        app.set_status(state,"[GA_MODAL_RETIRE] Playback generation exhausted")
+        continue
+      }
+      audio_generation=audio_generation+1
+      audio_request=audio_request+1
+      if not audio_playback.discard(str.view(audio_root),audio_request,audio_generation) {
+        app.set_status(state,"[GA_MODAL_RETIRE] Cannot retire playback audio before file picker")
+        continue
+      }
+      release_playback_output(first_pcm,str.view(audio_task_output))
+      audio_pending=false
+      let _=preview_link.wake(audio_transport,false)
+      preview_requested=preview_requested+1
+      if not preview.retire_request(str.view(preview_root),preview_transport,preview_requested) {
+        app.set_status(state,"[GA_MODAL_RETIRE] Cannot retire preview before file picker")
+        continue
+      }
       match choose_file(title, saving, str.view(suggested)) {
         none => { },
         some(chosen) => {
@@ -1047,9 +1401,14 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   match ref.swap(audio_library,option.none()) {none=>{},some(value)=>{var library: CAbiLibrary = value
     let _ = native_audio.request(library,"stop","")
     audio_library=option.some(library)},}
+  if audio_request < 18446744073709551615 {
+    audio_request=audio_request+1
+    let _=audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
+  }
   audio_playback.stop(str.view(audio_root))
   let _ = preview_link.wake(audio_transport,true)
   let _ = tasks.join_next<bool>(audio_jobs,30000)
+  release_playback_output(first_pcm,str.view(audio_task_output))
   preview_link.close_commands(audio_transport)
   preview.stop(str.view(preview_root))
   preview.stop(str.view(strip_root))

@@ -51,7 +51,7 @@ def main():
         parser.error("--cancel-client requires --wrapper on native Windows")
     with tempfile.TemporaryDirectory(prefix="genesis-audio-stream-") as directory:
         root = pathlib.Path(directory)
-        source = root / "continuous 日本語 %20, clip.wav"
+        source = root / "continuous æ—¥æœ¬èªž %20, clip.wav"
         samples = array.array("h")
         for n in range(12 * 48000):
             t = n / 48000
@@ -83,7 +83,7 @@ def main():
             assert max(differences) <= 2 and mean < 0.1, (name, max(differences), mean)
             print(f"{name}: 12 seconds in three pulls, max {max(differences)} PCM units, mean {mean:.6f}", flush=True)
         if args.client:
-            output = root / "editor audio 日本語"
+            output = root / "editor audio æ—¥æœ¬èªž"
             completed = subprocess.run([str(args.client.resolve()), str(args.worker.resolve()), str(source), str(output)],
                 text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
             assert completed.returncode == 0, (completed.returncode, completed.stdout[-4000:])
@@ -117,11 +117,14 @@ def main():
             recovered = pcm(output / "recovered.wav")
             expected = pcm(output / "case-3-whole.wav")[:5 * 48000 * 2]
             assert recovered == expected, "failed filter graph contaminated the next playback session"
+            import json
+            ownership = json.loads((output / "audio-output-ownership.json").read_text())
+            assert ownership.get("passed") and ownership.get("completed_before_receipt") and ownership.get("same_path_source_pcm_exact"), ownership
             print(completed.stdout.strip(), flush=True)
         if args.cancel_client:
             for action in ("seek", "stop", "control"):
                 for phase in ("reply", "write"):
-                    output = root / f"cancel {action} {phase} 日本語"
+                    output = root / f"cancel {action} {phase} æ—¥æœ¬èªž"
                     output.mkdir()
                     env = dict(os.environ, GENESIS_TEST_WORKER=str(args.worker.resolve()),
                         GENESIS_TEST_STARTS=str(output / "starts.log"),
@@ -141,6 +144,27 @@ def main():
                     if action != "stop":
                         assert pcm(output / "recovered.wav") == pcm(output / "reference.wav")[:5 * 48000 * 2], "stale audio reached recovery output"
                     print(f"active {action} during blocked {phase}: {completed.stdout.strip()}", flush=True)
+        if args.client and args.wrapper and os.name == "nt":
+            for phase in ("reply", "write"):
+                output = root / f"output owner {phase} 日本語"
+                output.mkdir()
+                env = dict(os.environ, GENESIS_TEST_WORKER=str(args.worker.resolve()),
+                    GENESIS_TEST_STARTS=str(output / "starts.log"),
+                    GENESIS_TEST_AUDIO_BLOCK=str(output / "blocked.pid"),
+                    GENESIS_TEST_AUDIO_PARTIAL=str(output / "cancelled.wav"))
+                env.pop("GENESIS_TEST_CRASH", None)
+                env.pop("GENESIS_TEST_AUDIO_BLOCK_WRITE", None)
+                if phase == "write": env["GENESIS_TEST_AUDIO_BLOCK_WRITE"] = "1"
+                completed = subprocess.run([str(args.client.resolve()), str(args.wrapper.resolve()), str(source),
+                    str(output), "output-owner", phase], env=env, text=True, encoding="utf-8", errors="replace",
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+                assert completed.returncode == 0, (phase, completed.returncode, completed.stdout[-4000:])
+                assert not (output / "cancelled.wav").exists(), "retired session output survived"
+                assert_process_exited(int((output / "blocked.pid").read_text()))
+                assert len((output / "starts.log").read_text().splitlines()) == 2
+                ownership = json.loads((output / "audio-output-ownership.json").read_text())
+                assert ownership.get("passed") and ownership.get("same_path_source_pcm_exact") and ownership.get("bounded_shutdown"), ownership
+                print(f"active output ownership {phase}: {completed.stdout.strip()}", flush=True)
         print("Continuous native audio graphs: Unicode paths, exact chunk lengths and cross-boundary filter history passed")
 
 

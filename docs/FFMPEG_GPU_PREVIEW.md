@@ -654,3 +654,48 @@ zero. This bounded direct-source baseline establishes neither zero-drop
 playback nor a full five-minute/compound 4K60 interval, and measures metadata
 clock alignment rather than physical speaker/display latency. Its raw first
 epoch and failing result are retained; the exclusions and gate are unchanged.
+
+## Ordered decode windows and actual picture reserve
+
+The [native validation record](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md) retains
+five subsequent ordinary-window runs and their failures. A two-frame producer
+window and ordered packet FIFO eliminate latest-packet overwrite, but a shared
+three-picture budget still exhausted its actual reserve during decoder waits.
+The 179.276-second private run averaged 59.8456 changed pictures/s and had five
+presentations beyond the two-frame lateness limit; its timing gate failed.
+
+The published 1A49 application prepares eight actual consecutive future pictures
+(or the available short tail) before first PCM, then refills within that fixed
+owned/reserved budget. Each
+producer window and completed-packet FIFO remains capped at two. This changes
+application scheduling and ownership, with the same AA40 native worker and
+MM-AIR codec runtime. It adds no FFmpeg copy, decoder DLL or GPU backend. Native
+timing acceptance now passes for the bounded ordinary editor scope below.
+
+The coherent Windows gate and native 1080p editing/modal/export checks pass on
+`1A49B8AF32B9A9169DFCDEBB78D4F523BF742C4C34A006F90551C2B8251EB4B6` with worker
+`AA40B96C631C82CFC834D027678E95A00BD8D5F61DB54F15E7C7ECEFCF74228C`.
+Its serial native 4K-source run lasts **133.8901633 seconds raw**. The unchanged
+first-one-second and final-half-second exclusions retain **132.1706172 seconds**,
+**7,923 changed pictures at 59.9376788/s**, zero steady repeats/skips/backward/early
+pictures, no jump above one frame, no presentation beyond two heard frames, and
+no queue drain or overwrite. Steady gaps have median/p95/maximum
+**16.67895/17.4692/24.1018 ms**. Actual prepared futures have median six/p95 seven;
+the observed owned/reserved total is bounded by eight.
+
+The full raw trace retains two frame-zero repeats, two startup drains and its
+**171.3431 ms** maximum gap. This is a supplied AV1/PQ 59.94-fps source with live
+embedded stereo audio, fitted 480x270 monitors and an ordinary maximized native
+window. Manual Stop at `00:02:13:32` silences output with a nonblank picture; Start
+restores nonblank frame zero. It does not prove the full authored five minutes,
+compound 4K60, fullscreen 4K, a pixel oracle for every presented picture or
+physical speaker/display alignment. A fixed reserve cannot guarantee recovery
+from arbitrary stalls or persistently slower decoding. Headless preparation
+benchmarks remain separate evidence.
+
+Installed-root publication and readiness pass with the shared runtime and original
+assets unchanged. Prior failed/incomplete runs and BDF3's unknown initiating
+producer-exit cause remain in the [native validation record](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md).
+The [sanitized evidence archive](../archive/native-playback-reserve-2026-10-10.tar.gz)
+preserves source and receipts; its digest is recorded in the archive receipt and
+publication commit. Broader professional editing acceptance remains incomplete.

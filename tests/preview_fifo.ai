@@ -1,0 +1,196 @@
+module genesis.tests.preview_fifo
+import std.channel as channel
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.testing as test
+import std.text as text
+import "../src/preview_link.ai" as link
+type Producer=struct {ticket:channel.Ticket,root:string,mode:u64}
+fn image(size:u32,seed:u64) -> draw.Surface effects {alloc} {
+  var out:draw.Surface=option.unwrap(draw.surface(size,if size == 1280 {720}else{size}))
+  var at:u64=0
+  loop {if at >= array.len(struct.borrow(out,field=pixels)) {break}
+    let value:u8=cast.wrap((at*37+seed)%256)
+    array.set(struct.borrow(out,field=pixels),at,cast.bits(value))
+    at=at+1
+  }
+  out
+}
+fn exact(surface:ref<draw.Surface>,size:u32,seed:u64) -> bool effects {} {
+  if surface.width != size or surface.height != (if size == 1280 {720}else{size}) {return false}
+  var at:u64=0
+  loop {if at >= array.len(struct.borrow(surface,field=pixels)) {break}
+    let expected:u8=cast.wrap((at*37+seed)%256)
+    let actual:byte=array.get(struct.borrow(surface,field=pixels),at)
+    if actual != cast.bits(expected) {return false}
+    at=at+1
+  }
+  true
+}
+fn stamp(id:u64) -> link.FrameTiming effects {} {
+  link.FrameTiming {generation:id,request_ns:id*101,source_ns:12,plan_ns:13,program_ns:14,publish_ns:0,coalesce_ns:15}
+}
+fn send(peer:ref<link.Peer>,root:str,id:u64,last:u64,size:u32,held:bool) -> result<bool,string>
+    effects {alloc,fs.meta,fs.read,net,time} {
+  var source:draw.Surface=if held {draw.empty_surface()}else{image(size,13+id)}
+  var program:draw.Surface=image(size,91+id)
+  link.notify_pixels_window(peer,root,last,source,program,"FIFO 日本",held,stamp(id),
+    link.FramePosition {source_frame:cast.sat(id*2),program_frame:cast.sat(id*3),revision:71},time.monotonic_ns())
+}
+fn marker(root:str,name:str) -> bool effects {alloc,fs.meta,time} {
+  let until:u64=time.monotonic_ns()+5000000000
+  loop {
+    if tasks.requested_at(path.join(root,name)) {return true}
+    if time.monotonic_ns() >= until {return false}
+    time.sleep_ms(5)
+  }
+  false
+}
+fn produce(config:Producer own) -> bool effects {alloc,fs.meta,fs.read,fs.write,net,time} {
+  var owned:Producer=config
+  var peer:link.Peer=match link.peer(struct.borrow(owned,field=ticket)) {ok(value)=>value,err(_)=>{return false},}
+  let root:string=string.copy(struct.borrow(owned,field=root))
+  if not link.next(peer) or peer.command_kind != (if owned.mode == 7 {8}else{10}) {return false}
+  let _=files.write_text(path.join(root,"started"),"yes")
+  var good:bool=true
+  if owned.mode == 7 {
+    var source:draw.Surface=image(16,14)
+    var program:draw.Surface=image(16,92)
+    good=match link.notify_pixels(peer,root,source,program,"FIFO 日本",false,stamp(1),
+      link.FramePosition {source_frame:2,program_frame:3,revision:71},time.monotonic_ns()) {ok(value)=>value,err(_)=>false,}
+    if not link.next(peer) or peer.command_kind != 8 {return false}
+    source=image(16,15)
+    program=image(16,93)
+    good=match link.notify_pixels(peer,root,source,program,"FIFO 日本",false,stamp(2),
+      link.FramePosition {source_frame:4,program_frame:6,revision:71},time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} and good
+  }else if owned.mode < 2 {
+    good=match send(peer,root,1,2,16,false) {ok(value)=>value,err(_)=>false,}
+    good=match send(peer,root,2,2,16,owned.mode == 1) {ok(value)=>value,err(_)=>false,} and good
+    let _=files.write_text(path.join(root,"published"),"yes")
+  }else if owned.mode == 5 or owned.mode == 6 {
+    if owned.mode == 6 {good=match send(peer,root,1,2,16,false) {ok(value)=>value,err(_)=>false,}}
+    // Valid bytes with an invalid issued-ID order: the receiver must reject the
+    // transaction without overwriting an already completed packet.
+    // Consumer can retire immediately after the rejected header, cancelling
+    // the remaining bytes of that deliberately invalid packet.
+    good=match send(peer,root,if owned.mode == 5 {2}else{1},2,16,false) {ok(_)=>true,err(_)=>false,} and good
+    let _=files.write_text(path.join(root,"published"),"yes")
+    if not link.next(peer) or peer.command_kind != 10 {return false}
+    good=match send(peer,root,3,3,16,false) {ok(value)=>value,err(_)=>false,} and good
+  }else{
+    let result:result<bool,string> =send(peer,root,1,2,1280,false)
+    good=match result {ok(value)=>not value and owned.mode != 4,
+      err(error)=>owned.mode == 4 and text.contains(error,"GA_PREVIEW_CREDIT"),}
+    let _=files.write_text(path.join(root,"cancelled"),if good {"yes"}else{"bad"})
+    if owned.mode != 3 {
+      if not link.next(peer) or peer.command_kind != 10 {return false}
+      good=match send(peer,root,3,3,16,false) {ok(value)=>value,err(_)=>false,} and good
+    }
+  }
+  if owned.mode != 3 {if link.next(peer) {return false}}
+  link.finish(peer,3)
+  good
+}
+fn check_packet(transport:ref<link.Link>,id:u64,source_seed:u64,held:bool) -> bool effects {alloc} {
+  if link.next_completed(transport) != id or not link.select_completed(transport,id) {return false}
+  check_active(transport,id,source_seed,held)
+}
+fn check_active(transport:ref<link.Link>,id:u64,source_seed:u64,held:bool) -> bool effects {alloc} {
+  var images:array<draw.Surface> =link.take_images(transport,id)
+  if array.len(images) != 2 {return false}
+  var program:draw.Surface=option.unwrap(array.pop(images))
+  var source:draw.Surface=option.unwrap(array.pop(images))
+  var restored:draw.Surface=link.restore_source(transport)
+  exact(program,16,91+id) and (if held {source.width == 0}else{exact(source,16,source_seed)}) and
+    exact(restored,16,source_seed) and link.holds_source(transport) == held and
+    transport.position.source_frame == cast.sat(id*2) and transport.position.program_frame == cast.sat(id*3) and
+    transport.position.revision == 71 and transport.timing.generation == id and transport.timing.request_ns == id*101 and
+    str.eq(struct.borrow(transport,field=pixel_error),"FIFO 日本")
+}
+fn run(suite:ref<test.Suite>,root:str,mode:u64) -> unit effects {alloc,fs.meta,fs.read,fs.write,io.write,net,thread,time} {
+  let _=files.mkdirs(root)
+  let _=files.write_text(path.join(root,"request.id"),if mode == 7 {"1"}else{"2"})
+  var transport:link.Link=match link.open_pixels() {ok(value)=>value,err(_)=>{let _=test.check(suite,false,"Open transport")
+    return ()},}
+  task.scope {
+    var jobs:array<task<bool>> =array.new()
+    array.push(jobs,task.spawn(Producer {ticket:link.ticket(transport),root:string.copy(root),mode:mode},fn=produce))
+    let _=test.check(suite,match link.connect(transport) {ok(_)=>true,err(_)=>false,},"Connected socket lanes")
+    let requested:bool=if mode == 7 {match link.frame(transport,1,41,3,2,71) {ok(_)=>true,err(_)=>false,}}
+      else{match link.window_frame(transport,1,2,41,3,2,71,false) {ok(_)=>true,err(_)=>false,}}
+    let _=test.check(suite,requested,"Reserved bounded window or legacy single request")
+    let _=test.check(suite,marker(root,"started"),"Producer receives kind10 manifest")
+    if mode == 7 {
+      let _=test.check(suite,match link.await_ready(transport,1,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Legacy first completion")
+      let _=files.write_text(path.join(root,"request.id"),"2")
+      let _=test.check(suite,match link.frame(transport,2,41,6,4,71) {ok(_)=>true,err(_)=>false,},"Legacy single command retains kind8")
+      let _=test.check(suite,match link.await_ready(transport,2,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Legacy second completion")
+      let _=test.check(suite,check_active(transport,2,15,false),"Legacy latest Source/Program metadata exact")
+      let _=test.eq_u64(suite,transport.completed_total,2,"Legacy packet count retained")
+      let _=test.eq_u64(suite,transport.overwritten_total,1,"Legacy coalescing counted exactly once")
+      let _=test.eq_u64(suite,link.next_completed(transport),0,"Legacy has no FIFO opt-in")
+    }else if mode < 2 {
+      let _=test.check(suite,match link.await_ready(transport,2,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Both packets complete before any take")
+      link.poll(transport)
+      let _=test.eq_u64(suite,transport.completed_total,2,"Exactly two completed packets")
+      let _=test.eq_u64(suite,transport.overwritten_total,0,"No complete packet overwritten")
+      let _=test.check(suite,not link.select_completed(transport,2),"Out-of-order consumer cannot lose front")
+      let _=test.check(suite,match link.window_frame(transport,3,5,41,9,6,71,false) {ok(_)=>false,err(_)=>true,},"Third reservation refused before mutation")
+      let _=test.check(suite,match link.window_frame(transport,1,2,41,3,2,71,false) {ok(_)=>false,err(_)=>true,},"Completed ID range cannot be reissued")
+      let _=test.eq_u64(suite,link.next_completed(transport),1,"Refusal preserves front packet")
+      let _=test.check(suite,check_packet(transport,1,14,false),"First pixels Source identity timing and positions exact")
+      let _=test.check(suite,check_packet(transport,2,if mode == 1 {14}else{15},mode == 1),"Second independent packet/held Source exact")
+      let _=test.eq_u64(suite,link.next_completed(transport),0,"FIFO empties only on actual consumption")
+    }else if mode == 5 or mode == 6 {
+      let _=test.check(suite,match link.await_ready(transport,2,time.monotonic_ns()+5000000000) {
+        ok(_)=>false,err(error)=>text.contains(error,"GA_PREVIEW_PIXELS"),},"Wrong first/duplicate packet refuses current window")
+      let _=test.eq_u64(suite,transport.error_generation,2,"Refusal names authoritative remaining window credit")
+      let _=test.eq_u64(suite,transport.completed_total,if mode == 6 {1}else{0},"Only ordered complete packet counted")
+      if mode == 6 {let _=test.check(suite,check_packet(transport,1,14,false),"Duplicate cannot replace owned first pixels")}
+      let _=files.write_text(path.join(root,"request.id"),"3")
+      let _=test.check(suite,match link.window_frame(transport,3,3,41,9,6,71,false) {ok(_)=>true,err(_)=>false,},"Retire malformed transaction")
+      let _=test.check(suite,match link.await_ready(transport,3,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Same lane recovers after malformed packet")
+      let _=test.check(suite,check_packet(transport,3,16,false),"Recovered ordered packet exact")
+      let _=test.eq_u64(suite,transport.overwritten_total,0,"No duplicate/out-of-order packet overwrite")
+    }else{
+      if mode == 4 {
+        let _=test.check(suite,marker(root,"cancelled"),"Unconsumed full packet times out within bounded credit wait")
+      }else{
+        time.sleep_ms(150)
+        if mode == 3 {let _=files.write_text(path.join(root,"stop"),"yes")}
+        else{let _=files.write_text(path.join(root,"request.id"),"3")}
+        let _=test.check(suite,marker(root,"cancelled"),"Stop or new window cancels blocked partial packet")
+      }
+      if mode != 3 {
+        let _=files.write_text(path.join(root,"request.id"),"3")
+        let _=test.check(suite,match link.window_frame(transport,3,3,41,9,6,71,false) {ok(_)=>true,err(_)=>false,},"New generation reserves after retirement")
+        let _=test.check(suite,match link.await_ready(transport,3,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Retired partial wire drains and valid packet recovers")
+        let _=test.check(suite,check_packet(transport,3,16,false),"Recovery packet exact")
+        let _=test.eq_u64(suite,transport.completed_total,1,"Cancelled packet never counted/published")
+      }
+    }
+    let _=files.write_text(path.join(root,"stop"),"yes")
+    let _=link.wake(transport,true)
+    let _=test.check(suite,match tasks.join_next<bool>(jobs,2500) {some(value)=>value,none=>false,},"Producer closes and owned task joins")
+    link.retire_window(transport)
+    let _=test.eq_u64(suite,link.next_completed(transport),0,"Retirement releases owned complete/partial packets")
+    link.close_commands(transport)
+  }
+  ()
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,thread,time} {
+  if view.len(args) < 2 {return 2}
+  let root:str=view.get(args,1)
+  var suite:test.Suite=test.suite("Owned two-frame preview FIFO",true)
+  var mode:u64=0
+  loop {if mode >= 8 {break}
+    let _=test.start(suite,str.view(string.from_int(mode)))
+    run(suite,path.join(root,str.view(string.from_int(mode))),mode)
+    let _=test.done(suite)
+    mode=mode+1
+  }
+  test.conclude(suite,path.join(root,"preview-fifo-tests.json"),32)
+}
+

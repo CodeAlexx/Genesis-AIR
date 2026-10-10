@@ -14,6 +14,8 @@ pub type FrameTiming = struct {
   program_ns: u64, publish_ns: u64, coalesce_ns: u64
 }
 pub type FramePosition = struct {source_frame: i64, program_frame: i64, revision: u64}
+type Packet = struct {info:array<u64>,data:bytes,detail:string,timing:FrameTiming,
+  source:bytes,source_width:u32,source_height:u32,source_generation:u64}
 fn empty_timing() -> FrameTiming effects {} {
   FrameTiming {generation:0,request_ns:0,source_ns:0,plan_ns:0,program_ns:0,publish_ns:0,coalesce_ns:0}
 }
@@ -23,6 +25,7 @@ pub type Link = struct {
   pixel_stream: bool, snapshot_generation: u64, snapshot_key: string,
   pending_pixels: channel.ChunkBuffer, pending_info: array<u64>,
   pixel_info: array<u64>, pixel_data: bytes, pixel_error: string,
+  window_first:u64,window_last:u64,window_received:u64,retired_through:u64,packets:array<Packet>,pending_discard:bool,
   position: FramePosition,
   completed_total: u64, overwritten_total: u64, pixel_taken: u64,
   source_data: bytes, source_width: u32, source_height: u32, source_generation: u64, source_taken: u64, source_held: bool
@@ -43,6 +46,7 @@ fn open_mode(pixels: bool) -> result<Link,string> effects {alloc,net,time} {
     pixel_stream:pixels,snapshot_generation:0,snapshot_key:string.new(),
     pending_pixels:channel.chunk_buffer(7376896),pending_info:array.new(),
     pixel_info:array.new(),pixel_data:bytes.copy(b""),pixel_error:string.new(),source_data:bytes.copy(b""),
+    window_first:0,window_last:0,window_received:0,retired_through:0,packets:array.new(),pending_discard:false,
     position:FramePosition {source_frame:0,program_frame:0,revision:0},
     completed_total:0,overwritten_total:0,pixel_taken:0,
     source_width:0,source_height:0,source_generation:0,source_taken:0,source_held:false})
@@ -90,6 +94,7 @@ pub fn frame(link: ref<Link>, generation: u64, snapshot: u64, program: i64, sour
   if array.len(struct.borrow(link,field=commands)) == 0 or link.closed {
     return result.err(problem("Preview command lane is closed"))
   }
+  retire_window(link)
   var fields: array<string> = [string.from_int(generation),string.from_int(snapshot),
     string.from_int(program),string.from_int(source),string.from_int(revision)]
   let encoded: string = text.join(fields,"\t")
@@ -98,31 +103,93 @@ pub fn frame(link: ref<Link>, generation: u64, snapshot: u64, program: i64, sour
     ok(_)=>result.ok(()),err(error)=>result.err(problem(str.view(channel.message(error)))),
   }
 }
+// A window reserves at most two individual frame IDs. Its in-flight, partial
+// and completed packets use the caller's eight-credit queue budget; the Link
+// retains at most two completed packets and never replaces an untaken packet.
+pub fn retire_window(link:ref<Link>) -> unit effects {alloc} {
+  if link.window_last > link.retired_through {struct.set(link,link.window_last,field=retired_through)}
+  struct.set(link,0,field=window_first)
+  struct.set(link,0,field=window_last)
+  struct.set(link,0,field=window_received)
+  struct.set(link,true,field=pending_discard)
+  let _=struct.replace(link,array.new(),field=packets)
+  let _=struct.replace(link,array.new(),field=pending_info)
+  let _=struct.replace(link,channel.chunk_buffer(7376896),field=pending_pixels)
+  ()
+}
+pub fn window_frame(link:ref<Link>,first:u64,last:u64,snapshot:u64,program:i64,source:i64,
+    revision:u64,source_playing:bool) -> result<unit,string> effects {alloc,net,time} {
+  if first == 0 or last < first or last-first > 1 or first <= link.ready or first <= link.retired_through {
+    return result.err(problem("Invalid two-frame window"))
+  }
+  if array.len(struct.borrow(link,field=commands)) == 0 or link.closed {
+    return result.err(problem("Preview command lane is closed"))
+  }
+  retire_window(link)
+  struct.set(link,first,field=window_first)
+  struct.set(link,last,field=window_last)
+  var fields:array<string> = [string.from_int(first),string.from_int(last),string.from_int(snapshot),
+    string.from_int(program),string.from_int(source),string.from_int(revision),if source_playing {"1"}else{"0"}]
+  let encoded:string=text.join(fields,"\t")
+  match channel.send(array.borrow(struct.borrow(link,field=commands),0),10,str.bytes(encoded),time.monotonic_ns()+100000000) {
+    ok(_)=>result.ok(()),err(error)=>result.err(problem(str.view(channel.message(error)))),
+  }
+}
+pub fn next_completed(link:ref<Link>) -> u64 effects {} {
+  if array.len(struct.borrow(link,field=packets)) == 0 {return 0}
+  array.get(struct.borrow(array.borrow(struct.borrow(link,field=packets),0),field=info),0)
+}
+pub fn select_completed(link:ref<Link>,id:u64) -> bool effects {alloc} {
+  if id == 0 or next_completed(link) != id {return false}
+  var owned:array<Packet> = struct.replace(link,array.new(),field=packets)
+  var packet:Packet = if array.len(owned) == 2 {
+    let second:Packet=option.unwrap(array.pop(owned))
+    let first:Packet=option.unwrap(array.pop(owned))
+    array.push(struct.borrow(link,field=packets),second)
+    first
+  }else{option.unwrap(array.pop(owned))}
+  struct.set(link,packet.timing,field=timing)
+  let info:ref<array<u64>> = struct.borrow(packet,field=info)
+  struct.set(link,FramePosition {source_frame:cast.sat(array.get(info,9)),program_frame:cast.sat(array.get(info,10)),revision:array.get(info,11)},field=position)
+  struct.set(link,packet.source_width,field=source_width)
+  struct.set(link,packet.source_height,field=source_height)
+  struct.set(link,packet.source_generation,field=source_generation)
+  let _=struct.replace(link,struct.replace(packet,bytes.copy(b""),field=source),field=source_data)
+  let _=struct.replace(link,struct.replace(packet,string.new(),field=detail),field=pixel_error)
+  let _=struct.replace(link,struct.replace(packet,bytes.copy(b""),field=data),field=pixel_data)
+  let _=struct.replace(link,struct.replace(packet,array.new(),field=info),field=pixel_info)
+  true
+}
 // Wait for work, then consume the queued burst. One decode reads the newest
 // committed document; a final Stop is never hidden by a later wake. The one-second
 // idle deadline permits cancellation if startup or command delivery failed; it
 // does not delay a request, which wakes the blocking receive immediately.
-pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
+pub fn next_checked(peer: ref<Peer>) -> result<bool,string> effects {alloc,net,time} {
   struct.set(peer,0,field=command_kind)
   let _ = struct.replace(peer,string.new(),field=command)
   var message: channel.Message = match channel.recv(struct.borrow(peer,field=commands),time.monotonic_ns()+1000000000) {
-    ok(value)=>match value {some(value)=>value,none=>{return false},},
-    err(error)=>{return error.code == channel.code_empty()},
+    ok(value)=>match value {some(value)=>value,none=>{return result.err(problem("Preview command lane ended unexpectedly"))},},
+    err(error)=>{if error.code == channel.code_empty() {return result.ok(true)}
+      return result.err(problem(str.view(channel.message(error))))},
   }
-  if message.kind == 9 { return false }
+  if message.kind == 9 { return result.ok(false) }
   let drain_begin: u64 = time.monotonic_ns()
   loop {
     match channel.recv_now(struct.borrow(peer,field=commands),time.monotonic_ns()) {
       ok(value)=>match value {some(value)=>{message=value
-        if message.kind == 9 { return false }},none=>{return false},},
-      err(error)=>{if error.code == channel.code_empty(){break}else{return false}},
+        if message.kind == 9 { return result.ok(false) }},none=>{return result.err(problem("Preview command lane ended unexpectedly"))},},
+      err(error)=>{if error.code == channel.code_empty(){break}else{
+        return result.err(problem(str.view(channel.message(error))))}},
     }
   }
   struct.set(peer,time.monotonic_ns()-drain_begin,field=last_drain_ns)
   struct.set(peer,message.kind,field=command_kind)
   let value: string = match channel.text_of(message) {some(value)=>value,none=>string.new(),}
   let _ = struct.replace(peer,value,field=command)
-  true
+  result.ok(true)
+}
+pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
+  match next_checked(peer) {ok(value)=>value,err(_)=>false,}
 }
 pub fn notify(peer: ref<Peer>, kind: u64, generation: u64) -> bool effects {alloc,net,time} {
   let value: string = string.from_int(generation)
@@ -148,9 +215,20 @@ pub fn notify_frame(peer: ref<Peer>, generation: u64, request_ns: u64, source_ns
 // A full credit lane is resumable. Poll its credit wait in short steps so native
 // modal dialogs can hold the consumer without poisoning the stream, while Stop
 // or a new committed seek can still retire an incomplete frame.
-fn send_pixels_part(peer: ref<Peer>, root: str, id: u64, kind: u64, data: view<byte>)
+fn send_pixels_part(peer: ref<Peer>, root: str, id: u64, bounded:bool, kind: u64, data: view<byte>)
     -> result<bool,string> effects {alloc,fs.meta,fs.read,net,time} {
+  let began:u64=time.monotonic_ns()
   loop {
+    if bounded and str.len(root) != 0 {
+      if tasks.requested_at(path.join(root,"stop")) {return result.ok(false)}
+      let current:string=match files.read_text(path.join(root,"request.id")) {
+        ok(value)=>value,err(_)=>{return result.err("[GA_PREVIEW_REQUEST] Cannot read the pixel request marker")},
+      }
+      if not str.eq(str.view(text.trim(current)),str.view(string.from_int(id))) {return result.ok(false)}
+    }
+    if bounded and time.monotonic_ns()-began >= 2000000000 {
+      return result.err("[GA_PREVIEW_CREDIT] Pixel consumer did not return a window credit within two seconds")
+    }
     match channel.send(struct.borrow(peer,field=events),kind,data,time.monotonic_ns()+50000000) {
       ok(_)=>{return result.ok(true)},
       err(error)=>{
@@ -167,18 +245,33 @@ fn send_pixels_part(peer: ref<Peer>, root: str, id: u64, kind: u64, data: view<b
   }
   result.ok(false)
 }
-fn send_pixel_bytes(peer: ref<Peer>, root: str, id: u64, data: view<byte>)
+fn send_pixel_bytes(peer: ref<Peer>, root: str, id: u64, bounded:bool, data: view<byte>)
     -> result<bool,string> effects {alloc,fs.meta,fs.read,net,time} {
   var offset: u64 = 0
   loop {if offset >= view.len(data) {break}
     let count: u64 = if view.len(data)-offset > 262144 {262144}else{view.len(data)-offset}
-    if not try send_pixels_part(peer,root,id,6,view.slice(data,offset,offset+count)) {return result.ok(false)}
+    if not try send_pixels_part(peer,root,id,bounded,6,view.slice(data,offset,offset+count)) {return result.ok(false)}
     offset=offset+count
   }
   result.ok(true)
 }
 pub fn notify_pixels(peer: ref<Peer>, root: str, source: ref<draw.Surface>, program: ref<draw.Surface>,
     detail: str, held_source: bool, timing: FrameTiming, position: FramePosition, publish_begin: u64) -> result<bool,string>
+    effects {alloc,fs.meta,fs.read,net,time} {
+  notify_pixels_owned(peer,root,timing.generation,false,source,program,detail,held_source,timing,position,publish_begin)
+}
+pub fn notify_pixels_window(peer: ref<Peer>, root:str,authoritative_last_id:u64,
+    source:ref<draw.Surface>,program:ref<draw.Surface>,detail:str,held_source:bool,
+    timing:FrameTiming,position:FramePosition,publish_begin:u64) -> result<bool,string>
+    effects {alloc,fs.meta,fs.read,net,time} {
+  if timing.generation == 0 or authoritative_last_id < timing.generation or authoritative_last_id-timing.generation > 1 {
+    return result.err(problem("Packet is outside its two-frame window"))
+  }
+  notify_pixels_owned(peer,root,authoritative_last_id,true,source,program,detail,held_source,timing,position,publish_begin)
+}
+fn notify_pixels_owned(peer:ref<Peer>,root:str,marker:u64,bounded:bool,
+    source:ref<draw.Surface>,program:ref<draw.Surface>,detail:str,held_source:bool,
+    timing:FrameTiming,position:FramePosition,publish_begin:u64) -> result<bool,string>
     effects {alloc,fs.meta,fs.read,net,time} {
   let source_pixels: view<byte> = array.view(struct.borrow(source,field=pixels))
   let program_pixels: view<byte> = array.view(struct.borrow(program,field=pixels))
@@ -192,10 +285,10 @@ pub fn notify_pixels(peer: ref<Peer>, root: str, source: ref<draw.Surface>, prog
     string.append(header,str.view(string.from_int(array.get(values,index))))
     index=index+1
   }
-  if not try send_pixels_part(peer,root,timing.generation,5,str.bytes(str.view(header))) {return result.ok(false)}
-  if not try send_pixel_bytes(peer,root,timing.generation,source_pixels) {return result.ok(false)}
-  if not try send_pixel_bytes(peer,root,timing.generation,program_pixels) {return result.ok(false)}
-  if not try send_pixel_bytes(peer,root,timing.generation,str.bytes(detail)) {return result.ok(false)}
+  if not try send_pixels_part(peer,root,marker,bounded,5,str.bytes(str.view(header))) {return result.ok(false)}
+  if not try send_pixel_bytes(peer,root,marker,bounded,source_pixels) {return result.ok(false)}
+  if not try send_pixel_bytes(peer,root,marker,bounded,program_pixels) {return result.ok(false)}
+  if not try send_pixel_bytes(peer,root,marker,bounded,str.bytes(detail)) {return result.ok(false)}
   let fields: array<u64> = [timing.generation,timing.request_ns,timing.source_ns,timing.plan_ns,
     timing.program_ns,time.monotonic_ns()-publish_begin,timing.coalesce_ns]
   var done: string = string.new()
@@ -205,9 +298,10 @@ pub fn notify_pixels(peer: ref<Peer>, root: str, source: ref<draw.Surface>, prog
     string.append(done,str.view(string.from_int(array.get(fields,index))))
     index=index+1
   }
-  send_pixels_part(peer,root,timing.generation,1,str.bytes(str.view(done)))
+  send_pixels_part(peer,root,marker,bounded,1,str.bytes(str.view(done)))
 }
 fn pixel_failure(link: ref<Link>, generation: u64, detail: str) -> unit effects {alloc} {
+  struct.set(link,true,field=pending_discard)
   let _ = struct.replace(link,channel.chunk_buffer(7376896),field=pending_pixels)
   let _ = struct.replace(link,array.new(),field=pending_info)
   struct.set(link,generation,field=error_generation)
@@ -229,10 +323,22 @@ fn begin_pixels(link: ref<Link>, header: str) -> unit effects {alloc} {
     at=at+1
   }
   let id: u64 = array.get(numbers,0)
+  if id <= link.retired_through or (link.window_first != 0 and id < link.window_first) {
+    struct.set(link,true,field=pending_discard)
+    let _=struct.replace(link,numbers,field=pending_info)
+    return ()
+  }
+  struct.set(link,false,field=pending_discard)
+  if link.window_first != 0 and (id > link.window_last or
+      (link.window_received == 0 and id != link.window_first) or
+      (link.window_received != 0 and id != link.window_received+1)) {
+    pixel_failure(link,link.window_last,"Packet does not match its reserved window order")
+    return ()
+  }
   if id <= link.ready or array.get(numbers,1) > 1280 or array.get(numbers,2) > 720 or
       array.get(numbers,3) > 1280 or array.get(numbers,4) > 720 or array.get(numbers,7) > 4096 or array.get(numbers,8) > 1 or
       array.get(numbers,9) > 9223372036854775807 or array.get(numbers,10) > 9223372036854775807 or
-      (array.get(numbers,8) == 1 and (array.len(struct.borrow(link,field=pixel_info)) != 12 or array.get(numbers,5) != 0)) or
+      (array.get(numbers,8) == 1 and (link.source_generation == 0 or array.get(numbers,5) != 0)) or
       ((array.get(numbers,1) == 0) != (array.get(numbers,2) == 0)) or
       ((array.get(numbers,3) == 0) != (array.get(numbers,4) == 0)) or
       array.get(numbers,5) != array.get(numbers,1)*array.get(numbers,2)*4 or
@@ -260,7 +366,7 @@ fn finish_pixels(link: ref<Link>, generation: u64) -> bool effects {alloc} {
   }
   // Count validated packets lost before the consumer takes their pixels. These
   // integers expose completion coalescing without changing its current policy.
-  if array.len(struct.borrow(link,field=pixel_info)) == 12 and
+  if link.window_first == 0 and array.len(struct.borrow(link,field=pixel_info)) == 12 and
       array.get(struct.borrow(link,field=pixel_info),0) != link.pixel_taken {
     struct.set(link,link.overwritten_total+1,field=overwritten_total)
   }
@@ -272,6 +378,18 @@ fn finish_pixels(link: ref<Link>, generation: u64) -> bool effects {alloc} {
     struct.set(link,cast.sat(array.get(info,1)),field=source_width)
     struct.set(link,cast.sat(array.get(info,2)),field=source_height)
     struct.set(link,generation,field=source_generation)
+  }
+  if link.window_first != 0 {
+    if array.len(struct.borrow(link,field=packets)) >= 2 {
+      pixel_failure(link,generation,"Completed window exceeded its two reserved credits")
+      return false
+    }
+    let packet:Packet=Packet {info:info,data:raw,detail:detail,timing:link.timing,
+      source:bytes.copy(bytes.view(struct.borrow(link,field=source_data))),
+      source_width:link.source_width,source_height:link.source_height,source_generation:link.source_generation}
+    array.push(struct.borrow(link,field=packets),packet)
+    struct.set(link,generation,field=window_received)
+    return true
   }
   let _ = struct.replace(link,detail,field=pixel_error)
   struct.set(link,FramePosition {source_frame:cast.sat(array.get(info,9)),program_frame:cast.sat(array.get(info,10)),revision:array.get(info,11)},field=position)
@@ -343,6 +461,7 @@ fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
     return ()
   }
   if item.kind == 6 {
+    if link.pending_discard {return ()}
     if not channel.append_chunk(struct.borrow(link,field=pending_pixels),bytes.view(struct.borrow(item,field=data))) {
       let generation: u64 = if array.len(struct.borrow(link,field=pending_info)) == 12 {array.get(struct.borrow(link,field=pending_info),0)}else{link.ready+1}
       pixel_failure(link,generation,"Unexpected or oversized pixel chunk")
@@ -382,6 +501,7 @@ fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
     }
   }
   if item.kind == 1 and generation > link.ready {
+    if link.pending_discard {return ()}
     if link.pixel_stream and not finish_pixels(link,generation) {return ()}
     struct.set(link,generation,field=ready)
     if generation >= link.error_generation {
@@ -396,6 +516,7 @@ fn take(link: ref<Link>, message: channel.Message own) -> unit effects {alloc} {
 pub fn poll(link: ref<Link>) -> unit effects {alloc,net,time} {
   if link.closed { return () }
   loop {
+    if link.window_first != 0 and array.len(struct.borrow(link,field=packets)) >= 2 {break}
     match channel.recv_now(struct.borrow(link,field=events),time.monotonic_ns()) {
       ok(value)=>match value {some(value)=>take(link,value),none=>{struct.set(link,true,field=closed)
         let _ = struct.replace(link,problem("Preview task ended unexpectedly"),field=error)
@@ -438,6 +559,7 @@ pub fn await_ready(link: ref<Link>, generation: u64, deadline: u64) -> result<un
 // not a channel failure, and partial packet state remains owned by the receiver.
 pub fn wait_activity(link: ref<Link>, timeout_ms: u64) -> result<bool,string> effects {alloc,net,time} {
   if link.closed {return result.err(problem("Preview task ended unexpectedly"))}
+  if link.window_first != 0 and array.len(struct.borrow(link,field=packets)) >= 2 {return result.ok(true)}
   match channel.recv(struct.borrow(link,field=events),time.monotonic_ns()+timeout_ms*1000000) {
     ok(value)=>match value {some(value)=>{take(link,value)
       result.ok(true)},none=>{struct.set(link,true,field=closed)

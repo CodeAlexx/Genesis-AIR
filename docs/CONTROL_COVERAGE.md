@@ -3,7 +3,7 @@
 The target is every control Genesis AIR currently exposes. All 31 video and 20 audio filter
 kinds have a media mapping, but a mapping alone is not control acceptance. A control is
 complete when its document edit, saved/reloaded state, preview, export, and failure behavior
-agree. The 749-click UI gate proves hit testing and command dispatch in its representative
+agree. The current 757-outcome UI gate proves hit testing and command dispatch in its representative
 panel states;
 state-dependent controls also need focused checks. It does not by itself prove media output.
 
@@ -1399,3 +1399,59 @@ focused and final receipts, raw native profile/strip metadata, and the preceding
 personal projects, pixel buffers, executables and codec DLLs are excluded. This
 checkpoint is accepted for its stated fixes; broader professional editing and
 sustained 4K60 acceptance remain open.
+
+## Locked editing and playback reserve experiments on 2026-10-10
+
+New safety checks refuse locked Lift, Ripple Delete and track removal while
+preserving project bytes, selection, dirty/revision state and full Undo/Redo
+branches. The seven-case/29-check fixture passes in Windows native, Linux native
+and the AIR interpreter. A disposable native 1080p project also verifies painted
+and keyboard refusal paths, unlocked Lift/Ripple and Undo.
+
+The separate 9676 private window check covers Fit thumbnails/processed waveforms,
+scrubbed Program time/picture and histogram/RGB/luma scopes, stereo audio, live
+gain/pan edits, Mute/Unmute, clip-boundary playback, Source audition, Stop, both
+frame-zero rewinds and an unchanged saved project hash. It does not establish
+authored EOF or full-project professional acceptance.
+
+Ordered preview windows pass the focused retained-worker and socket/FIFO gates,
+but their three-picture native timing run still fails the existing two-frame
+lateness gate. That build remains private. The subsequent eight-picture reserve
+and recovery checkpoint is recorded below. Existing 757 controls and 153 application plus three native-drop
+expected facts remain unchanged. See [exact evidence and limits](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md).
+
+## Native playback reserve and recovery on 2026-10-10
+
+Application `1A49B8AF32B9A9169DFCDEBB78D4F523BF742C4C34A006F90551C2B8251EB4B6`
+and unchanged worker `AA40B96C631C82CFC834D027678E95A00BD8D5F61DB54F15E7C7ECEFCF74228C`
+pass the coherent `cadence-reserve-gain` Windows gate, native editing/export,
+exact-binary cadence, publication and fresh installed-root readiness checks.
+
+| Gate | Current evidence |
+|---|---|
+| Complete Windows release suite | Exit zero; 757 control outcomes across four tabs, 153 application facts plus three native-drop checks, and existing picture/audio/project/export gates |
+| Actual reserve and ownership | Fixed eight total owned/reserved pictures; producer windows/FIFO each at most two. Readiness needs actual consecutive pictures, not issued requests. Queue model 20 cases/303 checks; clock 18/3,329 on Windows and Linux; the earlier 17/3,326 interpreter proof remains separate |
+| Producer/FIFO and profile schema | Persistent producer eight cases/228 checks; socket FIFO eight/93; cache eight/2,527, including all original profile fields and seven appended request/credit descriptors |
+| Destructive edit safety | Seven cases/29 checks on Windows, Linux and the interpreter; locked Lift/Ripple/removal refusals preserve complete document/history state |
+| PCM completion and retirement | Three scenarios with 2.4 million exact quantized source-PCM comparisons; completion before GUI receipt, in-flight cancellation and correct same-path reuse. These are headless ownership proofs, not physical sound checks |
+| Native 1080p editing | Two fitted clips, 24 mapped thumbnail rows, 1,199/1,200 processed waveform points; live Gain/Pan, Mute/Unmute, natural EOF, independent Source, scrubbed time/picture/scopes, native Open Cancel held over two seconds, locked refusals, Split/Undo/Redo and authored-content Save/Reopen |
+| Native export and retry | 1,032 clips/8,192 keys; cancel 240-frame export at observed 29%, encoder exits while preview remains alive, no final/partial/signals. Twelve-frame retry independently checks title/grade/background and AAC correlation 0.9999758635 with no padding; native Save/Reopen preserves the authored graph |
+| Native 4K-source cadence | Raw 133.8901633 s; steady 132.1706172 s, 7,923 changed pictures at 59.9376788/s. Zero steady repeats, skips, jump above one, backward/early pictures, lateness above two frames, drains or overwrites; gaps median/p95/max 16.67895/17.4692/24.1018 ms |
+| Installed root | Publication passes, old loaded images/user processes preserved, original assets/runtime unchanged. Fresh root opens the 76,701-frame project paused with both pictures nonblank, whole Fit, 23 mapped bitmaps, 25,567 processed peak cells and populated histogram/RGB/luma scopes |
+
+The cadence analyzer and fixed first-one-second/final-half-second exclusions are
+unchanged. The raw epoch retains two frame-zero repeats, two startup drains and a
+171.3431 ms maximum gap. The prepared steady reserve has median six and p95 seven;
+owned plus reserved never exceeds eight. Native Stop silences output and retains
+the picture; Start restores nonblank frame zero. This measures ordinary maximized
+480x270 fitted monitors from a single AV1/PQ 59.94-fps source, not fullscreen,
+whole five-minute or compound 4K60, independent pixels for every presentation,
+physical A/V synchronization or complete professional editing.
+
+Earlier failed runs, the capped incomplete 8892 attempt, the private qualified
+retry and BDF3's live-Gain failure remain retained. BDF3's initiating producer-exit
+cause is still unknown; passing recovery tests do not establish that cause.
+The [validation record](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md) binds exact
+receipts and restrictions. The [sanitized archive](../archive/native-playback-reserve-2026-10-10.tar.gz)
+preserves those receipts and staged source; its digest is recorded in the archive
+receipt and publication commit.

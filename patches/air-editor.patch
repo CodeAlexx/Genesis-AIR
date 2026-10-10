@@ -1,5 +1,5 @@
 diff --git a/stdlib/editor.ai b/stdlib/editor.ai
-index 13f78f4..cd2efb4 100644
+index 13f78f4..aa5646c 100644
 --- a/stdlib/editor.ai
 +++ b/stdlib/editor.ai
 @@ -17,6 +17,7 @@
@@ -624,7 +624,27 @@ index 13f78f4..cd2efb4 100644
        if not trim_end(doc, id, new_length) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1303,56 +1740,62 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+@@ -1276,7 +1713,10 @@ pub fn ripple_trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool eff
+ // LIFT: remove the clip and leave the hole. Genesis `delete_clip`.
+ pub fn lift(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+   match clip_slot(doc, id) {
+-    some(slot) => { remove_clip_slot(doc, slot)
++    some(slot) => {
++      let track: u64 = struct.get(array.borrow(struct.borrow(doc,field=clips),slot),field=track)
++      if track_locked(doc,track) {return false}
++      remove_clip_slot(doc, slot)
+       true },
+     none => false,
+   }
+@@ -1288,6 +1728,7 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+     some(slot) => {
+       let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+       let track: u64 = old.track
++      if track_locked(doc,track) {return false}
+       let finish: i64 = clip_end(old)
+       let length: i64 = old.length
+       remove_clip_slot(doc, slot)
+@@ -1303,56 +1744,62 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
  // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
  // up, because a clamped remnant would spill back into the range and never clear.
  // Genesis `lift_range`.
@@ -735,7 +755,7 @@ index 13f78f4..cd2efb4 100644
    ()
  }
  
-@@ -2131,9 +2574,8 @@ pub fn boundary_at(doc: ref<Document>, track: u64, center: i64)
+@@ -2131,9 +2578,8 @@ pub fn boundary_at(doc: ref<Document>, track: u64, center: i64)
  // Keyframes
  //
  // One flat, sorted store animates every parameter of every clip, plus the sequence-wide ones

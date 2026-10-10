@@ -12,6 +12,7 @@ import "../src/audio_playback.ai" as playback
 import "../src/preview_link.ai" as link
 import "../src/timeline_media.ai" as media
 import "../src/provider.ai" as provider
+import "../src/main.ai" as window
 
 fn pull(peer: ref<link.Link>, root: str, id: u64, generation: u64, plan: ref<media.AudioPlan>) -> bool
     effects {alloc,fs.write,io.write,net,time} {
@@ -31,6 +32,9 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
   let root: str = view.get(args,3)
   if view.len(args) > 4 and str.eq(view.get(args,4), "gain-keys") {
     return gain_keys(worker,source_path,root)
+  }
+  if view.len(args) > 4 and str.eq(view.get(args,4), "output-owner") {
+    return output_owner(worker,source_path,root,view.len(args)>5 and str.eq(view.get(args,5),"write"))
   }
   playback.reset(root)
   var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return 1},}
@@ -140,6 +144,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
           failure=true},
       }
     }
+    if not failure {
+      if not completed_owner(peer,root,worker,source_path,request) {failure=true}
+      request=request+5
+    }
     // A reset with no active range must close the retained worker. The next
     // request can reuse the same clip IDs without inheriting its filter state.
     request=request+1
@@ -155,6 +163,202 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
     link.close_commands(peer)
   }
   if failure {1}else{io.write("Continuous audio task: thirty-three cases covering all twenty audio effects, clip/track gain and pan, mute, solo, embedded video audio, source/rate/reset, coded failure/recovery and idle Stop passed\n")
+    0}
+}
+
+
+// Parse independently authored PCM WAV chunks, including non-44-byte headers.
+// Every byte of both stereo channels is checked against the source interval;
+// existence alone never proves a render has completed.
+fn little(data:view<byte>,at:u64,count:u64) -> u64 effects {} {
+  var answer:u64=0
+  var scale:u64=1
+  var i:u64=0
+  loop {if i>=count {break}
+    let b:u8=cast.bits(view.get(data,at+i))
+    answer=answer+cast.wrap(b)*scale
+    scale=scale*256
+    i=i+1
+  }
+  answer
+}
+type WaveSpan = struct {offset:u64,length:u64}
+fn wave_span(data:view<byte>) -> option<WaveSpan> effects {} {
+  if view.len(data)<44 or little(data,0,4)!=1179011410 or little(data,8,4)!=1163280727 {return option.none()}
+  var at:u64=12
+  var format:bool=false
+  loop {if at+8>view.len(data) {break}
+    let size:u64=little(data,at+4,4)
+    if size>view.len(data)-at-8 {return option.none()}
+    let tag:u64=little(data,at,4)
+    if tag==544501094 {
+      if size<16 or little(data,at+8,2)!=1 or little(data,at+10,2)!=2 or
+          little(data,at+12,4)!=48000 or little(data,at+22,2)!=16 {return option.none()}
+      format=true
+    }
+    if tag==1635017060 {if not format {return option.none()}
+      return option.some(WaveSpan {offset:at+8,length:size})}
+    at=at+8+size+(size%2)
+  }
+  option.none()
+}
+fn source_pcm_matches(output:str,source:str,begin:u64,frames:u64) -> bool effects {fs.read} {
+  let actual:bytes=match files.read_bytes(output) {ok(value)=>value,err(_)=>{return false},}
+  let expected:bytes=match files.read_bytes(source) {ok(value)=>value,err(_)=>{return false},}
+  let a:WaveSpan =match wave_span(bytes.view(actual)) {some(value)=>value,none=>{return false},}
+  let e:WaveSpan =match wave_span(bytes.view(expected)) {some(value)=>value,none=>{return false},}
+  if a.length!=frames*4 or begin*4+frames*4>e.length {return false}
+  var i:u64=0
+  loop {if i>=frames*4 {break}
+    let raw:u64=little(bytes.view(expected),e.offset+begin*4+i,2)
+    let signed:i64=if raw>=32768 {cast.wrap(raw)-65536}else{cast.wrap(raw)}
+    // Independent PCM16 -> float -> PCM16 quantization contract, using the
+    // authored source sample rather than another worker output as reference.
+    let normalized:f32=cast.float(signed)/32768.0
+    let scaled:f32=normalized*32767.0
+    let quantized:i64=cast.sat(if scaled<0.0 {math.ceil(cast.float(scaled)-0.5)}else{math.floor(cast.float(scaled)+0.5)})
+    let got:u64=little(bytes.view(actual),a.offset+i,2)
+    let value:i64=if got>=32768 {cast.wrap(got)-65536}else{cast.wrap(got)}
+    if value!=quantized {return false}
+    i=i+2
+  }
+  true
+}
+fn exists(file:str) -> bool effects {fs.meta} {
+  match files.exists(file) {ok(value)=>value,err(_)=>true,}
+}
+fn owner_doc(source_path:str) -> editor.Document effects {alloc} {
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let source:u64=editor.add_source(doc,source_path,"Ownership PCM",360,30.0)
+  let _=editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"Audio")
+  let _=editor.append(doc,track,source,0,360)
+  doc
+}
+fn completed_owner(peer:ref<link.Link>,root:str,worker:str,source:str,base:u64) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,time} {
+  var request:u64=base
+  var doc:editor.Document=owner_doc(source)
+  let output:string=path.join(root,"owned-session-chunk.wav")
+  let sentinel:string=path.join(root,"other-session.wav")
+  let _=files.write_text(sentinel,"unrelated-owner")
+  var first:media.AudioPlan=match media.audio_plan_range(doc,worker,0,150,output) {ok(value)=>value,err(_)=>{return false},}
+  request=request+1
+  if not pull(peer,root,request,300,first) {return false}
+  if not source_pcm_matches(output,source,0,240000) {io.write("[GA_TEST_AUDIO_OWNER_PCM0] Source quantization mismatch\n")
+    return false}
+  let seen:u64=peer.ready
+  var later:media.AudioPlan=match media.audio_plan_range(doc,worker,150,300,output) {ok(value)=>value,err(_)=>{return false},}
+  request=request+1
+  if not playback.request(root,request,300,later) {return false}
+  let _=link.wake(peer,false)
+  let deadline:u64=time.monotonic_ns()+30000000000
+  // Deliberately never poll the GUI-side channel while this later render ends.
+  loop {if source_pcm_matches(output,source,240000,240000) {break}
+    if time.monotonic_ns()>=deadline {io.write("[GA_TEST_AUDIO_OWNER_COMPLETE] Later PCM did not finish\n")
+      return false}
+    time.sleep_ms(5)
+  }
+  if peer.ready!=seen {return false}
+  var preroll:window.PcmPreroll=window.pcm_preroll()
+  if preroll.waiting or preroll.ready {return false}
+  request=request+1
+  if not playback.discard(root,request,301) {return false}
+  window.release_playback_output(preroll,output)
+  if exists(output) {return false}
+  let _=link.wake(peer,false)
+  match link.await_ready(peer,request,time.monotonic_ns()+2500000000) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+    return false},}
+  if exists(output) or peer.ready!=request {return false}
+  if not str.eq(match files.read_text(sentinel) {ok(value)=>value,err(_)=>string.new(),},"unrelated-owner") {return false}
+  request=request+1
+  if not pull(peer,root,request,301,first) {return false}
+  if not source_pcm_matches(output,source,0,240000) {io.write("[GA_TEST_AUDIO_OWNER_PCM0] Source quantization mismatch\n")
+    return false}
+  request=request+1
+  if not playback.discard(root,request,302) {return false}
+  window.release_playback_output(preroll,output)
+  let _=link.wake(peer,false)
+  match link.await_ready(peer,request,time.monotonic_ns()+2500000000) {ok(_)=>{},err(_)=>{return false},}
+  if exists(output) {return false}
+  io.write("Later PCM ownership: completed without receipt, discard/release, acknowledged cleanup and exact same-path recovery passed\n")
+  let _=files.write_text(path.join(root,"audio-output-ownership.json"),"{\"passed\":true,\"completed_before_receipt\":true,\"discard_ack_cleanup\":true,\"same_path_source_pcm_exact\":true,\"unrelated_output_preserved\":true}\n")
+  true
+}
+// The existing native wrapper blocks once, writing a partial output and a PID
+// marker. Its next child delegates to the actual compositor, not a fake mix.
+fn output_owner(worker:str,source:str,root:str,blocked_write:bool) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  playback.reset(root)
+  var doc:editor.Document=owner_doc(source)
+  let output:string=path.join(root,"cancelled.wav")
+  var plan:media.AudioPlan=match media.audio_plan_range(doc,worker,0,150,output) {ok(value)=>value,err(_)=>{return 1},}
+  if blocked_write {
+    var large:string=string.copy("AUDIOSTREAM ")
+    var i:u64=0
+    loop {if i==32768 {break}
+      string.append(large,"0123456789abcdef")
+      i=i+1
+    }
+    let _=struct.replace(plan,[large],field=sounds)
+  }
+  var peer:link.Link=match link.open() {ok(value)=>value,err(_)=>{return 1},}
+  let config:playback.Config=playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var failure:bool=false
+  var preroll:window.PcmPreroll=window.pcm_preroll()
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=playback.run)]
+    match link.connect(peer) {ok(_)=>{},err(_)=>{failure=true},}
+    if not failure {
+      if not playback.request(root,1,1,plan) {failure=true}
+      let _=link.wake(peer,false)
+      let deadline:u64=time.monotonic_ns()+5000000000
+      loop {if exists(path.join(root,"blocked.pid")) {break}
+        if time.monotonic_ns()>=deadline {failure=true
+          break}
+        time.sleep_ms(5)
+      }
+      if not exists(output) or peer.ready!=0 {failure=true}
+    }
+    let began:u64=time.monotonic_ns()
+    if not failure {
+      if not playback.discard(root,2,2) {failure=true}
+      window.release_playback_output(preroll,output)
+      let _=link.wake(peer,false)
+      match link.await_ready(peer,2,began+2500000000) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+        failure=true},}
+      if exists(output) or peer.ready!=2 or time.monotonic_ns()-began>2500000000 {io.write("[GA_TEST_AUDIO_OWNER_ACK] Discard did not clean output within bound\n")
+        failure=true}
+    }
+    if not failure {
+      match media.audio_plan_range(doc,worker,150,300,output) {
+        err(problem)=>{io.write(str.view(problem))
+          failure=true},
+        ok(value)=>{var fresh:media.AudioPlan=value
+          if not playback.request(root,3,2,fresh) {failure=true}
+          let _=link.wake(peer,false)
+          match link.await_ready(peer,3,time.monotonic_ns()+2500000000) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+            failure=true},}
+          if not source_pcm_matches(output,source,240000,240000) {io.write("[GA_TEST_AUDIO_OWNER_PCM5] Fresh source quantization mismatch\n")
+            failure=true}},
+      }
+    }
+    let _=playback.discard(root,4,3)
+    window.release_playback_output(preroll,output)
+    let _=link.wake(peer,false)
+    match link.await_ready(peer,4,time.monotonic_ns()+2500000000) {ok(_)=>{},err(_)=>{failure=true},}
+    if exists(output) {failure=true}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    let stopping:u64=time.monotonic_ns()
+    match tasks.join_next<bool>(jobs,2500) {some(value)=>{if not value {failure=true}},none=>{failure=true},}
+    if time.monotonic_ns()-stopping>2500000000 {io.write("[GA_TEST_AUDIO_OWNER_JOIN] Stop exceeded bound\n")
+      failure=true}
+    link.close_commands(peer)
+  }
+  if failure {io.write("[GA_TEST_AUDIO_OUTPUT_OWNER] Active cancellation or same-path PCM recovery failed\n")
+    1}else{let _=files.write_text(path.join(root,"audio-output-ownership.json"),"{\"passed\":true,\"active_cancel_discard_ack\":true,\"same_path_source_pcm_exact\":true,\"final_cleanup\":true,\"bounded_shutdown\":true}\n")
+    io.write("Active PCM ownership: blocked render discarded, same-path exact fresh PCM, final cleanup and bounded Stop passed\n")
     0}
 }
 

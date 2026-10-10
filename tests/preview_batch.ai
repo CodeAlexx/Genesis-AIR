@@ -1,0 +1,418 @@
+// CPU-only real persistent preview task: two independent timed completions from
+// one command. The fake decoder encodes frame number in its corner pixel.
+module genesis.tests.preview_batch
+import std.channel as channel
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.tasks as tasks
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/preview.ai" as preview
+import "../src/preview_link.ai" as link
+import "../src/provider.ai" as provider
+
+fn fixture(root: str, source_playing: bool) -> app.App effects {alloc} {
+  var state: app.App = app.app(provider.fake(root))
+  var doc: editor.Document = editor.document(60.0,32,18)
+  let source: u64 = editor.add_source(doc,"batch-coded.mov","Frame-coded source",120,60.0)
+  let _ = editor.describe_source(doc,source,32,18,true,true,48000,2)
+  let lane: u64 = editor.add_track(doc,doc.active,editor.track_video(),"Video")
+  let _ = editor.place(doc,lane,source,0,60,0)
+  struct.set(doc,source,field=monitor_source)
+  commands.replace_project(state,doc)
+  if source_playing {let _ = editor.monitor_action(struct.borrow(state,field=document),editor.play())}
+  else {let _ = editor.program_action(struct.borrow(state,field=document),editor.play())}
+  struct.set(state,7,field=media_revision)
+  state
+}
+fn read(root: str, file: str) -> string effects {alloc,fs.read} {
+  match files.read_text(path.join(root,file)) {ok(value)=>value,err(_)=>string.new(),}
+}
+fn await_pair(transport: ref<link.Link>, last: u64) -> bool effects {alloc,io.write,net,time} {
+  match link.await_ready(transport,last,time.monotonic_ns()+5000000000) {ok(_)=>true,err(problem)=>{
+    io.write(text.concat(problem,"\n"))
+    var fields:array<string> = [string.from_int(last),string.from_int(transport.ready),
+      string.from_int(transport.error_generation),string.from_int(transport.completed_total),
+      if transport.closed {"closed"}else{"open"},string.copy(struct.borrow(transport,field=error))]
+    io.write(text.concat("preview failure state: ",text.concat(text.join(fields,"\t"),"\n")))
+    false},}
+}
+fn corner(surface: ref<draw.Surface>, frame: i64) -> bool effects {} {
+  let positive: u64 = cast.sat(frame)
+  match draw.surface_pixel(surface,0,0) {none=>false,some(color)=>{
+    color.r == cast.sat((positive%128)*2) and color.g == 255},
+  }
+}
+fn check_packet(suite: ref<test.Suite>, transport: ref<link.Link>, id: u64, program: i64, source: i64)
+    -> bool effects {alloc} {
+  let selected: bool = link.select_completed(transport,id)
+  let _ = test.check(suite,selected,"FIFO permits selecting the exact individual request")
+  if not selected {return false}
+  let _ = test.eq_u64(suite,transport.timing.generation,id,"Individual timing retains original request ID")
+  let _ = test.eq_i64(suite,transport.position.program_frame,program,"Program timestamp is the authored requested frame")
+  let _ = test.eq_i64(suite,transport.position.source_frame,source,"Source timestamp preserves playing or parked time")
+  let _ = test.eq_u64(suite,transport.position.revision,7,"Media revision is stamped on each completion")
+  var pixels: array<draw.Surface> = link.take_images(transport,id)
+  let _ = test.eq_u64(suite,array.len(pixels),2,"Each completion owns both monitor slots")
+  if array.len(pixels) != 2 {return false}
+  var program_pixels: draw.Surface = option.unwrap(array.pop(pixels))
+  var source_pixels: draw.Surface = option.unwrap(array.pop(pixels))
+  if source_pixels.width == 0 {source_pixels=link.restore_source(transport)}
+  let _ = test.check(suite,corner(program_pixels,program),"Program corner independently encodes its frame number")
+  let _ = test.check(suite,corner(source_pixels,source),"Source corner independently encodes its frame number")
+  true
+}
+fn run_pair(suite: ref<test.Suite>, root: str, source_playing: bool) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App = fixture(root,source_playing)
+  let before: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+  var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var config: preview.Config = preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  struct.set(config,true,field=profile)
+  var good: bool = true
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    let _ = test.check(suite,preview.request_window(state,root,transport,1,2,"stable epoch",10,20,32,18,source_playing),"One command authorizes exactly two owned preparation slots")
+    let snapshot: string = read(root,"request.air")
+    good=await_pair(transport,2) and good
+    let _ = test.eq_u64(suite,transport.completed_total,2,"Background completes frame two without another request or wake")
+    let _ = test.eq_u64(suite,transport.overwritten_total,0,"Receiving frame two preserves unconsumed frame one")
+    let _ = test.eq_u64(suite,link.next_completed(transport),1,"FIFO exposes the earlier frame before the later frame")
+    good=check_packet(suite,transport,1,10,20) and good
+    good=check_packet(suite,transport,2,if source_playing {10}else{11},if source_playing {21}else{20}) and good
+    let _ = test.eq_u64(suite,link.next_completed(transport),0,"Taking both completions releases all FIFO credit")
+    let _ = test.check(suite,preview.request_window(state,root,transport,3,2,"stable epoch",30,40,32,18,source_playing),"Next accepted window reuses the immutable snapshot")
+    good=await_pair(transport,4) and good
+    good=check_packet(suite,transport,3,30,40) and good
+    good=check_packet(suite,transport,4,if source_playing {30}else{31},if source_playing {41}else{40}) and good
+    let _ = test.check(suite,str.eq(snapshot,read(root,"request.air")),"Moving windows do not rewrite the project snapshot")
+    let after: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+    let _ = test.check(suite,str.eq(before,after),"Background decode never mutates the caller's authored document")
+    preview.stop(root)
+    let _ = link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+fn invalid(command: str) -> bool effects {alloc} {
+  match preview.frame_window(command) {ok(_)=>false,err(problem)=>text.contains(problem,"GA_PREVIEW_REQUEST"),}
+}
+fn await_error(transport: ref<link.Link>) -> bool effects {alloc,net,time} {
+  let until: u64 = time.monotonic_ns()+5000000000
+  loop {link.poll(transport)
+    if str.len(struct.borrow(transport,field=error)) != 0 {return true}
+    if transport.closed or time.monotonic_ns() >= until {break}
+    let _ = link.wait_activity(transport,20)
+  }
+  false
+}
+fn raw(transport: ref<link.Link>, root: str, last: u64, command: str) -> bool
+    effects {alloc,fs.write,net,time} {
+  if not match files.write_text(path.join(root,"request.id"),string.from_int(last)) {ok(_)=>true,err(_)=>false,} {return false}
+  match channel.send(array.borrow(struct.borrow(transport,field=commands),0),10,str.bytes(command),time.monotonic_ns()+1000000000) {
+    ok(_)=>true,err(_)=>false,
+  }
+}
+fn recovery(suite: ref<test.Suite>, root: str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _ = files.mkdirs(root)
+  preview.reset(root)
+  var state: app.App = fixture(root,false)
+  var transport: link.Link = match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var config: preview.Config = preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good: bool = true
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"recovery",10,20,32,18,false) and good
+    good=await_pair(transport,2) and good
+    good=check_packet(suite,transport,1,10,20) and good
+    good=check_packet(suite,transport,2,11,20) and good
+    good=raw(transport,root,5,"3\t5\t1\t30\t20\t7\t0") and good
+    let _ = test.check(suite,await_error(transport),"Over-capacity wire command publishes a coded failure")
+    let _ = test.check(suite,text.contains(struct.borrow(transport,field=error),"GA_PREVIEW_REQUEST"),"Invalid window refusal retains its request code")
+    let _ = test.eq_u64(suite,transport.completed_total,2,"Malformed window never publishes a partial accepted frame")
+    good=preview.request_window(state,root,transport,6,2,"recovery",30,20,32,18,false) and good
+    good=await_pair(transport,7) and good
+    good=check_packet(suite,transport,6,30,20) and good
+    good=check_packet(suite,transport,7,31,20) and good
+    let _ = test.check(suite,not transport.closed,"Valid window recovers on the same persistent producer after refusal")
+    // Force pixel credit to fill before a 1280x720 two-picture packet completes.
+    good=preview.request_window(state,root,transport,8,2,"blocked geometry",40,20,1280,720,false) and good
+    time.sleep_ms(200)
+    // Deterministically expose an unavailable old marker during a blocked
+    // send. Its read error belongs to the retired window, not the new channel.
+    let marker_removed:bool=match files.rename(path.join(root,"request.id"),path.join(root,"request.retired-marker")) {
+      ok(_)=>true,err(_)=>false,}
+    let _=test.check(suite,marker_removed,"Old request marker is deliberately unavailable before replacement")
+    time.sleep_ms(100)
+    // A new seek/content revision retires the blocked window. Existing queued
+    // chunks must be discarded rather than acquiring the new window's stamp.
+    struct.set(state,8,field=media_revision)
+    good=preview.request_window(state,root,transport,10,2,"replacement epoch",50,20,32,18,false) and good
+    good=await_pair(transport,11) and good
+    let _ = test.check(suite,transport.completed_total==6,"Credit-blocked old window cannot publish either old completion after replacement")
+    // These new packets deliberately carry revision8, so check it independently.
+    let _ = test.check(suite,link.select_completed(transport,10),"Replacement owns its first request")
+    let _ = test.eq_i64(suite,transport.position.program_frame,50,"Seek replacement decodes exact new time")
+    let _ = test.eq_u64(suite,transport.position.revision,8,"Revision replacement uses its own snapshot")
+    var pixels: array<draw.Surface> = link.take_images(transport,10)
+    var program: draw.Surface = match array.pop(pixels) {some(value)=>value,none=>draw.empty_surface(),}
+    let _ = test.check(suite,corner(program,50),"Replacement program pixels match the new time")
+    let _ = test.check(suite,link.select_completed(transport,11),"Replacement preserves its second request")
+    var second: array<draw.Surface> = link.take_images(transport,11)
+    var second_program: draw.Surface = match array.pop(second) {some(value)=>value,none=>draw.empty_surface(),}
+    let _ = test.check(suite,corner(second_program,51),"Replacement's consecutive frame survives FIFO consumption")
+    good=preview.request_window(state,root,transport,12,2,"stop blocked",40,20,1280,720,false) and good
+    time.sleep_ms(200)
+    let until: u64 = time.monotonic_ns()+2000000000
+    preview.stop(root)
+    let _ = link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(value)=>value,none=>false,} and good
+    let _ = test.check(suite,time.monotonic_ns() < until,"Stop cancels blocked pixel credit and joins within two seconds")
+  }
+  good
+}
+// Deliberately receive a real producer's bytes without accepting its completion
+// into Link. Seeing frame two's held header proves frame one's Source key was
+// committed on the producer, while its receiver cache remains uncommitted.
+fn withhold_source(suite:ref<test.Suite>,transport:ref<link.Link>) -> bool effects {alloc,io.write,net,time} {
+  let events:ref<channel.Receiver> = struct.borrow(transport,field=events)
+  var raw:array<byte> = array.new()
+  var source_bytes:u64=0
+  var saw_header:bool=false
+  loop {
+    var item:channel.Message=match channel.recv(events,time.monotonic_ns()+5000000000) {
+      ok(value)=>match value {some(value)=>value,none=>{return false},},err(_)=>{return false},
+    }
+    if item.kind == 5 {
+      let encoded:string=match channel.text_of(item) {some(value)=>value,none=>{return false},}
+      var fields:array<string> = text.split(encoded,"\t")
+      if array.len(fields) != 12 {return false}
+      source_bytes=match text.parse_u64(array.borrow(fields,5)) {some(value)=>value,none=>{return false},}
+      saw_header=str.eq(array.borrow(fields,0),"1") and str.eq(array.borrow(fields,8),"0") and source_bytes==2304
+    }else if item.kind == 6 {
+      let data:view<byte> =bytes.view(struct.borrow(item,field=data))
+      var at:u64=0
+      loop {if at>=view.len(data) {break}
+        if array.len(raw)>=4608 {return false}
+        array.push(raw,view.get(data,at))
+        at=at+1}
+    }else if item.kind == 1 {
+      if not saw_header or array.len(raw)!=4608 {return false}
+      break
+    }else{return false}
+  }
+  var source:draw.Surface=match draw.surface_from_rgba(32,18,view.slice(array.view(raw),0,source_bytes)) {
+    some(value)=>value,none=>{return false},
+  }
+  let _=test.check(suite,corner(source,20),"Withheld Source bytes independently encode the requested frame")
+  var second:channel.Message=match channel.recv(events,time.monotonic_ns()+5000000000) {
+    ok(value)=>match value {some(value)=>value,none=>{return false},},err(_)=>{return false},
+  }
+  if second.kind != 5 {return false}
+  let encoded:string=match channel.text_of(second) {some(value)=>value,none=>{return false},}
+  var fields:array<string> = text.split(encoded,"\t")
+  let held:bool=array.len(fields)==12 and str.eq(array.borrow(fields,0),"2") and
+    str.eq(array.borrow(fields,5),"0") and str.eq(array.borrow(fields,8),"1")
+  let _=test.check(suite,held,"Production frame two holds the already-sent Source")
+  let _=test.eq_u64(suite,transport.source_generation,0,"Receiver never accepted withheld Source completion")
+  let _=test.eq_u64(suite,transport.ready,0,"Withheld completion never acquires GUI packet ownership")
+  held
+}
+fn modal_retirement(suite:ref<test.Suite>,root:str,unreceived:bool) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var transport:link.Link=match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    let size:u32=if unreceived {32}else{1280}
+    let height:u32=if unreceived {18}else{720}
+    good=preview.request_window(state,root,transport,1,2,"before modal",10,20,size,height,false) and good
+    if unreceived {good=withhold_source(suite,transport) and good}
+    else{
+      // Receive only the live producer's header. Its prepared body exceeds
+      // the entire wire budget, so without further credits it cannot finish.
+      var header:channel.Message=match channel.recv(struct.borrow(transport,field=events),time.monotonic_ns()+5000000000) {
+        ok(value)=>match value {some(value)=>value,none=>{return false},},err(_)=>{return false},
+      }
+      let encoded:string=match channel.text_of(header) {some(value)=>value,none=>string.new(),}
+      var fields:array<string> = text.split(encoded,"\t")
+      let source_bytes:u64=if array.len(fields)==12 {match text.parse_u64(array.borrow(fields,5)) {some(value)=>value,none=>0,}}else{0}
+      let program_bytes:u64=if array.len(fields)==12 {match text.parse_u64(array.borrow(fields,6)) {some(value)=>value,none=>0,}}else{0}
+      let _=test.check(suite,header.kind==5 and source_bytes==3686400 and program_bytes==3686400 and
+        source_bytes+program_bytes>channel.transport_bound(),"Live production packet exceeds the complete bounded wire credit")
+      time.sleep_ms(200)
+      let _=test.eq_u64(suite,transport.completed_total,0,"Full-resolution packet cannot complete without consumer credit")
+    }
+    let snapshot:string=read(root,"request.air")
+    let sent:u64=channel.sent(array.borrow(struct.borrow(transport,field=commands),0))
+    let _=test.check(suite,not preview.retire_request(root,transport,2),"Retirement must use a strictly newer ID")
+    let _=test.check(suite,preview.retire_request(root,transport,3),"Cancellation-only marker retires before consumer hold")
+    let _=test.eq_str(suite,read(root,"request.id"),"3","Authoritative cancellation ID is committed")
+    let _=test.eq_str(suite,read(root,"request.air"),snapshot,"Retirement publishes no new render snapshot")
+    let _=test.eq_u64(suite,channel.sent(array.borrow(struct.borrow(transport,field=commands),0)),sent,"Retirement sends no render command or wake")
+    let _=test.eq_u64(suite,transport.snapshot_generation,0,"Next real request must install a fresh snapshot")
+    let _=test.eq_u64(suite,link.next_completed(transport),0,"Retirement releases all receiver packet ownership")
+    let _=editor.program_action(struct.borrow(state,field=document),editor.pause())
+    let _=editor.monitor_action(struct.borrow(state,field=document),editor.pause())
+    time.sleep_ms(2300)
+    // Same Source frame/geometry for the unreceived case: its key would match
+    // the producer's old key without the new-snapshot Source reset.
+    good=preview.request_window(state,root,transport,4,1,"after modal",30,20,32,18,false) and good
+    good=await_pair(transport,4) and good
+    good=check_packet(suite,transport,4,30,20) and good
+    let _=test.eq_u64(suite,transport.completed_total,1,"Retired window never publishes an accepted old frame")
+    let _=test.check(suite,not transport.closed,"Same production task survives a consumer held beyond credit deadline")
+    let _=test.check(suite,str.len(struct.borrow(transport,field=error))==0,"Recovery has no channel or pixel credit error")
+    let _=test.eq_u64(suite,transport.snapshot_generation,4,"Fresh request owns its new immutable snapshot")
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(value)=>value,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+fn gain_midpacket(suite:ref<test.Suite>,root:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  let lane:u64=array.borrow(struct.borrow(struct.borrow(state,field=document),field=tracks),0).id
+  let revision:u64=state.document_revision
+  var transport:link.Link=match link.open_pixels() {ok(value)=>value,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"gain before",10,20,1280,720,false) and good
+    // Read the old header only. More than seven MB cannot cross the bounded
+    // transport without further GUI credits, so retirement occurs mid-packet.
+    var header:channel.Message=match channel.recv(struct.borrow(transport,field=events),time.monotonic_ns()+5000000000) {
+      ok(value)=>match value {some(value)=>value,none=>{return false},},err(_)=>{return false},}
+    let _=test.check(suite,header.kind==5,"Gain edit occurs after a real old packet header")
+    time.sleep_ms(200)
+    let _=test.eq_u64(suite,transport.completed_total,0,"Old packet cannot complete while GUI credits are withheld")
+    var changed:commands.Result=commands.set_track_gain(state,lane,1.05)
+    let _=test.check(suite,changed.ok,"Actual track gain command succeeds during playback")
+    let _=test.check(suite,state.document_revision>revision,"Gain edit advances document identity")
+    let _=test.eq_u64(suite,state.media_revision,7,"Gain edit preserves media identity")
+    let _=test.check(suite,editor.playing(struct.borrow(state,field=document)),"Gain edit leaves the Program transport playing")
+    link.retire_window(transport)
+    good=preview.request_window(state,root,transport,3,2,"gain after",30,20,480,270,false) and good
+    good=await_pair(transport,4) and good
+    good=check_packet(suite,transport,3,30,20) and good
+    good=check_packet(suite,transport,4,31,20) and good
+    let _=test.eq_u64(suite,transport.completed_total,2,"Only the new gain epoch owns accepted packets")
+    let _=test.check(suite,not transport.closed,"Same producer survives gain edit during an incomplete packet")
+    let _=test.eq_str(suite,read(root,"producer-failure.tsv"),"","Canceled old work publishes no terminal cause")
+    let snapshot:string=read(root,"request.air")
+    let newline:u64=match str.find(snapshot,"\n") {some(value)=>value,none=>{return false},}
+    var decoded:editor.Document=match editor_io.decode(str.slice(snapshot,newline+1,str.len(snapshot))) {
+      ok(value)=>value,err(_)=>{return false},}
+    let _=test.check(suite,array.borrow(struct.borrow(decoded,field=tracks),0).gain==1.05,
+      "New immutable snapshot contains authored gain1.05")
+    let _=test.check(suite,editor.playing(decoded),"New snapshot retains the playing transport")
+    // Deliberately close only the command owner. This exercises an actual
+    // producer fatal exit even if its event lane cannot communicate the cause.
+    link.close_commands(transport)
+    good=match tasks.join_next<bool>(jobs,3000) {some(value)=>value,none=>false,} and good
+    link.poll(transport)
+    preview.poll_failure(root,transport)
+    let _=test.check(suite,transport.closed,"Command owner closure terminates the retained producer")
+    let detail:string=match preview.producer_failure(root,4,3) {some(value)=>value,none=>string.new(),}
+    let _=test.check(suite,text.contains(detail,"Preview command lane ended unexpectedly"),
+      "Producer records the exact command failure outside its event channel")
+    let _=test.check(suite,not option.is_some(preview.producer_failure(root,2,1)),
+      "Retired epoch cannot claim the new terminal record")
+    let _=test.check(suite,text.contains(struct.borrow(transport,field=error),"request 4 snapshot 3"),
+      "Closed Link preserves original failure provenance")
+    let cause:string=string.copy(struct.borrow(transport,field=error))
+    let _=test.check(suite,not preview.request_window(state,root,transport,5,2,"retry",32,20,480,270,false),
+      "Closed producer refuses retry before mailbox mutation")
+    let _=test.eq_str(suite,read(root,"request.air"),snapshot,"Failed retry preserves the last accepted snapshot")
+    let _=test.eq_str(suite,read(root,"request.id"),"4","Failed retry preserves the accepted retirement marker")
+    let _=test.eq_str(suite,struct.borrow(transport,field=error),cause,"Retry cannot mask the original producer failure")
+  }
+  good
+}
+fn failure_scope(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.read,fs.write,net,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var transport:link.Link=match link.open_pixels() {ok(value)=>value,err(_)=>{return ()},}
+  let _=files.write_text(path.join(root,"producer-failure.tsv"),"1\t7\t5\n[GA_PREVIEW_CHANNEL] fixture transport failure")
+  preview.poll_failure(root,transport)
+  let _=test.eq_str(suite,struct.borrow(transport,field=error),"","Healthy Link ignores a retired producer record")
+  let _=test.check(suite,not option.is_some(preview.producer_failure(root,8,5)),"Wrong request cannot adopt stored failure")
+  let _=test.check(suite,not option.is_some(preview.producer_failure(root,7,6)),"Wrong snapshot cannot adopt stored failure")
+  let _=test.check(suite,option.is_some(preview.producer_failure(root,7,5)),"Exact request and snapshot can inspect their stored cause")
+  struct.set(transport,true,field=closed)
+  let _=test.check(suite,option.is_some(preview.current_failure(transport,false)),"Empty-text terminal close is still a current failure")
+  preview.reset(root)
+  let _=test.check(suite,not option.is_some(preview.producer_failure(root,7,5)),"New producer reset clears previous ownership record")
+  ()
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Bounded persistent preview windows",true)
+  let _ = test.start(suite,"Window bounds and actual transport endpoints")
+  let _ = test.check(suite,invalid("0\t1\t1\t0\t0\t0\t0"),"Zero request identity is refused")
+  let _ = test.check(suite,invalid("1\t3\t1\t0\t0\t0\t0"),"A third preparation slot is refused")
+  let _ = test.check(suite,invalid("2\t1\t1\t0\t0\t0\t0"),"Reversed request bounds are refused")
+  let _ = test.check(suite,invalid("1\t2\t3\t0\t0\t0\t0"),"Snapshot cannot follow its first request")
+  let _ = test.check(suite,invalid("1\t2\t1\t-1\t0\t0\t0"),"Negative positions are refused")
+  let _ = test.check(suite,invalid("1\t2\t1\t0\t0\t0\t2"),"Unknown monitor mode is refused")
+  let _ = test.check(suite,invalid("1\t2\t1\t0\t0\tbad\t0"),"Malformed revision cannot silently become zero")
+  var state: app.App = fixture(root,false)
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let _ = test.check(suite,preview.window_positions(doc,58,119,2,false),"Two final Program frames with parked final Source are valid")
+  let _ = test.check(suite,not preview.window_positions(doc,59,20,2,false),"A two-frame tail cannot clamp the second frame")
+  let _ = test.check(suite,preview.window_positions(doc,59,20,1,false),"A one-frame final tail remains valid")
+  let _ = test.check(suite,not preview.window_positions(doc,0,119,2,true),"Wrong playing monitor cannot authorize a two-frame window")
+  let _ = test.check(suite,not preview.window_positions(doc,9223372036854775807,20,2,false),"Active endpoint overflow is refused before arithmetic")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Playing Program advances while Source is parked")
+  let _ = test.check(suite,run_pair(suite,path.join(root,"program"),false),"Persistent Program worker completes and joins cleanly")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Playing Source advances while Program is parked")
+  let _ = test.check(suite,run_pair(suite,path.join(root,"source"),true),"Persistent Source worker completes and joins cleanly")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Refusal, revision/seek retirement and blocked Stop")
+  let _ = test.check(suite,recovery(suite,path.join(root,"recovery")),"One persistent worker recovers and cancels bounded credit")
+  let _ = test.done(suite)
+  let _=test.start(suite,"Modal retirement preserves production publisher past credit timeout")
+  let _=test.check(suite,modal_retirement(suite,path.join(root,"modal-credit"),false),"Full-credit producer cancels before modal hold and recovers")
+  let _=test.done(suite)
+  let _=test.start(suite,"Completed but unreceived Source is redelivered after retirement")
+  let _=test.check(suite,modal_retirement(suite,path.join(root,"modal-source"),true),"New snapshot never relies on a retired unreceived Source packet")
+  let _=test.done(suite)
+  let _=test.start(suite,"Actual gain edit retires an incomplete playing packet")
+  let _=test.check(suite,gain_midpacket(suite,path.join(root,"gain-midpacket")),"Retained producer survives gain/revision replacement and preserves a later fatal cause")
+  let _=test.done(suite)
+  let _=test.start(suite,"Terminal diagnostics preserve request and producer ownership")
+  failure_scope(suite,path.join(root,"failure-scope"))
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"preview-batch-tests.json"),8)
+}
+
