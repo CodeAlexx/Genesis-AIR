@@ -34,7 +34,9 @@ def neutral():
 
 
 def capture(worker, source, frames, root, default=False, software=False):
-    env = dict(os.environ, GENESIS_MEDIA_PROFILE="1")
+    # This gate isolates decoder/readback equivalence. GPU color/scaling has
+    # its own reference, precision and frame-order gate in hdr_preview.py.
+    env = dict(os.environ, GENESIS_MEDIA_PROFILE="1", GENESIS_GPU_PREVIEW="0")
     for name in ("GENESIS_DEFAULT_TRANSFER", "GENESIS_SOFTWARE_DECODE"):
         env.pop(name, None)
     if default:

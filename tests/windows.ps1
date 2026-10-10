@@ -78,10 +78,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'Native video readback pixel acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'hdr_preview.py') --worker $worker
+    if ($LASTEXITCODE -ne 0) { throw 'Native HDR preview color, precision and frame selection acceptance failed.' }
     Write-Host (Invoke-Native 'genesis-preview-async.exe' @($worker, $media, (Join-Path $work 'async'))).TrimEnd()
     Write-Host (Invoke-Native 'genesis-preview-stream.exe' @((Join-Path $work 'stream'), $worker, $media)).TrimEnd()
     & python (Join-Path $PSScriptRoot 'frame_identity.py') --worker $worker --client (Join-Path $Bin 'genesis-preview-stream.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Per-frame monitor and timeline bitmap acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'keyed_video.py') --worker $worker --client (Join-Path $Bin 'genesis-keyed-video.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Inspector picture-key preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'preview_canvas.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Small-sequence preview/master pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'transition_clips.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
@@ -97,6 +101,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Continuous audio and active cancellation acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-playback.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Clip gain automation PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_continuity.py') --worker $worker --report (Join-Path $root 'audio-continuity.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Long fractional-rate audio continuity and resumed-seek acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_reverse.py') --worker $worker --report (Join-Path $root 'reverse-audio-profile.json')
     if ($LASTEXITCODE -ne 0) { throw 'Long reverse audio and resampling acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'export_cancel.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `

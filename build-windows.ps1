@@ -4,6 +4,8 @@ param(
   [string]$Distro = 'Ubuntu',
   [string]$Destination = $PSScriptRoot,
   [string]$NativeBuild = '',
+  [string]$GeneratedDirectory = '',
+  [string]$Worker = (Join-Path $PSScriptRoot 'genesis-gcompose.exe'),
   [switch]$Launch,
   [switch]$SkipSmoke,
   [switch]$RunTests
@@ -18,7 +20,7 @@ if (-not $AirSdk) {
 if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
 $sdk = (Resolve-Path -LiteralPath $AirSdk).Path
 $buildRoot = Join-Path $here 'build-windows'
-$generated = Join-Path $buildRoot 'generated'
+$generated = if ($GeneratedDirectory) { [IO.Path]::GetFullPath($GeneratedDirectory) } else { Join-Path $buildRoot 'generated' }
 New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
 function WslPath([string]$Value) {
   $mapped = (& wsl.exe -d $Distro -u root -- wslpath -a ($Value -replace '\\', '/')).Trim()
@@ -30,6 +32,7 @@ $sdkLinux = WslPath $sdk
 if ($LASTEXITCODE -ne 0) { throw '[GA_TOOLCHAIN] Build the matching AIR compiler first with .\build-compiler-wsl.ps1.' }
 $sources = ,@('main', 'src/main.ai')
 if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai'), @('audio-device', 'tests/audio_device.ai'), @('audio-playback', 'tests/audio_playback.ai'), @('audio-cancel', 'tests/audio_cancel.ai'), @('preview-async', 'tests/preview_async.ai'), @('preview-stream', 'tests/preview_stream.ai'), @('preview-input', 'tests/preview_input.ai'), @('inspector', 'tests/inspector.ai'), @('live-paint', 'tests/live_paint.ai'), @('project-safety', 'tests/project_safety.ai'), @('picture-queue', 'tests/picture_queue.ai')) }
+if ($RunTests) { $sources += ,@('keyed-video', 'tests/keyed_video.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -47,12 +50,14 @@ $projectCmake = $here -replace '\\', '/'
 $generatedCmake = $generated -replace '\\', '/'
 $includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
 & $cmake -S $sdk -B $build -G 'Visual Studio 17 2022' -A x64 "-DGENESIS_ROOT=$projectCmake" `
+  "-DGENESIS_GENERATED_DIR=$generatedCmake" `
   "-DCMAKE_PROJECT_air_INCLUDE=$includeCmake" "-DGENESIS_TESTS=$($RunTests.IsPresent)" `
   "-DAIR_WINDOWS_APP_C=$generatedCmake/main.c" -DAIR_WINDOWS_APP_NAME=Genesis-AIR `
   -DAIR_DESKTOP=OFF -DAIR_SAM3=OFF -DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE
 if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
 $targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio')
 if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-audio-clock', 'genesis-audio-playback', 'genesis-audio-cancel', 'genesis-preview-async', 'genesis-preview-stream', 'genesis-preview-input', 'genesis-inspector', 'genesis-ui-pixels', 'genesis-live-paint', 'genesis-project-safety', 'genesis-picture-queue') }
+if ($RunTests) { $targets += 'genesis-keyed-video' }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'
@@ -98,6 +103,6 @@ if (-not $SkipSmoke) {
       -not (Test-Path -LiteralPath (Join-Path $smoke 'genesis-demo.air'))) { throw '[GA_BUILD_SMOKE] Missing demo output.' }
   Write-Host 'Genesis AIR native render smoke passed.'
 }
-if ($RunTests) { & (Join-Path $here 'tests/windows.ps1') -Bin $bin }
+if ($RunTests) { & (Join-Path $here 'tests/windows.ps1') -Bin $bin -Worker $Worker }
 Write-Output "Genesis AIR: $executable"
 if ($Launch) { Start-Process -FilePath $executable -WorkingDirectory $Destination -WindowStyle Normal }

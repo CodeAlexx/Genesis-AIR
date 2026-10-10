@@ -467,12 +467,52 @@ pub fn key_supported(param: str) -> bool effects {alloc} {
   }
   if str.eq(kind, "stabilize") { return str.eq(name, "strength") }
   if str.eq(kind, "speed") { return false }
+  if str.eq(kind, "size_position") and str.eq(name, "rotation") { return false }
   var video: array<string> = chrome.video_kinds()
+  var known: bool = false
+  var family: u64 = 0
+  loop { if family >= array.len(video) { break }
+    if str.eq(kind,str.view(array.borrow(video,family))) { known=true }
+    family=family+1
+  }
+  if not known { return false }
+  var specs: array<chrome.Spec> = chrome.params_for(kind)
   var index: u64 = 0
   loop {
-    if index >= array.len(video) { break }
-    if str.eq(kind, str.view(array.borrow(video, index))) { return true }
+    if index >= array.len(specs) { break }
+    if str.eq(name, str.view(struct.borrow(array.borrow(specs, index), field=name))) { return true }
     index = index + 1
+  }
+  false
+}
+
+// Overlay-only controls need a lower picture at this timeline frame. An incoming
+// transition side is prepared independently and cannot use these composition fields.
+pub fn key_layer_supported(doc: ref<editor.Document>, clip: editor.Clip, kind: str,
+                           frame: i64) -> bool effects {alloc} {
+  if not str.eq(kind,"blend") and not str.eq(kind,"size_position") and
+     not str.eq(kind,"chroma_key") { return true }
+  var lanes: array<u64> = editor_view.lanes(doc,doc.active)
+  var lower: bool = false
+  var at: u64 = 0
+  loop {if at >= array.len(lanes) {break}
+    let track: u64 = array.get(lanes,at)
+    if editor.track_kind(doc,track) == editor.track_video() and editor.track_visible(doc,track) {
+      match editor.transition_at(doc,track,frame) {
+        none=>{},
+        some(id)=>{
+          if track == clip.track { return false }
+        },
+      }
+      match composited_clip(doc,track,frame) {
+        none=>{},
+        some(visible)=>{
+          if visible.id == clip.id { return lower }
+          lower=true
+        },
+      }
+    }
+    at=at+1
   }
   false
 }
@@ -2085,6 +2125,9 @@ fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<a
   if not (fps > 0.0) { return result.err("[GA_EXPORT_FPS] the sequence frame rate is invalid") }
   var argv: array<string> = [string.copy(worker), string.copy("--serve"), string.copy("--size"),
     string.from_int(width), string.from_int(height)]
+  // Preview resampling may differ at edges. Every export retains the master
+  // reference transform, including SDR sequences smaller than their source.
+  array.push(argv, string.copy("--reference-color"))
   if profile == 4 or profile == 5 { array.push(argv, string.copy("--hdr")) }
   // Merge diagnostics into the bounded line reader so a chatty encoder cannot fill an
   // unread stderr pipe and stall a long export.

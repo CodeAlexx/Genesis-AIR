@@ -643,6 +643,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     let picture_source: bool = struct.get(struct.borrow(doc,field=monitor),field=playing)
     let picture_playing: bool = picture_source or editor.playing(doc)
     let wanted: i64 = if picture_source {struct.get(struct.borrow(doc,field=monitor),field=frame)}else{editor.playhead(doc)}
+    let parked_program: i64 = editor.playhead(doc)
+    let parked_source: i64 = struct.get(struct.borrow(doc,field=monitor),field=frame)
     let fps: f64 = if picture_source {timeline_media.monitor_fps(doc)}else{editor.sequence_fps(doc,doc.active)}
     let finish: i64 = if picture_source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
     let monitor_width: u32 = if state.fullscreen != 0 {1280}else{480}
@@ -696,13 +698,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, ffi, fs.me
     let shown: i64 = if picture_source {state.presented_source_frame}else{state.presented_program_frame}
     match picture_queue.target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown) {
       none=>{},some(target)=>{
-        var snapshot: editor.Document = editor.copy_document(struct.borrow(state,field=document))
-        let _ = if picture_source {editor.seek_monitor(snapshot,target)}else{editor.seek(snapshot,target)}
-        let encoded: string = match editor_io.encode(snapshot) {ok(value)=>value,err(_)=>string.new(),}
         preview_requested=preview_requested+1
-        if preview.request_revision(str.view(preview_root),encoded,preview_requested,app.scroll(state),app.zoom(state),450,monitor_width,monitor_height,state.media_revision) {
+        let program_frame: i64 = if picture_source {parked_program}else{target}
+        let source_frame: i64 = if picture_source {target}else{parked_source}
+        if preview.request_frame(state,preview_root,preview_transport,preview_requested,
+            struct.borrow(pictures,field=key),program_frame,source_frame,monitor_width,monitor_height) {
           picture_queue.requested(pictures,preview_requested,target,clock.start())
-          match preview_link.wake(preview_transport,false) {ok(_)=>{},err(problem)=>{app.set_status(state,problem)},}
         }else{app.set_status(state,"[GA_PREVIEW_REQUEST] Cannot publish the preview request")
           pause_transport(state,true)
           pause_transport(state,false)

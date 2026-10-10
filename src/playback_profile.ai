@@ -4,7 +4,6 @@
 module genesis.playback_profile
 import std.draw as draw
 import std.editor as editor
-import std.editor_io as editor_io
 import std.files as files
 import std.path as path
 import std.tasks as tasks
@@ -23,11 +22,10 @@ import "view.ai" as painter
 
 fn publish(state: ref<app.App>, root: str, transport: ref<link.Link>, id: u64,
     frame: i64) -> bool effects {alloc,fs.write,net,time} {
-  var doc: editor.Document = editor.copy_document(struct.borrow(state,field=document))
-  let _ = editor.seek(doc,frame)
-  let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{return false},}
-  if not preview.request_revision(root,encoded,id,0,2.4,450,480,270,state.media_revision) {return false}
-  match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let content: string = preview.strips_signature(doc)
+  preview.request_frame(state,root,transport,id,content,frame,
+    struct.get(struct.borrow(doc,field=monitor),field=frame),480,270)
 }
 fn plan(state: ref<app.App>, root: str, transport: ref<link.Link>, id: u64,
     start: i64, end: i64, output: str) -> bool effects {alloc,fs.write,io.write,net,time} {

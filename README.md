@@ -31,8 +31,13 @@ Windows Genesis reuses the [shared MM-AIR media runtime](docs/FFMPEG_GPU_PREVIEW
 and calls its codec libraries directly from the native compositor. Setup accepts
 `-MmAirRoot` (default `C:\MM-Air`); Genesis does not package a separate FFmpeg
 executable or codec DLL set. An optional native Vulkan decoder is available with
-`GENESIS_VIDEO_BACKEND=vulkan`; D3D11 remains the default. GPU color/scaling
-integration and sustained interactive 4K60 remain unfinished.
+`GENESIS_VIDEO_BACKEND=vulkan`; D3D11 remains the default. Downscaled P010
+BT.2020/PQ previews now use native D3D11 compute color conversion and scaling,
+with FP32 intermediate math and 16-bit channel quantization. Set
+`GENESIS_GPU_PREVIEW=0` to use the reference CPU transform. Native-size and HDR
+masters retain that reference transform. Sustained interactive 4K60 remains
+unfinished; [measured results and restrictions](docs/FFMPEG_GPU_PREVIEW.md) distinguish
+headless preparation from actual display performance.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -85,6 +90,11 @@ The right-hand dock has four tabs:
   Clip gain supports K keyframes on both audio and video lanes. After the first gain key,
   editing the fader writes a key at the playhead; its reading follows the curve when seeking.
   Gain drags remain one undo step. Track faders and audio-filter parameters remain static.
+
+Video-filter faders also show evaluated keys and edit the envelope after the first
+K key. A drag creates or updates one clip-local key in one undo step. Unsupported
+fields/layers and stale selections report coded errors. New Blend Mode keys use
+Hold interpolation so their integer mode identifiers switch at exact key frames.
 
 Mouse gestures on the timeline: click a clip to select it, drag a clip to move it between
 lanes or along time, and drag within seven pixels of a clip edge to trim it. Each monitor has Start, Previous frame, Play/Pause, Stop, Next frame and End buttons,
@@ -180,6 +190,10 @@ tracked compositor patch, and builds the native media dependencies. Existing che
 at a different revision are preserved and reported. `-AirSdk` or `AIR_HOME` overrides SDK
 discovery. `-Destination` stages a build elsewhere; run setup with the same destination
 when preparing a complete package. `-Launch` opens the editor after building.
+For an isolated build/test run, pass `-NativeBuild`, `-GeneratedDirectory` and
+`-Destination` under a private `build-windows/` folder; `-Worker` selects the
+candidate compositor used by the media gates. This keeps concurrent AIR generation
+and native build outputs separate.
 
 The SDK is pinned in [air-sdk.conf](air-sdk.conf). The compositor, OpenCL and Rust revisions
 are in [windows/source-pins.json](windows/source-pins.json); FFmpeg and font downloads have

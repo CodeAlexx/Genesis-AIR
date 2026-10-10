@@ -465,6 +465,74 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.eq_i64(suite,state.presented_program_frame,-1,"Reload invalidates completed monitor stamps")
   let _ = test.done(suite)
 
+  let _ = test.start(suite, "Keyed video faders display and edit the audible-time picture value")
+  var video_keys: app.App = fixture(scratch)
+  let video_clip: u64 = app.current_clip(video_keys)
+  let _ = commands.seek(video_keys, 0)
+  let _ = commands.keyframe_parameter(video_keys, chrome.domain_filter(), 0, "brightness", "level", 0.5)
+  let brightness: u64 = chrome.filter_of_kind(struct.borrow(video_keys,field=document),video_clip,"brightness")
+  let _ = commands.seek(video_keys, 20)
+  let _ = commands.set_parameter(video_keys, chrome.domain_filter(), brightness, "brightness", "level", 1.5)
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,"brightness.level"),2,"Fader creates a current-time picture key")
+  let _ = commands.seek(video_keys, 10)
+  app.set_dock_tab(video_keys,chrome.tab_filters())
+  app.set_selected_filter(video_keys,brightness)
+  var video_controls: array<chrome.Control> = chrome.filters_panel(frame,video_keys)
+  var value_found: bool = false
+  var video_index: u64 = 0
+  loop {if video_index >= array.len(video_controls) {break}
+    let control: ref<chrome.Control> = array.borrow(video_controls,video_index)
+    if control.action == chrome.act_param_set() and control.target == brightness {
+      value_found=math.abs(control.value-1.0) < 0.00001
+    }
+    video_index=video_index+1
+  }
+  let _ = test.check(suite,value_found,"Inspector shows interpolated picture value, not the static fallback")
+  let video_bar: layout.Rect = parameter(video_controls,"brightness","level")
+  let _ = input.pointer_down(video_keys,1600.0,980.0,video_bar.left+layout.width_of(video_bar)*0.6,(video_bar.top+video_bar.bottom)*0.5)
+  let _ = input.pointer_move(video_keys,1600.0,980.0,video_bar.left+layout.width_of(video_bar)*0.7,(video_bar.top+video_bar.bottom)*0.5)
+  let _ = input.pointer_up(video_keys,1600.0,980.0,video_bar.left+layout.width_of(video_bar)*0.7,(video_bar.top+video_bar.bottom)*0.5)
+  let _ = test.near_f64(suite,editor.clip_value_at(struct.borrow(video_keys,field=document),video_clip,"brightness.level",10,1.0),1.4,0.00001,"The complete drag changes the rendered value")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,"brightness.level"),3,"Drag adds only one current-time key")
+  let _ = commands.undo(video_keys)
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(video_keys,field=document),video_clip,"brightness.level"),2,"One undo removes the complete keyed drag")
+  let _ = editor.set_key(struct.borrow(video_keys,field=document),video_clip,"brightness.level",20,1.5,curve.hold())
+  let _ = commands.seek(video_keys,20)
+  let _ = commands.keyframe_parameter(video_keys,chrome.domain_filter(),brightness,"brightness","level",1.4)
+  var held_found: bool = false
+  video_index=0
+  loop {if video_index >= array.len(struct.borrow(struct.borrow(video_keys,field=document),field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(struct.borrow(video_keys,field=document),field=keys),video_index)
+    if key.frame == 20 {held_found=key.interp == curve.hold()}
+    video_index=video_index+1
+  }
+  let _ = test.check(suite,held_found,"K preserves the interpolation of an existing video key")
+  var unknown_key: commands.Result = commands.keyframe_parameter(video_keys,chrome.domain_filter(),brightness,"brightness","missing",1.0)
+  let _ = test.check(suite,not unknown_key.ok,"Unknown filter fields cannot create silent picture keys")
+  let _ = test.contains(suite,commands.message(unknown_key),"GA_KEY_UNSUPPORTED","Unsupported key has a copyable diagnostic")
+  let _ = test.check(suite,not media.key_supported("compressor.threshold"),"Audio-filter automation is not advertised as picture automation")
+  var base_pip: commands.Result = commands.keyframe_parameter(video_keys,chrome.domain_filter(),0,"size_position","x",0.5)
+  let _ = test.check(suite,not base_pip.ok,"Base picture cannot key an overlay-only effect")
+  let _ = test.contains(suite,commands.message(base_pip),"GA_KEY_LAYER","Unavailable layer behavior has a copyable diagnostic")
+  let video_source: u64 = struct.get(option.unwrap(editor.clip(struct.borrow(video_keys,field=document),video_clip)),field=source)
+  let _ = commands.append_clip(video_keys,app.default_video_track(video_keys),video_source,0,10)
+  let _ = commands.seek(video_keys,60)
+  let outside_video: commands.Result = commands.set_parameter(video_keys,chrome.domain_filter(),brightness,"brightness","level",0.8)
+  let _ = test.check(suite,not outside_video.ok,"Keyed video fader refuses a playhead outside its clip")
+  let video_owner: u64 = struct.get(struct.borrow(video_keys,field=document),field=active)
+  let upper_track: u64 = editor.add_track(struct.borrow(video_keys,field=document),video_owner,editor.track_video(),"V2")
+  let upper_clip: u64 = option.unwrap(editor.place(struct.borrow(video_keys,field=document),upper_track,video_source,0,60,0))
+  let _ = commands.select_only(video_keys,upper_clip)
+  let _ = commands.seek(video_keys,10)
+  let pip_key: commands.Result = commands.keyframe_parameter(video_keys,chrome.domain_filter(),0,"size_position","x",0.5)
+  let _ = test.check(suite,pip_key.ok,"Upper PiP key is accepted over the lower picture")
+  let unsupported_rotation: commands.Result = commands.keyframe_parameter(video_keys,chrome.domain_filter(),0,"size_position","rotation",45.0)
+  let _ = test.check(suite,not unsupported_rotation.ok,"Unimplemented PiP rotation cannot create picture keys")
+  var stale_key: commands.Result = commands.keyframe_parameter(video_keys,chrome.domain_filter(),brightness,"brightness","level",1.0)
+  let _ = test.check(suite,not stale_key.ok,"An old filter target cannot key a newly selected clip")
+  let _ = test.contains(suite,commands.message(stale_key),"GA_KEY_TARGET","Stale key target has a copyable diagnostic")
+  let _ = test.done(suite)
+
   let _ = test.start(suite, "TrueType metrics, caching and display scale")
   app.set_fonts(state, typeface.search_paths())
   let book: ref<ui_text.Typography> = struct.borrow(state, field=typography)

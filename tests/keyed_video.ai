@@ -1,0 +1,136 @@
+module genesis.keyed_video_tests
+import std.draw as draw
+import std.curve as curve
+import std.editor as editor
+import std.files as files
+import std.image as image
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 4 { return 2 }
+  let root: str = view.get(args,1)
+  let worker: str = view.get(args,2)
+  let source: str = view.get(args,3)
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Genesis keyed video media",false)
+  var state: app.App = app.app(provider.gcompose(worker,root))
+  let imported: commands.Result = commands.import_media(state,source,"keyed video")
+  let _ = test.start(suite,"Inspector writes clip-local picture automation and round trips it")
+  let _ = test.check(suite,imported.ok,"Import real mixed-rate lossless video")
+  let active: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let _ = editor.set_sequence_format(struct.borrow(state,field=document),active,320,180,30000.0/1001.0)
+  let clip: commands.Result = commands.overwrite_clip(state,app.default_video_track(state),imported.value,2,24,7)
+  let _ = test.check(suite,clip.ok,"Place the trimmed clip after a timeline gap")
+  let _ = commands.select_only(state,clip.value)
+  let _ = commands.seek(state,7)
+  let first: commands.Result = commands.keyframe_parameter(state,chrome.domain_filter(),0,"brightness","level",0.75)
+  let _ = test.check(suite,first.ok,"K creates the first picture key")
+  let filter: u64 = chrome.filter_of_kind(struct.borrow(state,field=document),clip.value,"brightness")
+  let _ = commands.seek(state,30)
+  let last: commands.Result = commands.set_parameter(state,chrome.domain_filter(),filter,"brightness","level",1.25)
+  let _ = test.check(suite,last.ok,"Fader creates the last picture key")
+  let _ = commands.seek(state,19)
+  let middle: commands.Result = commands.set_parameter(state,chrome.domain_filter(),filter,"brightness","level",1.1)
+  let _ = test.check(suite,middle.ok,"Fader creates a middle key")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),clip.value,"brightness.level"),3,"All three fader positions are keys")
+  let _ = test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),filter,"level",1.0),1.0,0.00001,"Static fallback remains independent of animation")
+  let project: string = path.join(root,"edited.air")
+  let saved: commands.Result = commands.save_project(state,str.view(project))
+  let opened: commands.Result = commands.open_project(state,str.view(project))
+  let _ = test.check(suite,saved.ok and opened.ok,"Animated edit is saved and reopened")
+  let _ = test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),clip.value,"brightness.level"),3,"Reopened project preserves automation")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Actual preview requests retain edited picture values through seek and rewind")
+  var fonts: array<string> = array.new()
+  var cache: media.RenderCache = media.render_cache(fonts)
+  media.configure_preview(struct.borrow(state,field=document),cache)
+  var offsets: array<i64> = [0,6,12,18,23,0]
+  var at: u64 = 0
+  loop {if at >= array.len(offsets) {break}
+    let local: i64 = array.get(offsets,at)
+    let _ = commands.seek(state,7+local)
+    let out: string = provider.preview_path(struct.borrow(state,field=provider))
+    let prefix: string = path.join(root,"picture")
+    match media.frame_plan(struct.borrow(state,field=document),7+local,"PREVIEW",str.view(out),str.view(prefix),cache) {
+      err(problem)=>{let _ = test.check(suite,false,problem)},
+      ok(lines)=>{
+        var plan: array<string> = lines
+        var picture: provider.Frame = provider.program_plan(struct.borrow(state,field=provider),plan,320,180,cache.width,cache.height)
+        let _ = test.check(suite,picture.ok,"Preview actual automated frame")
+        if picture.ok {
+          let name: string = text.concat(string.from_int(at),".png")
+          let png: bytes = image.encode_png(struct.borrow(picture,field=pixels))
+          let _ = image.write_file(path.join(root,str.view(name)),png)
+        }
+      },
+    }
+    media.cleanup_plan(str.view(prefix))
+    at=at+1
+  }
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Export uses the saved picture automation")
+  let _ = editor.set_export_range(struct.borrow(state,field=document),7,31)
+  match media.render_profile(struct.borrow(state,field=document),worker,path.join(root,"edited.mkv"),fonts,"","",3) {
+    ok(_)=>{let _ = test.check(suite,true,"Export 16-bit fractional-rate master")},
+    err(problem)=>{let _ = test.check(suite,false,problem)},
+  }
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Blend mode automation uses held integer modes in preview and master")
+  let blend_root: string = path.join(root,"blend")
+  let _ = files.mkdirs(str.view(blend_root))
+  var mixed: app.App = app.app(provider.gcompose(worker,str.view(blend_root)))
+  let blended_source: commands.Result = commands.import_media(mixed,source,"held blend")
+  let mixed_active: u64 = struct.get(struct.borrow(mixed,field=document),field=active)
+  let _ = editor.set_sequence_format(struct.borrow(mixed,field=document),mixed_active,320,180,30000.0/1001.0)
+  let base: commands.Result = commands.append_clip(mixed,app.default_video_track(mixed),blended_source.value,0,24)
+  let upper_track: u64 = editor.add_track(struct.borrow(mixed,field=document),mixed_active,editor.track_video(),"V2")
+  let upper: commands.Result = commands.append_clip(mixed,upper_track,blended_source.value,12,24)
+  let _ = commands.select_only(mixed,upper.value)
+  let _ = commands.seek(mixed,0)
+  let blend_first: commands.Result = commands.keyframe_parameter(mixed,chrome.domain_filter(),0,"blend","mode",0.0)
+  let blend_filter: u64 = chrome.filter_of_kind(struct.borrow(mixed,field=document),upper.value,"blend")
+  let _ = commands.seek(mixed,12)
+  let blend_last: commands.Result = commands.set_parameter(mixed,chrome.domain_filter(),blend_filter,"blend","mode",1.0)
+  let _ = test.check(suite,base.ok and upper.ok and blend_first.ok and blend_last.ok,"Inspector creates two overlay mode keys")
+  let first_mode: editor.Key = array.get(struct.borrow(struct.borrow(mixed,field=document),field=keys),0)
+  let last_mode: editor.Key = array.get(struct.borrow(struct.borrow(mixed,field=document),field=keys),1)
+  let _ = test.check(suite,first_mode.interp == curve.hold() and last_mode.interp == curve.hold(),"New blend keys use Hold instead of fractional mode ids")
+  var blend_cache: media.RenderCache = media.render_cache(fonts)
+  media.configure_preview(struct.borrow(mixed,field=document),blend_cache)
+  var blend_offsets: array<i64> = [0,6,11,12,18,23,0]
+  at=0
+  loop {if at >= array.len(blend_offsets) {break}
+    let frame: i64 = array.get(blend_offsets,at)
+    let _ = commands.seek(mixed,frame)
+    let out: string = provider.preview_path(struct.borrow(mixed,field=provider))
+    let prefix: string = path.join(str.view(blend_root),"picture")
+    match media.frame_plan(struct.borrow(mixed,field=document),frame,"PREVIEW",str.view(out),str.view(prefix),blend_cache) {
+      err(problem)=>{let _ = test.check(suite,false,problem)},
+      ok(lines)=>{
+        var plan: array<string> = lines
+        var picture: provider.Frame = provider.program_plan(struct.borrow(mixed,field=provider),plan,320,180,blend_cache.width,blend_cache.height)
+        let _ = test.check(suite,picture.ok,"Preview held blend mode")
+        if picture.ok {
+          let name: string = text.concat(string.from_int(at),".png")
+          let png: bytes = image.encode_png(struct.borrow(picture,field=pixels))
+          let _ = image.write_file(path.join(str.view(blend_root),str.view(name)),png)
+        }
+      },
+    }
+    media.cleanup_plan(str.view(prefix))
+    at=at+1
+  }
+  match media.render_profile(struct.borrow(mixed,field=document),worker,path.join(str.view(blend_root),"edited.mkv"),fonts,"","",3) {
+    ok(_)=>{let _ = test.check(suite,true,"Export held blend mode master")},
+    err(problem)=>{let _ = test.check(suite,false,problem)},
+  }
+  let _ = test.done(suite)
+  test.conclude(suite,path.join(root,"keyed-video-tests.json"),8)
+}

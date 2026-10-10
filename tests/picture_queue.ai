@@ -1,6 +1,8 @@
 module genesis.tests.picture_queue
 import std.draw as draw
 import std.testing as test
+import "../src/app.ai" as app
+import "../src/provider.ai" as provider
 import "../src/picture_queue.ai" as pictures
 import "../src/preview_link.ai" as link
 fn frame(source: i64, program: i64) -> pictures.Frame effects {alloc} {
@@ -60,6 +62,31 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write
   pictures.requested(queue,8,200,700000000)
   let _ = pictures.receive(queue,8,frame(200,80),730000000)
   let _ = test.check(suite,not option.is_some(pictures.target(queue,200,200,60.0,199)),"End does not repeatedly decode last frame")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Changing render latency preserves on-time picture order")
+  let _ = pictures.configure(queue,"variable latency",4,true,false,480,270)
+  struct.set(queue,16000000,field=latency_ns)
+  pictures.requested(queue,9,22,800000000)
+  struct.set(queue,20000000,field=latency_ns)
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,21,200,60.0,20)),23,"A growing lead does not skip frame 23")
+  pictures.requested(queue,10,23,810000000)
+  struct.set(queue,4000000,field=latency_ns)
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,22,200,60.0,21)),24,"A shrinking lead keeps consecutive future frames")
+  let _ = test.eq_i64(suite,option.unwrap(pictures.target(queue,30,200,60.0,22)),32,"A late renderer still coalesces to the current audio time")
+  let _ = test.done(suite)
+  let _ = test.start(suite,"Selecting a different Source retires prepared playback pictures")
+  var state: app.App = app.app(provider.fake(""))
+  let first: string = pictures.identity(state,false,true)
+  struct.set(struct.borrow(state,field=document),7,field=monitor_source)
+  let second: string = pictures.identity(state,false,true)
+  let _ = test.check(suite,first != second,"Source selection is part of playback identity at the same time")
+  let _ = pictures.configure(queue,first,5,true,false,480,270)
+  pictures.requested(queue,11,1,900000000)
+  let _ = pictures.receive(queue,11,frame(0,1),910000000)
+  pictures.requested(queue,12,2,920000000)
+  let _ = test.check(suite,pictures.configure(queue,second,5,true,false,480,270),"Source selection resets the queue")
+  let _ = test.eq_u64(suite,array.len(struct.borrow(queue,field=frames)),0,"Previous Source pixels cannot survive in preparation")
+  let _ = test.check(suite,not pictures.receive(queue,12,frame(0,2),930000000),"Previous Source completion cannot reenter the queue")
   let _ = test.done(suite)
   let report: string = if view.len(args)>1 {string.copy(view.get(args,1))}else{string.copy("picture-queue-tests.json")}
   test.conclude(suite,report,24)

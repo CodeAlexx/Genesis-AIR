@@ -851,27 +851,61 @@ pub fn set_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str, n
 pub fn update_parameter(state: ref<app.App>, domain: u32, target: u64, name: str,
                         value: f64) -> Result effects {alloc} {
   if domain == 1 { return set_clip_field_live(state, target, name, value) }
-  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  let outcome: Result = update_parameter_document(struct.borrow(state, field=document),domain,target,name,value)
+  if outcome.ok { app.mark_dirty(state, true) }
+  outcome
+}
+
+fn update_parameter_document(doc: ref<editor.Document>, domain: u32, target: u64, name: str,
+                             value: f64) -> Result effects {alloc} {
+  if domain == 2 {
+    let slot: u64 = match editor.filter_slot(doc, target) {
+      none => { return refused("that filter is missing") }, some(found) => found,
+    }
+    let clip: u64 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=clip)
+    let kind: string = editor.filter_kind(doc, target)
+    let qualified: string = text.concat(str.view(kind), text.concat(".", name))
+    if editor.key_count(doc, clip, str.view(qualified)) > 0 {
+      let selected: editor.Clip = match editor.clip(doc, clip) {
+        none => { return refused("selected clip is missing") }, some(found) => found,
+      }
+      let frame: i64 = editor.playhead(doc) - selected.start
+      if frame < 0 or frame >= selected.length { return refused("[GA_VIDEO_KEY_RANGE] Playhead is outside the keyed clip") }
+      if not math.is_finite(value) { return refused("[GA_VIDEO_KEY_VALUE] Key value must be finite") }
+      if not timeline_media.key_supported(str.view(qualified)) { return refused("[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet") }
+      if not timeline_media.key_layer_supported(doc,selected,str.view(kind),editor.playhead(doc)) {
+        return refused("[GA_KEY_LAYER] This effect needs an upper clip over a lower picture and cannot key a transition side")
+      }
+      let interp: u32 = parameter_key_interp(doc, clip, str.view(qualified), frame)
+      if not editor.set_key(doc, clip, str.view(qualified), frame, value, interp) {
+        return refused("[GA_VIDEO_KEY_WRITE] That parameter could not be keyed")
+      }
+      return done("parameter keyframe set", target)
+    }
+  }
   let changed: bool = if domain == 2 { editor.set_filter_param(doc, target, name, value) }
     else if domain == 3 and str.eq(name, "gain") { editor.set_track_gain(doc, target, value) }
     else if domain == 3 and str.eq(name, "pan") { editor.set_track_pan(doc, target, value) }
     else { false }
   if not changed { return refused("that parameter is not settable") }
-  app.mark_dirty(state, true)
   done("parameter set", target)
 }
 
 // A keyframe on the parameter under the pointer, at the playhead. Clip-local frames are the
 // toolkit's contract, so the value is handed over as-is.
 fn gain_key_interp(doc: ref<editor.Document>, clip: u64, frame: i64) -> u32 effects {alloc} {
-  let named: u64 = editor.name_id(doc, "gain")
+  parameter_key_interp(doc, clip, "gain", frame)
+}
+
+fn parameter_key_interp(doc: ref<editor.Document>, clip: u64, param: str, frame: i64) -> u32 effects {alloc} {
+  let named: u64 = editor.name_id(doc, param)
   var i: u64 = 0
   loop { if i >= array.len(struct.borrow(doc, field=keys)) { break }
     let key: editor.Key = array.get(struct.borrow(doc, field=keys), i)
     if key.clip == clip and key.param == named and key.frame == frame { return key.interp }
     i = i + 1
   }
-  curve.linear()
+  if str.eq(param,"blend.mode") { curve.hold() } else { curve.linear() }
 }
 
 pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str,
@@ -884,6 +918,18 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
   }
   let frame: i64 = playhead - selected.start
   if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
+  if domain == 1 and target != clip { return refused("[GA_KEY_TARGET] Key target no longer matches the selected clip") }
+  if domain == 2 and target != 0 {
+    let doc: ref<editor.Document> = struct.borrow(state,field=document)
+    let slot: u64 = match editor.filter_slot(doc,target) {
+      none=>{return refused("[GA_KEY_TARGET] That filter no longer exists")},some(found)=>found,
+    }
+    let owner: u64 = struct.get(array.borrow(struct.borrow(doc,field=filters),slot),field=clip)
+    let family: string = editor.filter_kind(doc,target)
+    if owner != clip or not str.eq(str.view(family),kind) {
+      return refused("[GA_KEY_TARGET] Key target no longer matches the selected filter")
+    }
+  }
   var qualified: string = string.copy(kind)
   if str.len(kind) != 0 { string.append(qualified, ".") }
   string.append(qualified, name)
@@ -895,7 +941,11 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
      (not audio_gain and editor.track_kind(struct.borrow(state, field=document), selected.track) !=
        editor.track_video()) or (domain == 1 and str.len(kind) != 0) or
      (domain == 2 and str.len(kind) == 0) or (domain != 1 and domain != 2) {
-    return refused("this parameter has no keyframed media behavior yet")
+    return refused("[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet")
+  }
+  if not math.is_finite(value) { return refused("[GA_VIDEO_KEY_VALUE] Key value must be finite") }
+  if domain == 2 and not timeline_media.key_layer_supported(struct.borrow(state,field=document),selected,kind,playhead) {
+    return refused("[GA_KEY_LAYER] This effect needs an upper clip over a lower picture and cannot key a transition side")
   }
   // K on a parameter row can precede the first ordinary parameter edit. Create
   // its filter along with the key so one Undo removes both changes.
@@ -906,9 +956,8 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
       some(_) => { },
     }
   }
-  let interp: u32 = if audio_gain {
-    gain_key_interp(struct.borrow(state, field=document), clip, frame)
-  } else { curve.linear() }
+  let interp: u32 = parameter_key_interp(struct.borrow(state, field=document), clip,
+    str.view(qualified), frame)
   if not editor.set_key(struct.borrow(state, field=document), clip,
                         str.view(qualified), frame, value, interp) {
     return refused("that parameter could not be keyed")

@@ -778,8 +778,109 @@ runtime override, and coded failure behavior. Full Windows and professional-medi
 gates pass with the shared runtime.
 
 The [FFmpeg source and performance investigation](FFMPEG_GPU_PREVIEW.md) records
-the tested GPU pipeline, rejected D3D11 resize prototype, current native implementation
-and remaining color/scaling work. Raw FFmpeg pipeline speed is not editor delivery:
-the current shared-runtime editor diagnostic delivers 53.90 pictures/s in twenty
-seconds with no early pictures or observed audio underruns, consistent with the
-53.65 baseline. Sustained interactive 4K60 is still open; fullscreen 4K remains deferred.
+the tested GPU pipeline, rejected D3D11 resize prototype and native compute preview.
+Raw FFmpeg pipeline speed is not editor delivery: the initial shared-runtime editor
+diagnostic delivered 53.90 pictures/s in twenty seconds, consistent with the 53.65
+baseline. Subsequent native compute and request-channel results are recorded below.
+Sustained interactive 4K60 is still open; fullscreen 4K remains deferred.
+
+## Selected GPU preview and continuous audio clock evidence (2026-10-09)
+
+The native D3D11 preview computes downscaled P010/BT.2020/PQ color directly from
+the selected decoder texture, with FP32 math and 16-bit channel quantization.
+Only its fitted float buffer is read back. Other formats, native-size output and
+explicit HDR masters retain the reference CPU color graph. Windows loads its
+system shader compiler; no separate codec or compiler runtime is packaged.
+Source/header ownership stays in the native worker, with coded fallback on failure.
+
+The color gate checks 512 uniform patch samples within 0.016/255, all pixels of
+eight PQ range excursions within 0.004/255, finite opaque channels, small selected
+readbacks, seek/EOF/rewind, odd-canvas letterbox edges and exact master fallback.
+It detects and prevents a PQ-asymptote overflow that turned limiting white black.
+Spatial resampling differs from zscale at edges; the investigation documents those
+differences rather than claiming bit-identical preview output.
+
+A changing preparation estimate now requests consecutive still-future pictures,
+while late requests retain catch-up coalescing. Source selection is part of the
+queue identity so old selected-source frames retire. Six queue cases contain 30 checks.
+The initial GPU/queue candidate delivered 56.65 pictures/s on the supplied 4K/59.94
+clip over twenty seconds, with 11.62/25.03 ms median/p95 picture delay and no early
+pictures or observed audio underruns. Per-frame snapshot decoding took 3.49 ms.
+
+The preview channel now retains an immutable project snapshot and sends bounded
+frame/time commands while content, media revision, source, mode and size stay
+unchanged. Generation markers still retire blocked pixels. New content and geometry
+force a snapshot refresh; coalesced startup can load the referenced base snapshot.
+The dedicated strip lane keeps actual scroll/zoom geometry. Stream checks cover
+revision refusal/recovery, resize/Reload and source selection during playback.
+Its twenty-second 4K candidate delivered 59.25 pictures/s with 10.71/16.46 ms
+median/p95 picture delay and 0.13 ms median snapshot work, with no early pictures
+or observed underruns. Native display presentation remains unmeasured.
+
+The extended generated 23.976-to-29.97 real-device fixture checks actual decoded
+pixels, source/program frame identities, histogram/cursor time, sample-to-frame
+conversion and device clock against wall time. A 180-second run checks 20,661
+observations and 36 production audio-buffer boundaries, with 5,395 pictures,
+at most two prepared frames, no early pictures or observed drained queues,
+and -3.00 ms clock drift across the measured 178.99-second interval.
+Maximum picture gap was 70.57 ms and maximum picture lateness 59.52 ms.
+This extends headless long-run A/V evidence; native display and speaker latency
+remain unmeasured. The fixture duration now grows with the requested measurement.
+An improved fixture gives every decoded picture a unique RGB identity across the
+full run. On the new request path it checks 23,762 observations and 36 buffer
+boundaries, with -3.02 ms interval drift, no early pictures or observed underruns.
+This run also included concurrent audio processing and C compilation; its maximum
+picture gap was 204.09 ms and maximum lateness 197.64 ms. It establishes identity
+and clock continuity under that load, rather than uninterrupted display delivery.
+
+## Keyed video controls edit what the renderer evaluates
+
+Video-filter sliders now show the evaluated clip-local envelope and write a key
+once keys exist, preserving its interpolation and one drag/undo transaction.
+Previously they edited an ignored static base value. Inspecting an unkeyed filter
+does not intern new names or alter project identity. K refuses unknown fields,
+unsupported layers, nonfinite values and stale filter targets with local codes.
+This closes the per-layer acceptance gap for PiP/Blend/Chroma Key; broader mapped
+parameter and animation media coverage remains open.
+
+The brightness media gate saves/reopens a trimmed fractional-rate clip with a
+seven-frame timeline gap. Complete previews and 24 decoded 16-bit master frames
+are compared with independent source-frame selection and brightness formulas,
+including exact rewind. Blend Mode's new keys default to Hold because interpolated
+fractional mode identifiers have no render meaning; existing key interpolation
+is retained. Unsupported PiP rotation continues to refuse explicitly.
+
+The inspector gate now has 17 cases and 121 checks. Thirteen complete preview
+pictures and 48 decoded master frames verify brightness and held Blend Mode
+against independent source/time/effect formulas within 1/255. Forty-four monitor
+pictures and 128 actual timeline bitmaps retain fractional-rate, trim, reverse,
+speed and rewind identity checks on the new request channel.
+
+## One native audio graph for playback and export
+
+Whole-range export now uses the same native-sample trim, resampler and effect
+graph as device playback. The old separate range decoder shifted the resampling
+phase at fractional seeks; the new 181-second 44.1-to-48 kHz fixture has identical
+PCM across 37 pulls/36 boundaries, with compressor, echo and gain automation,
+and also matches a fresh fractional seek. Nine one-/two-/17-sample shifted seeks
+retain exact source PCM. Fixed-decimal filter duration options prevent FFmpeg
+from refusing one-sample ranges written in scientific notation.
+
+The old post-filter helper could not fit slowed output in its input-sized buffer:
+a generated 12-second 0.5x/echo export contained 24 seconds of silence. Collecting
+actual native graph output in bounded pieces fixes it: all 24 seconds are audible,
+with exactly 1,152,000 sample frames. Both 0.5x and 2x whole/pull cases match exactly.
+Device reads still pad their requested range at EOF; complete exports preserve
+actual output length, including effect tails and retiming, within the existing cap.
+The audio-continuity gate runs in the ordinary Windows suite.
+
+## Remaining native window work
+
+The playback diagnostic paints the retained editor but does not execute every
+native window-loop signature/strip check or call native presentation. The window
+still rebuilds normalized content, raw strip and audio signatures on clock updates.
+A safe cache needs a semantic document-mutation revision covering live edits,
+cancel, undo/redo and project replacement; dirty/media-reload flags are insufficient.
+The native presenter also converts and uploads the entire canvas and synchronously
+ends its Direct2D draw. Its latency and physical speaker/display alignment remain
+unmeasured. Headless throughput therefore does not establish interactive 4K60.

@@ -268,6 +268,41 @@ pub fn request_revision(root: str, document: str, generation: u64, start: i64, z
   if not publish_checked(root,"request.air",str.view(snapshot)) {return false}
   publish_checked(root,"request.id",str.view(generation_text))
 }
+// Retain an immutable project snapshot across moving monitor requests. Only time
+// travels on the command lane until content, source selection, mode, media or
+// display geometry changes. The snapshot generation also survives a coalesced
+// initial wake: the worker can load that exact base before applying the newest tick.
+pub fn request_frame(state: ref<app.App>, root: str, transport: ref<link.Link>, generation: u64,
+    content: str, program_frame: i64, source_frame: i64, width: u32, height: u32)
+    -> bool effects {alloc,fs.write,net,time} {
+  // Viewport strip lanes retain full geometry snapshots through request_revision.
+  if not transport.pixel_stream {return false}
+  let document: ref<editor.Document> = struct.borrow(state,field=document)
+  var key: string = string.copy(content)
+  var fields: array<string> = [string.from_int(document.monitor_source),
+    string.from_int(if editor.playing(document) {1}else{0}),
+    string.from_int(if struct.get(struct.borrow(document,field=monitor),field=playing) {1}else{0}),
+    string.from_int(state.media_revision),string.from_int(width),string.from_int(height)]
+  string.append(key,"\n")
+  string.append(key,text.join(fields,"\t"))
+  if transport.snapshot_generation == 0 or not str.eq(key,struct.borrow(transport,field=snapshot_key)) {
+    var snapshot: editor.Document = editor.copy_document(document)
+    let _ = editor.seek(snapshot,program_frame)
+    let _ = editor.seek_monitor(snapshot,source_frame)
+    let encoded: string = match editor_io.encode(snapshot) {ok(value)=>value,err(_)=>{return false},}
+    if not request_revision(root,encoded,generation,0,2.4,450,width,height,state.media_revision) {return false}
+    if not match link.wake(transport,false) {ok(_)=>true,err(_)=>false,} {return false}
+    struct.set(transport,generation,field=snapshot_generation)
+    let _ = struct.replace(transport,key,field=snapshot_key)
+    return true
+  }
+  // The marker remains the authoritative retirement signal while a slow consumer
+  // holds pixel credit. It contains no project data and publishes before the tick.
+  if not publish_checked(root,"request.id",string.from_int(generation)) {return false}
+  match link.frame(transport,generation,transport.snapshot_generation,program_frame,source_frame,state.media_revision) {
+    ok(_)=>true,err(_)=>false,
+  }
+}
 pub fn stop(root: str) -> unit effects {alloc, fs.write} { let _ = files.write_text(str.view(path.join(root, "stop")), "stop")
  () }
 pub fn completed(root: str) -> u64 effects {alloc, fs.read} { number(root, "ready.id") }
@@ -470,6 +505,8 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
   var state: app.App = app.app(engine)
   let _ = struct.replace(state, struct.replace(owned, array.new(), field=fonts), field=fonts)
   var seen: u64 = 0
+  var snapshot_generation: u64 = 0
+  var snapshot_geometry: string = string.new()
   var media_revision: u64 = 0
   var held_source: string = string.new()
   loop {
@@ -478,31 +515,67 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     let request_begin: u64 = if owned.profile {time.monotonic_ns()}else{0}
     let id: u64 = number(str.view(root), "request.id")
     if id == 0 or id == seen { continue }
-    let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => {
-      link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
-      continue }, }
-    let boundary: u64 = match str.find(str.view(data),"\n") {some(value)=>value,none=>{
-      link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
-      continue},}
-    let header: str = str.slice(str.view(data),0,boundary)
-    let separator: u64 = match str.find(header,"\t") {some(value)=>value,none=>{
-      link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
-      continue},}
-    let carried_id: u64 = match text.parse_u64(str.slice(header,0,separator)) {some(value)=>value,none=>0,}
-    if carried_id != id {continue}
-    let geometry: string = string.copy(str.slice(header,separator+1,boundary))
-    let document: editor.Document = match editor_io.decode(str.slice(str.view(data),boundary+1,str.len(str.view(data)))) {
-      ok(value) => value, err(_) => {
-        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
+    var base: u64 = id
+    var program_frame: i64 = 0
+    var source_frame: i64 = 0
+    var tick_revision: u64 = 0
+    let tick: bool = wake.command_kind == 8
+    if tick {
+      var fields: array<string> = text.split(struct.borrow(wake,field=command),"\t")
+      if array.len(fields) != 5 {
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid frame command")
+        continue
+      }
+      let carried: u64 = match text.parse_u64(array.borrow(fields,0)) {some(value)=>value,none=>0,}
+      if carried != id {continue}
+      base=match text.parse_u64(array.borrow(fields,1)) {some(value)=>value,none=>0,}
+      program_frame=match text.parse_i64(array.borrow(fields,2)) {some(value)=>value,none=>{continue},}
+      source_frame=match text.parse_i64(array.borrow(fields,3)) {some(value)=>value,none=>{continue},}
+      tick_revision=match text.parse_u64(array.borrow(fields,4)) {some(value)=>value,none=>{continue},}
+      if base == 0 or base > id {
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid frame snapshot identity")
+        continue
+      }
+    }
+    var geometry: string = string.copy(snapshot_geometry)
+    if not tick or base != snapshot_generation {
+      let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => {
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
         continue }, }
-    if number(str.view(root), "request.id") != id { continue }
+      let boundary: u64 = match str.find(str.view(data),"\n") {some(value)=>value,none=>{
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
+        continue},}
+      let header: str = str.slice(str.view(data),0,boundary)
+      let separator: u64 = match str.find(header,"\t") {some(value)=>value,none=>{
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
+        continue},}
+      let carried_id: u64 = match text.parse_u64(str.slice(header,0,separator)) {some(value)=>value,none=>0,}
+      if carried_id != base {continue}
+      geometry = string.copy(str.slice(header,separator+1,boundary))
+      let document: editor.Document = match editor_io.decode(str.slice(str.view(data),boundary+1,str.len(str.view(data)))) {
+        ok(value) => value, err(_) => {
+          link.fail(wake,id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
+          continue }, }
+      if number(str.view(root), "request.id") != id { continue }
+      let _ = struct.replace(state, document, field=document)
+      snapshot_generation=base
+      let _ = ref.swap(snapshot_geometry,string.copy(geometry))
+    }
+    if number(str.view(root), "request.id") != id {continue}
     seen = id
-    let _ = struct.replace(state, document, field=document)
     let _ = struct.replace(struct.borrow(state, field=provider), string.new(), field=last_error)
     var dimensions: array<string> = text.split(str.view(geometry), "\t")
     let width: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 3))) {some(value) => cast.sat(value), none => 480,} } else { 480 }
     let height: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 4))) {some(value) => cast.sat(value), none => 270,} } else { 270 }
     let revision: u64 = if array.len(dimensions) >= 6 { match text.parse_u64(str.view(array.borrow(dimensions, 5))) {some(value) => value, none => 0,} } else { 0 }
+    if tick {
+      if tick_revision != revision {
+        link.fail(wake,id,"[GA_PREVIEW_REQUEST] Frame media revision differs from its snapshot")
+        continue
+      }
+      let _ = editor.seek(struct.borrow(state,field=document),program_frame)
+      let _ = editor.seek_monitor(struct.borrow(state,field=document),source_frame)
+    }
     if revision != media_revision {
       provider.restart(struct.borrow(state, field=provider))
       media_revision = revision

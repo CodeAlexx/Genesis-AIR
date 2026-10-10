@@ -1,5 +1,5 @@
 // Windows build of the pinned Genesis compositor plus the maintained media patch.
-use std::{env, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 fn main() {
     for name in ["GENESIS_FFMPEG_SDK", "GENESIS_OPENCL_HEADERS", "GENESIS_OPENCL_LIB", "GENESIS_WINDOWS_COMPAT"] {
         println!("cargo:rerun-if-env-changed={name}");
@@ -19,6 +19,17 @@ fn main() {
     let runtime = PathBuf::from(&compatibility).parent().unwrap().join("media-runtime.c");
     build.file(&runtime);
     println!("cargo:rerun-if-changed={}", runtime.display());
+    let preview = PathBuf::from(&compatibility).parent().unwrap().join("hdr-preview.c");
+    let shader = preview.with_extension("hlsl");
+    let mut source = fs::read(&shader).expect("HDR preview shader");
+    source.push(0);
+    let header = format!("static const unsigned char genesis_hdr_preview_shader[] = {{{}}};\n",
+        source.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(","));
+    let generated = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    fs::write(generated.join("genesis-hdr-preview-shader.h"), header).unwrap();
+    build.include(generated).file(&preview);
+    println!("cargo:rerun-if-changed={}", preview.display());
+    println!("cargo:rerun-if-changed={}", shader.display());
     build.compile("fpxengine");
     let imports = env::var("GENESIS_FFMPEG_IMPORTS").expect("GENESIS_FFMPEG_IMPORTS");
     println!("cargo:rerun-if-env-changed=GENESIS_FFMPEG_IMPORTS");

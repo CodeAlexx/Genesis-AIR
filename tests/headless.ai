@@ -893,7 +893,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     chrome.domain_clip(), key_clip.value, "", "pan", 0.5)
   emit_b("unrendered_key_refused", not rejected_key.ok and
     str.eq(str.view(rejected_key.message),
-      "this parameter has no keyframed media behavior yet"))
+      "[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet"))
   let _ = commands.undo(key_state)
   emit_b("keyframe_filter_one_undo", editor.key_count(
     struct.borrow(key_state, field=document), key_clip.value, "opacity.level") == 0 and

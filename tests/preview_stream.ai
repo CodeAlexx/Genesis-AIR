@@ -194,9 +194,16 @@ fn case(root: str, mode: u64) -> bool effects {alloc,fs.meta,fs.read,fs.write,io
 }
 fn request(state: ref<app.App>, transport: ref<link.Link>, root: str, id: u64, wide: u32, tall: u32, revision: u64)
     -> bool effects {alloc,fs.write,net,time} {
-  let document: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>{return false},}
-  if not preview.request_revision(root,str.view(document),id,0,2.4,450,wide,tall,revision) {return false}
-  match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
+  struct.set(state,revision,field=media_revision)
+  if not transport.pixel_stream {
+    let document: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>{return false},}
+    if not preview.request_revision(root,str.view(document),id,0,2.4,450,wide,tall,revision) {return false}
+    return match link.wake(transport,false) {ok(_)=>true,err(_)=>false,}
+  }
+  let document: ref<editor.Document> = struct.borrow(state,field=document)
+  let content: string = preview.strips_signature(document)
+  preview.request_frame(state,root,transport,id,content,editor.playhead(document),
+    struct.get(struct.borrow(document,field=monitor),field=frame),wide,tall)
 }
 fn color(surface: ref<draw.Surface>, blue: bool) -> bool effects {} {
   match draw.surface_pixel(surface,surface.width/2,surface.height/2) {
@@ -238,6 +245,7 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
   struct.set(configured,true,field=pixel_stream)
   var good: bool = true
   var source: draw.Surface = draw.empty_surface()
+  var initial_snapshot: string = string.new()
   task.scope {
     var jobs: array<task<bool>> = array.new()
     array.push(jobs,task.spawn(configured,fn=preview.run))
@@ -259,6 +267,14 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
       good=transport.position.program_frame == editor.playhead(struct.borrow(state,field=document)) and
         transport.position.source_frame == struct.get(struct.borrow(state,field=document),field=monitor).frame and
         transport.position.revision == (if id == 6 {1}else{0}) and good
+      let snapshot: string = match files.read_text(path.join(root,"request.air")) {ok(value)=>value,err(_)=>string.new(),}
+      if id == 1 {initial_snapshot=string.copy(snapshot)}
+      // Both moving monitors reuse the first immutable document. Geometry and
+      // media revision subsequently replace it instead of borrowing stale content.
+      if id == 2 or id == 3 {good=snapshot == initial_snapshot and transport.snapshot_generation == 1 and good}
+      if id == 4 {good=snapshot != initial_snapshot and transport.snapshot_generation == 4 and good}
+      if id == 5 {good=transport.snapshot_generation == 4 and good}
+      if id == 6 {good=transport.snapshot_generation == 6 and good}
       var pictures: array<draw.Surface> = link.take_images(transport,id)
       good=array.len(pictures) == 2 and good
       if array.len(pictures) == 2 {
@@ -329,6 +345,53 @@ fn real(root: str, worker: str, media: str) -> bool effects {alloc,fs.meta,fs.re
     let before: u64 = array.len(struct.borrow(state,field=thumbnails))
     let _ = files.write_text(path.join(str.view(strip_root),"thumbnails.id"),"0")
     good=not preview.read_thumbnails(state,str.view(strip_root),41) and array.len(struct.borrow(state,field=thumbnails)) == before and good
+    // The independent strip lane keeps the real scrolled and zoomed viewport;
+    // monitor ticks never replace it with the monitor snapshot's fixed geometry.
+    let viewport_document: string = match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
+    good=preview.request_revision(strip_root,viewport_document,42,16,10.0,8,480,270,1) and good
+    good=match link.wake(strip_transport,false) {ok(_)=>true,err(_)=>false,} and good
+    good=match link.await_event(strip_transport,3,42,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    good=preview.read_thumbnails(state,strip_root,42) and strip_matches(state) and good
+    let viewport_thumbs: ref<array<app.Thumbnail>> = struct.borrow(state,field=thumbnails)
+    if array.len(viewport_thumbs) > 0 {
+      good=struct.get(array.borrow(viewport_thumbs,0),field=frame) > 0 and
+        struct.get(array.borrow(viewport_thumbs,array.len(viewport_thumbs)-1),field=frame) < 24 and good
+    }else{good=false}
+    // Change Source selection during running playback without moving its frame.
+    // A transport-only cache key must still clear and restore the actual monitor.
+    let _ = editor.program_action(struct.borrow(state,field=document),editor.play())
+    struct.set(struct.borrow(state,field=document),0,field=monitor_source)
+    good=request(state,transport,root,42,480,270,1) and good
+    good=match link.await_ready(transport,42,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    var empty_source: array<draw.Surface> = link.take_images(transport,42)
+    good=array.len(empty_source) == 2 and good
+    if array.len(empty_source) == 2 {
+      let _ = array.pop(empty_source)
+      var cleared: draw.Surface = option.unwrap(array.pop(empty_source))
+      good=cleared.width == 0 and not link.holds_source(transport) and good
+    }
+    struct.set(struct.borrow(state,field=document),imported.value,field=monitor_source)
+    good=request(state,transport,root,43,480,270,1) and good
+    good=match link.await_ready(transport,43,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    var restored: array<draw.Surface> = link.take_images(transport,43)
+    good=array.len(restored) == 2 and transport.snapshot_generation == 43 and good
+    if array.len(restored) == 2 {
+      let _ = array.pop(restored)
+      var restored_source: draw.Surface = option.unwrap(array.pop(restored))
+      good=restored_source.width == 480 and color(restored_source,true) and good
+    }
+    // A tick cannot relabel cached content with another media revision. Recover
+    // through the next valid generation without restarting the native channel.
+    let _ = files.write_text(path.join(root,"request.id"),"44")
+    good=match link.frame(transport,44,43,20,30,0) {ok(_)=>true,err(_)=>false,} and good
+    let refused_revision: bool = match link.await_ready(transport,44,time.monotonic_ns()+15000000000) {
+      ok(_)=>false,err(problem)=>text.contains(problem,"GA_PREVIEW_REQUEST"),
+    }
+    good=refused_revision and transport.ready == 43 and good
+    good=request(state,transport,root,45,480,270,1) and good
+    good=match link.await_ready(transport,45,time.monotonic_ns()+15000000000) {ok(_)=>true,err(_)=>false,} and good
+    var recovered: array<draw.Surface> = link.take_images(transport,45)
+    good=array.len(recovered) == 2 and str.len(struct.borrow(transport,field=error)) == 0 and good
     preview.stop(root)
     preview.stop(str.view(strip_root))
     let _ = link.wake(strip_transport,true)
@@ -487,6 +550,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.w
     io.write("[GA_TEST_PIXELS] Real stream pixels, source holding, resize, rewind, Reload or drag burst failed\n")
     return 1}
   io.write("Pixel stream: nine native cases, exact largest-preview RGBA bytes, slow consumer, held/empty/coalesced source, Stop/seek backpressure and coded malformed-frame recovery passed\n")
-  io.write("Real pixel stream: decoded frame/time stamps, source/program colors, held-source preservation, monitor size changes, rewind, Reload, 32-request drag burst, independent timeline bitmaps during playback and after reverse/trim/2x rate, stale/incomplete strip refusal, no monitor mailbox files and idle Stop passed\n")
+  io.write("Real pixel stream: decoded frame/time stamps, source/program colors, immutable snapshot reuse, held-source preservation, source switch while playing, monitor resize, rewind, Reload, 32-request frame-command burst, coded media-revision refusal/recovery, independent scrolled/zoomed timeline bitmaps during playback and after reverse/trim/2x rate, stale/incomplete strip refusal, no monitor image files and idle Stop passed\n")
   0
 }

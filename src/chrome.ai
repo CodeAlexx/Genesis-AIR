@@ -864,15 +864,19 @@ fn text_row(out: ref<array<Control>>, area: layout.Rect, top: f64, text: str,
 // One parameter: a name, a decrement, a bar that can be clicked to a position, an
 // increment, a keyframe button and the current reading.
 // clip_value_at interns its parameter name. Inspecting an unkeyed clip must not
-// mutate the document: enter the SDK evaluator only when a gain key exists.
+// mutate the document: enter the SDK evaluator only when this key exists.
 fn audio_gain_value(doc: ref<editor.Document>, clip: u64, fallback: f64) -> f64 effects {alloc} {
+  math.max(0.0, animated_value(doc,clip,"gain",fallback))
+}
+
+fn animated_value(doc: ref<editor.Document>, clip: u64, param: str, fallback: f64) -> f64 effects {alloc} {
   var i: u64 = 0
   loop { if i >= array.len(struct.borrow(doc,field=keys)) { break }
     let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
     if key.clip == clip {
       let name: string = editor.name_text(doc,key.param)
-      if str.eq(str.view(name),"gain") {
-        return math.max(0.0,editor.clip_value_at(doc,clip,"gain",editor.playhead(doc),fallback))
+      if str.eq(str.view(name),param) {
+        return editor.clip_value_at(doc,clip,param,editor.playhead(doc),fallback)
       }
     }
     i=i+1
@@ -1012,8 +1016,12 @@ fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
     let owned_name: string = string.copy(str.view(struct.borrow(spec, field=name)))
     let owned_label: string = string.copy(str.view(struct.borrow(spec, field=label)))
     let fallback: f64 = struct.get(spec, field=fallback)
-    let value: f64 = if id == 0 { fallback }
+    let base: f64 = if id == 0 { fallback }
       else { editor.filter_param(doc, id, str.view(owned_name), fallback) }
+    let qualified: string = text.concat(kind, text.concat(".", str.view(owned_name)))
+    let value: f64 = if id == 0 { base } else {
+      animated_value(doc, clip, str.view(qualified), base)
+    }
     cursor = param_row(out, area, cursor, domain_filter(), id, kind, str.view(owned_name),
       str.view(owned_label), value, struct.get(spec, field=low),
       struct.get(spec, field=high), struct.get(spec, field=step), id != 0)

@@ -20,12 +20,14 @@ fn empty_timing() -> FrameTiming effects {} {
 pub type Link = struct {
   events: channel.Receiver, commands: array<channel.Sender>,
   ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64, timing: FrameTiming,
-  pixel_stream: bool, pending_pixels: channel.ChunkBuffer, pending_info: array<u64>,
+  pixel_stream: bool, snapshot_generation: u64, snapshot_key: string,
+  pending_pixels: channel.ChunkBuffer, pending_info: array<u64>,
   pixel_info: array<u64>, pixel_data: bytes, pixel_error: string,
   position: FramePosition,
   source_data: bytes, source_width: u32, source_height: u32, source_generation: u64, source_taken: u64, source_held: bool
 }
-pub type Peer = struct {events: channel.Sender, commands: channel.Receiver, last_drain_ns: u64}
+pub type Peer = struct {events: channel.Sender, commands: channel.Receiver, last_drain_ns: u64,
+  command_kind:u64, command:string}
 fn problem(detail: str) -> string effects {alloc} { text.concat("[GA_PREVIEW_CHANNEL] ", detail) }
 pub fn open() -> result<Link,string> effects {alloc,net,time} {
   open_mode(false)
@@ -37,7 +39,8 @@ fn open_mode(pixels: bool) -> result<Link,string> effects {alloc,net,time} {
   }
   result.ok(Link {events:events,commands:array.new(),ready:0,waveforms:0,
     thumbnails:0,closed:false,error:string.new(),error_generation:0,timing:empty_timing(),
-    pixel_stream:pixels,pending_pixels:channel.chunk_buffer(7376896),pending_info:array.new(),
+    pixel_stream:pixels,snapshot_generation:0,snapshot_key:string.new(),
+    pending_pixels:channel.chunk_buffer(7376896),pending_info:array.new(),
     pixel_info:array.new(),pixel_data:bytes.copy(b""),pixel_error:string.new(),source_data:bytes.copy(b""),
     position:FramePosition {source_frame:0,program_frame:0,revision:0},
     source_width:0,source_height:0,source_generation:0,source_taken:0,source_held:false})
@@ -50,12 +53,12 @@ pub fn peer(carried: ref<channel.Ticket>) -> result<Peer,string> effects {alloc,
   var events: channel.Sender = match channel.connect(carried,deadline) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
-  // Empty wake commands consume at most 4096 bounded headers. The document is
-  // authoritative in the mailbox, so a burst is coalesced before decoding.
-  var commands: channel.Receiver = match channel.open_command_lane(events,0,4096,1,deadline) {
+  // Frame commands carry only generation, immutable snapshot identity and time.
+  // Full project content remains in the atomic mailbox; a burst is coalesced.
+  var commands: channel.Receiver = match channel.open_command_lane(events,0,4096,128,deadline) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
-  result.ok(Peer {events:events,commands:commands,last_drain_ns:0})
+  result.ok(Peer {events:events,commands:commands,last_drain_ns:0,command_kind:0,command:string.new()})
 }
 pub fn connect(link: ref<Link>) -> result<unit,string> effects {alloc,net,time} {
   let deadline: u64 = time.monotonic_ns()+3000000000
@@ -80,11 +83,26 @@ pub fn wake(link: ref<Link>, stopping: bool) -> result<unit,string> effects {all
     ok(_)=>result.ok(()),err(error)=>result.err(problem(str.view(channel.message(error)))),
   }
 }
+pub fn frame(link: ref<Link>, generation: u64, snapshot: u64, program: i64, source: i64,
+    revision: u64) -> result<unit,string> effects {alloc,net,time} {
+  if array.len(struct.borrow(link,field=commands)) == 0 or link.closed {
+    return result.err(problem("Preview command lane is closed"))
+  }
+  var fields: array<string> = [string.from_int(generation),string.from_int(snapshot),
+    string.from_int(program),string.from_int(source),string.from_int(revision)]
+  let encoded: string = text.join(fields,"\t")
+  match channel.send(array.borrow(struct.borrow(link,field=commands),0),8,str.bytes(encoded),
+      time.monotonic_ns()+100000000) {
+    ok(_)=>result.ok(()),err(error)=>result.err(problem(str.view(channel.message(error)))),
+  }
+}
 // Wait for work, then consume the queued burst. One decode reads the newest
 // committed document; a final Stop is never hidden by a later wake. The one-second
 // idle deadline permits cancellation if startup or command delivery failed; it
 // does not delay a request, which wakes the blocking receive immediately.
 pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
+  struct.set(peer,0,field=command_kind)
+  let _ = struct.replace(peer,string.new(),field=command)
   var message: channel.Message = match channel.recv(struct.borrow(peer,field=commands),time.monotonic_ns()+1000000000) {
     ok(value)=>match value {some(value)=>value,none=>{return false},},
     err(error)=>{return error.code == channel.code_empty()},
@@ -99,6 +117,9 @@ pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
     }
   }
   struct.set(peer,time.monotonic_ns()-drain_begin,field=last_drain_ns)
+  struct.set(peer,message.kind,field=command_kind)
+  let value: string = match channel.text_of(message) {some(value)=>value,none=>string.new(),}
+  let _ = struct.replace(peer,value,field=command)
   true
 }
 pub fn notify(peer: ref<Peer>, kind: u64, generation: u64) -> bool effects {alloc,net,time} {

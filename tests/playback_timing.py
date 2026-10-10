@@ -1,4 +1,9 @@
-"""Real native audio clock, async picture queue, painter and per-frame pixel identity."""
+"""Real native audio clock, async pictures and fractional-rate long-run identity.
+
+The generated fixture covers the requested duration. Native presentation and
+physical speaker latency are excluded; queued-buffer polling can only establish
+that no underrun was observed, rather than detecting every sub-poll event.
+"""
 
 from media_runtime import tool as _media_tool
 import argparse
@@ -24,6 +29,13 @@ def run(argv, env=None, timeout=120):
 def percentile(values, fraction):
     values = sorted(values)
     return values[min(len(values)-1, math.floor((len(values)-1)*fraction))]
+
+
+def fixture_color(frame):
+    # Base-24 digits provide 13,824 distinct RGB identities, with eight code
+    # values between identities so the two-value decode tolerance cannot alias.
+    assert 0 <= frame < 24**3
+    return tuple(32+((frame//divisor) % 24)*8 for divisor in (1, 24, 24**2))
 
 
 def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll=False):
@@ -53,12 +65,34 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
         clip = document["clips"][0]
         for row in rows:
             source_frame = math.floor((clip["source_in"] + row["shown_frame"])*source["fps"]/fps)
-            expected = tuple(32 + (source_frame*multiplier) % 192 for multiplier in (37, 73, 109))
+            expected = fixture_color(source_frame)
             actual = tuple(row[channel] for channel in ("r", "g", "b"))
             assert max(abs(a-b) for a, b in zip(actual, expected)) <= 2, (row, source_frame, expected)
     # Ignore the initial half-second of cold prefetch when describing steady timing.
     steady = [row for row in rows if row["samples"] >= 24000]
     lag = [(row["samples"]/48000-row["shown_frame"]/fps)*1000 for row in steady]
+    # Compare independent monotonic elapsed time with the real device cursor.
+    # The initial offset includes driver startup and is not drift.
+    timed = [row for row in rows if row["samples"] >= 48000]
+    first, last = timed[0], timed[-1]
+    elapsed = (last["wall_ns"] - first["wall_ns"])/1e9
+    drift_ms = ((last["samples"]-first["samples"])/48000-elapsed)*1000
+    phases_ms = [(row["samples"]-first["samples"])/48
+                 -(row["wall_ns"]-first["wall_ns"])/1e6 for row in timed]
+    assert abs(drift_ms) < 75, (label, "device cursor diverged from monotonic time", drift_ms)
+    assert max(phases_ms)-min(phases_ms) < 75, (label, "device clock phase discontinuity", min(phases_ms), max(phases_ms))
+    picture_gaps_ms = [(b["wall_ns"]-a["wall_ns"])/1e6 for a, b in zip(changed, changed[1:])
+                       if a["samples"] >= 48000]
+    if identity:
+        # A global average could hide a frozen interval in a long measurement.
+        assert max(picture_gaps_ms) < 250, (label, "lossless fixture picture froze", max(picture_gaps_ms))
+        assert max(lag) < 250, (label, "lossless fixture picture fell behind", max(lag))
+    # Production audio pulls floor(fps*5) timeline frames, not exactly 5 seconds
+    # at a fractional sequence rate. Check all observed crossings of that span.
+    audio_span = math.floor(fps*5)
+    boundaries = [round(frame*48000/fps) for frame in range(audio_span, math.floor(seconds*fps), audio_span)]
+    crossed = sum(rows[0]["samples"] < boundary <= rows[-1]["samples"] for boundary in boundaries)
+    assert crossed == len(boundaries), (label, "audio buffer boundaries were not reached", crossed, len(boundaries))
     phases = {name: [] for name in ("snapshot_ns", "source_ns", "plan_ns", "program_ns", "publish_ns", "coalesce_ns")}
     seen = set()
     for row in steady:
@@ -86,6 +120,10 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
                 "p95": percentile(lag, .95), "maximum": max(lag)},
             "peak_prepared": max(row["prepared"] for row in rows),
             "audio_underruns": 0, "early_pictures": 0, "pixel_checks": len(rows) if identity else 0,
+            "device_clock": {"interval_seconds": elapsed, "interval_drift_ms": drift_ms,
+                             "phase_range_ms": max(phases_ms)-min(phases_ms)},
+            "audio_buffer_boundaries": crossed,
+            "maximum_picture_gap_ms": max(picture_gaps_ms),
             "phase_ms": {name: {"median": statistics.median(values), "p95": percentile(values, .95)} for name, values in phases.items()},
             "paint_ms": {"median": statistics.median(paints), "p95": percentile(paints, .95)},
             "wait_ms": {"median": statistics.median(waits), "p95": percentile(waits, .95)},
@@ -94,21 +132,30 @@ def measure(binary, worker, project, root, seconds, legacy, identity, sleep_poll
             "raw_report": str(report)}
 
 
-def fixture(binary, worker, root):
+def fixture(binary, worker, root, seconds=8):
     ffmpeg = _media_tool(worker, "ffmpeg")
-    frames = b"".join(bytes(32+(frame*m) % 192 for m in (37, 73, 109))*320*180 for frame in range(288))
+    # Upscale uniform one-pixel lossless frames, avoiding gigabytes of raw video.
+    # Unlike a repeated short clip, each frame throughout three minutes has its
+    # own identity, so an old picture cannot alias one from a later loop.
+    duration = max(12.012, seconds+2.012)
+    frames = b"".join(bytes(fixture_color(frame)) for frame in range(math.ceil(duration*24000/1001)))
     raw = root / "identity.rgb"
     raw.write_bytes(frames)
     video = root / "frames 日本語 %20.mp4"
     run([ffmpeg, "-nostdin", "-y", "-v", "error", "-f", "rawvideo", "-pixel_format", "rgb24",
-         "-video_size", "320x180", "-framerate", "24000/1001", "-i", raw,
+         "-video_size", "1x1", "-framerate", "24000/1001", "-i", raw,
          "-f", "lavfi", "-i", "sine=frequency=431:sample_rate=48000",
-         "-t", "12.012", "-c:v", "libx264rgb", "-crf", "0", "-preset", "fast", "-bf", "3", "-g", "24",
-         "-c:a", "aac", video])
+         "-map", "0:v", "-map", "1:a", "-t", str(duration), "-vf", "scale=320:180:flags=neighbor",
+         "-c:v", "libx264rgb", "-crf", "0", "-preset", "fast", "-bf", "3", "-g", "24", "-c:a", "aac", video])
+    # Every full-size frame is uniform. Cropping a single source pixel avoids a
+    # multi-gigabyte raw-video capture while independently checking the entire
+    # sequence and its decoded frame order.
     decoded = subprocess.run([str(ffmpeg), "-nostdin", "-v", "error", "-i", str(video),
-                              "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
-                             capture_output=True, timeout=30, creationflags=FLAGS)
-    assert decoded.returncode == 0 and decoded.stdout == frames, "independent lossless decode differed"
+                              "-an", "-vf", "crop=1:1:0:0", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+                             capture_output=True, timeout=120, creationflags=FLAGS)
+    count = len(decoded.stdout)//3
+    expected = b"".join(bytes(fixture_color(frame)) for frame in range(count))
+    assert decoded.returncode == 0 and count > (seconds+1)*24000/1001 and decoded.stdout == expected, "independent lossless decode differed"
     project = root / "fractional.air"
     env = dict(os.environ, GENESIS_GCOMPOSE=str(worker), GENESIS_SCRATCH=str(root / "probe"))
     env.pop("GENESIS_FAKE_PROVIDER", None)
@@ -116,7 +163,7 @@ def fixture(binary, worker, root):
     document = json.loads(project.read_text(encoding="utf-8"))
     sequence = document["sequences"][0]
     sequence.update(fps=30000/1001, width=320, height=180)
-    document["clips"][0]["length"] = 360
+    document["clips"][0]["length"] = math.floor((seconds+1)*30000/1001) if seconds > 8 else 360
     project.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     return project
 
@@ -133,6 +180,7 @@ def main():
     parser.add_argument("--poll", action="store_true", help="reproduce the earlier sleep/poll diagnostic")
     args = parser.parse_args()
     assert 1 <= args.pairs <= 5
+    assert 2 <= args.seconds <= 180, "measurement duration must be 2..180 seconds"
     binary, worker = args.binary.resolve(), args.worker.resolve()
     report = args.report.resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +189,7 @@ def main():
     evidence.mkdir(exist_ok=True)
     results = []
     with tempfile.TemporaryDirectory(prefix="genesis-playback-") as temporary:
-        project = args.project.resolve() if args.project else fixture(binary, worker, Path(temporary))
+        project = args.project.resolve() if args.project else fixture(binary, worker, Path(temporary), args.seconds)
         for n in range(args.pairs):
             modes = [True, False] if args.compare else [False]
             if n % 2:

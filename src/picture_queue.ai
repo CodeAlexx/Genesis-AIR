@@ -37,6 +37,8 @@ pub fn identity(state: ref<app.App>, source: bool, playing: bool) -> string effe
   string.append(out,"\n")
   string.append(out,string.from_int(state.media_revision))
   string.append(out,"\n")
+  string.append(out,string.from_int(doc.monitor_source))
+  string.append(out,"\n")
   string.append(out,string.from_int(if source {editor.playhead(doc)}else{
     struct.get(struct.borrow(doc,field=monitor),field=frame)}))
   out
@@ -79,7 +81,12 @@ pub fn target(queue: ref<Queue>, wanted: i64, last: i64, fps: f64, shown: i64)
   let lead: i64 = cast.sat(math.ceil(cast.float(lead_ns)*fps/1000000000.0))
   let next: i64 = wanted + if lead > 0 {lead}else{1}
   let bounded: i64 = if next > last {last}else{next}
-  if bounded <= queue.last_requested {option.none()}else{option.some(bounded)}
+  if bounded <= queue.last_requested {option.none()}else{
+    // A changing preparation estimate must not skip a future picture that is
+    // still on time. Advance consecutive requests within the lead window;
+    // coalesce to the current target only when the renderer has fallen behind.
+    if queue.last_requested >= wanted {option.some(queue.last_requested+1)}else{option.some(bounded)}
+  }
 }
 pub fn requested(queue: ref<Queue>, id: u64, frame: i64, now: u64) -> unit effects {alloc} {
   if queue.first_id == 0 {struct.set(queue,id,field=first_id)}
