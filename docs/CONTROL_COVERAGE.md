@@ -639,14 +639,16 @@ completed-group fitting and compositing use independent math. The strict native
 error bound remains five 16-bit codes. Title acceptance covers timing, transparent
 background and grayscale coverage; font glyph shape is outside that oracle.
 
-Native compound canvases and FP32 disk intermediates prioritize picture correctness.
-One 4K group is 126.6 MiB. Smooth compound 4K60, larger interactive compound projects,
+At this compound-picture checkpoint, native canvases and FP32 disk intermediates
+prioritized picture correctness; one 4K group was 126.6 MiB. The later GPU snapshot
+checkpoint below removes internal group files. Smooth compound 4K60, larger interactive compound projects,
 compound waveforms and complete professional editing acceptance remain open.
-The separate audio audit also reproduced an existing PCM Matroska trim defect:
+At this checkpoint, the separate audio audit also reproduced a PCM Matroska trim defect:
 timestamp-based selection against millisecond packet PTS shifts sample boundaries.
 Both the released and candidate workers reproduce it; independently authored NUT
 mapping passes and independent FFmpeg sample-count selection is exact. Origin-based
-sample selection and late-seek latency require a separate decoder checkpoint.
+sample selection required a separate decoder checkpoint, now covered below.
+Late audio-seek latency remains open.
 
 Focused checks (use binaries built from the matching current source):
 
@@ -685,3 +687,101 @@ has SHA-256 `c8369251f84c3e5dba9bc84ebcb5b85c76304752994c464a966de005814814c1`.
 Each entry was read back against its manifest; the bundle includes production
 source fingerprints, full-gate output, independent picture/bitmap/resource
 receipts, the before-fix canvas failure and the retained Matroska audio gap.
+
+## GPU picture snapshots and source audio boundaries on 2026-10-10
+
+Internal compound-group and ordered-filter FP32 passes now stay in native GPU
+snapshots. The alloc-only AIR lowering pass binds a fresh executor-chosen epoch,
+assigns immutable IDs to intermediate outputs and drops each snapshot after its
+last input use. Old epochs, dropped IDs, incompatible exact canvases and malformed
+references refuse with `GA_VIDEO_SNAPSHOT_*`; terminal output, abort, failure and
+worker shutdown release owned snapshots. Same-size siblings remain independent,
+and snapshots survive eviction from the four retained-canvas slots. The combined
+snapshot/canvas allocation budget is 4 GiB. A native store validates finite pixels
+and compound alpha through a four-byte status readback; no full FP32 intermediate
+picture crosses to host memory. Final preview readback, external FLOAT output and
+encoder quantization retain their existing contracts.
+
+Source audio selection now counts decoded samples at the native source rate
+before resampling. Its origin is the first decoded frame timestamp after decoder
+skip/edit handling, rather than coarse packet PTS or the first packet timestamp.
+Positive origin offsets contribute leading silence; negative offsets skip
+pre-zero samples. Reverse uses the same native interval selection before
+resampling. Child buses preserve their full-history processing before root seek
+slices. Picture and audio mapping retain the saved owner/child frame-rate domains.
+
+| Gate | Evidence |
+|---|---|
+| Native snapshot lifecycle | 23,627 checks: same-size immutable siblings, exact dimensions, finite/alpha validation, injected allocation recovery, four-canvas eviction, prospective shared 4 GiB refusal, dropped/stale IDs and zero live resources after shutdown. GPU validation reads four bytes rather than the FP32 picture. |
+| Snapshot protocol and pixels | 20 cases / 92,302 checks: independent straight-alpha equations, nonlinear parent-on-sum, both brightness/contrast orders and duplicate filters, portrait fit, stale/inactive references, abort/EOF, external FLOAT, PREVIEW, exact PREVIEWTCP identities/pixels and independently decoded lossless ENC output. |
+| Existing picture contracts | 26 authored compound cases plus seven coded preview/export refusals, the native compound pixel gate and 128 actual asynchronous filmstrip bitmaps pass with the new worker. Existing flat paths and ordered-filter/title gates pass. |
+| Corrected installed audio baseline | 91 cases / 364 comparisons, with 102 failed Matroska outcomes; WAV/NUT controls pass. The oracle rounds seconds through the existing microsecond duration parser before native-sample selection and does not use Genesis output as its reference. |
+| Fresh source boundaries | 130 cases / 664 checks pass: 520 project PCM outcomes have maximum error `0.500481367111206` PCM units, and all 144 mono decoder comparisons are exact. Authored sample-coded 48/44.1 kHz WAV/NUT/Matroska, whole output, uneven chunks, fresh seeks, reverse, mixed FPS, nesting and gain/fade context are covered. Independently decoded first-frame PTS proves positive/negative origins and AAC skip/edit cases. Source/project bytes remain unchanged; Stop/join leaves no owned nested cache. |
+| Native UI | Fresh candidate Play advances pictures with stereo output meters; Stop is silent and rewind restores visible frame zero. A distant `00:00:12:41` seek updates Program picture/timecode, status/playhead and histogram, RGB parade and luma waveform. This functional check adds no sustained cadence or physical-hearing claim. |
+
+The complete isolated Windows build/gate passed with freshly generated AIR C,
+including the snapshot lifecycle/protocol, compound/filmstrip gates, existing
+picture/export/audio gates, project recovery, native device clock, retained
+painting and 749 control clicks. The new source-boundary registration was added
+after that invocation parsed its script, so a separate fresh native-client run
+then passed all 130 cases / 664 checks against the same final app/worker.
+
+The installed application SHA-256 is
+`2DD0C3938EDD3DE5C061B91839092179EC016F5F8F1175CCEFD8B1075B892912`;
+the worker is `C2947D934F00EC9CFA0509F9215015BFE4D19AC3CF814A8C9F2B55B3A62FBEAB`.
+The fresh source-boundary client's SHA-256 is
+`4E7081AC93CC4DE1E802F9AF54A78047818CFB25ED962E043C3218D2FA40BC0A`.
+The seven-file maintained worker overlay passes pinned forward/reverse and LF
+round-trip checks; its SHA-256 is
+`3f25d5d1b55b03acee5b561e7c26c8ff47f59e2b5e9276a8a3f5e571ae19b831`.
+
+A separate sequential headless 4K compound comparison retains native 3840x2160
+child/root canvases inside a 1280x720 ordinary-editor canvas with fitted 480x270
+monitors. It uses three warmup pictures and twelve measured serial pictures:
+
+| Measurement | Accepted disk intermediates | Snapshot prototype |
+|---|---:|---:|
+| Program median latency | 788.89 ms | 66.50 ms |
+| Whole serial pipeline median | 799.46 ms | 72.22 ms |
+| Reciprocal whole-pipeline mean | 1.175 pictures/s | 12.928 pictures/s |
+| Observed FP32 group files | Two, 132,710,400 bytes each | None |
+
+The accepted measurement uses app
+`0AE78AD228199D00F415BC0994E82A2444244BA41B3D802B6F04B7560D3D605C`
+and worker `E8354F1845985A9CF12697887FC5DDF48B590277649CF8394492EA4FD216EB73`;
+the prototype uses app
+`0ABDFF80F6494BDE8D7AB030A28BF7A04478AA2172ADFD279B9310A06B75F7D4`
+and worker `2DC132F4C39EBE57A4719AB806AAE197F10CCA6216DA8093E6B99E0784CF7856`.
+The final worker retains that GPU implementation and adds the source-audio fix;
+this timing does not belong to the final integrated app hash. The comparison
+excludes audio, native presentation and paced playback. The last profile argument
+is a picture count, not seconds; the file observation is not a physical disk-I/O
+measurement. Protected source/project and measured binaries retain their hashes.
+These results are well below sustained compound 4K60.
+
+The native functional receipt is
+[`archive/native-picture-memory-ui-2026-10-10.json`](../archive/native-picture-memory-ui-2026-10-10.json).
+The 45-entry [checkpoint bundle](../archive/picture-memory-audio-boundaries-2026-10-10.tar.gz)
+was sanitized and read back against its manifest; its SHA-256 is
+`fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. All six installed runtime
+payload files match their accepted hashes. Canonical migration changes five
+worker source blocks and preserves the other two byte for byte; the overlay
+reverse check passes. A cold root launch opened the private 4K-source compound
+with visible beach pictures in both monitors at frame zero and a complete
+30-second filmstrip in the ordinary maximized Audio-tab window.
+
+Remaining limitations: the missing-first-PTS refusal path is not independently
+fixture-proved; later timestamp discontinuities are not repaired. Decoding from
+the origin makes fresh distant audio seeks O(seek). A fresh 44.1 kHz reverse seek
+regenerates the shortened interval's resampler EOF phase instead of slicing full
+clip history, while nested seeks slice their processed bus. Compound waveforms,
+larger interactive projects, sustained compound 4K60, zero-drop native cadence and
+physical speaker/display alignment remain open. Native compound canvases are
+still conservative; no lower-resolution spatial-effect shortcut was introduced.
+
+Focused acceptance commands:
+
+```powershell
+python tests/picture_memory_pixels.py --worker .\genesis-gcompose.exe --report .\build-windows\picture-memory-pixels.json
+python tests/audio_source_boundaries.py --binary .\Genesis-AIR.exe --client .\build-windows\native\bin\Release\genesis-audio-nested.exe --worker .\genesis-gcompose.exe --report .\build-windows\audio-source-boundaries.json
+```

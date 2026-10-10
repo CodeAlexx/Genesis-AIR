@@ -68,6 +68,7 @@ if ($RunTests) { $sources += @(@('keyed-video', 'tests/keyed_video.ai'), @('wind
 if ($RunTests) { $sources += @(@('fade-controls', 'tests/fade_controls.ai'), @('audio-fade-keys', 'tests/audio_fade_keys.ai'), @('audio-nested', 'tests/audio_nested.ai'), @('audio-nested-cancel', 'tests/audio_nested_cancel.ai'), @('nested-audio-controls', 'tests/nested_audio_controls.ai')) }
 if ($RunTests) { $sources += ,@('nested-timeline-bitmaps', 'tests/nested_timeline_bitmaps.ai') }
 if ($RunTests) { $sources += ,@('nested-picture-plan', 'tests/nested_picture_plan.ai') }
+if ($RunTests) { $sources += ,@('picture-memory', 'tests/picture_memory.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -99,6 +100,7 @@ if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys
 if ($RunTests) { $targets += @('genesis-process-wait') }
 if ($RunTests) { $targets += @('genesis-nested-timeline-bitmaps') }
 if ($RunTests) { $targets += @('genesis-nested-picture-plan', 'genesis-compound-canvas') }
+if ($RunTests) { $targets += @('genesis-picture-memory', 'genesis-picture-memory-lifecycle') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'

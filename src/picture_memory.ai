@@ -1,0 +1,139 @@
+// Lower a completed picture plan into one worker-owned GPU transaction. The
+// caller supplies an epoch unique within its physical worker; planning stays pure.
+module genesis.picture_memory
+import std.map as map
+import std.text as text
+
+type Input = struct {path:string,kind:string}
+fn input(value:str) -> option<Input> effects {alloc} {
+  if str.starts_with(value,"FLOAT:") {
+    return option.some(Input {path:string.copy(str.slice(value,6,str.len(value))),kind:"GPU"})
+  }
+  let prefix:u64=if str.starts_with(value,"FLOATDIM:") {9}
+    else if str.starts_with(value,"OPAQUE:") {7}else{return option.none()}
+  var at:u64=prefix
+  var colons:u64=0
+  loop {if at >= str.len(value) {return option.none()}
+    if str.slice(value,at,at+1)==":" {colons=colons+1
+      if colons==2 {return option.some(Input {
+        path:string.copy(str.slice(value,at+1,str.len(value))),
+        kind:if prefix==9 {"GPUDIM"}else{"GPUOPAQUE"}})}
+    }
+    at=at+1
+  }
+  option.none()
+}
+fn token(kind:str,epoch:u64,id:u64) -> string effects {alloc} {
+  var value:string=text.concat(kind,":")
+  string.append(value,string.from_int(epoch))
+  string.append(value,":")
+  string.append(value,string.from_int(id))
+  value
+}
+fn copied(lines:ref<array<string>>) -> array<string> effects {alloc} {
+  var answer:array<string> = array.new()
+  var at:u64=0
+  loop {if at>=array.len(lines) {break}
+    array.push(answer,string.copy(array.borrow(lines,at)))
+    at=at+1
+  }
+  answer
+}
+pub fn lower(lines:ref<array<string>>,epoch:u64) -> result<array<string>,string> effects {alloc} {
+  if epoch==0 or array.len(lines)==0 or array.len(lines)>16384 {
+    return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid picture transaction")
+  }
+  var versions:map.Map=map.new()
+  var rewritten:array<string> = array.new()
+  var last_use:array<u64> = array.new()
+  var step:u64=0
+  var bytes:u64=0
+  loop {if step>=array.len(lines) {break}
+    let line:str=array.borrow(lines,step)
+    if str.len(line)>960000-bytes {return result.err("[GA_PICTURE_MEMORY_CAPACITY] Picture wire budget exceeded")}
+    bytes=bytes+str.len(line)
+    var fields:array<string> = text.split(line," ")
+    let command:str=array.borrow(fields,0)
+    if command=="CANVAS" {
+      if array.len(fields)!=4 or step+1==array.len(lines) {
+        return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid picture canvas command")
+      }
+      array.push(rewritten,string.copy(line))
+      step=step+1
+      continue
+    }
+    let terminal:bool=step+1==array.len(lines)
+    if (command!="FLOAT" and command!="PREVIEW" and command!="ENC") or
+       (not terminal and command!="FLOAT") or
+       array.len(fields)!=if command=="ENC" {109}else{110} {
+      return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid picture pass command")
+    }
+    // Resolve all reads against the previous version before defining this
+    // output. Ordered filter stacks deliberately reuse their two scratch names.
+    var slot:u64=0
+    loop {if slot>=3 {break}
+      let field:u64=if slot==0 {1}else if slot==1 {2}else{20}
+      let value:str=array.borrow(fields,field)
+      if str.starts_with(value,"GPU:") or str.starts_with(value,"GPUDIM:") or str.starts_with(value,"GPUOPAQUE:") {
+        return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Caller supplied a worker snapshot")
+      }
+      match input(value) {none=>{},some(parsed)=>{
+        match map.get(versions,str.view(parsed.path)) {none=>{},some(version)=>{
+          let id:u64=option.unwrap(text.parse_u64(version))
+          array.set(last_use,id-1,step)
+          let _=ref.swap(array.borrow(fields,field),token(str.view(parsed.kind),epoch,id))
+        },}
+      },}
+      slot=slot+1
+    }
+    if not terminal {
+      let output:str=array.borrow(fields,109)
+      if output=="-" or str.len(output)==0 or str.starts_with(output,"GPU:") {
+        return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid internal picture output")
+      }
+      let id:u64=array.len(last_use)+1
+      let _=map.put(versions,output,string.from_int(id))
+      array.push(last_use,step)
+      let _=ref.swap(array.borrow(fields,109),token("GPU",epoch,id))
+    }
+    array.push(rewritten,text.join(fields," "))
+    step=step+1
+  }
+  if array.len(last_use)==0 {return result.ok(copied(lines))}
+  // Bucket releases by their last consuming pass, so long stacks are linear
+  // after the map lookups. Terminal commands automatically release the remainder.
+  var heads:array<i64> = array.repeat(-1,array.len(lines))
+  var next:array<i64> = array.repeat(-1,array.len(last_use))
+  var id:u64=0
+  loop {if id>=array.len(last_use) {break}
+    let used:u64=array.get(last_use,id)
+    array.set(next,id,array.get(heads,used))
+    array.set(heads,used,cast.sat(id))
+    id=id+1
+  }
+  var answer:array<string> = [text.concat("PICBEGIN ",string.from_int(epoch))]
+  step=0
+  loop {if step>=array.len(rewritten) {break}
+    array.push(answer,string.copy(array.borrow(rewritten,step)))
+    if step+1<array.len(rewritten) {
+      var release:i64=array.get(heads,step)
+      loop {if release<0 {break}
+        var drop:string=text.concat("PICDROP ",string.from_int(epoch))
+        string.append(drop," ")
+        string.append(drop,string.from_int(release+1))
+        array.push(answer,drop)
+        release=array.get(next,cast.sat(release))
+      }
+    }
+    step=step+1
+  }
+  bytes=0
+  step=0
+  loop {if step>=array.len(answer) {break}
+    let size:u64=str.len(array.borrow(answer,step))+1
+    if size>960000-bytes {return result.err("[GA_PICTURE_MEMORY_CAPACITY] Lowered picture wire budget exceeded")}
+    bytes=bytes+size
+    step=step+1
+  }
+  result.ok(answer)
+}

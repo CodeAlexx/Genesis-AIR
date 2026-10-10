@@ -181,8 +181,9 @@ The candidate also passes 4K ProRes fine-detail/exact PCM length, portrait/multi
 ## Native-window measurements on 2026-10-09
 
 The loopback-pixel candidate uses a bounded packet with frame identity checks instead of
-writing the final Program bitmap to disk. Float intermediate passes and exports
-retain their existing paths. A twenty-second retained-painter/device run delivered
+writing the final Program bitmap to disk. At that checkpoint, float intermediate
+passes and exports retained their existing paths; the later GPU snapshot stage
+below removes internal FP32 group/filter disk passes. A twenty-second retained-painter/device run delivered
 1,189 pictures (59.45/s), with 4.53/16.05 ms median/p95 program preparation.
 This excludes native display presentation.
 
@@ -323,3 +324,78 @@ RGB parade and luma waveform. Filmstrip bitmaps remained visible; Source stayed
 at zero while Program moved. Six shared-runtime process cases also passed against
 the published worker, with no separate Genesis codec bundle. The original project
 SHA256 stayed `480D82E310BA6F231FAB2C0C0DB9945DAB193D63073CB63FE053019A13AEB143`.
+
+## GPU picture snapshots on 2026-10-10
+
+Compound groups and ordered video-filter passes now retain immutable FP32 GPU
+pictures between passes. The AIR plan remains a pure description; executor-side
+lowering assigns a monotonically increasing epoch per physical worker and IDs to
+internal outputs. `PICBEGIN` starts an epoch, a `FLOAT` pass can store to
+`GPU:<epoch>:<id>`, and later passes consume exact-canvas `GPU`, transparent-fit
+`GPUDIM`, or black-flattening `GPUOPAQUE` references. `PICDROP` follows the last
+input use, while `PICABORT`, failures, terminal preview/encoder/external FLOAT
+output and shutdown release remaining snapshots. IDs cannot be redefined after
+Drop, and old epochs cannot alias new same-numbered IDs.
+
+Snapshot buffers remain separate from the four retained canvas slots, so changing
+canvas dimensions or evicting a canvas cannot overwrite a sibling/group picture.
+Both use one prospective 4 GiB allocation budget. Store-time finite/alpha
+validation returns a four-byte status word; internal pictures avoid full RGBA
+readback, host upload and scratch-file writes. Native child canvases and existing
+spatial/filter semantics remain conservative. Final preview readback and actual
+encoder output retain their format and precision contracts. This uses OpenCL
+through the existing native compositor and the shared MM-AIR codec runtime.
+
+The native lifecycle oracle passes 23,627 checks, including injected allocation
+failures, prospective budget refusal, finite/alpha rejection, LRU survival and
+zero live objects at shutdown. The independent protocol oracle passes twenty
+cases / 92,302 checks, including stale references, same-size siblings,
+noncommutative/duplicate filters, nonlinear group filtering, portrait fit and
+actual preview/encoder pixels. The full isolated Windows suite and its compound,
+ordered-filter, filmstrip, audio and control gates pass. Source-boundary acceptance
+is a separate fresh 130-case / 664-check run against the same final app/worker.
+
+A short sequential headless benchmark uses native 3840x2160 root and child
+canvases, a 1280x720 ordinary-editor canvas and fitted 480x270 monitors:
+
+| Measurement | Disk intermediates | GPU snapshot prototype |
+|---|---:|---:|
+| Program median / p90 latency | 788.89 / 1006.32 ms | 66.50 / 94.37 ms |
+| Whole serial median / p90 | 799.46 / 1015.45 ms | 72.22 / 100.12 ms |
+| Reciprocal whole serial mean | 1.175 pictures/s | 12.928 pictures/s |
+| Observed group files | Two at 132,710,400 bytes each | None |
+
+The command is `profile-preview REPORT PROJECT 1280 720 12`: three warmup
+pictures precede twelve measured serial pictures. `12` is not a duration.
+This excludes audio, native display presentation and paced sustained playback;
+file observation is not a physical disk-I/O benchmark. No fullscreen window was
+used. The supplied source and protected original project retained their hashes.
+The improvement removes a large transfer bottleneck, but this result remains
+far below sustained compound 4K60.
+
+The accepted benchmark app/worker hashes are
+`0AE78AD228199D00F415BC0994E82A2444244BA41B3D802B6F04B7560D3D605C` /
+`E8354F1845985A9CF12697887FC5DDF48B590277649CF8394492EA4FD216EB73`;
+the prototype hashes are
+`0ABDFF80F6494BDE8D7AB030A28BF7A04478AA2172ADFD279B9310A06B75F7D4` /
+`2DC132F4C39EBE57A4719AB806AAE197F10CCA6216DA8093E6B99E0784CF7856`.
+The final integrated app/worker are
+`2DD0C3938EDD3DE5C061B91839092179EC016F5F8F1175CCEFD8B1075B892912` /
+`C2947D934F00EC9CFA0509F9215015BFE4D19AC3CF814A8C9F2B55B3A62FBEAB`.
+They retain the tested GPU implementation and include native audio selection
+before resampling, anchored to first decoded PTS after AAC skip/edit handling.
+Positive origins insert silence and negative origins skip pre-zero audio; the
+[acceptance ledger](CONTROL_COVERAGE.md#gpu-picture-snapshots-and-source-audio-boundaries-on-2026-10-10)
+details the independent sample oracles and remaining missing-PTS, discontinuity,
+seek-cost and fresh-reverse phase limits. The prototype timings must not be
+attributed to this final integrated application.
+
+The [native functional receipt](../archive/native-picture-memory-ui-2026-10-10.json)
+records advancing Play with stereo meters, silent Stop, visible frame-zero
+rewind and a distant seek with synchronized picture/time/playhead/scopes. It
+adds no new sustained native-display or physical-hearing measurement. The
+45-entry [checkpoint archive](../archive/picture-memory-audio-boundaries-2026-10-10.tar.gz)
+was sanitized and read back against its manifest; SHA-256 is
+`fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. The installed root payload
+matches the final hashes above, and a cold ordinary-window launch restored
+frame-zero pictures and the compound filmstrip.

@@ -24,6 +24,7 @@ import std.text as text
 import "ffmpeg.ai" as ffmpeg
 import "diagnostics.ai" as diagnostics
 import "media_runtime.ai" as media_runtime
+import "picture_memory.ai" as picture_memory
 
 pub fn kind_fake() -> u32 effects {} { 0 }
 pub fn kind_gcompose() -> u32 effects {} { 1 }
@@ -804,7 +805,10 @@ fn receive_picture_socket(socket: ref<Socket>, token: u64, sequence: u64,
 }
 pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32) -> Frame
     effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
-  program_attempt(state,line,width,height,true)
+  // Snapshot IDs belong to this worker. Retrying only the final command on a
+  // replacement process cannot reconstruct its preceding composition passes.
+  let retained:bool=text.contains(line," GPU:") or text.contains(line," GPUDIM:") or text.contains(line," GPUOPAQUE:")
+  program_attempt(state,line,width,height,not retained)
 }
 fn program_attempt(state: ref<Provider>, line: str, width: u32, height: u32, retry: bool) -> Frame
     effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
@@ -909,10 +913,16 @@ pub fn program_plan(state: ref<Provider>, lines: ref<array<string>>, width: u32,
     return Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),
       detail: string.copy("empty preview plan")}
   }
+  // calls increases for every exchange and survives restart. Each generated
+  // transaction therefore gets a new identity within this provider's worker.
+  var commands:array<string> = match picture_memory.lower(lines,state.calls+1) {
+    ok(value)=>value,err(problem)=>{note_failure(state,problem)
+      return failed_frame(state)},
+  }
   var at: u64 = 0
   loop {
-    if at + 1 >= array.len(lines) { break }
-    match ask(state, str.view(array.borrow(lines, at)), "program-step.txt") {
+    if at + 1 >= array.len(commands) { break }
+    match ask(state, str.view(array.borrow(commands, at)), "program-step.txt") {
       none => {
         // A refused step can leave the live worker on a child canvas or in group
         // mode. Discard that session so the next plan starts on its root canvas.
@@ -925,7 +935,7 @@ pub fn program_plan(state: ref<Provider>, lines: ref<array<string>>, width: u32,
     }
     at = at + 1
   }
-  program_command(state, str.view(array.borrow(lines, at)), width, height)
+  program_command(state, str.view(array.borrow(commands, at)), width, height)
 }
 
 fn thumb_command(source: str, frame: i64, width: u32, height: u32, out: str) -> string effects {alloc} {

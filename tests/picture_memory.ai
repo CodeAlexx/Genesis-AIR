@@ -1,0 +1,129 @@
+module genesis.tests.picture_memory
+import std.files as files
+import std.map as map
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/picture_memory.ai" as memory
+
+fn pass(kind:str,base:str,upper:str,incoming:str,out:str) -> string effects {alloc} {
+  var fields:array<string> = array.new()
+  var at:u64=0
+  loop {if at>=108 {break}
+    array.push(fields,string.copy("0"))
+    at=at+1
+  }
+  let _=ref.swap(array.borrow(fields,0),string.copy(base))
+  let _=ref.swap(array.borrow(fields,1),string.copy(upper))
+  let _=ref.swap(array.borrow(fields,19),string.copy(incoming))
+  var line:string=text.concat(kind," ")
+  string.append(line,text.join(fields," "))
+  if kind!="ENC" {string.append(line," ")
+    string.append(line,out)}
+  line
+}
+fn lowered(suite:ref<test.Suite>,lines:ref<array<string>>,epoch:u64) -> array<string> effects {alloc} {
+  match memory.lower(lines,epoch) {ok(value)=>value,err(problem)=>{
+    let _=test.check(suite,false,problem)
+    array.new()
+  },}
+}
+// An independent lifetime interpreter: every read must see a live snapshot,
+// each immutable ID is defined once, and terminal completion clears all storage.
+fn lifetimes(lines:ref<array<string>>) -> bool effects {alloc} {
+  var live:map.Map=map.new()
+  var ever:map.Map=map.new()
+  var step:u64=0
+  var active:bool=false
+  loop {if step>=array.len(lines) {break}
+    var fields:array<string> = text.split(array.borrow(lines,step)," ")
+    let command:str=array.borrow(fields,0)
+    if command=="PICBEGIN" {if active {return false}
+      active=true
+    }else if command=="PICDROP" {
+      let key:string=text.concat(text.concat(array.borrow(fields,1),":"),array.borrow(fields,2))
+      if not map.remove(live,key) {return false}
+    }else if command!="CANVAS" {
+      var slot:u64=0
+      loop {if slot>=3 {break}
+        let field:u64=if slot==0 {1}else if slot==1 {2}else{20}
+        let value:str=array.borrow(fields,field)
+        if str.starts_with(value,"GPU:") or str.starts_with(value,"GPUDIM:") or str.starts_with(value,"GPUOPAQUE:") {
+          var parts:array<string> = text.split(value,":")
+          let key:string=text.concat(text.concat(array.borrow(parts,1),":"),array.borrow(parts,2))
+          if not active or not map.contains(live,key) {return false}
+        }
+        slot=slot+1
+      }
+      if command=="FLOAT" and str.starts_with(array.borrow(fields,109),"GPU:") {
+        let value:str=array.borrow(fields,109)
+        let key:str=str.slice(value,4,str.len(value))
+        if map.contains(ever,key) {return false}
+        let _=map.put(live,key,"live")
+        let _=map.put(ever,key,"once")
+      }else{if step+1!=array.len(lines) {return false}
+        active=false
+        live=map.new()}
+    }
+    step=step+1
+  }
+  not active and map.len(live)==0
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Immutable GPU picture planning",true)
+  let _=test.start(suite,"Reused paths keep prior inputs and independent new outputs")
+  var lines:array<string> = [
+    pass("FLOAT","source.mkv","-","-","C:/scratch a/one.fp32"),
+    pass("FLOAT","FLOAT:C:/scratch a/one.fp32","-","-","two.fp32"),
+    pass("FLOAT","FLOAT:two.fp32","FLOAT:C:/scratch a/one.fp32","-","C:/scratch a/one.fp32"),
+    pass("PREVIEW","FLOAT:C:/scratch a/one.fp32","-","FLOAT:two.fp32","monitor.rgba")]
+  // Wires escape spaces; make sure matching uses the encoded identity once.
+  var at:u64=0
+  loop {if at>=array.len(lines) {break}
+    let value:string=text.replace(array.borrow(lines,at),"scratch a","scratch%20a")
+    let _=ref.swap(array.borrow(lines,at),value)
+    at=at+1
+  }
+  var actual:array<string> = lowered(suite,lines,7)
+  let wire:string=text.join(actual,"\n")
+  let _=test.check(suite,text.contains(wire,"GPU:7:2 GPU:7:1"),"Read-before-write preserves both old versions")
+  let _=test.check(suite,text.contains(wire,"PICDROP 7 1"),"Old overwritten path is released at last use")
+  let _=test.check(suite,lifetimes(actual),"No read observes a dropped or overwritten snapshot")
+  let _=test.check(suite,not text.contains(wire,".fp32"),"Internal pixel paths disappear from the wire")
+  let _=test.check(suite,str.starts_with(array.borrow(actual,array.len(actual)-1),"PREVIEW GPU:7:3"),"Preview remains the terminal command")
+  let _=test.start(suite,"Dimensioned groups, caption RAW input and final external FLOAT")
+  lines=["CANVAS 32 64 1",pass("FLOAT","RAW:title.rgba","-","-","child.fp32"),
+    "CANVAS 64 36 1",pass("FLOAT","FLOATDIM:32:64:child.fp32","RAW:caption.rgba","-","root.fp32"),
+    "CANVAS 64 36 0",pass("FLOAT","OPAQUE:64:36:root.fp32","-","-","saved.fp32")]
+  actual=lowered(suite,lines,8)
+  let groups:string=text.join(actual,"\n")
+  let _=test.check(suite,text.contains(groups,"GPUDIM:8:1 RAW:caption.rgba"),"Child fits with transparent bars; CPU caption stays a raster")
+  let _=test.check(suite,text.contains(groups,"FLOAT GPUOPAQUE:8:2"),"Final root gets the opaque fit")
+  let _=test.check(suite,text.contains(groups," saved.fp32"),"Caller-visible FP32 remains a file")
+  let _=test.check(suite,lifetimes(actual),"Canvas changes preserve independent snapshots")
+  let _=test.start(suite,"Long ordered stacks retain a bounded live set and terminal encoder")
+  lines=array.new()
+  at=0
+  loop {if at>=300 {break}
+    let output:str=if at%2==0 {"a"}else{"b"}
+    let source:string=if at==0 {"source.mkv"}else{text.concat("FLOAT:",if at%2==0 {"b"}else{"a"})}
+    array.push(lines,pass("FLOAT",source,"-","-",output))
+    at=at+1
+  }
+  array.push(lines,pass("ENC","FLOAT:b","-","-",""))
+  actual=lowered(suite,lines,9)
+  let _=test.check(suite,lifetimes(actual),"Three hundred duplicate effects have unique snapshots and valid lifetimes")
+  let _=test.eq_i64(suite,cast.sat(array.len(actual)),601,"Last-use releases keep live storage bounded")
+  let _=test.check(suite,str.starts_with(array.borrow(actual,array.len(actual)-1),"ENC GPU:9:300"),"Encoder remains terminal")
+  let _=test.start(suite,"Flat pass compatibility and protocol refusal")
+  lines=[pass("PREVIEW","FLOAT:external.fp32","-","-","monitor")]
+  actual=lowered(suite,lines,10)
+  let _=test.eq_str(suite,text.join(actual,"\n"),text.join(lines,"\n"),"Single-pass external inputs are byte-identical")
+  let _=test.check(suite,match memory.lower(lines,0) {err(_)=>true,ok(_)=>false,},"Epoch zero refused")
+  lines=[pass("FLOAT","GPU:9:300","-","-","a"),pass("PREVIEW","FLOAT:a","-","-","monitor")]
+  let _=test.check(suite,match memory.lower(lines,11) {err(_)=>true,ok(_)=>false,},"External snapshot IDs cannot enter a new plan")
+  test.conclude(suite,path.join(root,"picture-memory-tests.json"),20)
+}

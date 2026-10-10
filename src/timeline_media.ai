@@ -17,6 +17,7 @@ import "chrome.ai" as chrome
 import "provider.ai" as provider
 import "typeface.ai" as typeface
 import "filter_keys.ai" as filter_keys
+import "picture_memory.ai" as picture_memory
 
 type SourceInfo = struct {path: string, frames: i64, fps: f64, audio: bool, online: bool}
 
@@ -3266,7 +3267,10 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
       let _ = files.write_text(progress, str.view(string.from_int(percent)))
       reported = percent
     }
-    var lines: array<string> = try frame_plan(doc, frame, "ENC", "", output, cache)
+    var planned: array<string> = try frame_plan(doc, frame, "ENC", "", output, cache)
+    // Export owns one physical worker. Frame-relative positive epochs are
+    // unique within that session and do not add clock effects to frame_plan.
+    var lines: array<string> = try picture_memory.lower(planned,cast.sat(frame-range.mark_in+1))
     var step: u64 = 0
     loop {
       if step >= array.len(lines) { break }

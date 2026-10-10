@@ -49,6 +49,9 @@ try {
   $canvasResult = Invoke-Native 'genesis-compound-canvas.exe' @()
   Write-Host $canvasResult.TrimEnd()
   Set-Content -LiteralPath (Join-Path $root 'compound-canvas-windows.log') -Value $canvasResult
+  $pictureMemoryResult = Invoke-Native 'genesis-picture-memory-lifecycle.exe' @()
+  Write-Host $pictureMemoryResult.TrimEnd()
+  Set-Content -LiteralPath (Join-Path $root 'picture-memory-windows.log') -Value $pictureMemoryResult
   & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
     --report (Join-Path $root 'native-audio-clock.json')
   if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
@@ -83,6 +86,9 @@ try {
     & python (Join-Path $PSScriptRoot 'compound_pixels.py') --worker $worker `
       --report (Join-Path $root 'compound-pixels.json')
     if ($LASTEXITCODE -ne 0) { throw 'Independent compound compositor pixels and recovery failed.' }
+    & python (Join-Path $PSScriptRoot 'picture_memory_pixels.py') --worker $worker `
+      --report (Join-Path $root 'picture-memory-pixels.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Immutable GPU picture lifetime and pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'nested_picture.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --worker $worker --report (Join-Path $root 'nested-picture.json')
     if ($LASTEXITCODE -ne 0) { throw 'Saved-project nested picture preview/master acceptance failed.' }
@@ -147,6 +153,10 @@ try {
       --client (Join-Path $Bin 'genesis-audio-nested.exe') --worker $worker `
       --report (Join-Path $root 'audio-nested.json')
     if ($LASTEXITCODE -ne 0) { throw 'Recursive nested audio audition/playback/master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_source_boundaries.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --client (Join-Path $Bin 'genesis-audio-nested.exe') --worker $worker `
+      --report (Join-Path $root 'audio-source-boundaries.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Native sample boundaries, source offsets and mono alignment acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_nested_cancel.py') --client (Join-Path $Bin 'genesis-audio-nested-cancel.exe') `
       --worker $worker --report (Join-Path $root 'audio-nested-cancel.json')
     if ($LASTEXITCODE -ne 0) { throw 'Active nested audio warm cancellation and recovery acceptance failed.' }
@@ -195,6 +205,9 @@ try {
   $nestedPlan = Join-Path $work 'nested-picture-plan'
   Write-Host (Invoke-Native 'genesis-nested-picture-plan.exe' @($nestedPlan)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $nestedPlan 'nested-picture-plan-tests.json') -Destination (Join-Path $root 'nested-picture-plan-tests.json') -Force
+  $memoryPlan = Join-Path $work 'picture-memory'
+  Write-Host (Invoke-Native 'genesis-picture-memory.exe' @($memoryPlan)).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $memoryPlan 'picture-memory-tests.json') -Destination (Join-Path $root 'picture-memory-tests.json') -Force
   Copy-Item -LiteralPath (Join-Path $work 'native-tests.json') -Destination (Join-Path $root 'native-tests.json') -Force
 
   $headless = Invoke-Native 'genesis-headless.exe' @($work, (Join-Path $work 'project.air'), (Join-Path $work 'frame.png'))

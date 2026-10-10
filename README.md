@@ -140,6 +140,7 @@ from AIR's reusable NLE toolkit, which was itself derived from Genesis.
 | `src/recovery.ai` | independent autosave timer, separate recovery snapshots, legacy recovery reader and managed-file cleanup. |
 | `src/provider.ai` | the media seam: source probe, frame and waveform retrieval, and the worker transport. |
 | `src/timeline_media.ai` | resolves AIR editor clips into the worker's preview, encode, and audio commands. |
+| `src/picture_memory.ai` | lowers internal FP32 picture passes to immutable, frame-scoped GPU snapshots and releases them after their last use. |
 | `src/audio_playback.ai` | background audio owner; retains native clip graphs, resets transport generations and publishes coded failures. |
 | `src/transport_clock.ai` | elapsed-time transport fallback; native Windows playback uses the audio device sample clock. |
 | `src/native_audio.ai`, `windows/native_audio.cpp` | typed C ABI adapter for Windows audio queues, sample clock and stereo output levels. |
@@ -329,7 +330,11 @@ ratios retain the bounded rounded fallback. Native 4K spatial-transition playbac
 at 60 fps remains unmeasured; fullscreen 4K work remains deferred.
 
 Media decode retains 16-bit precision and composition/intermediate passes use FP32.
-The encoded format determines the final quantization. HDR sources are tone mapped to
+Compound pictures and ordered video-filter passes now keep their internal FP32
+results in immutable GPU snapshots instead of round-tripping full pictures through
+scratch files. Frame-scoped identities prevent stale references; snapshots and
+retained canvases share a 4 GiB budget. Final preview readback and encoded output
+retain their existing formats. The encoded format determines the final quantization. HDR sources are tone mapped to
 Rec.709 for the ordinary SDR preview; HDR masters retain PQ / BT.2020. This is not a
 calibrated HDR display or a scene-linear grading pipeline.
 
@@ -354,8 +359,13 @@ rounding from accumulating at fractional frame rates. The device's sample clock 
 the source/program playhead.
 Reverse playback decodes two-second source windows from the end of the clip and feeds
 the reversed PCM into the retained effect graph. Decoder/resampler preroll protects
-window boundaries, and native sample counting preserves fractional source trims. This
-keeps source buffering independent of clip duration while preserving delay and speed history.
+window boundaries. Source trims now count native decoded samples before resampling,
+anchored to the first decoded frame timestamp after codec skip/edit handling. Positive
+source origins insert silence and negative origins skip pre-zero samples; coarse
+Matroska packet timestamps no longer select trim edges. This keeps reverse source
+buffering independent of clip duration while preserving delay and speed history.
+Origin-based fresh selection may decode from the beginning, so distant audio seeks
+remain O(seek). Later timestamp discontinuities are not repaired.
 Pause, Stop and seek immediately reset output; gain, pan, mute, solo and audio-effect
 edits invalidate queued sound. Picture-only edits preserve it. The meters read the PCM
 at the device cursor after mixing. Preview decoding runs on a separate thread; rapid
@@ -1052,6 +1062,43 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
   to the same clip, and reject an unsupported
   effect instead of silently dropping it.
 
+## GPU picture snapshots and source audio boundaries (2026-10-10)
+
+The combined isolated Windows build/gate passed with the snapshot protocol,
+compound pictures and bitmaps, existing HDR/spatial/ordered-filter checks,
+audio/automation/nesting/cancellation, native device clock, project recovery,
+retained painting and 749 control clicks. A separate newly generated native-client
+run passed all 130 source-boundary cases / 664 checks after its gate registration
+was added. It compares 520 project PCM outcomes within 0.500482 PCM units and
+144 mono decoder outcomes exactly. The corrected prior installed baseline failed
+102 of 364 checks across 91 cases on Matroska; WAV/NUT controls passed.
+
+The installed application SHA-256 is
+`2DD0C3938EDD3DE5C061B91839092179EC016F5F8F1175CCEFD8B1075B892912`;
+the worker is `C2947D934F00EC9CFA0509F9215015BFE4D19AC3CF814A8C9F2B55B3A62FBEAB`.
+The native candidate window also showed Play with stereo meters, silent Stop,
+visible frame-zero rewind, and a distant `00:00:12:41` seek updating the picture,
+timecode, status, playhead, histogram, RGB parade and luma waveform. This is a
+functional check, with no new sustained device cadence or physical-hearing claim.
+
+The separate 4K compound benchmark used native 3840x2160 child/root canvases,
+a 1280x720 ordinary-editor canvas and fitted 480x270 monitors. After three warmup
+pictures it measured twelve serial pictures: whole-pipeline throughput improved
+from 1.175 to 12.928 pictures/s and Program median latency from 788.89 to 66.50 ms.
+The old path produced two 132,710,400-byte group files; the snapshot path produced
+none. This prototype comparison excludes audio, native presentation and paced
+playback. It is not a twelve-second run or evidence of sustained 4K60.
+
+See the [current acceptance ledger](docs/CONTROL_COVERAGE.md#gpu-picture-snapshots-and-source-audio-boundaries-on-2026-10-10)
+and [GPU protocol and measurement scope](docs/FFMPEG_GPU_PREVIEW.md#gpu-picture-snapshots-on-2026-10-10).
+`tests/audio_source_boundaries.py` is registered in the Windows gate; its
+independent PCM and decoded-PTS oracles cover ordinary and nested output,
+retained chunks, fresh seeks, reverse, fractional rates and source origin shifts.
+The 45-entry [source/acceptance archive](archive/picture-memory-audio-boundaries-2026-10-10.tar.gz)
+was sanitized and read back against its manifest. Its SHA-256 is
+`fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. A cold launch of the installed
+root payload restored visible frame-zero pictures and the compound filmstrip.
+
 ## Known gaps
 
 The earlier published session-safety and
@@ -1060,9 +1107,9 @@ passed a combined Windows suite with 749 control outcomes, recovery ownership,
 concurrent media isolation, spatial preview/master comparisons and the audio,
 HDR and cancellation gates. The supplied video also passed the native
 interactive workflow. Sustained timing below belongs to the earlier measured
-application; the installed recursive-audio checkpoint has no new sustained throughput
+application; the historical recursive-audio checkpoint had no new sustained throughput
 measurement. Its combined Windows suite, broader generated-media workflow and native
-window check passed. Exact installed hashes and archived receipts are in the
+window check passed. Exact checkpoint hashes and archived receipts are in the
 [nested audio ledger](docs/CONTROL_COVERAGE.md#recursive-nested-audio-on-2026-10-10).
 
 The 2026-10-10 native-window recovery candidate delivers 59.87 distinct pictures/s
@@ -1083,9 +1130,13 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   automation curves. An unsupported phase, partial edited fade or temporal effect
   context refuses with `GA_TRIM_CONTEXT`; refusals and clamped no-ops preserve redo.
   General temporal DSP history preservation remains unfinished.
-- Compressed-source seek startup can differ
-  slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
-  sample-identical seeking for every codec.
+- Source boundaries now count native decoded samples before resampling and preserve
+  the first decoded timestamp, including AAC skip/edit handling. The missing-timestamp
+  refusal path is not independently fixture-proved, later PTS discontinuities are not
+  repaired, and origin decoding can make distant audio seeks slow. At 44.1 kHz, a
+  fresh reverse seek regenerates the shortened interval's resampler EOF phase; it is
+  not required to reproduce the interior of a previously processed full clip. Nested
+  seeks slice their retained full-history bus. This is not universal codec seek parity.
 - The Windows build applies `patches/air-process-wait-windows.patch` to the pinned
   SDK. A child that exits between a deadline and the immediate status recheck now
   returns its exit status. The native regression preserves timeout, genuine I/O
@@ -1095,8 +1146,10 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
 - Compound pictures render child sequences before applying parent effects, retain
   transparent coverage until final presentation, and use owner/child FPS for trims,
   reverse and rate. Compound filmstrips use the same picture plan and reject stale
-  descendant revisions. Native-size FP32 intermediates currently cost substantial
-  memory and scratch I/O; responsive compound 4K60 remains unproved. Parent
+  descendant revisions. Internal FP32 snapshots now stay on the GPU; native compound
+  canvases still cost substantial memory and computation. A short headless comparison
+  improves serial preparation from 1.175 to 12.928 pictures/s, excluding audio and native
+  presentation; responsive compound 4K60 remains unproved. Parent
   Stabilize refuses with `GA_VIDEO_NESTED_HISTORY` until group history is available.
   Compound waveforms, track/audio-filter automation, animated speed and some filter combinations
   remain unfinished. Recursive nested audio has independent mixing, output,

@@ -1,0 +1,27 @@
+{
+  "schema": "genesis.native_picture_memory_ui.v1",
+  "date": "2026-10-10",
+  "scope": "Fresh native Windows editor and workers; private 30-second compound project with supplied 4K AV1/PQ/AAC media, 480x270 child/root canvases; ordinary editor window",
+  "candidate_application_sha256": "2dd0c3938edd3de5c061b91839092179ec016f5f8f1175ccefd8b1075b892912",
+  "candidate_worker_sha256": "c2947d934f00ec9cfa0509f9215015bfe4d19ac3cf814a8c9f2b55b3a62fbeab",
+  "fresh_process": true,
+  "fresh_workers": true,
+  "installed_root_reload_verified": true,
+  "installed_root_observation": "After installing the accepted payload, a fresh root process with fresh workers opens a private copy at frame zero. Source and program show the beach picture, timecode/playhead are zero, and compound filmstrip bitmaps render.",
+  "observations": [
+    "Initial frame zero is visible in both source and program monitors; compound filmstrip renders.",
+    "Program Play advances picture and timecode; stereo output meters respond and Audio playing is displayed.",
+    "Stop clears output meters and displays Stopped / silent.",
+    "Program rewind returns to visible beach frame at 00:00:00:00.",
+    "Timeline Fit displays the complete 30-second compound filmstrip.",
+    "Paused distant ruler seek displays 00:00:12:41 in program timecode and bottom playhead status, moves the timeline marker, and displays a sloth picture.",
+    "Histogram, RGB parade and luma waveform change from the beach image to the sought picture; scopes display sampled 21600 px of 480x270."
+  ],
+  "older_unsaved_user_window_preserved": true,
+  "original_project_and_media_modified": false,
+  "limits": [
+    "These observations do not establish native-resolution 4K fullscreen or sustained 60fps playback.",
+    "Exact thumbnail pixel/time alignment is covered by the independent asynchronous bitmap gate rather than inferred from coarse filmstrip spacing."
+  ],
+  "complete_professional_editing_acceptance": false
+}
