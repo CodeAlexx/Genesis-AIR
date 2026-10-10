@@ -223,7 +223,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     return commands.message(landed)
   }
   if action == chrome.act_paste() {
-    let track: u64 = app.default_video_track(state)
+    let track: u64 = app.paste_track(state)
     let at: i64 = editor.playhead(struct.borrow(state, field=document))
     var landed: commands.Result = commands.paste_clip(state, track, at)
     return commands.message(landed)
@@ -1087,7 +1087,7 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     return commands.message(landed)
   }
   if control and code == widgets.key_v() {
-    let track: u64 = app.default_video_track(state)
+    let track: u64 = app.paste_track(state)
     let at: i64 = editor.playhead(struct.borrow(state, field=document))
     var landed: commands.Result = commands.paste_clip(state, track, at)
     return commands.message(landed)

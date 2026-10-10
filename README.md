@@ -1226,6 +1226,38 @@ full-source playback, physical A/V or sustained 4K60 claim.
 See the [acceptance ledger](docs/CONTROL_COVERAGE.md#long-timeline-fit-and-fine-waveforms-on-2026-10-10)
 and [sanitized evidence bundle](archive/long-timeline-fine-waveforms-2026-10-10.tar.gz).
 
+## Clip content, layered effects and direct waveform preparation
+
+Copy and Cut retain the complete authored clip: retiming, reverse, fades, gain,
+pan, enable state, ordered filter instances, text and numeric parameters, and
+signed clip-local automation. Paste allocates fresh clip/filter identities and
+remaps scoped keys. Audio Paste chooses a compatible unlocked audio lane.
+Compound clips retain their same-project child link. Successful Paste or Cut
+has one Undo step; refused operations preserve the document and history.
+Replacing a project clears its clipboard. If Undo or another successful edit
+removes the copied source or child, that clipboard is retired until Copy again,
+preventing a reused numeric ID from silently selecting different media. Different
+owner frame rates and unsupported occupied-range trims explicitly refuse.
+
+A single bottom-layer picture adjustment now runs before upper layers are
+composited, in both ordinary and child sequences. Parent compound adjustments
+still run on the complete child image. This fixes the color adjustment leaking
+onto an upper clip; single-visible-clip preparation retains its fast path.
+
+Direct waveforms now reduce the existing processed stereo stream into peak
+cells without creating full-body RF64 intermediates. The decoder, effects,
+authored timing, peak partitioning and unclipped headroom are unchanged. The
+cached-bus path remains the independent PCM reference and continues to serve
+compound waveforms. Complete history and distant-origin decoding still cost
+time; this change does not remove full-history audition/export caches.
+
+Focused Windows/Linux clipboard tests pass 11 cases/59 checks. Independent
+media comparisons cover five authored copy/cut cases, 60 master frames, 20
+preview requests and five audition/master audio bodies. Streamed peaks pass
+34 direct and 24 unchanged nested cases, plus 16 numerical protocol cases and
+11 coded refusals. The combined native release gate is recorded in the
+[acceptance ledger](docs/CONTROL_COVERAGE.md#clip-content-and-streamed-direct-waveforms-on-2026-10-10).
+
 ## Known gaps
 
 The earlier published session-safety and

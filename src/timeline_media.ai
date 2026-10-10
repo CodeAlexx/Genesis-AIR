@@ -1074,9 +1074,9 @@ fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
     base_transition=match editor.transition_at(doc,base.track,frame) {none=>false,some(_)=>true,}
     match try text_clip_plan(doc, base, frame, scratch_prefix, 0, false, cache) {
       none => {
-        // Each side enters a transition with its own picture effects applied.
-        // Applying the outgoing grade afterwards would also grade the incoming clip.
-        if base_transition {
+        // Apply the bottom clip's picture effects before transitions or upper layers.
+        // A final composite grade would also change the incoming clip or upper layers.
+        if base_transition or array.len(visible) >= 2 {
           let raster: string = preclip_path(scratch_prefix,0)
           match try preclip_line(doc,base,frame,str.view(raster),false) {
             none=>{},some(line)=>{array.push(lines,line)
@@ -3161,6 +3161,16 @@ pub fn clip_envelope(doc: ref<editor.Document>, clip: editor.Clip, buckets: u64,
   let output: string = path.join(cache,"envelope.f32")
   var lines: array<string> = match clip_envelope_plan(doc,clip,buckets,output) {
     ok(value)=>value,err(problem)=>{return result.err(nested_audio_failure(problem,nested_audio_cleanup(cache)))},
+  }
+  if clip.nested == 0 {
+    // The public cached-bus plan remains the PCM/reference path. Waveforms alone
+    // can reduce its exact direct leaf while streaming, without RF64 bodies.
+    // The worker proves the identity wrapper before accepting this terminator.
+    let _ = array.pop(lines)
+    let _ = array.pop(lines)
+    var fields: array<string> = ["NESTPEAK",text.concat("n",string.from_int(clip.id)),
+      string.from_int(buckets),provider.wire_path(output)]
+    array.push(lines,text.join(fields," "))
   }
   var argv: array<string> = [string.copy(worker),"--serve"]
   var child: Child = match proc.spawn_piped_merged(argv) {

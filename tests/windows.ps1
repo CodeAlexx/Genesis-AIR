@@ -52,6 +52,8 @@ try {
   $clipboardResult = Invoke-Native 'genesis-ui-clipboard.exe' @()
   Write-Host $clipboardResult.TrimEnd()
   Set-Content -LiteralPath (Join-Path $root 'ui-clipboard-windows.log') -Value $clipboardResult
+  Write-Host (Invoke-Native 'genesis-clip-clipboard.exe' @((Join-Path $work 'clip-clipboard'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'clip-clipboard/clip-clipboard-tests.json') -Destination (Join-Path $root 'clip-clipboard-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-timeline-track-scroll.exe' @((Join-Path $work 'track-scroll'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'track-scroll/timeline-track-scroll-tests.json') -Destination (Join-Path $root 'timeline-track-scroll-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-waveform-view.exe' @((Join-Path $work 'waveform-view'))).TrimEnd()
@@ -114,6 +116,10 @@ try {
   Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd()
   $env:GENESIS_GCOMPOSE = $Worker
   if (Test-Path -LiteralPath $worker) {
+    & python (Join-Path $PSScriptRoot 'clip_clipboard_media.py') `
+      --client (Join-Path $Bin 'genesis-clip-clipboard-media.exe') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --worker $worker --report (Join-Path $root 'clip-clipboard-media.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Clipboard authored graph, independent pasted pixels/PCM and Save/Open acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'lazy_gpu.py') --worker $worker `
       --fault-shim (Join-Path $Bin 'lazy-gpu-fault/OpenCL.dll') --report (Join-Path $root 'lazy-gpu.json')
     if ($LASTEXITCODE -ne 0) { throw 'Lazy OpenCL initialization, retained history and failure cleanup failed.' }
@@ -145,6 +151,9 @@ try {
       --client (Join-Path $Bin 'genesis-direct-waveforms.exe') --worker $worker `
       --report (Join-Path $root 'direct-waveforms.json')
     if ($LASTEXITCODE -ne 0) { throw 'Processed direct-source stereo waveforms, viewport scheduling and cancellation failed.' }
+    & python (Join-Path $PSScriptRoot 'direct_waveform_stream.py') --worker $worker `
+      --report (Join-Path $root 'direct-waveform-stream.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Streamed direct waveform partitions, coded refusals and retained-cache recovery failed.' }
     & python (Join-Path $PSScriptRoot 'preview_fit.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'GPU fitted monitor pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'video_transfer.py') --worker $worker

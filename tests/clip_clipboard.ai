@@ -1,0 +1,446 @@
+module genesis.tests.clip_clipboard
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.text as text
+import std.testing as test
+import std.widgets as widgets
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/filter_keys.ai" as filter_keys
+import "../src/provider.ai" as provider
+
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn stable(state:ref<app.App>) -> string effects {alloc} {
+  var out:string=encoded(struct.borrow(state,field=document))
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,string.from_int(state.media_revision))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  let history:ref<editor.History> = struct.borrow(state,field=history)
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(history,field=undo)) {break}
+    string.append(out,"undo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),i)))
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(history,field=redo)) {break}
+    string.append(out,"redo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),i)))
+    i=i+1}
+  out
+}
+fn before(a:str,b:str) -> bool effects {} {
+  var i:u64=0
+  loop {if i>=str.len(a) or i>=str.len(b) {break}
+    let av:u8=cast.bits(view.get(str.bytes(a),i))
+    let bv:u8=cast.bits(view.get(str.bytes(b),i))
+    if av!=bv {return av<bv}
+    i=i+1}
+  str.len(a)<str.len(b)
+}
+// Normalize only newly allocated IDs and placement/selection/group membership.
+// Every scalar, text/numeric parameter, order/enable and local key stays compared.
+fn content(doc:ref<editor.Document>, id:u64) -> string effects {alloc} {
+  let original:editor.Clip=option.unwrap(editor.clip(doc,id))
+  var saved:editor.ClipSnapshot=editor.ClipSnapshot {clip:original,fps:editor.sequence_fps(doc,original.owner),track_kind:editor.track_kind(doc,original.track),filters:array.new(),numeric:array.new(),textual:array.new(),keys:array.new()}
+  // Independent document walk: never use the snapshot implementation as its oracle.
+  var entry_index:u64=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=filters)) {break}
+    let entry:ref<editor.Filter> = array.borrow(struct.borrow(doc,field=filters),entry_index)
+    if entry.clip==id {array.push(struct.borrow(saved,field=filters),editor.Filter {id:entry.id,clip:id,kind:string.copy(entry.kind),order:entry.order,enabled:entry.enabled})}
+    entry_index=entry_index+1}
+  entry_index=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=filter_params)) {break}
+    let entry:ref<editor.FilterParam> = array.borrow(struct.borrow(doc,field=filter_params),entry_index)
+    array.push(struct.borrow(saved,field=numeric),editor.FilterParam {filter:entry.filter,name:string.copy(entry.name),value:entry.value})
+    entry_index=entry_index+1}
+  entry_index=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=filter_text_params)) {break}
+    let entry:ref<editor.FilterTextParam> = array.borrow(struct.borrow(doc,field=filter_text_params),entry_index)
+    array.push(struct.borrow(saved,field=textual),editor.FilterTextParam {filter:entry.filter,name:string.copy(entry.name),value:string.copy(entry.value)})
+    entry_index=entry_index+1}
+  entry_index=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=keys)) {break}
+    let entry:editor.Key=array.get(struct.borrow(doc,field=keys),entry_index)
+    if entry.clip==id {array.push(struct.borrow(saved,field=keys),editor.ClipSnapshotKey {param:editor.name_text(doc,entry.param),frame:entry.frame,value:entry.value,interp:entry.interp})}
+    entry_index=entry_index+1}
+  let clip:editor.Clip=saved.clip
+  var out:string=string.new()
+  var fields:array<string> = [string.from_int(clip.source),string.from_int(clip.nested),string.from_int(clip.source_in),string.from_int(clip.length),
+    string.from_int(clip.fade_in),string.from_int(clip.fade_out),string.from_float(clip.gain),string.from_float(clip.pan),string.from_float(clip.speed),
+    if clip.reverse {string.copy("reverse")}else{string.copy("forward")},if clip.enabled {string.copy("enabled")}else{string.copy("disabled")},
+    string.from_float(saved.fps),string.from_int(saved.track_kind)]
+  var i:u64=0
+  loop {if i>=array.len(fields) {break}
+    string.append(out,array.borrow(fields,i))
+    string.append(out,"|")
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=filters)) {break}
+    let filter:ref<editor.Filter> = array.borrow(struct.borrow(saved,field=filters),i)
+    string.append(out,filter.kind)
+    string.append(out,string.from_int(filter.order))
+    string.append(out,if filter.enabled {"on"}else{"off"})
+    var p:u64=0
+    loop {if p>=array.len(struct.borrow(saved,field=numeric)) {break}
+      let entry:ref<editor.FilterParam> = array.borrow(struct.borrow(saved,field=numeric),p)
+      if entry.filter==filter.id {string.append(out,entry.name)
+        string.append(out,string.from_float(entry.value))}
+      p=p+1}
+    p=0
+    loop {if p>=array.len(struct.borrow(saved,field=textual)) {break}
+      let entry:ref<editor.FilterTextParam> = array.borrow(struct.borrow(saved,field=textual),p)
+      if entry.filter==filter.id {string.append(out,entry.name)
+        string.append(out,entry.value)}
+      p=p+1}
+    i=i+1}
+  var normalized:array<string> = array.new()
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=keys)) {break}
+    let key:ref<editor.ClipSnapshotKey> = array.borrow(struct.borrow(saved,field=keys),i)
+    var named:string=string.copy(key.param)
+    var f:u64=0
+    loop {if f>=array.len(struct.borrow(saved,field=filters)) {break}
+      let old:u64=struct.get(array.borrow(struct.borrow(saved,field=filters),f),field=id)
+      let prefix:string=text.concat("filter.",text.concat(string.from_int(old),"."))
+      if str.starts_with(named,prefix) {named=text.concat("instance.",text.concat(string.from_int(f),text.concat(".",str.slice(named,str.len(prefix),str.len(named)))))
+        break}
+      f=f+1}
+    var point:string=named
+    string.append(point,"|")
+    string.append(point,string.from_int(key.frame))
+    string.append(point,"|")
+    string.append(point,string.from_float(key.value))
+    string.append(point,"|")
+    string.append(point,string.from_int(key.interp))
+    array.push(normalized,point)
+    i=i+1}
+  i=0
+  loop {if i>=array.len(normalized) {break}
+    var j:u64=i
+    loop {if j==0 {break}
+      let a:string=string.copy(array.borrow(normalized,j))
+      let b:string=string.copy(array.borrow(normalized,j-1))
+      if not before(a,b) {break}
+      array.swap(normalized,j,j-1)
+      j=j-1}
+    i=i+1}
+  i=0
+  loop {if i>=array.len(normalized) {break}
+    string.append(out,array.borrow(normalized,i))
+    string.append(out,";")
+    i=i+1}
+  out
+}
+fn fixture(root:str,kind:u32,nested:bool) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state:app.App=app.app(provider.fake(root))
+  var doc:editor.Document=editor.document(24.0,320,180)
+  let source:u64=editor.add_source(doc,"metadata-original.mov","Original",240,24.0)
+  let _=editor.describe_source(doc,source,320,180,true,true,48000,2)
+  let video:u64=editor.add_track(doc,doc.active,editor.track_video(),"Video")
+  let audio:u64=editor.add_track(doc,doc.active,editor.track_audio(),"Audio")
+  let track:u64=if kind==editor.track_audio() {audio}else{video}
+  if kind==editor.track_audio() {let _=editor.place(doc,video,source,0,200,0)}
+  var id:u64=0
+  if nested {
+    let child:u64=editor.add_sequence(doc,"Child",24.0,320,180)
+    let child_track:u64=editor.add_track(doc,child,kind,"Child lane")
+    let _=editor.place(doc,child_track,source,0,120,0)
+    id=option.unwrap(editor.place_nested(doc,track,child,2,24,7))
+  }else{id=option.unwrap(editor.place(doc,track,source,2,24,7))}
+  let _=editor.set_clip_enabled(doc,id,false)
+  let _=editor.set_clip_speed(doc,id,2.0)
+  let _=editor.set_clip_reverse(doc,id,true)
+  let _=editor.set_clip_gain(doc,id,0.6)
+  let _=editor.set_clip_pan(doc,id,-0.25)
+  let _=editor.set_fade_in(doc,id,3)
+  let _=editor.set_fade_out(doc,id,5)
+  let first:u64=option.unwrap(editor.add_filter(doc,id,"brightness"))
+  let second:u64=option.unwrap(editor.add_filter(doc,id,"brightness"))
+  let title:u64=option.unwrap(editor.add_filter(doc,id,"text"))
+  let _=editor.set_filter_param(doc,first,"level",0.2)
+  let _=editor.set_filter_param(doc,second,"level",-0.1)
+  let _=editor.set_filter_enabled(doc,second,false)
+  let _=editor.set_filter_text_param(doc,title,"text","Frozen 日本 title")
+  let _=editor.set_filter_param(doc,title,"size",32.0)
+  let _=editor.set_key(doc,id,filter_keys.name(first,"brightness","level"),-5,-0.2,2)
+  let _=editor.set_key(doc,id,filter_keys.name(first,"brightness","level"),40,0.7,3)
+  let _=editor.set_key(doc,id,filter_keys.name(second,"brightness","level"),0,0.3,1)
+  let _=editor.set_key(doc,id,"brightness.level",12,0.4,0)
+  let _=editor.set_key(doc,id,"gain",0,0.5,1)
+  let _=editor.set_key(doc,id,"gain",50,0.8,2)
+  let _=editor.select_only(doc,id)
+  commands.replace_project(state,doc)
+  app.mark_dirty(state,false)
+  state
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Authored clip clipboard",false)
+  var state:app.App=fixture(root,editor.track_video(),false)
+  let original:u64=app.current_clip(state)
+  let original_content:string=content(struct.borrow(state,field=document),original)
+  let copy_before:string=stable(state)
+  let _=test.start(suite,"Copy freezes complete content across original edits and deletion")
+  let _=input.key(state,widgets.key_c(),true,false)
+  let _=test.check(suite,app.has_clipboard(state),"Actual CtrlC owns a complete payload")
+  let _=test.eq_str(suite,stable(state),copy_before,"Copy preserves document, dirty/revisions and every history snapshot")
+  let first:u64=option.unwrap(editor.filter_at(struct.borrow(state,field=document),original,0))
+  let _=commands.set_filter_param(state,first,"level",0.9)
+  let _=commands.set_clip_field(state,original,"gain",0.1)
+  let _=commands.lift(state,original)
+  let track:u64=app.paste_track(state)
+  let before_paste:string=encoded(struct.borrow(state,field=document))
+  let history_before:u64=array.len(struct.borrow(struct.borrow(state,field=history),field=undo))
+  let pasted:commands.Result=commands.paste_clip(state,track,120)
+  let _=test.check(suite,pasted.ok,"Paste survives original deletion")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),pasted.value),original_content,"All clip settings, duplicate filters, text, scoped/legacy and outside-body keys survive")
+  let _=test.eq_u64(suite,array.len(struct.borrow(struct.borrow(state,field=history),field=undo)),history_before+1,"Paste captures exactly one Undo")
+  let pasted_doc:string=encoded(struct.borrow(state,field=document))
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before_paste,"Undo restores the entire pre-paste graph")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),pasted_doc,"Redo restores fresh identities and all keys")
+  let again:commands.Result=commands.paste_clip(state,track,200)
+  let _=test.check(suite,again.ok and again.value!=pasted.value,"Repeated paste allocates an independent clip")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),again.value),original_content,"Repeated paste retains the frozen content")
+  let f1:u64=option.unwrap(editor.filter_at(struct.borrow(state,field=document),pasted.value,0))
+  let f2:u64=option.unwrap(editor.filter_at(struct.borrow(state,field=document),again.value,0))
+  let _=test.check(suite,f1!=f2 and editor.key_count(struct.borrow(state,field=document),again.value,filter_keys.name(f2,"brightness","level"))==2,"Fresh scoped filter identities do not share automation")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Compound Cut and audio CtrlV retain the proper material and lane")
+  let _=ref.swap(state,fixture(root,editor.track_video(),true))
+  let compound:u64=app.current_clip(state)
+  let compound_content:string=content(struct.borrow(state,field=document),compound)
+  let _=input.key(state,widgets.key_x(),true,false)
+  let _=test.check(suite,app.has_clipboard(state) and match editor.clip(struct.borrow(state,field=document),compound) {none=>true,some(_)=>false,},"Actual CtrlX removes compound only with a filled clipboard")
+  let _=commands.seek(state,80)
+  let _=input.key(state,widgets.key_v(),true,false)
+  let compound_pasted:u64=app.current_clip(state)
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),compound_pasted),compound_content,"CtrlV retains compound child link and full parent settings")
+  let _=ref.swap(state,fixture(root,editor.track_audio(),false))
+  let audio_original:u64=app.current_clip(state)
+  let audio_content:string=content(struct.borrow(state,field=document),audio_original)
+  let _=input.key(state,widgets.key_c(),true,false)
+  let _=commands.clear_selection(state)
+  let _=commands.seek(state,80)
+  let _=input.key(state,widgets.key_v(),true,false)
+  let audio_pasted:u64=app.current_clip(state)
+  let audio_clip:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),audio_pasted))
+  let _=test.eq_u64(suite,cast.wrap(editor.track_kind(struct.borrow(state,field=document),audio_clip.track)),cast.wrap(editor.track_audio()),"Audio clipboard chooses audio even without a selected lane")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),audio_clip.id),audio_content,"Audio clip rate, reverse, gains, fades and keys remain authored")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Refused Cut and Paste preserve clipboard, document and Redo")
+  let copied:commands.Result=commands.copy_clip(state,audio_clip.id)
+  let _=commands.set_clip_field(state,audio_clip.id,"gain",0.3)
+  let _=commands.undo(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),audio_clip.track,true)
+  let refused_before:string=stable(state)
+  let cut:commands.Result=commands.cut_clip(state,audio_clip.id)
+  let paste:commands.Result=commands.paste_clip(state,audio_clip.track,180)
+  let _=test.check(suite,copied.ok and not cut.ok and not paste.ok,"Locked Cut/Paste explicitly refuse")
+  let _=test.eq_str(suite,stable(state),refused_before,"Refusal preserves all document and Undo/Redo state")
+  let _=test.check(suite,app.has_clipboard(state),"Refusal retains the existing clipboard")
+  let _=editor.set_track_lock(struct.borrow(state,field=document),audio_clip.track,false)
+  let wrong_before:string=stable(state)
+  let wrong:commands.Result=commands.paste_clip(state,app.default_video_track(state),200)
+  let missing:commands.Result=commands.paste_clip(state,999999,200)
+  let overflow:commands.Result=commands.paste_clip(state,audio_clip.track,9223372036854775800)
+  let _=test.check(suite,not wrong.ok and not missing.ok and not overflow.ok,"Wrong lane, missing target and wrapping range refuse")
+  let _=test.eq_str(suite,stable(state),wrong_before,"All target refusals preserve complete state")
+  let restored:commands.Result=commands.paste_clip(state,audio_clip.track,150)
+  let _=test.check(suite,restored.ok,"Clipboard remains usable after every refusal")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),restored.value),audio_content,"Refused Cut/Paste preserve the exact prior payload, not merely filled state")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Deleted media and child sequence refuse without publishing")
+  let _=ref.swap(state,fixture(root,editor.track_video(),false))
+  let resource_clip:u64=app.current_clip(state)
+  let resource_track:u64=app.paste_track(state)
+  let _=commands.copy_clip(state,resource_clip)
+  let _=array.pop(struct.borrow(struct.borrow(state,field=document),field=sources))
+  let missing_source_before:string=stable(state)
+  let no_source:commands.Result=commands.paste_clip(state,resource_track,120)
+  let _=test.check(suite,not no_source.ok,"A deleted copied media source is explicitly refused")
+  let _=test.eq_str(suite,stable(state),missing_source_before,"Missing source preserves graph, revision, dirty, selection and every history entry")
+  let _=ref.swap(state,fixture(root,editor.track_video(),true))
+  let child_clip:u64=app.current_clip(state)
+  let child_track:u64=app.paste_track(state)
+  let _=commands.copy_clip(state,child_clip)
+  let _=array.pop(struct.borrow(struct.borrow(state,field=document),field=sequences))
+  let missing_child_before:string=stable(state)
+  let no_child:commands.Result=commands.paste_clip(state,child_track,120)
+  let _=test.check(suite,not no_child.ok,"A deleted compound child is explicitly refused")
+  let _=test.eq_str(suite,stable(state),missing_child_before,"Missing child publishes no partial clip or history")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Sequence cycle, foreign frame rate and ID exhaustion are transactional")
+  let _=ref.swap(state,fixture(root,editor.track_video(),true))
+  let cyclic_id:u64=app.current_clip(state)
+  let cyclic:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),cyclic_id))
+  let _=commands.copy_clip(state,cyclic_id)
+  let _=editor.set_active(struct.borrow(state,field=document),cyclic.nested)
+  let cycle_track:u64=app.paste_track(state)
+  let cycle_before:string=stable(state)
+  let cycle:commands.Result=commands.paste_clip(state,cycle_track,150)
+  let _=test.check(suite,not cycle.ok,"Pasting a child into itself refuses a composition cycle")
+  let _=test.eq_str(suite,stable(state),cycle_before,"Cycle refusal keeps the entire authored state")
+  let _=ref.swap(state,fixture(root,editor.track_video(),false))
+  let fps_clip:u64=app.current_clip(state)
+  let fps_content:string=content(struct.borrow(state,field=document),fps_clip)
+  let _=commands.copy_clip(state,fps_clip)
+  let sequence:u64=editor.add_sequence(struct.borrow(state,field=document),"Other fps",30.0,320,180)
+  let destination:u64=editor.add_track(struct.borrow(state,field=document),sequence,editor.track_video(),"Destination")
+  let _=editor.set_active(struct.borrow(state,field=document),sequence)
+  let fps_before:string=stable(state)
+  let wrong_fps:commands.Result=commands.paste_clip(state,destination,0)
+  let _=test.check(suite,not wrong_fps.ok,"Cross-FPS paste refuses instead of silently retiming local automation")
+  let _=test.eq_str(suite,stable(state),fps_before,"FPS refusal captures no history")
+  let _=editor.set_sequence_format(struct.borrow(state,field=document),sequence,320,180,24.0)
+  let same_fps:commands.Result=commands.paste_clip(state,destination,0)
+  let _=test.check(suite,same_fps.ok,"Same-project same-FPS sequence accepts a fresh independent instance")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),same_fps.value),fps_content,"Cross-owner content remains in the exact authored frame domain")
+  struct.set(struct.borrow(state,field=document),18446744073709551614,field=next_id)
+  let capacity_before:string=stable(state)
+  let capacity:commands.Result=commands.paste_clip(state,destination,100)
+  let _=test.check(suite,not capacity.ok,"Insufficient clip plus filter identity capacity refuses")
+  let _=test.eq_str(suite,stable(state),capacity_before,"ID refusal publishes no wrapped identities")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Occupied range preserves survivors or refuses their unsupported trim")
+  let _=ref.swap(state,fixture(root,editor.track_video(),false))
+  let occupied_id:u64=app.current_clip(state)
+  let occupied:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),occupied_id))
+  let _=commands.copy_clip(state,occupied_id)
+  let neighbour:u64=option.unwrap(editor.place(struct.borrow(state,field=document),occupied.track,occupied.source,0,100,100))
+  let timer:u64=option.unwrap(editor.add_filter(struct.borrow(state,field=document),neighbour,"timer"))
+  let _=editor.set_key(struct.borrow(state,field=document),neighbour,"opacity",-4,0.2,1)
+  let _=editor.set_key(struct.borrow(state,field=document),neighbour,"opacity",120,0.9,2)
+  let occupied_before:string=stable(state)
+  let blocked:commands.Result=commands.paste_clip(state,occupied.track,130)
+  let _=test.check(suite,not blocked.ok,"Overwrite refuses a temporal survivor that cannot retain its history")
+  let _=test.eq_str(suite,stable(state),occupied_before,"No lift, allocated filter or history leaks from refused overwrite")
+  let _=editor.set_filter_enabled(struct.borrow(state,field=document),timer,false)
+  let accepted:commands.Result=commands.paste_clip(state,occupied.track,130)
+  let _=test.check(suite,accepted.ok,"Supported occupied-range overwrite creates both intact survivors")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),accepted.value),content(struct.borrow(state,field=document),occupied_id),"Inserted settings remain exact through overwrite")
+  let left:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),neighbour))
+  let _=test.check(suite,left.start==100 and left.length==30 and editor.key_count(struct.borrow(state,field=document),neighbour,"opacity")==2,"Left survivor retains its full automation context")
+  var found_right:bool=false
+  var scan:u64=0
+  loop {if scan>=editor.clip_count(struct.borrow(state,field=document)) {break}
+    let value:editor.Clip=array.get(struct.borrow(struct.borrow(state,field=document),field=clips),scan)
+    if value.start==154 and value.length==46 and value.track==occupied.track {
+      found_right=editor.key_count(struct.borrow(state,field=document),value.id,"opacity")==2 and editor.filter_count(struct.borrow(state,field=document),value.id)==1}
+    scan=scan+1}
+  let _=test.check(suite,found_right,"Right survivor retains its filter and complete rebased key context")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Invalid Copy and Cut leave the previous immutable payload intact")
+  let _=ref.swap(state,fixture(root,editor.track_video(),false))
+  let valid_id:u64=app.current_clip(state)
+  let valid_content:string=content(struct.borrow(state,field=document),valid_id)
+  let _=commands.copy_clip(state,valid_id)
+  let invalid_before:string=stable(state)
+  let invalid_copy:commands.Result=commands.copy_clip(state,999999)
+  let invalid_cut:commands.Result=commands.cut_clip(state,999999)
+  let _=test.check(suite,not invalid_copy.ok and not invalid_cut.ok,"Missing Copy/Cut targets are explicit refusals")
+  let _=test.eq_str(suite,stable(state),invalid_before,"Refused source operations preserve all authored/history state")
+  let valid_track:u64=app.paste_track(state)
+  let prior_payload:commands.Result=commands.paste_clip(state,valid_track,120)
+  let _=test.check(suite,prior_payload.ok,"Prior clipboard still pastes after invalid source operations")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),prior_payload.value),valid_content,"Refusal retained every byte of authored payload semantics")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Save/Open and New retire clipboard identities while preserving pasted content")
+  let saved_id:u64=app.current_clip(state)
+  let project:string=path.join(root,"clipboard.air")
+  let saved:commands.Result=commands.save_project(state,project)
+  let saved_content:string=content(struct.borrow(state,field=document),saved_id)
+  let opened:commands.Result=commands.open_project(state,project)
+  let _=test.check(suite,saved.ok and opened.ok and not app.has_clipboard(state),"Actual Open clears old resource identities")
+  let _=test.eq_str(suite,content(struct.borrow(state,field=document),saved_id),saved_content,"Saved pasted filter/key content round trips")
+  let _=commands.copy_clip(state,saved_id)
+  let _=commands.new_project(state)
+  let _=test.check(suite,not app.has_clipboard(state),"New also clears clipboard before numeric IDs can be reused")
+  let empty_before:string=stable(state)
+  let empty:commands.Result=commands.paste_clip(state,app.default_video_track(state),0)
+  let _=test.check(suite,not empty.ok and stable(state)==empty_before,"Retired clipboard cannot publish foreign material or destroy Redo")
+  let _=test.done(suite)
+  let _=test.start(suite,"Undo import then reused media ID cannot rebind a surviving clipboard")
+  let _=ref.swap(state,fixture(root,editor.track_video(),false))
+  let imported:commands.Result=commands.import_media(state,"first-created.mov","Created media")
+  let import_track:u64=app.default_video_track(state)
+  let imported_clip:u64=option.unwrap(editor.place(struct.borrow(state,field=document),import_track,imported.value,0,12,100))
+  let _=editor.select_only(struct.borrow(state,field=document),imported_clip)
+  app.document_changed(state)
+  let _=commands.copy_clip(state,imported_clip)
+  let removed:commands.Result=commands.undo(state)
+  let _=test.check(suite,imported.ok and removed.ok and not app.has_clipboard(state),"Successful Undo of the copied resource creation retires Paste UI eligibility")
+  let replacement:commands.Result=commands.import_media(state,"different-created.mov","Created media")
+  let _=test.check(suite,replacement.ok and replacement.value==imported.value,"Fixture genuinely reuses the old numeric resource ID in a new branch")
+  let identity_before:string=stable(state)
+  var bad_identity:commands.Result=commands.paste_clip(state,import_track,120)
+  let _=test.check(suite,not bad_identity.ok and text.contains(bad_identity.message,"GA_CLIPBOARD_IDENTITY"),"A reused media ID remains coded refusal until another Copy")
+  let _=test.eq_str(suite,stable(state),identity_before,"Identity refusal preserves document, selection, dirty, revisions and all history")
+  let new_clip:u64=option.unwrap(editor.place(struct.borrow(state,field=document),import_track,replacement.value,0,12,150))
+  let _=commands.copy_clip(state,new_clip)
+  let recopied:commands.Result=commands.paste_clip(state,import_track,180)
+  let _=test.check(suite,recopied.ok and app.has_clipboard(state),"Explicit Copy establishes the new resource identity")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Undo child creation retires reused child IDs even with identical metadata")
+  let _=ref.swap(state,fixture(root,editor.track_video(),false))
+  let parent_track:u64=app.default_video_track(state)
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let created_child:u64=editor.add_sequence(struct.borrow(state,field=document),"Same name",24.0,320,180)
+  let child_lane:u64=editor.add_track(struct.borrow(state,field=document),created_child,editor.track_video(),"Child")
+  let _=editor.place(struct.borrow(state,field=document),child_lane,3,0,100,0)
+  let created_parent:u64=option.unwrap(editor.place_nested(struct.borrow(state,field=document),parent_track,created_child,0,12,100))
+  let _=editor.select_only(struct.borrow(state,field=document),created_parent)
+  app.document_changed(state)
+  let _=commands.copy_clip(state,created_parent)
+  let _=commands.undo(state)
+  let replacement_child:u64=editor.add_sequence(struct.borrow(state,field=document),"Same name",24.0,320,180)
+  app.document_changed(state)
+  let _=test.check(suite,replacement_child==created_child and not app.has_clipboard(state),"Identical name, FPS and dimensions cannot revive a retired child lifetime")
+  let child_identity_before:string=stable(state)
+  var child_identity:commands.Result=commands.paste_clip(state,parent_track,180)
+  let _=test.check(suite,not child_identity.ok and text.contains(child_identity.message,"GA_CLIPBOARD_IDENTITY"),"Pasting the recycled compound identity is explicitly refused")
+  let _=test.eq_str(suite,stable(state),child_identity_before,"No stale compound or history is published")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Ordinary child edits and Paste Undo Redo retain linked resource eligibility")
+  let _=ref.swap(state,fixture(root,editor.track_video(),true))
+  let linked_id:u64=app.current_clip(state)
+  let linked:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),linked_id))
+  let _=commands.copy_clip(state,linked_id)
+  var leaf_id:u64=0
+  var leaf_scan:u64=0
+  loop {if leaf_scan>=editor.clip_count(struct.borrow(state,field=document)) {break}
+    let value:editor.Clip=array.get(struct.borrow(struct.borrow(state,field=document),field=clips),leaf_scan)
+    if value.owner==linked.nested {leaf_id=value.id
+      break}
+    leaf_scan=leaf_scan+1}
+  let _=commands.set_clip_field(state,leaf_id,"gain",0.2)
+  let _=test.check(suite,app.has_clipboard(state),"Editing the existing linked child retains Copy")
+  let _=commands.undo(state)
+  let _=test.check(suite,app.has_clipboard(state),"Undo of ordinary child content preserves the resource lifetime")
+  let linked_paste:commands.Result=commands.paste_clip(state,linked.track,120)
+  let linked_body:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),linked_paste.value))
+  let _=test.check(suite,linked_paste.ok and linked_body.nested==linked.nested,"Compound remains a live link to the intended child")
+  let _=commands.undo(state)
+  let _=commands.redo(state)
+  let another_link:commands.Result=commands.paste_clip(state,linked.track,180)
+  let _=test.check(suite,another_link.ok and app.has_clipboard(state),"Paste Undo Redo and repeated Paste do not retire a still-live child")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"clip-clipboard-tests.json"),11)
+}

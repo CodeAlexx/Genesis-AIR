@@ -1,0 +1,84 @@
+// Exercise actual application clipboard/history/project commands. Python owns
+// authored media and independent output oracles, not this command fixture.
+module genesis.tests.clip_clipboard_media
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+
+fn encoded(state:ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=4 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  let manifest:string=match files.read_text(view.get(args,3)) {ok(value)=>value,err(_)=>{return 2},}
+  var rows:array<string> = text.split(manifest,"\n")
+  var suite:test.Suite=test.suite("Application clipboard media command roundtrip",false)
+  var row:u64=0
+  var cases:u64=0
+  loop {if row>=array.len(rows) {break}
+    let line:string=text.trim(array.borrow(rows,row))
+    row=row+1
+    if str.len(line)==0 {continue}
+    var fields:array<string> = text.split(line,"\t")
+    if array.len(fields)!=6 {return 2}
+    let name:str=str.view(array.borrow(fields,0))
+    let clip:u64=match text.parse_u64(str.view(array.borrow(fields,2))) {some(value)=>value,none=>{return 2},}
+    let track:u64=match text.parse_u64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>{return 2},}
+    let at:i64=match text.parse_i64(str.view(array.borrow(fields,4))) {some(value)=>value,none=>{return 2},}
+    var state:app.App=app.app(provider.fake(root))
+    let _=test.start(suite,name)
+    var opened:commands.Result=commands.open_project(state,str.view(array.borrow(fields,1)))
+    let _=test.check(suite,opened.ok,"Open independently authored project")
+    if not opened.ok {let _=test.done(suite)
+      continue}
+    let _=commands.select_only(state,clip)
+    let cut:bool=str.eq(str.view(array.borrow(fields,5)),"cut")
+    var copied:commands.Result=if cut {commands.cut_clip(state,clip)}else{commands.copy_clip(state,clip)}
+    let _=test.check(suite,copied.ok,"Actual Copy or Cut captures complete authored content")
+    if not copied.ok {let _=files.write_text(path.join(root,text.concat(name,"-copy-error.txt")),commands.message(copied))
+      let _=test.done(suite)
+      continue}
+    if not cut {
+      // The clipboard must own its scalar values, even after the source is edited.
+      let _=editor.set_clip_gain(struct.borrow(state,field=document),clip,0.125)
+      app.document_changed(state)
+    }
+    let before:string=encoded(state)
+    var pasted:commands.Result=commands.paste_clip(state,track,at)
+    let _=test.check(suite,pasted.ok,"Actual Paste places a playable clip on the requested compatible lane")
+    if not pasted.ok {let _=files.write_text(path.join(root,text.concat(name,"-paste-error.txt")),commands.message(pasted))
+      let _=test.done(suite)
+      continue}
+    let snapshot:string=encoded(state)
+    var undo:commands.Result=commands.undo(state)
+    let _=test.check(suite,undo.ok and encoded(state)==before,"One Undo restores the exact pre-paste document")
+    var redo:commands.Result=commands.redo(state)
+    let _=test.check(suite,redo.ok and encoded(state)==snapshot,"One Redo restores every pasted record and resource identity")
+    let pasted_clip:editor.Clip=match editor.clip(struct.borrow(state,field=document),pasted.value) {
+      some(value)=>value,none=>{let _=test.check(suite,false,"Pasted clip is missing")
+        let _=test.done(suite)
+        continue},
+    }
+    let _=editor.set_export_range(struct.borrow(state,field=document),at,at+pasted_clip.length)
+    let _=commands.seek(state,at)
+    let destination:string=path.join(root,text.concat(name,".air"))
+    var saved:commands.Result=commands.save_project(state,destination)
+    let stored:string=encoded(state)
+    var reopened:commands.Result=commands.open_project(state,destination)
+    let _=test.check(suite,saved.ok and reopened.ok and encoded(state)==stored,"Save/Open preserves the complete pasted graph and selected export range")
+    let receipt:string=text.concat("{\"pasted_id\":",text.concat(string.from_int(pasted.value),"}\n"))
+    let _=files.write_text(path.join(root,text.concat(name,"-id.json")),receipt)
+    let _=test.done(suite)
+    cases=cases+1
+  }
+  if cases==0 {return 1}
+  test.conclude(suite,path.join(root,"clip-clipboard-media-tests.json"),cases)
+}

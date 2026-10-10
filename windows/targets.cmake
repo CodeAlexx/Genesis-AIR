@@ -1,7 +1,7 @@
 if(NOT GENESIS_GENERATED_DIR)
   set(GENESIS_GENERATED_DIR "${GENESIS_ROOT}/build-windows/generated")
 endif()
-foreach(name IN ITEMS headless controls native audio-device audio-playback audio-cancel preview-async preview-stream preview-input inspector live-paint project-safety picture-queue keyed-video window-cache editor-trim trim-history recovery-ownership media-session spatial-canvas fade-controls audio-fade-keys audio-nested audio-nested-cancel nested-audio-controls nested-picture-plan picture-memory)
+foreach(name IN ITEMS headless controls native audio-device audio-playback audio-cancel preview-async preview-stream preview-input inspector live-paint project-safety picture-queue keyed-video window-cache editor-trim trim-history recovery-ownership media-session spatial-canvas fade-controls audio-fade-keys audio-nested audio-nested-cancel nested-audio-controls nested-picture-plan picture-memory clip-clipboard clip-clipboard-media)
   add_executable(genesis-${name} "${GENESIS_GENERATED_DIR}/${name}.c")
   target_include_directories(genesis-${name} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
   target_link_libraries(genesis-${name} PRIVATE air_rt)

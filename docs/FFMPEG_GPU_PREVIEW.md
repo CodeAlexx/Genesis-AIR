@@ -629,3 +629,28 @@ results; clips beyond the 65,536-cell cap have coarser detail. This functional
 native check ran alongside the regression suite and adds no playback cadence,
 physical A/V, full 21-minute playback or sustained 4K60 claim. See the
 [long-timeline ledger](CONTROL_COVERAGE.md#long-timeline-fit-and-fine-waveforms-on-2026-10-10).
+
+### Ordinary 4K baseline after the long-timeline update
+
+A separate serial native-window run measures the published `1BD1` app with the
+supplied AV1/PQ 59.94 fps source, embedded stereo audio, a 2560x1316 ordinary
+maximized editor and fitted 480x270 monitors. It uses a private project copy;
+the source and original project remain byte-identical. Fullscreen 4K remains
+deferred. The complete first playback epoch lasts 134.174 seconds and records
+8,027 changed frame positions at 59.854/s, with seven skipped positions and a
+105.965 ms maximum startup gap.
+
+The fixed startup-one-second and manual-Stop-tail-half-second exclusions retain
+132.521 seconds: 7,941 changed positions at 59.915/s, four skipped positions,
+a maximum two-frame jump and a 33.553 ms maximum gap. After-presentation metadata
+lateness has a one-frame median, a two-frame p95, and 30 three-frame observations
+(50.05 ms). **The two-frame lateness gate fails.** No early pictures, steady
+drained queue, queue overwrite, audio-cache rebuild or filmstrip request is
+observed during that interval. Device-clock drift is -2.205 ms. Median painting
+is 1.231 ms and synchronous presentation is 14.191 ms.
+
+Manual Stop retains the picture and zeros output meters; Start restores frame
+zero. This bounded direct-source baseline establishes neither zero-drop
+playback nor a full five-minute/compound 4K60 interval, and measures metadata
+clock alignment rather than physical speaker/display latency. Its raw first
+epoch and failing result are retained; the exclusions and gate are unchanged.

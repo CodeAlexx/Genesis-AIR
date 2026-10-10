@@ -1,5 +1,5 @@
 diff --git a/stdlib/editor.ai b/stdlib/editor.ai
-index 13f78f4..91ae34d 100644
+index 13f78f4..cd2efb4 100644
 --- a/stdlib/editor.ai
 +++ b/stdlib/editor.ai
 @@ -17,6 +17,7 @@
@@ -10,7 +10,19 @@ index 13f78f4..91ae34d 100644
  
  // ---------------------------------------------------------------------------
  // Constants and kinds
-@@ -1097,7 +1098,9 @@ pub fn insert(doc: ref<Document>, track: u64, source: u64, source_in: i64, lengt
+@@ -128,6 +129,11 @@ pub type Subtitle = struct { id: u64, owner: u64, start: i64, finish: i64, text:
+ pub type Filter = struct { id: u64, clip: u64, kind: string, order: u32, enabled: bool }
+ pub type FilterParam = struct { filter: u64, name: string, value: f64 }
+ pub type FilterTextParam = struct { filter: u64, name: string, value: string }
++// A same-project clipboard owns authored clip content independently of the
++// original clip. Source and child-sequence identities remain document links.
++pub type ClipSnapshotKey = struct {param:string,frame:i64,value:f64,interp:u32}
++pub type ClipSnapshot = struct {clip:Clip,fps:f64,track_kind:u32,filters:array<Filter>,
++  numeric:array<FilterParam>,textual:array<FilterTextParam>,keys:array<ClipSnapshotKey>}
+ 
+ pub type Sequence = struct { id: u64, name: string, fps: f64, width: u32, height: u32 }
+ 
+@@ -1097,7 +1103,9 @@ pub fn insert(doc: ref<Document>, track: u64, source: u64, source_in: i64, lengt
    if track_locked(doc, track) { return option.none() }
    let start: i64 = if at < 0 { 0 } else { at }
    match clip_spanning(doc, track, start) {
@@ -21,7 +33,7 @@ index 13f78f4..91ae34d 100644
      none => { },
    }
    let want: i64 = if length < 1 { 1 } else { length }
-@@ -1117,6 +1120,7 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+@@ -1117,10 +1125,117 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
    if track_locked(doc, track) { return option.none() }
    let start: i64 = if at < 0 { 0 } else { at }
    let want: i64 = if length < 1 { 1 } else { length }
@@ -29,7 +41,117 @@ index 13f78f4..91ae34d 100644
    lift_range(doc, track, start, start + want)
    place(doc, track, source, source_in, want, start)
  }
-@@ -1129,28 +1133,149 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+ 
++// Copy owns only clip content, not the complete document or its undo history.
++// The caller must retire snapshots when installing another project.
++pub fn clip_snapshot(doc: ref<Document>, id: u64) -> option<ClipSnapshot> effects {alloc} {
++  let value: Clip = match clip(doc,id) {none=>{return option.none()},some(found)=>found,}
++  if value.length <= 0 or value.start < 0 or value.start > 9223372036854775807-value.length or value.source_in < 0 or (value.source == 0 and value.nested == 0) or
++      (value.source != 0 and value.nested != 0) {return option.none()}
++  match sequence_slot(doc,value.owner) {none=>{return option.none()},some(_)=>{},}
++  match track_slot(doc,value.track) {none=>{return option.none()},some(_)=>{},}
++  if value.source != 0 {match source_slot(doc,value.source) {none=>{return option.none()},some(_)=>{},}}
++  if value.nested != 0 {match sequence_slot(doc,value.nested) {none=>{return option.none()},some(_)=>{},}}
++  var out: ClipSnapshot = ClipSnapshot {clip:value,fps:sequence_fps(doc,value.owner),track_kind:track_kind(doc,value.track),
++    filters:array.new(),numeric:array.new(),textual:array.new(),keys:array.new()}
++  var i:u64=0
++  loop {if i >= array.len(struct.borrow(doc,field=filters)) {break}
++    let filter:ref<Filter> = array.borrow(struct.borrow(doc,field=filters),i)
++    if filter.clip==id {
++      array.push(struct.borrow(out,field=filters),Filter {id:filter.id,clip:id,kind:string.copy(struct.borrow(filter,field=kind)),order:filter.order,enabled:filter.enabled})
++      var p:u64=0
++      loop {if p >= array.len(struct.borrow(doc,field=filter_params)) {break}
++        let entry:ref<FilterParam> = array.borrow(struct.borrow(doc,field=filter_params),p)
++        if entry.filter==filter.id {array.push(struct.borrow(out,field=numeric),FilterParam {filter:entry.filter,name:string.copy(struct.borrow(entry,field=name)),value:entry.value})}
++        p=p+1}
++      p=0
++      loop {if p >= array.len(struct.borrow(doc,field=filter_text_params)) {break}
++        let entry:ref<FilterTextParam> = array.borrow(struct.borrow(doc,field=filter_text_params),p)
++        if entry.filter==filter.id {array.push(struct.borrow(out,field=textual),FilterTextParam {filter:entry.filter,name:string.copy(struct.borrow(entry,field=name)),value:string.copy(struct.borrow(entry,field=value))})}
++        p=p+1}
++    }
++    i=i+1}
++  i=0
++  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
++    let key:Key=array.get(struct.borrow(doc,field=keys),i)
++    if key.clip==id {array.push(struct.borrow(out,field=keys),ClipSnapshotKey {param:name_text(doc,key.param),frame:key.frame,value:key.value,interp:key.interp})}
++    i=i+1}
++  option.some(out)
++}
++fn snapshot_content(doc: ref<Document>, id:u64, saved:ref<ClipSnapshot>) -> bool effects {alloc} {
++  var old_ids:array<u64> = array.new()
++  var new_ids:array<u64> = array.new()
++  var i:u64=0
++  loop {if i >= array.len(struct.borrow(saved,field=filters)) {break}
++    let filter:ref<Filter> = array.borrow(struct.borrow(saved,field=filters),i)
++    let fresh:u64=fresh_id(doc)
++    array.push(old_ids,filter.id)
++    array.push(new_ids,fresh)
++    array.push(struct.borrow(doc,field=filters),Filter {id:fresh,clip:id,kind:string.copy(struct.borrow(filter,field=kind)),order:filter.order,enabled:filter.enabled})
++    var p:u64=0
++    loop {if p >= array.len(struct.borrow(saved,field=numeric)) {break}
++      let entry:ref<FilterParam> = array.borrow(struct.borrow(saved,field=numeric),p)
++      if entry.filter==filter.id {array.push(struct.borrow(doc,field=filter_params),FilterParam {filter:fresh,name:string.copy(struct.borrow(entry,field=name)),value:entry.value})}
++      p=p+1}
++    p=0
++    loop {if p >= array.len(struct.borrow(saved,field=textual)) {break}
++      let entry:ref<FilterTextParam> = array.borrow(struct.borrow(saved,field=textual),p)
++      if entry.filter==filter.id {array.push(struct.borrow(doc,field=filter_text_params),FilterTextParam {filter:fresh,name:string.copy(struct.borrow(entry,field=name)),value:string.copy(struct.borrow(entry,field=value))})}
++      p=p+1}
++    i=i+1}
++  i=0
++  loop {if i >= array.len(struct.borrow(saved,field=keys)) {break}
++    let key:ref<ClipSnapshotKey> = array.borrow(struct.borrow(saved,field=keys),i)
++    var named:string=string.copy(struct.borrow(key,field=param))
++    var f:u64=0
++    loop {if f >= array.len(old_ids) {break}
++      let prefix:string=text.concat("filter.",text.concat(string.from_int(array.get(old_ids,f)),"."))
++      if str.starts_with(named,prefix) {
++        named=text.concat("filter.",text.concat(string.from_int(array.get(new_ids,f)),text.concat(".",str.slice(named,str.len(prefix),str.len(named)))))
++        break}
++      f=f+1}
++    if str.len(named)==0 or not set_key(doc,id,named,key.frame,key.value,key.interp) {return false}
++    i=i+1}
++  true
++}
++// Overwrite is transactional even when a surviving neighbour cannot be trimmed.
++// Owner-frame timing is preserved exactly; different-FPS conversion is explicit
++// refusal rather than a silently retimed clipboard. Group membership is not copied.
++pub fn paste_clip_snapshot(doc:ref<Document>, saved:ref<ClipSnapshot>, track:u64, at:i64)
++    -> result<u64,string> effects {alloc} {
++  let target:u64=match track_slot(doc,track) {none=>{return result.err("destination track is missing")},some(slot)=>slot,}
++  let owner:u64=struct.get(array.borrow(struct.borrow(doc,field=tracks),target),field=owner)
++  if owner != doc.active or track_kind(doc,track) != saved.track_kind {return result.err("destination track kind or active sequence does not match")}
++  if track_locked(doc,track) {return result.err("destination track is locked")}
++  if not math.is_finite(saved.fps) or saved.fps <= 0.0 or saved.fps != sequence_fps(doc,owner) {return result.err("clipboard owner frame rate differs from the destination")}
++  let old:Clip=saved.clip
++  if at < 0 or old.length <= 0 or at > 9223372036854775807-old.length or old.source_in < 0 {return result.err("clipboard frame range is invalid")}
++  if old.source != 0 and old.nested == 0 {
++    match source_slot(doc,old.source) {none=>{return result.err("clipboard source is missing")},some(_)=>{},}
++  }else if old.nested != 0 and old.source == 0 {
++    match sequence_slot(doc,old.nested) {none=>{return result.err("clipboard child sequence is missing")},some(_)=>{},}
++    if nesting_cycle(doc,owner,old.nested) {return result.err("clipboard would create a sequence cycle")}
++  }else{return result.err("clipboard source identity is invalid")}
++  let filters:u64=array.len(struct.borrow(saved,field=filters))
++  if doc.next_id == 0 or filters >= 18446744073709551615-doc.next_id {return result.err("clipboard identity capacity is exhausted")}
++  if not lift_range_possible(doc,track,at,at+old.length) {return result.err("occupied range cannot preserve its surviving clips")}
++  var candidate:Document=copy_document(doc)
++  lift_range(candidate,track,at,at+old.length)
++  if candidate.next_id == 0 or filters >= 18446744073709551615-candidate.next_id {return result.err("clipboard identity capacity is exhausted")}
++  let id:u64=fresh_id(candidate)
++  array.push(struct.borrow(candidate,field=clips),Clip {id:id,owner:owner,source:old.source,nested:old.nested,
++    source_in:old.source_in,length:old.length,start:at,track:track,group:0,enabled:old.enabled,selected:false,
++    fade_in:old.fade_in,fade_out:old.fade_out,gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse})
++  if not snapshot_content(candidate,id,saved) {return result.err("clipboard automation is invalid")}
++  let _=select_only(candidate,id)
++  let _=ref.swap(doc,candidate)
++  result.ok(id)
++}
++
+ // ---------------------------------------------------------------------------
+ // Trim, split and the ripple family
+ //
+@@ -1129,28 +1244,149 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
  // / `ripple_trim_end` / `ripple_delete`, whose ripple-current-track-only rule is Shotcut's
  // default and is kept here.
  
@@ -187,7 +309,7 @@ index 13f78f4..91ae34d 100644
        option.some(right)
      },
      none => option.none(),
-@@ -1165,7 +1290,8 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+@@ -1165,7 +1401,8 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
    loop {
      if index >= array.len(struct.borrow(doc, field=clips)) { break }
      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
@@ -197,7 +319,7 @@ index 13f78f4..91ae34d 100644
        array.push(targets, value.id)
      }
      index = index + 1
-@@ -1180,56 +1306,254 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+@@ -1180,56 +1417,254 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
    cuts
  }
  
@@ -485,7 +607,7 @@ index 13f78f4..91ae34d 100644
        if not trim_start(doc, id, new_start) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1252,13 +1576,15 @@ pub fn ripple_trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool ef
+@@ -1252,13 +1687,15 @@ pub fn ripple_trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool ef
  
  // RIPPLE TRIM the tail: trim, then shift the later same-track clips by the length actually
  // applied, so shortening closes the gap and lengthening opens one. Genesis `ripple_trim_end`.
@@ -502,7 +624,7 @@ index 13f78f4..91ae34d 100644
        if not trim_end(doc, id, new_length) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1303,56 +1629,62 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+@@ -1303,56 +1740,62 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
  // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
  // up, because a clamped remnant would spill back into the range and never clear.
  // Genesis `lift_range`.
@@ -613,7 +735,7 @@ index 13f78f4..91ae34d 100644
    ()
  }
  
-@@ -2131,9 +2463,8 @@ pub fn boundary_at(doc: ref<Document>, track: u64, center: i64)
+@@ -2131,9 +2574,8 @@ pub fn boundary_at(doc: ref<Document>, track: u64, center: i64)
  // Keyframes
  //
  // One flat, sorted store animates every parameter of every clip, plus the sequence-wide ones

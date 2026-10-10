@@ -171,21 +171,26 @@ def cancel_direct(root,client,worker,recovery_doc,recovery_peaks):
         signals=root/("signals-"+mode);signals.mkdir()
         marker=signals/"request.id";marker.write_text("17",encoding="utf-8")
         native=root/("cancel-native-"+mode)
+        environment=dict(os.environ,GENESIS_CLIP_ENV_TRACE="1")
         process=subprocess.Popen([str(client),str(native),str(worker),str(manifest),str(signals),"17"],
-                                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=FLAGS)
+                                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=FLAGS,env=environment)
         handle=None
         try:
             deadline=time.monotonic()+20
             witness=None
             while witness is None:
-                assert process.poll() is None,(mode,"Client exited before real cache warm")
-                witness=next((p for p in native.rglob("*.rf64") if p.is_file() and p.stat().st_size>=80),None)
-                assert time.monotonic()<deadline,(mode,"Cache warm deadline")
+                assert process.poll() is None,(mode,"Client exited before real processed block")
+                witness=next((p for p in native.rglob("*.active") if p.is_file() and
+                              p.read_text(encoding="utf-8").startswith("processed_frames=") and
+                              p.read_text(encoding="utf-8").endswith("\n")),None)
+                assert time.monotonic()<deadline,(mode,"Processed block deadline")
                 if witness is None:time.sleep(.002)
             owned=[pid for pid in children(process.pid) if image(pid)==worker]
             assert len(owned)==1,(mode,"No unique live owned worker",owned)
             handle=worker_handle(owned[0])
-            warm_bytes=witness.stat().st_size
+            processed_frames=int(witness.read_text(encoding="utf-8").strip().split("=")[1])
+            assert processed_frames==240000,(mode,"No complete real DSP block",processed_frames)
+            assert not list(native.rglob("*.rf64")),(mode,"Stream created intermediate RF64")
             start=time.monotonic()
             if mode=="stop":(signals/"stop").write_text("stop",encoding="utf-8")
             else:marker.write_text("18",encoding="utf-8")
@@ -198,7 +203,8 @@ def cancel_direct(root,client,worker,recovery_doc,recovery_peaks):
             _,rows=read_cache(native/"cancel-direct-waveforms.tsv")
             assert 30 not in rows,(mode,"Partial waveform was published")
             assert not handle_alive(handle),(mode,"Worker survived confirmed join")
-            result.append(dict(mode=mode,warm_rf64_bytes=warm_bytes,cancel_join_seconds=elapsed,
+            result.append(dict(mode=mode,completed_processed_frames=processed_frames,cancel_join_seconds=elapsed,
+                               intermediate_rf64_absent=True,
                                no_partial_peaks=True,owned_cache_removed=True,worker_joined=True))
         finally:
             if process.poll() is None:

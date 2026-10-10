@@ -72,9 +72,9 @@ pub fn drag() -> Drag effects {} {
     origin_length: 0, origin_track: 0, moved: false}
 }
 
-// One clip's worth of material, held for paste. Copying records the SOURCE and its range,
-// never a clip id, so a paste survives the original being deleted.
-pub type Clipboard = struct { source: u64, source_in: i64, length: i64, filled: bool }
+// The shared editor owns a frozen authored clip payload. Project replacement
+// retires it; ordinary edits and Undo leave the copied settings untouched.
+
 
 // A one-line prompt. There is no file dialog on this platform's canvas window, so the
 // actions that need a path ask for one in the status line. The prompt holds the action it
@@ -120,7 +120,8 @@ pub type App = struct {
   snap: bool,
   light: bool,
   theme_id: u64,
-  clipboard: Clipboard,
+  clipboard: option<editor.ClipSnapshot>,
+  clipboard_resource_valid: bool,
   gesture: Drag,
   prompt: Prompt,
   pending_project: PendingProject,
@@ -170,7 +171,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     pool_row: 0, selected_filter: 0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
-    clipboard: Clipboard {source: 0, source_in: 0, length: 0, filled: false},
+    clipboard: option.none(), clipboard_resource_valid: false,
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), selected_all: false},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
@@ -221,6 +222,7 @@ pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
 // Successful document mutations explicitly invalidate semantic playback caches.
 // Saving, repainting and following the heard clock do not change this revision.
 pub fn document_changed(state: ref<App>) -> unit effects {} {
+  refresh_clipboard_resource(state)
   struct.set(state,state.document_revision+1,field=document_revision)
   struct.set(state,true,field=dirty)
   ()
@@ -397,17 +399,41 @@ pub fn toggle_snap(state: ref<App>) -> bool effects {} {
 }
 
 pub fn has_clipboard(state: ref<App>) -> bool effects {} {
-  struct.get(struct.borrow(state, field=clipboard), field=filled)
+  if not state.clipboard_resource_valid {return false}
+  match struct.borrow(state,field=clipboard) {none=>false,some(_)=>true,}
 }
-pub fn clipboard(state: ref<App>) -> Clipboard effects {} { state.clipboard }
-pub fn set_clipboard(state: ref<App>, source: u64, source_in: i64,
-                     length: i64) -> unit effects {} {
-  let board: ref<Clipboard> = struct.borrow(state, field=clipboard)
-  struct.set(board, source, field=source)
-  struct.set(board, source_in, field=source_in)
-  struct.set(board, length, field=length)
-  struct.set(board, source != 0 and length > 0, field=filled)
+pub fn set_clipboard(state: ref<App>, content:editor.ClipSnapshot own) -> unit effects {alloc} {
+  let _=struct.replace(state,option.some(content),field=clipboard)
+  struct.set(state,true,field=clipboard_resource_valid)
   ()
+}
+// Losing a resource lifetime retires the reference permanently until Copy.
+// Restoring its numeric ID in a new Undo branch must never bind different media.
+fn refresh_clipboard_resource(state:ref<App>) -> unit effects {} {
+  if not state.clipboard_resource_valid {return ()}
+  let saved:editor.Clip=match struct.borrow(state,field=clipboard) {none=>{return ()},some(value)=>value.clip,}
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  let media:bool=if saved.source==0 {true}else{match editor.source_slot(doc,saved.source) {none=>false,some(_)=>true,}}
+  let child:bool=if saved.nested==0 {true}else{match editor.sequence_slot(doc,saved.nested) {none=>false,some(_)=>true,}}
+  if not media or not child {struct.set(state,false,field=clipboard_resource_valid)}
+  ()
+}
+pub fn clipboard_identity_valid(state:ref<App>) -> bool effects {} {state.clipboard_resource_valid}
+pub fn paste_track(state: ref<App>) -> u64 effects {alloc} {
+  if not has_clipboard(state) {return 0}
+  let kind:u32=match struct.borrow(state,field=clipboard) {none=>{return 0},some(saved)=>saved.track_kind,}
+  let selected:u64=current_clip(state)
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  let active:u64=doc.active
+  match editor.clip(doc,selected) {none=>{},some(chosen)=>{
+    if chosen.owner==doc.active and editor.track_kind(doc,chosen.track)==kind and not editor.track_locked(doc,chosen.track) {return chosen.track}
+  },}
+  var i:u64=0
+  loop {if i >= editor.track_count(doc) {break}
+    let track:ref<editor.Track> = array.borrow(struct.borrow(doc,field=tracks),i)
+    if track.owner==active and track.kind==kind and not track.locked {return track.id}
+    i=i+1}
+  0
 }
 
 // ---- the pointer gesture ---------------------------------------------------

@@ -1285,3 +1285,117 @@ contains maintained source, indexed-source hashes, the full Windows log, native
 receipts and measurement rows, and the retained initial raster failure and
 unchanged-threshold pass. Every member is checked after writing. Media, pixel
 buffers, personal projects, executables and codec DLLs are excluded.
+
+## Clip content and streamed direct waveforms on 2026-10-10
+
+The old clipboard stored only source/range. Paste dropped retiming, fades,
+mix settings, filter instances and automation; compound Cut removed the clip
+without creating a usable clipboard. The shared editor overlay now owns a
+complete clip snapshot and transactionally instantiates it with fresh IDs,
+remapped scoped keys and preserved signed/off-body context. Selection and group
+links are intentionally fresh. Compound children remain live same-project links.
+The application routes audio Paste to an unlocked audio lane and records one
+history step only after successful Cut/Paste. Resource removal irreversibly
+retires the clipboard reference until another Copy, including Undo branches
+that reuse the original numeric source/sequence ID.
+
+Windows and Linux focused command/model gates pass 11 cases/59 checks. Their
+oracle walks the raw document arrays rather than calling the snapshot function.
+It checks disabled/duplicate filters, Unicode text, legacy and scoped keys,
+original edits/deletion, repeated Paste, Undo/Redo and Save/Open, locked/wrong
+lanes, missing resources, sequence cycles, cross-FPS targets, exhausted IDs,
+unrepresentable occupied survivors, and exact document/history/clipboard
+preservation on refusal. The pinned editor overlay passes independent clean-base
+forward application, reverse check and exact normalized-source roundtrip.
+
+The media oracle uses independently authored source pictures and PCM, not
+pre-paste Genesis output. Five cases cover direct reverse/rate/title/duplicate
+grades, audio Cut with gain/pan, post-group compound effects, and a single bottom
+grade beneath an upper layer in both child and ordinary sequences. Its baseline
+records three graph/media losses and two compound Paste refusals. Focused
+candidate comparisons pass 60 lossless master frames, 20 paused preview requests,
+five audition/master audio bodies and five command/history/project cases.
+Maximum error is below 0.494 RGB16 code, 0.501 PCM16 code and one PCM24 LSB,
+within unchanged two-code RGB16 and one-code PCM16/PCM24 limits. An explicitly
+hashed bold Windows face supplies the title witness: solid white coverage,
+position and exact stored text/parameters are checked separately from background
+color math; its bounded glyph region is excluded from that color comparison.
+
+This test exposed a separate planner bug: a lone bottom-clip grade occupied the
+worker's shared post-composition fields. It consequently graded the upper clip.
+The existing bottom-clip prepass now also runs when two or more layers are
+visible. Prepared effects are suppressed from the final composition fields;
+ordinary single-visible clips keep the fast path. Parent compound effects still
+apply to the complete child picture. The no-clipboard reproduction separates
+this renderer defect from clipboard copying.
+
+Direct waveform preparation uses a narrowly validated `NESTPEAK` terminator for
+one direct leaf plus its exact neutral wrapper. It streams the existing decoder
+and effect history in five-second blocks, applies the existing leaf envelope,
+and reduces stereo maxima into the same floor partitions. It pads/truncates to
+the authored body and retains float headroom. No full-body RF64 files are made
+for that route. Compound `NESTCOMMIT`/`NESTENV` and the direct cached-bus PCM
+reference remain unchanged; unsupported streamed trees explicitly refuse.
+
+The focused worker protocol gate passes 16 numerical cases and 11 coded refusals,
+including 1/600/25,567/65,536 cells, a real block seam, cells outnumbering samples,
+headroom/fades, EOF padding and truncation. Streamed peak bytes match the untouched
+cached-bus path. All 34 direct processed-waveform and 24 nested cases pass the
+unchanged 2e-6 peak bound; direct maximum error is 3.73e-9 and retained PCM differs
+by at most one code. Stop and supersede cancel after a genuine completed
+240,000-frame DSP block, join in 0.141 seconds, remove owned workers/cache and
+partial outputs, and permit a fresh independently checked request. Protocol
+refusals preserve accepted cache data and recover in the same worker.
+
+Cold preparation still processes the complete clip; distant-origin decoding,
+reverse prefix work and complete-history audition/export caches remain. This
+update introduces no codec, color converter, export or native-presenter change.
+The `1BD1` ordinary 4K baseline retained above belongs to the preceding published
+binary: its two-frame lateness gate fails. Component tests establish neither
+zero-drop/fullscreen 4K, full 21-minute cadence, sustained compound 4K60 nor
+physical speaker/display alignment.
+
+The combined native candidate is `C6D2E44B` with worker `AA40B96C`. Its actual
+Windows editor was checked against disposable copies of the regular 1080p60
+project. Copy/Paste at frame 3599 changes one 3600-frame clip into two clips with
+duration 7199; one Undo restores the original and one Redo restores the paste.
+Fit shows both mapped thumbnail strips and fine processed waveforms. Ruler seek
+to frame 1786 aligns Program time `00:00:29:46`, its picture, marker and updated
+histogram/parade/luma. Playback advances pictures and shows active stereo meters
+on the V1 embedded-audio mixer; Mute silences them, Unmute restores them, and
+Stop pauses with zero output. Start restores the nonblank first frame. Only the
+disposable project was saved and its window closed.
+
+On the unchanged full 76,701-frame private project, Fit completes with 25,567
+processed peak cells and 23 mapped thumbnails. The waveform bytes exactly match
+the preceding cached-bus receipt. Late seek to frame 72,497 aligns changed
+picture/scopes with `00:20:08:17`; End shows the source's black last frame at
+`00:21:18:20`, and Start restores frame zero and populated scopes. No RF64
+intermediate remains in this direct-waveform session. These are functional
+checks alongside background regressions, with no new cadence or physical A/V
+synchronization claim.
+
+The fresh combined Windows build and complete `tests/windows.ps1` suite pass on
+this exact application/worker pair: 153 saved application facts plus three
+native-drop checks, 757 reported control outcomes with all four dock overlap
+checks, and the real Windows media/Unicode and coded-failure paths. The root
+clipboard oracle passes all 11 cases/59 checks; all five independent authored
+graph/picture/PCM cases pass on the final application. Direct 34, nested 24 and
+streamed 16 numerical/11 coded-refusal waveform gates pass, alongside the
+existing GPU HDR, frame identity, retimed timeline bitmaps, audio history,
+project/recovery isolation and export cancellation checks. No expected outputs
+or numerical limits were rebaselined.
+
+The checked native executable, native DLLs and worker were published in the
+Genesis root folder. Existing loaded images were preserved without terminating
+user windows; protected projects and both media inputs keep their original
+hashes. The MM-AIR runtime manifest, fonts and SDK/worker pins remain unchanged,
+with no separate Genesis FFmpeg executable/DLL bundle.
+
+The [sanitized checkpoint bundle](../archive/clip-content-streamed-waveforms-2026-10-10.tar.gz)
+contains maintained and indexed source hashes, the complete build/Windows logs,
+focused and final receipts, raw native profile/strip metadata, and the preceding
+4K lateness failure. Every archive member is verified after writing. Media,
+personal projects, pixel buffers, executables and codec DLLs are excluded. This
+checkpoint is accepted for its stated fixes; broader professional editing and
+sustained 4K60 acceptance remain open.

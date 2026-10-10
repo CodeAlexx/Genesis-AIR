@@ -880,16 +880,17 @@ The window now caches semantic audio and picture facts using a document-mutation
 revision covering live edits, cancellation, undo/redo and project replacement.
 Filmstrip requests depend on content and viewport changes rather than the clock.
 Actual native-window profiles measure painting, presentation, changed-picture
-delivery and the audio device clock; the Audio and Scopes tabs delivered about
-56 changed pictures/second in the first measured candidate. Bounded passive
-redraws reduce repeated pictures and delay. The final Audio-tab candidate paints
-only its changing output meters and Program image when other controls are static;
-median paint time is 1.42 ms, with 56.76 changed pictures/s over 79.20 seconds.
-Throughput remains below 60.
+delivery and the audio device clock. Historical Audio-tab profiles delivered
+56.76 changed pictures/s over 79.20 seconds. Later ordinary-window recovery
+profiles approach the supplied source's 59.94 fps cadence, with retained skips
+and bounded metadata lateness rather than zero-drop acceptance. The published
+`1BD1` application's subsequent ordinary 4K baseline has four steady skipped
+positions and 30 presentations more than two frames late; its two-frame
+lateness gate fails. Measurements belong to their recorded binary and interval.
 The native presenter still uploads the whole canvas and synchronously ends its
 Direct2D draw. Physical speaker/display alignment remains unmeasured. See
 [native measurements](FFMPEG_GPU_PREVIEW.md#native-window-measurements-on-2026-10-09)
-for the measured scope and retained transport failure.
+for the measured scope and retained transport failures.
 
 ## Shared editor Split and trim overlay
 
@@ -935,3 +936,27 @@ fractional FPS, decimal-rate refusals, source bounds and atomic Lift/ripple refu
 The application history gate passes ten cases/187 checks: refusals and exact or
 clamped no-ops preserve all redo snapshots, selections, revision and clean state;
 successful trims capture once and restore exact project bytes with Undo/Redo.
+
+## Clip clipboard content and resource lifetime
+
+The shared editor overlay now snapshots complete authored clip content and
+instantiates fresh clip/filter identities on Paste. Signed/off-body and legacy
+automation remains intact; same-project compound children stay linked. The
+application retires a copied resource when a successful edit or Undo removes it,
+so a later branch cannot bind the clipboard to a reused numeric ID. Project
+replacement clears it. Cross-FPS Paste explicitly refuses until a reliable
+timing conversion is represented. Unsupported occupied-range trim contexts
+still refuse before changing the document or history.
+
+## Direct waveform streaming and layer-local grades
+
+Direct processed peaks now reduce the existing stereo decoder/DSP stream without
+full-body RF64 intermediates. The cached PCM reference and compound waveform
+route are unchanged. Five-second sample blocks and bounded peak cells reduce
+temporary disk use; complete origin/effect history still runs, and the existing
+audition/export full-history paths retain their own memory and disk costs.
+
+Single bottom-clip adjustments now run before upper composition, fixing a grade
+leaking onto an upper clip in ordinary and child sequences. Compound parent
+adjustments continue to operate on the child sum. The direct single-visible
+fast path remains. See the [focused acceptance and remaining scope](CONTROL_COVERAGE.md#clip-content-and-streamed-direct-waveforms-on-2026-10-10).

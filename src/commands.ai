@@ -55,7 +55,8 @@ pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> un
   let _ = struct.replace(state, editor.history(depth), field=history)
   let _ = struct.replace(state, array.new(), field=waveforms)
   let _ = struct.replace(state, array.new(), field=thumbnails)
-  struct.set(state, app.Clipboard {source: 0, source_in: 0, length: 0, filled: false}, field=clipboard)
+  let _=struct.replace(state,option.none(),field=clipboard)
+  struct.set(state,false,field=clipboard_resource_valid)
   struct.set(state, app.viewport(), field=viewport)
   app.set_pool_row(state, 0)
   app.set_selected_filter(state, 0)
@@ -1133,27 +1134,49 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
 }
 
 // ---------------------------------------------------------------------------
-// Clipboard. A copy records the SOURCE and range, never a clip id, so a paste survives the
-// original being deleted.
+// Clipboard snapshots retain the complete authored clip independently of its
+// original. Project replacement retires document resource identities.
 
 pub fn copy_clip(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
-  match editor.clip(struct.borrow(state, field=document), clip) {
-    none => refused("no clip selected"),
-    some(value) => { app.set_clipboard(state, value.source, value.source_in, value.length)
+  match editor.clip_snapshot(struct.borrow(state, field=document), clip) {
+    none => refused("[GA_CLIPBOARD_COPY] No valid clip selected"),
+    some(value) => { app.set_clipboard(state,value)
       done("copied", clip) },
   }
 }
 
 pub fn cut_clip(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
-  var copied: Result = copy_clip(state, clip)
-  if not copied.ok { return copied }
-  ripple_delete(state, clip)
+  let doc:ref<editor.Document> = struct.borrow(state,field=document)
+  let value:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("[GA_CLIPBOARD_CUT] No clip selected")},some(found)=>found,}
+  if editor.track_locked(doc,value.track) {return refused("[GA_CLIPBOARD_CUT] Source track is locked")}
+  let saved:editor.ClipSnapshot=match editor.clip_snapshot(doc,clip) {none=>{return refused("[GA_CLIPBOARD_CUT] Clip content is invalid")},some(found)=>found,}
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.ripple_delete(candidate,clip) {return refused("[GA_CLIPBOARD_CUT] Clip could not be removed")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
+  app.set_clipboard(state,saved)
+  app.document_changed(state)
+  done("cut",clip)
 }
 
 pub fn paste_clip(state: ref<app.App>, track: u64, at: i64) -> Result effects {alloc} {
-  if not app.has_clipboard(state) { return refused("clipboard is empty") }
-  let held: app.Clipboard = app.clipboard(state)
-  overwrite_clip(state, track, held.source, held.source_in, held.length, at)
+  if not app.clipboard_identity_valid(state) {
+    match struct.borrow(state,field=clipboard) {
+      none=>{return refused("[GA_CLIPBOARD_EMPTY] Clipboard is empty")},
+      some(_)=>{return refused("[GA_CLIPBOARD_IDENTITY] Copied media or child sequence was removed; copy the clip again")},
+    }
+  }
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  let pasted:result<u64,string> = match struct.borrow(state,field=clipboard) {
+    none=>{return refused("[GA_CLIPBOARD_EMPTY] Clipboard is empty")},
+    some(saved)=>editor.paste_clip_snapshot(candidate,saved,track,at),
+  }
+  match pasted {err(problem)=>refused(text.concat("[GA_CLIPBOARD_PASTE] ",problem)),ok(id)=>{
+    editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+    let _=struct.replace(state,candidate,field=document)
+    app.document_changed(state)
+    done("pasted",id)
+  },}
 }
 
 // ---------------------------------------------------------------------------

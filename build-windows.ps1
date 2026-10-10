@@ -90,6 +90,7 @@ if ($RunTests) { $sources += ,@('timeline-track-scroll', 'tests/timeline_track_s
 if ($RunTests) { $sources += ,@('waveform-view', 'tests/waveform_view.ai') }
 if ($RunTests) { $sources += ,@('waveform-detail', 'tests/waveform_detail.ai') }
 if ($RunTests) { $sources += ,@('strip-viewport', 'tests/strip_viewport.ai') }
+if ($RunTests) { $sources += @(@('clip-clipboard', 'tests/clip_clipboard.ai'), @('clip-clipboard-media', 'tests/clip_clipboard_media.ai')) }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -129,6 +130,7 @@ if ($RunTests) { $targets += @('genesis-timeline-track-scroll') }
 if ($RunTests) { $targets += @('genesis-waveform-view') }
 if ($RunTests) { $targets += @('genesis-waveform-detail') }
 if ($RunTests) { $targets += @('genesis-strip-viewport') }
+if ($RunTests) { $targets += @('genesis-clip-clipboard', 'genesis-clip-clipboard-media') }
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }
