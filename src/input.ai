@@ -901,7 +901,7 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
   let widened: i64 = cast.wrap(rows)
   let step: i64 = widened * 12
   let now: i64 = app.scroll(state)
-  let _ = app.set_scroll(state, if down { now + step } else { now - step })
+  let _ = app.set_scroll(state, if down { add.sat(now,step) } else { now - step })
   note("Scrolled")
 }
 

@@ -1234,11 +1234,12 @@ Stop leaves the picture visible and meters zero. Start restores a nonblank frame
 zero and scopes. Fit populates 32 filmstrip tiles and the processed waveform;
 a settled ruler seek to frame 12773 (`00:03:32:53`) aligns marker, Program time,
 picture, histogram, parade and luma waveform. Start restores frame zero again.
-The personal project bytes remain unchanged. Fit currently clamps zoom at
+The personal project bytes remain unchanged. At this checkpoint Fit clamps zoom at
 0.05 px/frame: this full clip exposes only about the first 5.5 minutes in the
 current window even though status says Fitted. Its fixed 512 waveform buckets
 represent roughly 2.5 seconds each. Full-duration Fit and finer/zoom-responsive
-waveform detail remain concrete professional-editing gaps. No fullscreen 4K,
+waveform detail remained concrete gaps at that checkpoint; the next update below
+addresses them. No fullscreen 4K,
 zero-drop cadence, physical A/V alignment or full large-project acceptance follows.
 Acceptance bundle location: `archive/viewport-lazy-native-color-input-2026-10-10.tar.gz`.
 The sanitized source/receipt manifest retains exact app identities, original and
@@ -1246,3 +1247,41 @@ sanitized hashes, explicit exclusions and per-member readback verification; its
 local bundle receipt records the archive hash. Media, QA pixel buffers, codec DLLs
 and application binaries are excluded. This bundle records the bounded evidence
 above, not complete professional-editing acceptance.
+
+## Long timeline Fit and fine waveforms on 2026-10-10
+
+The published aligned native app is `1bd1bccfbf08c30945a1b6e69f8799d8420c9ecf5d25e9ddcc1389597031abe9`.
+The worker remains `37868533...`, using the existing MM-AIR runtime without a
+separate Genesis codec bundle. The complete Windows suite passes on this exact
+application and combined source, including all 757 control outcomes and
+153 saved headless facts. Its root payload is hash-verified; loaded user images,
+original media and both personal projects are preserved.
+
+| Check | Bounded result |
+| --- | --- |
+| Timeline navigation | Eight cases / 80 checks cover full 76,701-frame Fit at several widths, a sparse billion-frame ruler and seeks, signed endpoints, nonfinite zoom, wheel bounds, and unchanged project/selection/history. |
+| Peak cache | Six cases / 32 checks cover fixed duration-based detail, all-target promotion before eviction, pan/zoom reuse, fair quotas, failed incoming updates and semantic revision invalidation. |
+| Waveform pixels | Six cases / 34 checks cover first/interior/last sparse transients, dense max reduction, visible bins, lane clipping and invalid peaks/ranges. The initial fractional-coverage failure is retained; pixel alignment fixes it with unchanged assertions and thresholds. |
+| Processed audio | All 34 independent direct and 24 compound cases pass, including a real 33-second sparse stereo source and 600 cells on a 30-second clip, retaining the existing fixed 2e-6 peak tolerance. |
+| Actual native window | The ordinary maximized full project fits completely. Seek 72,733 (`20:12:13`) aligns picture, time, marker and histogram/parade/luma. End 76,700 (`21:18:20`) matches an independently decoded black source frame; Start restores visible frame zero. |
+| Audio and strips | V1 embedded controls are enabled. Play advances picture/time with active stereo output; Mute silences output and waveform, Unmute restores them, and Stop at `01:00:06` retains the picture with zero output. Fit publishes 23 mapped bitmaps and 25,567 peaks; zoom request 3 to 4 preserves exact waveform TSV hash `a416f520...`. |
+
+All valid current cached targets are promoted before a missing target can evict
+them. Incoming peak arrays are validated before changing the cache; requested
+generations are published only when every target is retained. The per-clip cap
+is 65,536 and the shared budget is 262,144 f64 peaks, or 2 MiB of scalar payload.
+Metadata, container overhead, in-flight results and full audio bodies are outside
+that bound. Cold preparation still processes complete clips; a changed eligible
+clip count can alter quotas and require regeneration.
+
+The private native check ran alongside the regression suite and supplies no new
+cadence benchmark. Its saved test project is disposable; original projects,
+media and user windows remain preserved. No fullscreen 4K, zero-drop or full
+21-minute playback, physical A/V alignment, sustained compound 4K60, or complete
+professional-editing acceptance follows.
+
+The [sanitized checkpoint bundle](../archive/long-timeline-fine-waveforms-2026-10-10.tar.gz)
+contains maintained source, indexed-source hashes, the full Windows log, native
+receipts and measurement rows, and the retained initial raster failure and
+unchanged-threshold pass. Every member is checked after writing. Media, pixel
+buffers, personal projects, executables and codec DLLs are excluded.

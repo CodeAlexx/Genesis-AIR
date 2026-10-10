@@ -800,7 +800,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     if passive_pending and clock.start() - last_present_ns >= 33000000 { dirty = true }
     if dirty {
       let view_frame: layout.Frame = layout.frame(logical_width, logical_height)
-      let span: i64 = cast.sat(layout.width_of(view_frame.timeline) / app.zoom(state))
+      let span: i64 = app.visible_span(state,layout.width_of(view_frame.timeline))
       let body_height: f64 = layout.height_of(view_frame.timeline)
       let first_lane: u64 = app.clamp_track_scroll(state,body_height)
       if not strip_initialized or strip_document_revision != state.document_revision or

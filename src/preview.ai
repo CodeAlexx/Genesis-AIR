@@ -263,9 +263,32 @@ pub fn strip_targets(state: ref<app.App>, first: i64, last: i64, visible: bool,
   }
   result.ok(out)
 }
+pub fn waveform_buckets(length: i64, wanted: u64) -> result<u64,string> effects {alloc} {
+  if wanted == 0 or wanted > app.waveform_peak_budget()/8 {
+    return result.err("[GA_AUDIO_CLIP_ENV_CAPACITY] Too many waveform clips for the peak budget")
+  }
+  let divided: u64=app.waveform_peak_budget()/wanted
+  let quota: u64=if divided > app.waveform_bucket_limit() {app.waveform_bucket_limit()}else{divided}
+  let scaled: u64=cast.sat(length/3)
+  let desired: u64=if scaled < 8 {8}else{scaled}
+  result.ok(if desired > quota {quota}else{desired})
+}
+fn waveform_current(state: ref<app.App>, document: ref<editor.Document>, value: editor.Clip, buckets: u64) -> bool effects {alloc} {
+  match app.waveform_slot(state,value.id) {none=>false,some(slot)=>{
+    let cached: ref<app.Waveform> =array.borrow(struct.borrow(state,field=waveforms),slot)
+    cached.document_revision == state.document_revision and cached.revision == state.media_revision and
+      cached.source == value.source and cached.length == value.length and
+      cached.first == timeline_media.source_frame(document,value,value.start) and
+      cached.last == timeline_media.source_frame(document,value,value.start+value.length-1) and
+      array.len(struct.borrow(cached,field=peaks)) == buckets
+  },}
+}
 fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, first: i64, last: i64, view: StripView)
     -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var wanted: array<u64> = try strip_targets(state,first,last,visible,view,false)
+  if array.len(wanted) > app.waveform_peak_budget()/8 {
+    return result.err("[GA_AUDIO_CLIP_ENV_CAPACITY] Too many visible waveform clips for the peak budget")
+  }
   var widths: array<u64> = array.new()
   var document: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   var index: u64 = 0
@@ -273,12 +296,18 @@ fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, fi
     if index >= array.len(wanted) { break }
     match editor.clip(document,array.get(wanted,index)) {
       none => { },some(value) => {
-          let widened: u64 = cast.sat(value.length)
-          let buckets: u64 = if widened/3 > 512 {512}else{widened/3}
-          array.push(widths,if buckets < 8 {8}else{buckets})
+          array.push(widths,try waveform_buckets(value.length,array.len(wanted)))
       },
     }
     index = index + 1
+  }
+  // Promote ALL reusable targets before any new result can evict an entry.
+  // A cached target later in document order must survive earlier misses too.
+  index=0
+  loop {if index >= array.len(wanted) {break}
+    let value: editor.Clip=option.unwrap(editor.clip(document,array.get(wanted,index)))
+    if waveform_current(state,document,value,array.get(widths,index)) {app.touch_waveform(state,value.id)}
+    index=index+1
   }
   var filled: u64 = 0
   var at: u64 = 0
@@ -291,19 +320,10 @@ fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, fi
     let buckets: u64 = array.get(widths,at)
     // The strip worker retains its cache across viewport requests. Only a
     // content/media generation or changed time mapping needs new audio work.
-    match app.waveform_slot(state,value.id) {
-      some(slot)=>{
-        let cached: ref<app.Waveform> = array.borrow(struct.borrow(state,field=waveforms),slot)
-        if cached.document_revision == state.document_revision and cached.revision == state.media_revision and
-            cached.source == value.source and cached.length == value.length and
-            cached.first == timeline_media.source_frame(document,value,value.start) and
-            cached.last == timeline_media.source_frame(document,value,value.start+value.length-1) and
-            array.len(struct.borrow(cached,field=peaks)) == buckets {
-          filled=filled+1
-          at=at+1
-          continue
-        }
-      },none=>{},
+    if waveform_current(state,document,value,buckets) {
+      filled=filled+1
+      at=at+1
+      continue
     }
       let engine: ref<provider.Provider> = struct.borrow(state,field=provider)
       var peaks: array<f64> = if not value.enabled or not editor.track_audible(document,value.track) or
@@ -328,6 +348,19 @@ fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, fi
         timeline_media.source_frame(document,value,value.start+value.length-1),state.media_revision)
       filled=filled+1
       at=at+1
+  }
+  // The fair quota ensures all current targets can coexist after old-cache
+  // eviction. Never commit a generation silently missing an earlier clip.
+  at=0
+  loop {if at >= array.len(wanted) {break}
+    let slot: u64=match app.waveform_slot(state,array.get(wanted,at)) {some(value)=>value,none=>{
+      return result.err("[GA_AUDIO_CLIP_ENV_CAPACITY] A requested waveform was not retained")},}
+    let cached: ref<app.Waveform> =array.borrow(struct.borrow(state,field=waveforms),slot)
+    if cached.document_revision != state.document_revision or cached.revision != state.media_revision or
+        array.len(struct.borrow(cached,field=peaks)) != array.get(widths,at) {
+      return result.err("[GA_AUDIO_CLIP_ENV_CAPACITY] A requested waveform generation was not retained")
+    }
+    at=at+1
   }
   result.ok(filled)
 }
@@ -577,6 +610,7 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
        match text.parse_u64(array.borrow(header,2)) {some(value)=>value != state.media_revision,none=>true,} {return false}
   }
   var incoming: array<app.Waveform> = array.new()
+  var incoming_peaks: u64=0
   var i: u64 = 0
   loop { if i >= array.len(rows) { break }
     var fields: array<string> = text.split(str.view(array.borrow(rows, i)), "\t")
@@ -604,8 +638,11 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
         let peak: f64 = match text.parse_f64(str.view(array.borrow(fields,k))) {some(value)=>value,none=>{return false},}
         if not math.is_finite(peak) or peak < 0.0 {return false}
         array.push(peaks,peak)
+        if array.len(peaks) > app.waveform_bucket_limit() {return false}
  k = k + 1
       }
+      incoming_peaks=incoming_peaks+array.len(peaks)
+      if incoming_peaks > app.waveform_peak_budget() {return false}
       if clip != 0 {array.push(incoming,app.Waveform {clip:clip,source:source,length:length,first:first,last:last,
         revision:revision,document_revision:document_revision,peaks:peaks})}
     }

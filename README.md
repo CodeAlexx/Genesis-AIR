@@ -1181,7 +1181,7 @@ Escape preserving the original title. Its fresh 60-second regular-source window
 run measures 59.73 changed pictures/s raw and 59.884/s after explicit startup/EOF
 exclusions: six steady skipped positions, two four-frame jumps and a 34.9 ms
 maximum gap. EOF, rewind, settled scopes/seeks, strips and mute/unmute respond.
-The root now publishes `52A6` with the secondary-button guard: right-click Mute
+The preceding checkpoint published `52A6` with the secondary-button guard: right-click Mute
 and Save have no action, while primary mixer controls, picker/header-wheel
 scrolling and native prompt paste/cancel pass. Acceptance combines the complete
 Windows suite on `80A6` with targeted controls/probes/failures and actual native
@@ -1190,8 +1190,8 @@ A separate published-root playback observes 75.711 wall seconds of the full
 21-minute source. It measures 59.75 changed pictures/s raw and 59.885/s after
 explicit startup/manual-Stop exclusions, with eight steady skips and a 48.58 ms
 maximum gap. This is bounded near-60 playback, not zero-drop or full-source cadence.
-Fit currently stops at 0.05 px/frame, so the full clip cannot fit in this window;
-its 512 peak buckets also limit waveform detail to about 2.5 seconds per bucket.
+At that checkpoint, Fit stopped at 0.05 px/frame and the waveform had 512 peaks.
+The long-timeline update below addresses those two limitations.
 Earlier results retain
 their own scope. See the [current acceptance scope](docs/CONTROL_COVERAGE.md#visible-strips-lazy-gpu-and-qualified-hdr-candidate-on-2026-10-10)
 and [color/performance restrictions](docs/FFMPEG_GPU_PREVIEW.md#qualified-native-hdr-candidate-on-2026-10-10).
@@ -1199,6 +1199,32 @@ and [color/performance restrictions](docs/FFMPEG_GPU_PREVIEW.md#qualified-native
 Acceptance bundle location: [viewport/lazy/native-color/input evidence](archive/viewport-lazy-native-color-input-2026-10-10.tar.gz).
 Its sanitized source/receipt manifest preserves each build identity and bounded
 scope; media, pixel buffers, codec DLLs and application binaries are excluded.
+
+## Long timelines and fine waveform detail
+
+Fit now covers the complete 76,701-frame, roughly 21-minute test project. The
+ruler adapts its spacing to the available width, and navigation stays within
+signed frame bounds without changing the authored project or its edit history.
+
+Processed waveforms retain finer detail across zoom and pan: this source has
+25,567 peak cells, about 50 ms each at 60 fps. Fitted drawing takes the maximum
+of grouped cells and aligns thin bars to pixel columns, preserving transients.
+The cache caps each clip at 65,536 cells and shares 262,144 f64 peaks across clips,
+a 2 MiB scalar payload excluding metadata, containers and temporary/full audio
+bodies. Cold changed waveforms still process complete clips; changing the
+eligible clip count can change the quota and regenerate them. Longer clips
+beyond the cap have coarser detail.
+
+The published native `1BD1` app fits the whole project, reuses exact waveform data
+when zooming, and aligns picture, timecode, marker and scopes at `20:12:13`.
+Embedded stereo output, Mute/Unmute, Stop and rewind respond. Its black last
+frame is independently confirmed source content. The complete Windows suite
+passes on this exact build, including all 757 controls, and the verified app is
+installed at the repository root. These functional checks add no fresh cadence,
+full-source playback, physical A/V or sustained 4K60 claim.
+
+See the [acceptance ledger](docs/CONTROL_COVERAGE.md#long-timeline-fit-and-fine-waveforms-on-2026-10-10)
+and [sanitized evidence bundle](archive/long-timeline-fine-waveforms-2026-10-10.tar.gz).
 
 ## Known gaps
 

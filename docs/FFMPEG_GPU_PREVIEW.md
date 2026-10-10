@@ -605,7 +605,27 @@ physical speaker/photon alignment is claimed.
 
 Stop/Start, settled scopes and a frame12773 (`03:32:53`) seek align picture,
 time and marker in the actual window. Fit populates filmstrip/processed peaks,
-but the 0.05 px/frame minimum zoom prevents fitting the entire long clip;
+but that checkpoint's 0.05 px/frame minimum zoom prevents fitting the entire long clip;
 only about its first 5.5 minutes is visible in that surface. Fixed 512 peaks on
 this source have about 2.5-second bucket resolution. Those timeline limitations
-need separate professional-editing work and are not decoder/color acceptance.
+are addressed by the subsequent long-timeline update and are not decoder/color acceptance.
+
+### Long timeline navigation and processed peak detail
+
+The published native `1BD1` app removes the unrelated minimum zoom that prevented
+full-duration Fit. Its ordinary full-project window shows all 76,701 frames,
+with mapped filmstrip tiles and 25,567 processed peak cells. Pan and zoom reuse
+the complete peaks; fitted rendering takes the maximum across subpixel cells
+and aligns transient bars to visible columns. Seek `20:12:13`, End/Start and
+histogram/parade/luma updates agree with Program time and picture. Embedded
+stereo meters and Mute/Unmute/Stop respond. The complete Windows suite passes
+on this exact build, and its verified payload is installed at the root.
+No decoder, codec, color, DSP or runtime change is
+introduced by this update.
+
+The peak cache is bounded, but cold changed waveform preparation still processes
+the complete clip. Changed eligible clip counts can change quotas and regenerate
+results; clips beyond the 65,536-cell cap have coarser detail. This functional
+native check ran alongside the regression suite and adds no playback cadence,
+physical A/V, full 21-minute playback or sustained 4K60 claim. See the
+[long-timeline ledger](CONTROL_COVERAGE.md#long-timeline-fit-and-fine-waveforms-on-2026-10-10).

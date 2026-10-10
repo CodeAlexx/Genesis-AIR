@@ -48,6 +48,9 @@ def projects(paths):
     doc=add("mono-stereo-rematrix",12)
     doc["sources"][5]["audio_channels"]=1
     add("sparse-impulse",13,start=0,length=60)
+    doc=add("fine-600",14,start=0,length=1800)
+    doc["sequences"][0]["fps"]=60
+    doc["sources"][-1].update(frames=1980,fps=60)
     add("headroom",10,gain=2)
     doc=add("clip-track-gain",7,gain=.375);doc["tracks"][0]["gain"]=.625
     add("clip-pan",7,pan=.5)
@@ -269,7 +272,7 @@ def main():
                     if not passed:errors.append((name,"Expected coded refusal",error))
                     continue
                 clip=doc["clips"][0]
-                buckets=max(8,min(512,clip["length"]//3))
+                buckets=max(8,min(512 if args.baseline_client else 65536,clip["length"]//3))
                 target=peaks(expected[name],buckets)
                 actual=rows.get(30,{}).get("peaks",[])
                 maximum=max((abs(a-b) for a,b in zip(actual,target)),default=math.inf)
@@ -308,7 +311,7 @@ def main():
             assert not list(native.rglob(".genesis-nested-*")),"Owned cache survived joined command"
             if not args.skip_cancel:
                 report["cancellation"]=cancel_direct(root,client,worker,cases[0][1],
-                    peaks(expected["anti-phase"],max(8,min(512,cases[0][1]["clips"][0]["length"]//3))))
+                    peaks(expected["anti-phase"],max(8,min(65536,cases[0][1]["clips"][0]["length"]//3))))
             assert all(sha(Path(p))==digest for p,digest in before.items()),"Source/project mutation"
             assert sha(worker)==report["worker_sha256"] and sha(client)==report["client_sha256"]
             report.update(passed=True,sources_projects_binaries_immutable=True,owned_cache_removed=True,

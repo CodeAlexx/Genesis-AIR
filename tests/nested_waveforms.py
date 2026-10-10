@@ -62,6 +62,13 @@ def source_files(root):
         impulse[n*2]=.9375
         impulse[n*2+1]=-.8125
     values.append(impulse)
+    # Real 33-second authored stereo source, never wrapped/truncated to fit a
+    # longer declaration. Isolated impulses exercise fine 3-frame partitions.
+    long_signal=array("f",[0.]*(33*SR*2))
+    for n in range(37,33*SR,2399):
+        long_signal[n*2]=(.1875,.5,.8125)[(n//2399)%3]
+        long_signal[n*2+1]=-(.6875,.3125)[(n//2399)%2]
+    values.append(long_signal)
     paths=[]
     for n,data in enumerate(values):
         path=root/f"authored waveform {n} 日本語 %20.wav"
@@ -161,6 +168,11 @@ def cases(paths):
     base=authored(paths,30,30)
     for source in base["sources"]:source["frames"]=120
     result=[("nested-coded",base,30)]
+    fine=authored(paths,60,60)
+    fine["sources"][-1].update(frames=1980,fps=60)
+    fine["clips"][0].update(source=14,length=1800)
+    fine["clips"][-1].update(length=1800)
+    result.append(("nested-fine-600",fine,30))
     for name,source in (("stereo-antiphase",10),("single-sample-spikes",13),("digital-silence",11)):
         doc=copy.deepcopy(base);doc["clips"][0]["source"]=source
         result.append((name,doc,30))
@@ -446,7 +458,7 @@ def main():
                 path=root/(name+".air");path.write_text(json.dumps(doc),encoding="utf-8")
                 original[path]=sha(path)
                 clip=next(c for c in doc["clips"] if c["id"]==ident)
-                count=max(8,min(512,max(8,clip["length"])//3))
+                count=max(8,min(512 if args.expect_missing else 65536,max(8,clip["length"])//3))
                 values=clip_signal(doc,ident,source_values,worker)
                 # The authored mono DC is .25. Playback's default equal-power
                 # mono->stereo matrix yields .25/sqrt(2) on each channel; the old

@@ -86,6 +86,33 @@ fn painted(state: ref<app.App>, width: u32, height: u32) -> draw.Surface effects
   painter.paint(state,canvas,cast.float(width),cast.float(height),source,program)
   draw.finish(canvas)
 }
+fn long_fixture(root: str, length: i64, start: i64) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App=app.app(provider.fake(root))
+  var doc: editor.Document=editor.document(60.0,1920,1080)
+  let source: u64=editor.add_source(doc,"long-metadata-only.mov","Long clip",length,60.0)
+  let _=editor.describe_source(doc,source,1920,1080,true,true,48000,2)
+  let track: u64=editor.add_track(doc,doc.active,editor.track_video(),"Long video")
+  let clip: u64=option.unwrap(editor.place(doc,track,source,0,length,start))
+  commands.replace_project(state,doc)
+  let _=editor.select_only(struct.borrow(state,field=document),clip)
+  let _=commands.set_clip_field(state,clip,"opacity",0.5)
+  let _=commands.undo(state)
+  app.mark_dirty(state,false)
+  state
+}
+fn fit(state: ref<app.App>, width: f64, height: f64) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let frame: layout.Frame=layout.frame(width,height)
+  var controls: array<chrome.Control> = chrome.timeline_bar(frame,state)
+  var at: u64=0
+  loop {if at>=array.len(controls) {break}
+    let entry: ref<chrome.Control> = array.borrow(controls,at)
+    if entry.action==chrome.act_zoom_fit() {
+      return input.pointer_down(state,width,height,(entry.area.left+entry.area.right)/2.0,(entry.area.top+entry.area.bottom)/2.0)
+    }
+    at=at+1
+  }
+  string.copy("Fit control missing")
+}
 fn pixel(surface: ref<draw.Surface>, x: f64, y: f64, wanted: draw.Color) -> bool effects {} {
   match draw.surface_pixel(surface,cast.sat(x),cast.sat(y)) {
     none=>false,some(found)=>found.r==wanted.r and found.g==wanted.g and found.b==wanted.b,
@@ -266,6 +293,82 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=editor.set_active(struct.borrow(state,field=document),2)
   let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
   let _=test.eq_u64(suite,app.track_scroll(state),0,"Returning to another sequence begins at its first lane")
+  let _=test.done(suite)
+  let _=test.start(suite,"Fit shows every frame of the76701-frame clip across logical window sizes")
+  var long_state: app.App=long_fixture(root,76701,0)
+  let before_fit: string=authored(long_state)
+  var widths: array<f64> = [640.0,1600.0,1920.0]
+  var width_index: u64=0
+  loop {if width_index>=array.len(widths) {break}
+    let width: f64=array.get(widths,width_index)
+    let fitted: layout.Frame=layout.frame(width,980.0)
+    let _=app.set_scroll(long_state,1234)
+    let _=test.eq_str(suite,fit(long_state,width,980.0),"Fitted to project","Actual Fit control reports success")
+    var fitted_model: timeline.Timeline=painter.timeline_model(long_state,fitted.timeline)
+    let _=test.check(suite,app.scroll(long_state)==0 and app.zoom(long_state)<0.05,"Fit resets origin and permits the needed long-project scale")
+    let _=test.near_f64(suite,timeline.frame_to_x(fitted_model,76701),fitted.timeline.right,0.000001,"Full clip endpoint reaches the visible right edge")
+    let range: i64=app.visible_span(long_state,layout.width_of(fitted.timeline))
+    let _=test.check(suite,range>=76701 and range<=76702,"Rounded request includes the final frame without expanding more than one frame")
+    width_index=width_index+1
+  }
+  let _=test.eq_str(suite,authored(long_state),before_fit,"Fit and resize preserve selection, authored bytes, revisions, dirty and nonempty Redo")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Sparse billion-frame Fit retains distant ruler ticks and seek mapping")
+  let _=ref.swap(long_state,long_fixture(root,60,999999940))
+  let sparse_authored: string=authored(long_state)
+  let _=test.eq_str(suite,fit(long_state,1600.0,980.0),"Fitted to project","Sparse project uses the same actual Fit control")
+  var sparse_model: timeline.Timeline=painter.timeline_model(long_state,frame.timeline)
+  let _=test.near_f64(suite,timeline.frame_to_x(sparse_model,1000000000),frame.timeline.right,0.000001,"Sparse final clip remains inside full-duration Fit")
+  let stride: i64=painter.ruler_stride(60.0,app.zoom(long_state))
+  let stride_f: f64=cast.float(stride)
+  let _=test.check(suite,stride>60 and stride_f*app.zoom(long_state)>=6.0,"Distant ticks skip empty seconds with at least six logical pixels spacing")
+  let _=test.check(suite,app.visible_span(long_state,layout.width_of(frame.timeline))/stride<4096,"Full ruler requires a bounded visible tick count")
+  let last_tick: i64=(1000000000/stride)*stride
+  let last_x: f64=timeline.frame_to_x(sparse_model,last_tick)
+  var sparse_image: draw.Surface=painted(long_state,1600,980)
+  let sparse_colors: painter.Theme=painter.theme(long_state)
+  let ink: bool=not pixel(sparse_image,last_x-1.0,frame.ruler.bottom-4.0,sparse_colors.timeline) or
+    not pixel(sparse_image,last_x,frame.ruler.bottom-4.0,sparse_colors.timeline) or
+    not pixel(sparse_image,last_x+1.0,frame.ruler.bottom-4.0,sparse_colors.timeline)
+  let _=test.check(suite,last_tick>990000000 and ink,"Actual painted ruler contains a distant tick near the project end")
+  let _=test.eq_str(suite,authored(long_state),sparse_authored,"Distant Fit and paint leave authored state and history intact")
+  let _=app.set_scroll(long_state,700000000)
+  let _=ref.swap(sparse_model,painter.timeline_model(long_state,frame.timeline))
+  let target_x: f64=timeline.frame_to_x(sparse_model,800000000)
+  let _=input.pointer_down(long_state,1600.0,980.0,target_x,frame.ruler.top+5.0)
+  let _=input.pointer_up(long_state,1600.0,980.0,target_x,frame.ruler.top+5.0)
+  let landed: i64=editor.playhead(struct.borrow(long_state,field=document))
+  let _=test.check(suite,landed>=799999999 and landed<=800000001,"Panned ruler pointer resolves the distant authored frame within rounding")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Invalid zooms and signed-endpoint ranges remain finite and bounded")
+  let valid_zoom: f64=app.zoom(long_state)
+  let _=test.near_f64(suite,app.set_zoom(long_state,math.nan()),valid_zoom,0.0,"NaN cannot poison timeline geometry")
+  let _=test.near_f64(suite,app.set_zoom(long_state,math.infinity()),valid_zoom,0.0,"Infinity preserves the last usable zoom")
+  let _=app.set_zoom(long_state,0.0)
+  let _=test.check(suite,app.zoom(long_state)>0.0 and math.is_finite(1.0/app.zoom(long_state)),"Minimum scale is positive with a finite reciprocal")
+  let _=app.set_scroll(long_state,9223372036854775800)
+  let _=test.eq_i64(suite,app.visible_span(long_state,1000.0),7,"Requested range reserves space for its signed frame origin")
+  let _=test.eq_i64(suite,app.visible_span(long_state,math.infinity()),0,"Nonfinite width yields no request")
+  let _=test.eq_i64(suite,app.visible_span(long_state,-1.0),0,"Negative width yields no request")
+  let _=app.set_scroll(long_state,9223372036854775807)
+  let _=test.eq_i64(suite,app.visible_span(long_state,1000.0),0,"Exhausted signed endpoint yields no wrapping request")
+  let _=app.set_zoom(long_state,100.0)
+  let _=test.near_f64(suite,app.zoom(long_state),40.0,0.0,"Close zoom retains the established upper limit")
+  let _=test.check(suite,painter.ruler_stride(60.0,1.0)>0 and painter.ruler_stride(60.0,app.set_zoom(long_state,0.0))>0,"Ruler stride remains positive at both zoom extremes")
+  let boundary_authored: string=authored(long_state)
+  let boundary_zoom: f64=app.zoom(long_state)
+  let boundary_lane: u64=app.track_scroll(long_state)
+  let _=app.set_scroll(long_state,9223372036854775802)
+  let _=input.wheel(long_state,1600.0,980.0,frame.timeline.left+20.0,frame.timeline.top+10.0,true,1,false)
+  let _=test.eq_i64(suite,app.scroll(long_state),9223372036854775807,"Plain body wheel saturates near the signed endpoint")
+  let _=input.wheel(long_state,1600.0,980.0,frame.timeline.left+20.0,frame.timeline.top+10.0,false,1,false)
+  let _=test.eq_i64(suite,app.scroll(long_state),9223372036854775795,"Upward wheel retreats from the saturated endpoint")
+  let _=input.wheel(long_state,1600.0,980.0,frame.timeline.left+20.0,frame.timeline.top+10.0,true,4294967295,false)
+  let _=test.eq_i64(suite,app.scroll(long_state),9223372036854775807,"Largest event line count cannot wrap scroll")
+  let _=test.check(suite,app.zoom(long_state)==boundary_zoom and app.track_scroll(long_state)==boundary_lane,"Endpoint panning preserves zoom and lane offset")
+  let _=test.eq_str(suite,authored(long_state),boundary_authored,"Endpoint panning preserves complete document, revision, dirty, selection and history")
   let _=test.done(suite)
   test.conclude(suite,path.join(root,"timeline-track-scroll-tests.json"),8)
 }

@@ -1,0 +1,160 @@
+// Authored peak/time fixtures verify pixels independently of the painter's grouping.
+module genesis.tests.waveform_view
+import std.draw as draw
+import std.files as files
+import std.math as math
+import std.path as path
+import std.testing as test
+import std.timeline as timeline
+import "../src/waveform_view.ai" as waveform
+
+fn ink() -> draw.Color effects {} {draw.rgb(20,240,30)}
+fn model(zoom:f64,left:f64,top:f64) -> timeline.Timeline effects {alloc} {
+  var value:timeline.Timeline=timeline.timeline(60.0,zoom,left,top)
+  let _=timeline.push_track(value,timeline.track(1,timeline.track_audio(),"Authored stereo peaks",40.0))
+  value
+}
+fn peaks(count:u64,value:f64) -> array<f64> effects {alloc} {
+  var out:array<f64> =array.new()
+  var at:u64=0
+  loop {if at>=count {break}
+    array.push(out,value)
+    at=at+1}
+  out
+}
+fn rendered(value:ref<timeline.Timeline>,lane:u64,length:i64,values:view<f64>,
+    left:f64,top:f64,right:f64,bottom:f64) -> draw.Surface effects {alloc} {
+  var canvas:draw.Canvas=draw.canvas(option.unwrap(draw.surface(320,80)))
+  draw.clear(canvas,draw.rgb(0,0,0))
+  waveform.paint(canvas,ink(),value,lane,0,length,values,left,top,right,bottom)
+  draw.finish(canvas)
+}
+fn green(surface:ref<draw.Surface>,x:u32,y:u32) -> bool effects {} {
+  match draw.surface_pixel(surface,x,y) {
+    none=>false,some(value)=>value.r==20 and value.g==240 and value.b==30,
+  }
+}
+fn near_green(surface:ref<draw.Surface>,x:u32,y:u32) -> bool effects {} {
+  var at:u32=if x>2 {x-2}else{0}
+  loop {if at>x+2 {break}
+    if green(surface,at,y) {return true}
+    at=at+1}
+  false
+}
+fn columns(surface:ref<draw.Surface>,y:u32) -> u64 effects {} {
+  var total:u64=0
+  var x:u32=0
+  loop {if x>=surface.width {break}
+    if green(surface,x,y) {total=total+1}
+    x=x+1}
+  total
+}
+fn painted_pixels(surface:ref<draw.Surface>) -> u64 effects {} {
+  var total:u64=0
+  var y:u32=0
+  loop {if y>=surface.height {break}
+    total=total+columns(surface,y)
+    y=y+1}
+  total
+}
+
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Waveform viewport transient preservation",false)
+
+  let _=test.start(suite,"Full-duration Fit preserves sparse first, interior and last impulses")
+  var fitted:timeline.Timeline=model(300.0/76701.0,10.0,10.0)
+  var sparse:array<f64> =peaks(25567,0.0)
+  array.set(sparse,0,0.8)
+  array.set(sparse,12345,0.9)
+  array.set(sparse,25566,1.0)
+  var fitted_image:draw.Surface=rendered(fitted,0,76701,array.view(sparse),10.0,0.0,310.0,80.0)
+  // Each bucket covers three authored frames. The middle impulse is deliberately
+  // not a regular decimation sample; its time is independent of grouping stride.
+  let middle_x:u32=cast.sat(10.0+300.0*12345.0/25567.0)
+  let _=test.check(suite,near_green(fitted_image,10,20),"First bucket remains visible at the authored clip start")
+  let _=test.check(suite,near_green(fitted_image,middle_x,18),"A rare unsampled interior transient remains visible at its time")
+  let _=test.check(suite,near_green(fitted_image,309,15),"Last bucket remains visible at the authored clip end")
+  let _=test.check(suite,not green(fitted_image,100,20),"Silent interior time does not acquire an unrelated impulse")
+  let _=test.check(suite,not green(fitted_image,9,25) and not green(fitted_image,310,25),"Neither endpoint paints beyond the fitted clip")
+  let _=test.check(suite,columns(fitted_image,25)<=9,"Three sparse impulses occupy bounded local columns")
+  let _=test.near_f64(suite,array.get(sparse,12345),0.9,0.0,"Painting does not mutate processed peaks")
+  let _=test.eq_u64(suite,array.len(sparse),25567,"Painting keeps the complete long-clip peak array")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Dense complete peaks produce a viewport-bounded number of groups")
+  var dense:array<f64> =peaks(65536,1.0)
+  let dense_window:waveform.Window=waveform.window(65536,10.0,310.0,10.0,310.0)
+  let group_count:u64=(dense_window.last-dense_window.first+dense_window.stride-1)/dense_window.stride
+  let _=test.check(suite,dense_window.first==0 and dense_window.last==65536 and dense_window.stride>0,"Every endpoint is covered by a finite grouping")
+  let _=test.check(suite,group_count<=302,"Sixty-five thousand peaks require at most viewport-width groups")
+  var dense_image:draw.Surface=rendered(fitted,0,76701,array.view(dense),10.0,0.0,310.0,80.0)
+  let _=test.check(suite,columns(dense_image,20)<=300 and columns(dense_image,20)>0,"Actual raster output stays within the 300-column viewport")
+  let _=test.check(suite,near_green(dense_image,10,20) and near_green(dense_image,309,20),"Dense grouping keeps both physical endpoints")
+  let _=test.check(suite,not green(dense_image,9,20) and not green(dense_image,310,20),"Dense data cannot paint outside the clip")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Zoomed viewport selects the authored bucket interval and amplitudes")
+  var zoomed:timeline.Timeline=model(1.0,-100.0,10.0)
+  var zoom_peaks:array<f64> =peaks(12,0.0)
+  array.set(zoom_peaks,0,1.0)
+  array.set(zoom_peaks,1,0.25)
+  array.set(zoom_peaks,2,0.5)
+  array.set(zoom_peaks,3,0.75)
+  array.set(zoom_peaks,4,1.0)
+  let visible:waveform.Window=waveform.window(12,-100.0,1100.0,0.0,300.0)
+  let _=test.eq_u64(suite,visible.first,1,"Left edge begins at bucket one: frame100")
+  let _=test.eq_u64(suite,visible.last,4,"Right exclusive edge ends before bucket four: frame400")
+  var zoom_image:draw.Surface=rendered(zoomed,0,1200,array.view(zoom_peaks),0.0,0.0,300.0,80.0)
+  let _=test.check(suite,green(zoom_image,50,29) and not green(zoom_image,50,20),"First visible quarter-height peak is not replaced by the hidden maximum")
+  let _=test.check(suite,green(zoom_image,150,25) and not green(zoom_image,150,20),"Middle half-height peak keeps its amplitude")
+  let _=test.check(suite,green(zoom_image,250,20),"Last visible three-quarter peak keeps its amplitude")
+  let _=test.check(suite,not green(zoom_image,300,20) and not green(zoom_image,310,20),"Right-side offscreen peak is excluded")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Offscreen lanes and vertical clipping preserve neighboring panels")
+  var below:timeline.Timeline=model(1.0,0.0,100.0)
+  var full:array<f64> =peaks(3,1.0)
+  var below_image:draw.Surface=rendered(below,0,300,array.view(full),0.0,0.0,300.0,60.0)
+  let _=test.eq_u64(suite,painted_pixels(below_image),0,"A fully offscreen lane paints zero pixels")
+  var invalid_image:draw.Surface=rendered(fitted,8,76701,array.view(full),0.0,0.0,300.0,80.0)
+  let _=test.eq_u64(suite,painted_pixels(invalid_image),0,"An absent lane paints zero pixels")
+  var ordinary:timeline.Timeline=model(1.0,0.0,10.0)
+  var clipped:draw.Surface=rendered(ordinary,0,300,array.view(full),0.0,20.0,300.0,44.0)
+  let _=test.check(suite,green(clipped,150,20) and green(clipped,150,43),"An intersecting lane paints the allowed vertical interior")
+  let _=test.check(suite,not green(clipped,150,19) and not green(clipped,150,44),"Clip boundaries protect both neighboring panel rows")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Nonfinite and negative peaks cannot poison pixels; headroom is display-clamped")
+  var unusual:array<f64> =array.new()
+  array.push(unusual,math.nan())
+  array.push(unusual,math.infinity())
+  array.push(unusual,-0.5)
+  array.push(unusual,1.75)
+  let _=test.near_f64(suite,waveform.maximum(array.view(unusual),0,3),0.0,0.0,"Invalid and negative peaks reduce to zero")
+  let _=test.near_f64(suite,waveform.maximum(array.view(unusual),0,4),1.0,0.0,"Finite raw bus headroom clamps only for display")
+  let _=test.near_f64(suite,waveform.maximum(array.view(unusual),7,9),0.0,0.0,"An empty out-of-range selection is harmless")
+  var unusual_model:timeline.Timeline=model(0.75,0.0,10.0)
+  var unusual_image:draw.Surface=rendered(unusual_model,0,400,array.view(unusual),0.0,0.0,300.0,80.0)
+  let _=test.check(suite,not green(unusual_image,30,25) and not green(unusual_image,110,25) and not green(unusual_image,190,25),"All three invalid or negative bins leave the raster black")
+  let _=test.check(suite,green(unusual_image,270,15) and not green(unusual_image,270,13),"Headroom draws the unit peak without exceeding its lane")
+  let _=test.near_f64(suite,array.get(unusual,3),1.75,0.0,"Display clamping does not overwrite the raw bus peak")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Empty or invalid viewport ranges do not paint or produce invalid windows")
+  var empty:array<f64> =array.new()
+  var empty_image:draw.Surface=rendered(fitted,0,76701,array.view(empty),0.0,0.0,300.0,80.0)
+  let _=test.eq_u64(suite,painted_pixels(empty_image),0,"No peaks produce no pixels")
+  let empty_window:waveform.Window=waveform.window(0,0.0,300.0,0.0,300.0)
+  let _=test.check(suite,empty_window.first==0 and empty_window.last==0 and empty_window.stride==1,"Empty input has a valid empty window")
+  let outside:waveform.Window=waveform.window(12,400.0,500.0,0.0,300.0)
+  let _=test.eq_u64(suite,outside.last,0,"A horizontally invisible clip has no selected bins")
+  let invalid:waveform.Window=waveform.window(12,0.0,300.0,math.nan(),300.0)
+  let _=test.eq_u64(suite,invalid.last,0,"Nonfinite viewport coordinates are refused")
+  let reversed:waveform.Window=waveform.window(12,300.0,0.0,0.0,300.0)
+  let _=test.eq_u64(suite,reversed.last,0,"Reversed clip endpoints are refused")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"waveform-view-tests.json"),6)
+}

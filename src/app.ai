@@ -563,11 +563,24 @@ pub fn clamp_track_scroll(state: ref<App>, height: f64) -> u64 effects {} {
   set_track_scroll(state,if same {track_scroll(state)}else{0},height)
 }
 pub fn set_zoom(state: ref<App>, value: f64) -> f64 effects {} {
+  if not math.is_finite(value) { return zoom(state) }
   var next: f64 = value
-  if next < 0.05 { next = 0.05 }
+  // One logical pixel can represent the complete signed frame domain. Fit must
+  // not acquire an unrelated short-project lower limit.
+  let minimum: f64 = 1.0 / 9223372036854775807.0
+  if next < minimum { next = minimum }
   if next > 40.0 { next = 40.0 }
   struct.set(struct.borrow(state, field=viewport), next, field=pixels_per_frame)
   next
+}
+// Requests use a half-open frame range. Round upward so the final fitted frame
+// is not lost to division rounding, and leave room for a nonzero scroll origin.
+pub fn visible_span(state: ref<App>, width: f64) -> i64 effects {} {
+  if not math.is_finite(width) or width <= 0.0 { return 0 }
+  let room: i64 = 9223372036854775807 - scroll(state)
+  if room <= 0 { return 0 }
+  let wanted: i64 = cast.sat(math.ceil(width / zoom(state)))
+  if wanted > room { room } else { wanted }
 }
 pub fn set_scroll(state: ref<App>, value: i64) -> i64 effects {} {
   let next: i64 = if value < 0 { 0 } else { value }
@@ -631,21 +644,64 @@ pub fn default_audio_track(state: ref<App>) -> u64 effects {} {
 
 // ---- waveform cache -------------------------------------------------------
 
+pub fn waveform_bucket_limit() -> u64 effects {} {65536}
+pub fn waveform_peak_budget() -> u64 effects {} {262144}
+pub fn waveform_peak_count(state: ref<App>) -> u64 effects {} {
+  var total: u64=0
+  var at: u64=0
+  loop {if at >= array.len(struct.borrow(state,field=waveforms)) {break}
+    total=total+array.len(struct.borrow(array.borrow(struct.borrow(state,field=waveforms),at),field=peaks))
+    at=at+1
+  }
+  total
+}
+pub fn touch_waveform(state: ref<App>, clip: u64) -> unit effects {alloc} {
+  var previous: array<Waveform> =ref.swap(struct.borrow(state,field=waveforms),array.new())
+  var reverse: array<Waveform> =array.new()
+  var found: option<Waveform> =option.none()
+  loop {match array.pop(previous) {none=>{break},some(entry)=>{
+    if entry.clip == clip {let _=ref.swap(found,option.some(entry))}else{array.push(reverse,entry)}
+  },}}
+  loop {match array.pop(reverse) {none=>{break},some(entry)=>array.push(struct.borrow(state,field=waveforms),entry),}}
+  match found {none=>{},some(entry)=>array.push(struct.borrow(state,field=waveforms),entry),}
+  ()
+}
 pub fn set_waveform(state: ref<App>, clip: u64, peaks: array<f64> own, first: i64, last: i64, revision: u64) -> unit effects {alloc} {
   var incoming: array<f64> = peaks
   let value: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{return ()},}
-  var updated: Waveform = Waveform {clip:clip,source:value.source,length:value.length,first:first,last:last,revision:revision,document_revision:state.document_revision,peaks:incoming}
-  var index: u64 = 0
-  loop {
-    if index >= array.len(struct.borrow(state, field=waveforms)) { break }
-    let entry: ref<Waveform> = array.borrow(struct.borrow(state, field=waveforms), index)
-    if struct.get(entry, field=clip) == clip {
-      let _ = ref.swap(entry,updated)
-      return ()
-    }
-    index = index + 1
+  let count: u64=array.len(incoming)
+  if count == 0 or count > waveform_bucket_limit() {return ()}
+  var check: u64=0
+  loop {if check >= count {break}
+    let peak: f64=array.get(incoming,check)
+    if not math.is_finite(peak) or peak < 0.0 {return ()}
+    check=check+1
   }
-  array.push(struct.borrow(state, field=waveforms), updated)
+  var updated: Waveform = Waveform {clip:clip,source:value.source,length:value.length,first:first,last:last,revision:revision,document_revision:state.document_revision,peaks:incoming}
+  // Entries are ordered by successful update. Invalid/failed incoming work
+  // never evicts a prior entry; drop oldest other clips only after validation.
+  var total: u64=count
+  var index: u64 = 0
+  loop {if index >= array.len(struct.borrow(state,field=waveforms)) {break}
+    let entry: ref<Waveform> =array.borrow(struct.borrow(state,field=waveforms),index)
+    if entry.clip != clip {total=total+array.len(struct.borrow(entry,field=peaks))}
+    index=index+1
+  }
+  var evict: u64=0
+  loop {if total <= waveform_peak_budget() or evict >= array.len(struct.borrow(state,field=waveforms)) {break}
+    let entry: ref<Waveform> =array.borrow(struct.borrow(state,field=waveforms),evict)
+    if entry.clip != clip {total=total-array.len(struct.borrow(entry,field=peaks))}
+    evict=evict+1
+  }
+  var previous: array<Waveform> =ref.swap(struct.borrow(state,field=waveforms),array.new())
+  var reverse: array<Waveform> =array.new()
+  loop {if array.len(previous) == 0 {break}
+    let position: u64=array.len(previous)-1
+    var entry: Waveform=option.unwrap(array.pop(previous))
+    if position >= evict and entry.clip != clip {array.push(reverse,entry)}
+  }
+  loop {match array.pop(reverse) {none=>{break},some(entry)=>array.push(struct.borrow(state,field=waveforms),entry),}}
+  array.push(struct.borrow(state,field=waveforms),updated)
   ()
 }
 

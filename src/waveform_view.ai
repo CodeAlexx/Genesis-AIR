@@ -1,0 +1,62 @@
+// Complete processed peaks retain clip time. Only intersecting bins are painted;
+// subpixel bins are max-reduced so fitting a long clip preserves transients.
+module genesis.waveform_view
+import std.draw as draw
+import std.geometry as geometry
+import std.math as math
+import std.timeline as timeline
+
+pub type Window = struct {first:u64,last:u64,stride:u64}
+pub fn window(count:u64, left:f64, right:f64, first:f64, last:f64) -> Window effects {} {
+  let empty: Window = Window {first:0,last:0,stride:1}
+  if count == 0 or not math.is_finite(left) or not math.is_finite(right) or
+      not math.is_finite(first) or not math.is_finite(last) or right <= left or
+      last <= first or last <= left or first >= right {return empty}
+  let step: f64 = (right-left)/cast.float(count)
+  if not math.is_finite(step) or step <= 0.0 {return empty}
+  let raw_stride: u64 = cast.sat(math.ceil(1.0/step))
+  let stride: u64 = if raw_stride < 1 {1}else if raw_stride > count {count}else{raw_stride}
+  let raw_first: u64 = cast.sat(math.floor((math.max(first,left)-left)/step))
+  let begin: u64 = (raw_first/stride)*stride
+  let raw_last: u64 = cast.sat(math.ceil((math.min(last,right)-left)/step))
+  Window {first:begin,last:if raw_last > count {count}else{raw_last},stride:stride}
+}
+pub fn maximum(values:view<f64>, first:u64, last:u64) -> f64 effects {} {
+  var peak:f64=0.0
+  var at:u64=first
+  let end:u64=if last < view.len(values) {last}else{view.len(values)}
+  loop {if at >= end {break}
+    let value:f64=view.get(values,at)
+    if math.is_finite(value) {peak=math.max(peak,value)}
+    at=at+1}
+  math.min(1.0,peak)
+}
+pub fn paint(canvas:ref<draw.Canvas>, color:draw.Color, model:ref<timeline.Timeline>,
+    lane:u64, start:i64, length:i64, values:view<f64>,
+    first:f64, top_edge:f64, last:f64, bottom_edge:f64) -> unit effects {alloc} {
+  if lane >= array.len(struct.borrow(model,field=tracks)) {return ()}
+  let top:f64=timeline.track_top(model,lane)
+  let height:f64=struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=height)
+  if top >= bottom_edge or top+height <= top_edge {return ()}
+  let left:f64=timeline.frame_to_x(model,start)
+  let right:f64=timeline.frame_to_x(model,add.sat(start,length))
+  let bins:Window=window(view.len(values),left,right,first,last)
+  if bins.last <= bins.first {return ()}
+  let step:f64=(right-left)/cast.float(view.len(values))
+  let middle:f64=top+height*0.5
+  var at:u64=bins.first
+  loop {if at >= bins.last {break}
+    let end:u64=if bins.stride > view.len(values)-at {view.len(values)}else{at+bins.stride}
+    let peak:f64=maximum(values,at,end)
+    let reach:f64=peak*math.max(0.0,height*0.5-4.0)
+    let raw_x:f64=left+step*cast.float(at)
+    // A subpixel group represents one visible column. Align that column so
+    // fractional rectangle coverage cannot fade a short isolated transient.
+    let x:f64=if step < 1.0 {math.floor(raw_x)}else{raw_x}
+    let width:f64=math.max(1.0,step*cast.float(end-at)-1.0)
+    match geometry.rect(math.max(first,x),math.max(top_edge,middle-reach),
+        math.min(math.min(last,right),x+width),math.min(bottom_edge,middle+reach)) {
+      some(box)=>draw.fill_rect(canvas,box,color),none=>{},}
+    at=end}
+  ()
+}

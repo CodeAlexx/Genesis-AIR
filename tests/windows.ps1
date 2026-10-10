@@ -54,6 +54,10 @@ try {
   Set-Content -LiteralPath (Join-Path $root 'ui-clipboard-windows.log') -Value $clipboardResult
   Write-Host (Invoke-Native 'genesis-timeline-track-scroll.exe' @((Join-Path $work 'track-scroll'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'track-scroll/timeline-track-scroll-tests.json') -Destination (Join-Path $root 'timeline-track-scroll-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-waveform-view.exe' @((Join-Path $work 'waveform-view'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'waveform-view/waveform-view-tests.json') -Destination (Join-Path $root 'waveform-view-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-waveform-detail.exe' @((Join-Path $work 'waveform-detail'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'waveform-detail/waveform-detail-tests.json') -Destination (Join-Path $root 'waveform-detail-tests.json') -Force
   $previousStripFixture = $env:GENESIS_TEST_STRIP_INPUT
   try {
     $env:GENESIS_TEST_STRIP_INPUT = Join-Path $work 'strip-viewport/strip-worker.txt'

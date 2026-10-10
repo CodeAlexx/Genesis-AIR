@@ -27,6 +27,7 @@ import "chrome.ai" as chrome
 import "layout.ai" as layout
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
+import "waveform_view.ai" as waveform_view
 
 pub type Theme = struct {
   background: draw.Color,
@@ -279,23 +280,29 @@ pub fn timeline_model(state: ref<app.App>, area: layout.Rect) -> timeline.Timeli
   model
 }
 
+// Thin out whole-second ticks at distant zoom instead of visiting every second
+// until a fixed loop limit leaves the right side of a long project unlabelled.
+pub fn ruler_stride(fps: f64, zoom: f64) -> i64 effects {} {
+  let second: i64 = if math.is_finite(fps) and fps >= 1.0 { cast.sat(math.round(fps)) } else { 1 }
+  if not math.is_finite(zoom) or zoom <= 0.0 { return second }
+  let seconds: i64 = cast.sat(math.max(1.0,math.ceil(6.0/(cast.float(second)*zoom))))
+  if seconds > 9223372036854775807/second { return 9223372036854775807 }
+  seconds*second
+}
 fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                area: layout.Rect, model: ref<timeline.Timeline>, fps: f64) -> unit effects {alloc} {
   fill(canvas, area, colors.timeline)
   outline(canvas, area, colors.edge)
-  let step: i64 = if fps >= 1.0 { cast.sat(math.round(fps)) } else { 1 }
-  // A timecode is eleven characters wide, so at close zoom only every Nth second can carry
-  // one. Ticking every second while labelling every Nth is what keeps them from colliding.
-  let stamp_width: f64 = ui_text.width(struct.borrow(state, field=typography), "00 00 00 00", type_small()) + 10.0
+  let step: i64 = ruler_stride(fps,app.zoom(state))
+  // Labels stay on whole-second boundaries. At distant zoom the minor ticks
+  // also advance by several seconds, keeping both draw work and labels bounded.
+  let far_frame: i64 = app.scroll(state)+app.visible_span(state,layout.width_of(area))
+  let far_stamp: string = timeline.timecode(far_frame,fps)
+  let stamp_width: f64 = math.max(ui_text.width(struct.borrow(state, field=typography), "00 00 00 00", type_small()),
+    ui_text.width(struct.borrow(state, field=typography),str.view(far_stamp),type_small()))+10.0
   let ticks_per_second: f64 = cast.float(step)
   let per_tick: f64 = ticks_per_second * app.zoom(state)
-  var every: i64 = 1
-  loop {
-    if every > 3600 { break }
-    let spacing: f64 = cast.float(every)
-    if spacing * per_tick >= stamp_width { break }
-    every = every + 1
-  }
+  let every: i64 = cast.sat(math.max(1.0,math.ceil(stamp_width/per_tick)))
   var frame: i64 = app.scroll(state)
   // Start on a whole second so the labelled ticks do not shift while scrolling.
   frame = frame - (frame - (frame / step) * step)
@@ -316,6 +323,7 @@ fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
         label(canvas, struct.borrow(state, field=typography), x + 4.0, area.top + 4.0, str.view(stamp), type_small(), colors.dim)
       }
     }
+    if frame > 9223372036854775807-step { break }
     frame = frame + step
     ticks = ticks + 1
     guard = guard + 1
@@ -377,7 +385,7 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 // Waveforms for the audio clips, from the cache the application refreshed. The lane index
 // matches the one `editor_view.view` assigned, so the bars land on their own clip.
 fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state: ref<app.App>,
-                   model: ref<timeline.Timeline>) -> unit effects {alloc} {
+                   model: ref<timeline.Timeline>, area: layout.Rect) -> unit effects {alloc} {
   let count: u64 = app.waveform_count(state)
   if count == 0 { return () }
   let document: ref<editor.Document> = struct.borrow(state, field=document)
@@ -407,8 +415,8 @@ fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state
         }
         if position < total {
           let lane: u64 = total - 1 - position
-          editor_view.paint_waveform(canvas, colours, model, lane, value.start, value.length,
-            array.view(struct.borrow(entry, field=peaks)))
+          waveform_view.paint(canvas, colours.waveform, model, lane, value.start, value.length,
+            array.view(struct.borrow(entry, field=peaks)),area.left,area.top,area.right,area.bottom)
         }
       },
     }
@@ -465,7 +473,7 @@ fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   timeline.paint(model, canvas, area.right)
   let colours: editor_view.Palette = editor_view.dark()
   paint_thumbnails(canvas, state, model, area)
-  paint_waveforms(canvas, colours, state, model)
+  paint_waveforms(canvas, colours, state, model, area)
   // Redraw the seek handle above thumbnail/waveform pixels.
   let head: f64 = timeline.frame_to_x(model, app.timeline_frame(state))
   if head >= area.left and head < area.right { fill_at(canvas, head - 1.0, area.top, head + 2.0, area.bottom, colors.focus) }

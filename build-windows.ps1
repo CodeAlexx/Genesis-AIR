@@ -87,6 +87,8 @@ if ($RunTests) { $sources += ,@('picture-memory', 'tests/picture_memory.ai') }
 if ($RunTests) { $sources += ,@('nested-waveforms', 'tests/nested_waveforms.ai') }
 if ($RunTests) { $sources += ,@('direct-waveforms', 'tests/direct_waveforms.ai') }
 if ($RunTests) { $sources += ,@('timeline-track-scroll', 'tests/timeline_track_scroll.ai') }
+if ($RunTests) { $sources += ,@('waveform-view', 'tests/waveform_view.ai') }
+if ($RunTests) { $sources += ,@('waveform-detail', 'tests/waveform_detail.ai') }
 if ($RunTests) { $sources += ,@('strip-viewport', 'tests/strip_viewport.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
@@ -124,6 +126,8 @@ if ($RunTests) { $targets += @('genesis-picture-memory', 'genesis-picture-memory
 if ($RunTests) { $targets += @('genesis-nested-waveforms') }
 if ($RunTests) { $targets += @('genesis-direct-waveforms') }
 if ($RunTests) { $targets += @('genesis-timeline-track-scroll') }
+if ($RunTests) { $targets += @('genesis-waveform-view') }
+if ($RunTests) { $targets += @('genesis-waveform-detail') }
 if ($RunTests) { $targets += @('genesis-strip-viewport') }
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
