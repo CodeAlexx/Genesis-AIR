@@ -977,8 +977,8 @@ python3 tests/window_file_picker.py --binary build/genesis-air \
 
 ## Known gaps
 
-The current root application is the session-safety checkpoint described in
-[control coverage](docs/CONTROL_COVERAGE.md#concurrent-sessions-and-transition-fidelity-on-2026-10-10).
+The current root application includes the session-safety checkpoint and the
+[final-output audio mixer fix](docs/CONTROL_COVERAGE.md#overlapping-audio-headroom-on-2026-10-10).
 Its combined Windows suite passed 749 control outcomes, recovery ownership,
 concurrent media isolation, spatial preview/master comparisons and the audio,
 HDR and cancellation gates. The supplied video also passed the native
@@ -1007,9 +1007,12 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   slightly from whole-range WAV decoding; generated PCM continuity checks do not establish
   sample-identical seeking for every codec.
 - Nested sequence rendering, track/audio-filter automation, animated speed and some filter combinations
-  remain unfinished. An independent signed-overlap PCM test also reproduces
-  order-dependent audio levels from per-addition clipping; fixing the mixer to
-  preserve headroom until final output is pending.
+  remain unfinished. Clip fade-length keys currently affect pictures but audio
+  still reads scalar fades; the Fade slider's display/write path also needs to
+  follow existing keys. Imported nested audio can be silently omitted and needs
+  an explicit refusal until recursive sequence mixing is implemented.
+  Overlapping signed audio now retains float headroom until final output, so
+  rearranging clip storage no longer changes levels through intermediate clipping.
   Clip gain automation is covered above. The library has mappings for 31 video and
   20 audio effects; representative output checks do not establish every parameter value,
   ordering combination or keyframe behavior.

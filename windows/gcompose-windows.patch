@@ -1947,7 +1947,7 @@ index 7bc6fbe..f322f60 100644
 +    { true }
 +}
 diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
-index c987aa3..d636d65 100644
+index c987aa3..fd664be 100644
 --- a/gcompose/src/main.rs
 +++ b/gcompose/src/main.rs
 @@ -22,6 +22,13 @@
@@ -2131,7 +2131,20 @@ index c987aa3..d636d65 100644
      let ts = (*enc_count as f64) / fps;
      if !e.video_frame(&frame, ts) {
          eprintln!("[gcompose] enc video_frame failed @ {}", *enc_count);
-@@ -1300,21 +1331,24 @@ impl ProgAudio {
+@@ -1290,6 +1321,12 @@ struct ProgAudio {
+     gain_env: Vec<(f64, f32)>, // (sec, gain), sorted ascending by sec
+ }
+ 
++// Every consumer observes the same final hard limiter, after all signed clip
++// contributions have been summed. The accumulator itself retains float headroom.
++fn final_audio_sample(sample: f32) -> f32 {
++    sample.clamp(-1.0, 1.0)
++}
++
+ impl Default for ProgAudio {
+     fn default() -> Self {
+         ProgAudio { buf: Vec::new(), active: false, gain_env: Vec::new() }
+@@ -1300,21 +1337,24 @@ impl ProgAudio {
      /// (Re)allocate the accumulator to `total_s` seconds of silence and mark it active. A prior
      /// (unconsumed) buffer is dropped. `total_s` is clamped to a sane ceiling so a pathological
      /// duration can't blow up the allocation.
@@ -2170,7 +2183,27 @@ index c987aa3..d636d65 100644
      }
  
      /// Drop the accumulator and mark inactive (after CLOSE/WAVECLOSE consumes it).
-@@ -1360,9 +1394,9 @@ impl ProgAudio {
+@@ -1326,7 +1366,8 @@ impl ProgAudio {
+     }
+ 
+     /// Mix `samples` (interleaved stereo @ 48000, already gain-applied) into the accumulator at
+-    /// frame offset `dst_frame` (samples-per-channel offset). Sample-adds and clamps to [-1,1].
++    /// frame offset `dst_frame` (samples-per-channel offset). Retains float headroom so
++    /// overlapping signed contributions can cancel before one final output limiter.
+     /// Samples that would land past the end of the accumulator are dropped (the accumulator is the
+     /// authoritative timeline length, so a clip running slightly long is truncated to it).
+     ///
+@@ -1350,8 +1391,7 @@ impl ProgAudio {
+         let room = self.buf.len() - start;
+         let take = n.min(room);
+         for i in 0..take {
+-            let v = self.buf[start + i] + samples[i];
+-            self.buf[start + i] = v.clamp(-1.0, 1.0);
++            self.buf[start + i] += samples[i];
+         }
+     }
+ 
+@@ -1360,24 +1400,34 @@ impl ProgAudio {
      /// across calls), so chunking is purely to bound the per-call slice — the muxed result is the
      /// single continuous timeline-length program audio. Best-effort: a rejected chunk is logged and
      /// the drain stops (the already-fed audio still muxes on finish).
@@ -2182,9 +2215,23 @@ index c987aa3..d636d65 100644
          }
          // ~0.25 s of stereo @ 48k per chunk (12000 frames). Aligned to whole interleaved samples.
          const CHUNK_FRAMES: usize = 12_000;
-@@ -1374,10 +1408,11 @@ impl ProgAudio {
++        // Limit one bounded chunk at the output boundary; never rewrite the
++        // accumulator, which must retain headroom for later signed additions.
++        let mut limited = Vec::new();
++        if limited.try_reserve_exact(CHUNK_FRAMES * PROG_CH).is_err() {
++            eprintln!("[GA_AUDIO_ALLOCATION] cannot reserve limited encoder chunk");
++            return false;
++        }
+         let total_frames = self.buf.len() / PROG_CH;
+         let mut f = 0usize;
+         while f < total_frames {
+             let nb = CHUNK_FRAMES.min(total_frames - f);
+             let off = f * PROG_CH;
              let slice = &self.buf[off..off + nb * PROG_CH];
-             if !e.audio_samples(slice, nb) {
+-            if !e.audio_samples(slice, nb) {
++            limited.clear();
++            limited.extend(slice.iter().copied().map(final_audio_sample));
++            if !e.audio_samples(&limited, nb) {
                  eprintln!("[gcompose] enc audio_samples failed draining accumulator @ frame {f}");
 -                return;
 +                return false;
@@ -2195,7 +2242,36 @@ index c987aa3..d636d65 100644
      }
  
      /// Per-channel PEAK + RMS of the accumulator, in dBFS (P3 level meter). Returns
-@@ -1534,7 +1569,7 @@ fn gainenv_set(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1397,7 +1447,7 @@ impl ProgAudio {
+         for fr in 0..frames {
+             let base = fr * PROG_CH;
+             for ch in 0..PROG_CH {
+-                let s = self.buf[base + ch];
++                let s = final_audio_sample(self.buf[base + ch]);
+                 let a = s.abs();
+                 if a > peak[ch] {
+                     peak[ch] = a;
+@@ -1432,8 +1482,8 @@ impl ProgAudio {
+         let mut re = vec![0.0f32; N];
+         let mut im = vec![0.0f32; N];
+         for i in 0..take {
+-            let l = self.buf[i * PROG_CH];
+-            let r = if PROG_CH > 1 { self.buf[i * PROG_CH + 1] } else { l };
++            let l = final_audio_sample(self.buf[i * PROG_CH]);
++            let r = if PROG_CH > 1 { final_audio_sample(self.buf[i * PROG_CH + 1]) } else { l };
+             let s = 0.5 * (l + r);
+             // Hann window
+             let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (N as f32 - 1.0)).cos();
+@@ -1460,7 +1510,7 @@ impl ProgAudio {
+         if win == 0 { return out; }
+         for k in 0..n {
+             let fr = (k * win) / n;            // decimate the window to n points
+-            out[k] = self.buf[fr * PROG_CH];   // LEFT channel (interleaved)
++            out[k] = final_audio_sample(self.buf[fr * PROG_CH]); // LEFT output channel
+         }
+         out
+     }
+@@ -1534,7 +1584,7 @@ fn gainenv_set(line: &str, prog: &mut ProgAudio) -> bool {
  /// Per-clip audio-decode capacity ceiling (in FLOATS), shared by AUDIO mixing. Mirrors MojoMedia's
  /// AUF (180 s stereo 48k + headroom) used as a per-decode cap. Bounds the temp decode buffer and
  /// guarantees the `cap as c_int` narrowing in ffi::decode_audio_range is lossless & positive.
@@ -2204,7 +2280,7 @@ index c987aa3..d636d65 100644
  
  /// `AUDIO <path> <src_in_s> <dur_s> <dst_offset_s> <gain> <fade_in_s> <fade_out_s> <clip_len_s>
  /// <range_local_s> <fx_chain|->` — decode the SOURCE audio range [src_in_s, src_in_s+dur_s) of
-@@ -1546,19 +1581,164 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
+@@ -1546,19 +1596,164 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
  /// full length is `clip_len_s`. This is the timeline-sync fix plus per-clip volume/fades/FX: the clip
  /// is positioned at its timeline offset, not concatenated.
  ///
@@ -2378,7 +2454,7 @@ index c987aa3..d636d65 100644
      // No active accumulator: a stray AUDIO outside an OPEN/WAVE session. ERR (client skips).
      if !prog.active {
          eprintln!("[gcompose] AUDIO with no active accumulator (no OPEN/WAVE)");
-@@ -1572,10 +1752,21 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1572,10 +1767,21 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // the path is a pool media path like ENC/THUMB), so a fixed-arity split is safe. The trailing 4
      // numeric fields carry the per-clip AUDIO FADE envelope (applied per-sample below); the FINAL
      // token is the per-clip libavfilter chain ("-" when the AudioFx is neutral).
@@ -2401,7 +2477,7 @@ index c987aa3..d636d65 100644
      // WHITESPACE-SAFE WIRE: the UI percent-encodes the media path token (enc_path); decode it here
      // (dec_path) BEFORE opening the decoder. A space-free path decodes to itself (identity).
      let path = dec_path(f[1]);
-@@ -1628,49 +1819,43 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1628,49 +1834,43 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
          return false;
      }
  
@@ -2476,7 +2552,7 @@ index c987aa3..d636d65 100644
  
      // Apply per-clip GAIN + FADE envelope in place (Triad-B P1). The gain is a flat linear multiplier;
      // the fades ramp the gain 0→1 over [0, fade_in_s) and 1→0 over [clip_len_s − fade_out_s,
-@@ -1685,7 +1870,7 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1685,7 +1885,7 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // Run the per-sample loop when the per-clip gain isn't unity, OR there's a fade, OR a master
      // envelope is present (the last clause is the GATE case: a flat-gain, fade-less clip still needs
      // the master envelope applied). When all three are absent the loop is skipped — identical to today.
@@ -2485,7 +2561,7 @@ index c987aa3..d636d65 100644
          let sr_f = PROG_SR as f64;
          let fade_out_start = clip_len_s - fade_out_s; // clip-local time where fade-out begins
          let frames = samples.len() / PROG_CH;
-@@ -1705,7 +1890,8 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1705,7 +1905,8 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
              // (dst_off_s = the clip's destination offset in the program; fr/sr = frames into the
              // range). Empty menv → eval_gain_env == 1.0 → unchanged.
              let abs_t = dst_off_s + (fr as f64) / sr_f;
@@ -2495,7 +2571,7 @@ index c987aa3..d636d65 100644
              let base = fr * PROG_CH;
              for ch in 0..PROG_CH {
                  samples[base + ch] *= g;
-@@ -1739,8 +1925,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1739,8 +1940,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
      if !total_s.is_finite() || total_s < 0.0 {
          return false;
      }
@@ -2505,7 +2581,7 @@ index c987aa3..d636d65 100644
  }
  
  /// `WAVECLOSE <out_wav>` — write the playback accumulator to `<out_wav>` as a 16-bit PCM stereo @
-@@ -1753,12 +1938,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
+@@ -1753,12 +1953,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
          eprintln!("[gcompose] bad WAVECLOSE ({} fields): {line}", f.len());
          return None;
      }
@@ -2520,7 +2596,7 @@ index c987aa3..d636d65 100644
      prog.clear();
      if ok {
          Some(out.to_string())
-@@ -1788,8 +1973,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1788,8 +1988,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
      if !window_s.is_finite() || window_s < 0.0 {
          return false;
      }
@@ -2530,7 +2606,18 @@ index c987aa3..d636d65 100644
  }
  
  /// `LEVELS <out>` — measure the active accumulator's per-channel PEAK + RMS (dBFS), write the 4
-@@ -1974,7 +2158,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
+@@ -1940,8 +2139,8 @@ fn write_wav_pcm16(path: &str, samples: &[f32], sr: u32, ch: u16) -> bool {
+     out.extend_from_slice(b"data");
+     out.extend_from_slice(&data_bytes.to_le_bytes());
+     for &s in samples {
+-        // Clamp + scale to s16. (Mix already clamps, but re-clamp defensively.)
+-        let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i32;
++        // The same final limiter feeds WAV, encoded audio and output scopes.
++        let v = (final_audio_sample(s) * 32767.0).round() as i32;
+         out.extend_from_slice(&(v as i16).to_le_bytes());
+     }
+     std::fs::write(path, &out).is_ok()
+@@ -1974,7 +2173,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
          decoders.insert(path.clone(), d);
      }
      let dec = decoders.get_mut(&path)?;
@@ -2540,7 +2627,7 @@ index c987aa3..d636d65 100644
      if std::fs::write(&out, &buf).is_err() {
          eprintln!("[gcompose] THUMB write failed: {out}");
          return None;
-@@ -2212,6 +2397,23 @@ fn handle_request(
+@@ -2212,6 +2412,23 @@ fn handle_request(
      line: &str,
  ) -> Option<String> {
      let mut f: Vec<&str> = line.split_whitespace().collect();
@@ -2564,7 +2651,7 @@ index c987aa3..d636d65 100644
      // Accept both the new explicit form (`PREVIEW` + the positional fields) and the legacy
      // keyword-less form. Strip a leading PREVIEW keyword so the positional indices below are
      // identical for both (finding #3). The fields are the 12 composite fields + the 1 P31 BLEND field
-@@ -2243,7 +2445,8 @@ fn handle_request(
+@@ -2243,7 +2460,8 @@ fn handle_request(
      // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
      // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
      // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
@@ -2574,7 +2661,7 @@ index c987aa3..d636d65 100644
          f.remove(0);
      }
      if f.len() != 103 && f.len() != 106 && f.len() != 107 && f.len() != 108 && f.len() != 109 {
-@@ -2469,15 +2672,16 @@ fn handle_request(
+@@ -2469,15 +2687,16 @@ fn handle_request(
      // identity here, applied for symmetry with the encoded emit side.
      let out_path = dec_path(f[f.len() - 1]);
  
@@ -2593,7 +2680,7 @@ index c987aa3..d636d65 100644
      }
  
      // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
-@@ -2506,7 +2710,8 @@ fn handle_request(
+@@ -2506,7 +2725,8 @@ fn handle_request(
      // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
      // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -2603,7 +2690,7 @@ index c987aa3..d636d65 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -2526,9 +2731,38 @@ fn handle_request(
+@@ -2526,9 +2746,38 @@ fn handle_request(
      // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
      *last_final_is_look = fin;
  
@@ -2645,7 +2732,7 @@ index c987aa3..d636d65 100644
      }
      Some(out_path)
  }
-@@ -2539,34 +2773,33 @@ fn decode_cached(
+@@ -2539,34 +2788,33 @@ fn decode_cached(
      decoders: &mut HashMap<String, ffi::Decoder>,
      path: &str,
      frame: i32,
@@ -2689,7 +2776,7 @@ index c987aa3..d636d65 100644
      let mut best = (0, 0);
      let mut lowest = u64::MAX;
      for dy in (-24..=24).step_by(4) {
-@@ -2578,9 +2811,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2578,9 +2826,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
                      let b = (((y + dy) * w + x + dx) * 4) as usize;
                      // RGB differences distinguish camera motion on both bright
                      // and low-contrast material without a separate grayscale copy.
@@ -2702,7 +2789,7 @@ index c987aa3..d636d65 100644
                  }
              }
              if error < lowest ||
-@@ -2592,7 +2825,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2592,7 +2840,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
      }
      // A scene cut has no defensible motion estimate.
      let samples = ((h - 128 + 15) / 16 * ((w - 128 + 15) / 16)) as u64;
@@ -2711,7 +2798,7 @@ index c987aa3..d636d65 100644
  }
  
  fn stabilized_frame(
-@@ -2600,7 +2833,7 @@ fn stabilized_frame(
+@@ -2600,7 +2848,7 @@ fn stabilized_frame(
      path: &str,
      frame: i32,
      strength: f32,
@@ -2720,7 +2807,7 @@ index c987aa3..d636d65 100644
      let current = decode_cached(decoders, path, frame)?;
      if strength <= 0.0 { return Some(current); }
      let mut sum_x = 0i32;
-@@ -2629,9 +2862,9 @@ fn stabilized_frame(
+@@ -2629,9 +2877,9 @@ fn stabilized_frame(
      let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
      let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
      if shift_x == 0 && shift_y == 0 { return Some(current); }
@@ -2733,7 +2820,7 @@ index c987aa3..d636d65 100644
      for y in 0..h {
          let sy = y - shift_y;
          if sy < 0 || sy >= h { continue; }
-@@ -2669,28 +2902,51 @@ fn upload_slot(
+@@ -2669,28 +2917,51 @@ fn upload_slot(
      path: &str,
      frame: i32,
  ) -> bool {
@@ -2793,7 +2880,7 @@ index c987aa3..d636d65 100644
          let decoded = if let Some(spec) = path.strip_prefix("STAB:") {
              match spec.split_once(':') {
                  Some((amount, source)) => match amount.parse::<f32>() {
-@@ -2703,11 +2959,11 @@ fn upload_slot(
+@@ -2703,11 +2974,11 @@ fn upload_slot(
          } else { decode_cached(decoders, path, frame) };
          match decoded {
              Some(rgba) => {
@@ -2807,7 +2894,7 @@ index c987aa3..d636d65 100644
                  false
              }
          }
-@@ -2718,13 +2974,13 @@ fn upload_slot(
+@@ -2718,13 +2989,13 @@ fn upload_slot(
  fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
      let gpu = ffi::Gpu::init()?;
      let mut b = ffi::Decoder::open(base)?;
@@ -2823,7 +2910,7 @@ index c987aa3..d636d65 100644
                  gpu.upload(1, &ov);
                  has_over = true;
              }
-@@ -2740,5 +2996,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+@@ -2740,5 +3011,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
  /// CPU/FFmpeg-only fallback: just the decoded base frame.
  fn decode_only(base: &str) -> Option<Vec<u8>> {
      let mut b = ffi::Decoder::open(base)?;

@@ -106,6 +106,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Per-clip transition preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_export_length.py') --worker $worker
     if ($LASTEXITCODE -ne 0) { throw 'Final audio sample and stream-duration acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_mix_headroom.py') --worker $worker `
+      --report (Join-Path $root 'audio-mix-headroom.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Independent signed audio headroom and final-output scope acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_mix_project.py') --worker $worker `
+      --binary (Join-Path $Bin 'Genesis-AIR.exe') --report (Join-Path $root 'audio-mix-project.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Saved-project overlap audio audition/export acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'playback_timing.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $root 'playback-timing-fixture.json')
     if ($LASTEXITCODE -ne 0) { throw 'Audio-timed picture, histogram and timeline acceptance failed.' }

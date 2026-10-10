@@ -376,3 +376,52 @@ The sanitized 41-entry source/acceptance archive is
 `df0d1ea540f9c6d1fb1431b0c3897e4d82a17935b3e46909647a0e339ed1dbc0`.
 It includes numeric process/pixel evidence, the exact native UI receipt and the
 separate overlap-audio defect reproduction. It contains no executables or media.
+
+## Overlapping audio headroom on 2026-10-10
+
+The mixer now sums signed clip contributions with float headroom and applies
+one common hard limiter at final output. Playback WAV, the encoder, peak/RMS
+meters, spectrum and oscilloscope consume that same limited signal. Encoding
+uses at most 24,000 temporary floats (96 KB) per chunk. The wire protocol and
+static gain/fade behavior are unchanged.
+
+An independently authored stereo-float gate passes 14 cases/112 checks and 688
+worker commands. All 1,501,892 PCM16 values match the mathematical sum exactly
+across whole renders, three uneven retained chunks and fresh seeks. PCM24 export
+differs by at most `1.1921e-7`; floating-point export by `9.0898e-8`. It checks all
+six signed overlap orders, positive/negative overload, gain/pan, asymmetric
+channels and a clipped sine. Independent peak/RMS, oscilloscope and selected
+direct-DFT spectrum checks agree with final output. Float export explicitly
+tests the encoder path that integer conversion could otherwise mask. The old
+worker fails 24 checks. Both gates explicitly reject non-finite decoded samples.
+
+Twelve additional saved-project cases exercise the actual application through
+audition and lossless export: six storage orders, track gain/mute/solo, clip
+gain, playhead seek and signed overload. Source and saved-project bytes remain
+unchanged. The combined Windows suite and broader generated-media workflow
+also pass on the new worker, retaining 749 control outcomes, HDR/readback,
+spatial transitions, continuous/reverse audio and five-phase export cancellation.
+Cancellation took 139–176 ms with worker exit, partial cleanup and audible
+same-path retries. Finite-output assertions were strengthened after the combined
+run; both new audio gates were rerun successfully against the unchanged worker.
+
+The published worker SHA-256 is
+`6AD0AB8B6D818CF32D51070D03F4C30B4FBC07A18C4CE71166BFE938E2CFEE19`;
+the application remains `2A7872B7…`. A fresh native editor process and all three
+descendant compositors were checked against those hashes. The supplied video
+played with advancing pictures/time and active stereo meters; Stop, visible
+rewind, scrubbing, histogram, RGB parade and luma waveform passed again. The
+original project hash stayed unchanged. This is an interactive correctness
+check, with no new sustained cadence or physical speaker/display latency claim.
+See `archive/native-audio-headroom-ui-2026-10-10.json`.
+
+The maintained overlay applies and reverses against the pinned donor; the local
+canonical Rust source was migrated with exact old/new hash guards, preserving
+all other source bytes. MM-AIR's existing media runtime is reused. The sanitized
+14-entry archive `archive/audio-headroom-2026-10-10.tar.gz` has SHA-256
+`2658ef022b1b0e8943ba7f848b02634d89c9aae63c262dc9310e07a2e619d711`.
+
+The separate audit reproduced ignored audio fade keys and omitted nested audio
+on the earlier worker. Those planning paths remain unchanged by this mixer fix.
+Fade controls/audio automation and explicit nested-audio handling are next;
+this checkpoint does not establish complete professional editing acceptance.

@@ -1,0 +1,20 @@
+{
+  "schema": "genesis.native_audio_headroom_ui.v1",
+  "app_sha256": "2A7872B732249F09391292016FA00DB0238C851002D30BC780709B03245FF6BF",
+  "worker_sha256": "6AD0AB8B6D818CF32D51070D03F4C30B4FBC07A18C4CE71166BFE938E2CFEE19",
+  "descendant_compositors_verified": 3,
+  "all_descendant_worker_hashes_match": true,
+  "original_project_sha256_before": "480D82E310BA6F231FAB2C0C0DB9945DAB193D63073CB63FE053019A13AEB143",
+  "original_project_sha256_after": "480D82E310BA6F231FAB2C0C0DB9945DAB193D63073CB63FE053019A13AEB143",
+  "original_project_unchanged": true,
+  "both_video_monitors_nonblank": true,
+  "timeline_filmstrip_visible": true,
+  "playing_time_observed": "00:00:11:36",
+  "stereo_output_meters_active": true,
+  "stop_paused_and_silenced_meters": true,
+  "start_frame_zero_nonblank": true,
+  "scrub_time_observed": "00:00:07:14",
+  "scrub_picture_and_scopes_changed": true,
+  "left_paused_at_start": true,
+  "performance_scope": "Interactive correctness; no new sustained cadence or physical speaker/display latency measurement"
+}
