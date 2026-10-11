@@ -21,6 +21,7 @@ import std.editor_io as editor_io
 import "provider.ai" as provider
 import "typeface.ai" as typeface
 import "ui_text.ai" as ui_text
+import "linked_media.ai" as linked_media
 
 // The panels a keystroke can be aimed at. The filter stack, the properties column and the
 // mixer used to be panels of their own; they are tabs of the dock now, and `chrome` decides
@@ -121,6 +122,7 @@ pub type App = struct {
   light: bool,
   theme_id: u64,
   clipboard: option<editor.ClipSnapshot>,
+  clipboard_peer: option<editor.ClipSnapshot>,
   clipboard_resource_valid: bool,
   gesture: Drag,
   prompt: Prompt,
@@ -171,7 +173,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     pool_row: 0, selected_filter: 0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
-    clipboard: option.none(), clipboard_resource_valid: false,
+    clipboard: option.none(), clipboard_peer:option.none(), clipboard_resource_valid: false,
     gesture: drag(),
     prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), selected_all: false},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
@@ -403,6 +405,7 @@ pub fn has_clipboard(state: ref<App>) -> bool effects {} {
   match struct.borrow(state,field=clipboard) {none=>false,some(_)=>true,}
 }
 pub fn set_clipboard(state: ref<App>, content:editor.ClipSnapshot own) -> unit effects {alloc} {
+  let _=struct.replace(state,option.none(),field=clipboard_peer)
   let _=struct.replace(state,option.some(content),field=clipboard)
   struct.set(state,true,field=clipboard_resource_valid)
   ()
@@ -619,6 +622,17 @@ pub fn current_clip(state: ref<App>) -> u64 effects {alloc} {
   var chosen: array<u64> = editor.selection(struct.borrow(state, field=document))
   if array.len(chosen) == 0 { return 0 }
   array.get(chosen, 0)
+}
+
+// Selecting a linked video also exposes its audio in the Audio inspector.
+pub fn current_audio_clip(state: ref<App>) -> u64 effects {alloc} {
+  let selected:u64=current_clip(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  if editor.clip_streams(doc,selected)==editor.streams_video() {
+    let peer:u64=linked_media.mate(doc,selected)
+    if peer!=0 {return peer}
+  }
+  selected
 }
 
 // The media source the pool has highlighted, by STABLE ID rather than row position.

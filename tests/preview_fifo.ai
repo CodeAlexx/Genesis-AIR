@@ -193,4 +193,3 @@ pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,i
   }
   test.conclude(suite,path.join(root,"preview-fifo-tests.json"),32)
 }
-

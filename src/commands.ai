@@ -22,6 +22,7 @@ import "provider.ai" as provider
 import "recovery.ai" as recovery
 import "timeline_media.ai" as timeline_media
 import "filter_keys.ai" as filter_keys
+import "linked_media.ai" as linked_media
 
 pub type Result = struct { ok: bool, message: string, value: u64 }
 
@@ -56,6 +57,7 @@ pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> un
   let _ = struct.replace(state, array.new(), field=waveforms)
   let _ = struct.replace(state, array.new(), field=thumbnails)
   let _=struct.replace(state,option.none(),field=clipboard)
+  let _=struct.replace(state,option.none(),field=clipboard_peer)
   struct.set(state,false,field=clipboard_resource_valid)
   struct.set(state, app.viewport(), field=viewport)
   app.set_pool_row(state, 0)
@@ -184,6 +186,23 @@ pub fn open_project(state: ref<app.App>, target: str) -> Result effects {alloc, 
   done("opened", 0)
 }
 
+// Native opens expose legacy embedded audio as linked clips; headless readers retain
+// the original graph. Conversion is in memory and requires an explicit Save.
+pub fn open_linked_project(state:ref<app.App>,target:str) -> Result effects {alloc,fs.read,fs.write} {
+  let content:string=match files.read_text(target) {err(_)=>{return refused("[GA_PROJECT_READ] The project could not be read; current edits are preserved")},ok(value)=>value,}
+  var loaded:editor.Document=match editor_io.decode(content) {err(_)=>{return refused("[GA_PROJECT_FORMAT] Invalid project; current edits are preserved")},ok(value)=>value,}
+  var warning:string=string.new()
+  let count:u64=match linked_media.migrate_legacy(loaded) {err(problem)=>{warning=text.concat("Opened original layout; automatic stream separation unavailable: ",problem)
+    0},ok(value)=>value,}
+  let _=recovery.clear_owned(state)
+  replace_project(state,loaded)
+  app.set_project_path(state,target)
+  app.mark_dirty(state,count!=0)
+  let message:string=if str.len(warning)!=0 {warning}else if count!=0 {string.copy("Opened; video and audio separated into linked lanes. Save to keep this layout")} else {string.copy("Opened")}
+  app.set_status(state,message)
+  done(message,count)
+}
+
 // ---------------------------------------------------------------------------
 // Media
 
@@ -298,6 +317,7 @@ pub fn remove_track(state: ref<app.App>, track: u64) -> Result effects {alloc} {
   if editor.track_locked(doc,track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
   var candidate:editor.Document=editor.copy_document(doc)
   if not editor.remove_track(candidate,track) {return refused("[GA_EDIT_CONTEXT] Track could not be removed")}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
   let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
@@ -326,6 +346,7 @@ pub fn insert_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
   var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   match editor.insert(candidate, track, source, source_in, length, at) {
     some(id) => {
+      if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
       editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
       let _ = struct.replace(state, candidate, field=document)
       app.document_changed(state)
@@ -340,6 +361,7 @@ pub fn overwrite_clip(state: ref<app.App>, track: u64, source: u64, source_in: i
   var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   match editor.overwrite(candidate, track, source, source_in, length, at) {
     some(id) => {
+      if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
       editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
       let _ = struct.replace(state, candidate, field=document)
       app.document_changed(state)
@@ -358,27 +380,102 @@ pub fn append_clip(state: ref<app.App>, track: u64, source: u64, source_in: i64,
   }
 }
 
-pub fn move_clip(state: ref<app.App>, clip: u64, track: u64, start: i64) -> Result effects {alloc} {
-  let doc: ref<editor.Document> = struct.borrow(state, field=document)
-  let current: editor.Clip = match editor.clip(doc, clip) { none => { return refused("no such clip") }, some(value) => value, }
-  if editor.track_kind(doc, current.track) != editor.track_kind(doc, track) {
-    return refused("[GA_TRACK_KIND] Keep video on a video lane and audio on an audio lane")
+// Placement commits both streams together, with one undo snapshot.
+fn source_flags(doc:ref<editor.Document>,source:u64) -> u32 effects {} {
+  let slot:u64=match editor.source_slot(doc,source) {none=>{return 0},some(value)=>value,}
+  let media:ref<editor.Source> =array.borrow(struct.borrow(doc,field=sources),slot)
+  (if media.has_video {1}else{0})+(if media.has_audio {2}else{0})
+}
+fn place_source(state:ref<app.App>,source:u64,source_in:i64,length:i64,at:i64,mode:u32) -> Result effects {alloc} {
+  let flags:u32=source_flags(struct.borrow(state,field=document),source)
+  if flags==0 {return refused("[GA_EDIT_SOURCE] No audio or video media is available")}
+  let has_video:bool=flags==1 or flags==3
+  let has_audio:bool=flags==2 or flags==3
+  let track:u64=if has_video {app.default_video_track(state)} else {app.default_audio_track(state)}
+  let audio:u64=app.default_audio_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  var candidate:editor.Document=editor.copy_document(doc)
+  let id:u64=match if mode==1 {editor.insert(candidate,track,source,source_in,length,at)} else if mode==2 {editor.overwrite(candidate,track,source,source_in,length,at)} else {editor.append(candidate,track,source,source_in,length)} {
+    none=>{return refused("[GA_EDIT_PLACE] Media cannot be placed on this lane")},some(value)=>value,
   }
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.move_clip(struct.borrow(state, field=document), clip, track, start) {
-    return refused("that clip cannot move there")
+  if has_video and has_audio {
+    let placed:editor.Clip=match editor.clip(candidate,id) {none=>{return refused("[GA_EDIT_PLACE] Missing placed clip")},some(value)=>value,}
+    if mode!=0 {
+      // Apply the same SDK range operation to the audio lane before adding its stream.
+      let temp:u64=match if mode==1 {editor.insert(candidate,audio,source,source_in,length,placed.start)} else {editor.overwrite(candidate,audio,source,source_in,length,placed.start)} {
+        none=>{return refused("[GA_LINKED_PLACE] Audio lane is locked or cannot preserve this edit")},some(value)=>value,
+      }
+      if not editor.lift(candidate,temp) {return refused("[GA_LINKED_PLACE] Audio lane could not be prepared")}
+    }
+    match linked_media.separate_import(candidate,id,audio) {err(problem)=>{return refused(problem)},ok(_)=>{},}
+  } else {
+    let _=editor.set_clip_streams(candidate,id,if has_video {editor.streams_video()} else {editor.streams_audio()})
   }
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("moved", clip)
+  done(if has_video and has_audio {"Added linked video and audio"} else if has_video {"Added video"} else {"Added audio"},id)
+}
+pub fn append_source(state:ref<app.App>,source:u64,source_in:i64,length:i64) -> Result effects {alloc} {place_source(state,source,source_in,length,0,0)}
+pub fn insert_source(state:ref<app.App>,source:u64,source_in:i64,length:i64,at:i64) -> Result effects {alloc} {place_source(state,source,source_in,length,at,1)}
+pub fn overwrite_source(state:ref<app.App>,source:u64,source_in:i64,length:i64,at:i64) -> Result effects {alloc} {place_source(state,source,source_in,length,at,2)}
+
+fn linked_geometry(doc:ref<editor.Document>,id:u64,peer:u64) -> bool effects {} {
+  if peer==0 {return true}
+  let a:editor.Clip=match editor.clip(doc,id) {none=>{return false},some(value)=>value,}
+  let b:editor.Clip=match editor.clip(doc,peer) {none=>{return false},some(value)=>value,}
+  a.owner==b.owner and a.source==b.source and a.nested==b.nested and
+  a.start==b.start and a.source_in==b.source_in and a.length==b.length and a.speed==b.speed and a.reverse==b.reverse
+}
+// A multi-lane operation may affect unselected followers or neighbours. Every
+// previously linked pair must survive with one source-time mapping or disappear
+// together; validate before capturing history, including pairs on other A lanes.
+fn linked_document_geometry(before:ref<editor.Document>,after:ref<editor.Document>) -> bool effects {} {
+  var i:u64=0
+  loop {if i>=editor.clip_count(before) {break}
+    let old:editor.Clip=option.unwrap(editor.clip_at(before,i))
+    let peer:u64=linked_media.mate(before,old.id)
+    if peer!=0 and old.id<peer {
+      let first:bool=option.is_some(editor.clip(after,old.id))
+      let second:bool=option.is_some(editor.clip(after,peer))
+      if first!=second {return false}
+      if first and not linked_geometry(after,old.id,peer) {return false}
+    }
+    i=i+1}
+  true
+}
+fn regroup_pair(doc:ref<editor.Document>,a:u64,b:u64) -> unit effects {alloc} {
+  if b==0 {return ()}
+  var members:array<u64> =array.new()
+  array.push(members,a)
+  array.push(members,b)
+  let _=editor.group(doc,array.view(members))
+  ()
 }
 
-pub fn nudge(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.nudge(struct.borrow(state, field=document), clip, delta) {
-    return refused("that clip cannot be nudged")
-  }
+pub fn move_clip(state:ref<app.App>,clip:u64,track:u64,start:i64) -> Result effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let current:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("no such clip")},some(value)=>value,}
+  if editor.track_kind(doc,current.track)!=editor.track_kind(doc,track) {return refused("[GA_TRACK_KIND] Keep video on a video lane and audio on an audio lane")}
+  let peer:u64=linked_media.mate(doc,clip)
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.move_clip(candidate,clip,track,start) {return refused("[GA_EDIT_LOCKED] Clip cannot move there")}
+  let moved:editor.Clip=match editor.clip(candidate,clip) {none=>{return refused("[GA_EDIT_TARGET] Missing clip")},some(value)=>value,}
+  if peer!=0 and not editor.nudge(candidate,peer,moved.start-current.start) {return refused("[GA_LINKED_LOCKED] Linked audio/video lane is locked")}
+  if not linked_geometry(candidate,clip,peer) {return refused("[GA_LINKED_RANGE] Linked streams cannot preserve the same source time")}
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("nudged", clip)
+  done("moved",clip)
+}
+pub fn nudge(state:ref<app.App>,clip:u64,delta:i64) -> Result effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let current:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("no such clip")},some(value)=>value,}
+  let outcome:Result=move_clip(state,clip,current.track,add.sat(current.start,delta))
+  if not outcome.ok {return outcome}
+  done("nudged",outcome.value)
 }
 
 // SPLIT at the playhead, which is what the keyboard shortcut means.
@@ -392,6 +489,13 @@ pub fn split_at_playhead(state: ref<app.App>) -> Result effects {alloc} {
     if selected.start < frame and editor.clip_end(selected) > frame {
       match editor.split(candidate, chosen, frame) {
         some(id) => {
+          let peer:u64=linked_media.mate(struct.borrow(state,field=document),chosen)
+          if peer!=0 {
+            let right:u64=match editor.split(candidate,peer,frame) {none=>{return refused("[GA_LINKED_SPLIT] Linked stream could not be split; both clips preserved")},some(value)=>value,}
+            regroup_pair(candidate,chosen,peer)
+            regroup_pair(candidate,id,right)
+          }
+          if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
           editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
           let _ = struct.replace(state,candidate,field=document)
           app.document_changed(state)
@@ -402,8 +506,20 @@ pub fn split_at_playhead(state: ref<app.App>) -> Result effects {alloc} {
   }
   // Nothing selected, or the playhead is not inside it: split every track at the playhead,
   // which is the ordinary "razor all" gesture.
+  var walk:u64=0
+  loop {if walk>=editor.clip_count(candidate) {break}
+    let value:editor.Clip=match editor.clip_at(candidate,walk) {none=>{break},some(found)=>found,}
+    if value.owner==sequence and value.start<frame and editor.clip_end(value)>frame {
+      let peer:u64=linked_media.mate(candidate,value.id)
+      if peer!=0 and (editor.track_locked(candidate,value.track) or not editor.split_possible(candidate,peer,frame)) {
+        return refused("[GA_LINKED_SPLIT] A linked lane is locked or cannot preserve this cut; all clips were preserved")
+      }
+    }
+    walk=walk+1
+  }
   let cuts: u64 = editor.split_all(candidate, sequence, frame)
   if cuts == 0 { return refused("[GA_SPLIT_CONTEXT] No unlocked cut can preserve source time, fades, and effect history at this playhead") }
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
   let _ = struct.replace(state,candidate,field=document)
   app.document_changed(state)
@@ -422,6 +538,7 @@ pub fn trim_start(state: ref<app.App>, clip: u64, start: i64) -> Result effects 
     none=>{return refused("[GA_TRIM_CONTEXT] No such clip for head trim")},some(value)=>value,
   }
   if start == current.start {return done("[GA_TRIM_NO_CHANGE] Head already at this frame",clip)}
+  let peer:u64=linked_media.mate(struct.borrow(state,field=document),clip)
   var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   if not editor.trim_start(candidate, clip, start) {
     return refused("[GA_TRIM_CONTEXT] Head trim cannot preserve unlocked source time and effect history")
@@ -429,6 +546,9 @@ pub fn trim_start(state: ref<app.App>, clip: u64, start: i64) -> Result effects 
   if trim_unchanged(struct.borrow(state,field=document),candidate) {
     return done("[GA_TRIM_NO_CHANGE] Head remains at the available source bound",clip)
   }
+  if peer!=0 and not editor.trim_start(candidate,peer,start) {return refused("[GA_LINKED_LOCKED] Linked stream edit was refused; both clips were preserved")}
+  if not linked_geometry(candidate,clip,peer) {return refused("[GA_LINKED_RANGE] Linked streams cannot preserve the same source time")}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let _ = struct.replace(state, candidate, field=document)
   app.document_changed(state)
@@ -439,6 +559,7 @@ pub fn trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {
     none=>{return refused("[GA_TRIM_CONTEXT] No such clip for tail trim")},some(value)=>value,
   }
   if length == current.length {return done("[GA_TRIM_NO_CHANGE] Tail already at this frame",clip)}
+  let peer:u64=linked_media.mate(struct.borrow(state,field=document),clip)
   var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   if not editor.trim_end(candidate, clip, length) {
     return refused("[GA_TRIM_CONTEXT] Tail trim cannot preserve unlocked source time and effect history")
@@ -446,6 +567,9 @@ pub fn trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result effects {
   if trim_unchanged(struct.borrow(state,field=document),candidate) {
     return done("[GA_TRIM_NO_CHANGE] Tail remains at the available source bound",clip)
   }
+  if peer!=0 and not editor.trim_end(candidate,peer,length) {return refused("[GA_LINKED_LOCKED] Linked stream edit was refused; both clips were preserved")}
+  if not linked_geometry(candidate,clip,peer) {return refused("[GA_LINKED_RANGE] Linked streams cannot preserve the same source time")}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let _ = struct.replace(state, candidate, field=document)
   app.document_changed(state)
@@ -456,6 +580,7 @@ pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result ef
     none=>{return refused("[GA_TRIM_CONTEXT] No such clip for ripple trim")},some(value)=>value,
   }
   if length == current.length {return done("[GA_TRIM_NO_CHANGE] Ripple tail already at this frame",clip)}
+  let peer:u64=linked_media.mate(struct.borrow(state,field=document),clip)
   var candidate: editor.Document = editor.copy_document(struct.borrow(state, field=document))
   if not editor.ripple_trim_end(candidate, clip, length) {
     return refused("[GA_TRIM_CONTEXT] Ripple trim cannot preserve unlocked source time and effect history")
@@ -463,6 +588,9 @@ pub fn ripple_trim_end(state: ref<app.App>, clip: u64, length: i64) -> Result ef
   if trim_unchanged(struct.borrow(state,field=document),candidate) {
     return done("[GA_TRIM_NO_CHANGE] Ripple tail remains at the available source bound",clip)
   }
+  if peer!=0 and not editor.ripple_trim_end(candidate,peer,length) {return refused("[GA_LINKED_LOCKED] Linked stream edit was refused; both clips were preserved")}
+  if not linked_geometry(candidate,clip,peer) {return refused("[GA_LINKED_RANGE] Linked streams cannot preserve the same source time")}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let _ = struct.replace(state, candidate, field=document)
   app.document_changed(state)
@@ -472,8 +600,11 @@ pub fn ripple_delete(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
   let doc:ref<editor.Document> = struct.borrow(state,field=document)
   let value:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("[GA_EDIT_TARGET] No such clip")},some(found)=>found,}
   if editor.track_locked(doc,value.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  let peer:u64=linked_media.mate(doc,clip)
   var candidate:editor.Document=editor.copy_document(doc)
   if not editor.ripple_delete(candidate,clip) {return refused("[GA_EDIT_CONTEXT] Clip could not be ripple deleted")}
+  if peer!=0 and not editor.ripple_delete(candidate,peer) {return refused("[GA_LINKED_LOCKED] Linked stream edit was refused; both clips were preserved")}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
   let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
@@ -483,36 +614,98 @@ pub fn lift(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
   let doc:ref<editor.Document> = struct.borrow(state,field=document)
   let value:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("[GA_EDIT_TARGET] No such clip")},some(found)=>found,}
   if editor.track_locked(doc,value.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  let peer:u64=linked_media.mate(doc,clip)
   var candidate:editor.Document=editor.copy_document(doc)
   if not editor.lift(candidate,clip) {return refused("[GA_EDIT_CONTEXT] Clip could not be lifted")}
+  if peer!=0 and not editor.lift(candidate,peer) {return refused("[GA_LINKED_LOCKED] Linked stream edit was refused; both clips were preserved")}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
   let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
   done("lifted",clip)
 }
 
-pub fn slip(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.slip(struct.borrow(state, field=document), clip, delta) {
-    return refused("that slip was refused")
-  }
+pub fn slip(state:ref<app.App>,clip:u64,delta:i64) -> Result effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let peer:u64=linked_media.mate(doc,clip)
+  if clip_locked(doc,clip) or (peer!=0 and clip_locked(doc,peer)) {return refused("[GA_LINKED_LOCKED] Linked slip needs unlocked lanes")}
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.slip(candidate,clip,delta) {return refused("that slip was refused")}
+  if peer!=0 and not editor.slip(candidate,peer,delta) {return refused("[GA_LINKED_LOCKED] Linked stream slip was refused")}
+  if not linked_geometry(candidate,clip,peer) {return refused("[GA_LINKED_RANGE] Linked streams cannot preserve the same source time")}
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("slipped", clip)
+  done("slipped",clip)
 }
-pub fn roll(state: ref<app.App>, left: u64, right: u64, delta: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let applied: i64 = editor.roll(struct.borrow(state, field=document), left, right, delta)
-  if applied == 0 { return refused("that cut cannot roll") }
-  app.document_changed(state)
-  done("rolled", cast.wrap(if applied < 0 { 0 - applied } else { applied }))
+fn clip_locked(doc:ref<editor.Document>,id:u64) -> bool effects {} {
+  match editor.clip(doc,id) {none=>true,some(value)=>editor.track_locked(doc,value.track),}
 }
-pub fn slide(state: ref<app.App>, clip: u64, delta: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.slide(struct.borrow(state, field=document), clip, delta) {
-    return refused("that clip has no abutting neighbours to absorb a slide")
+pub fn roll(state:ref<app.App>,left:u64,right:u64,delta:i64) -> Result effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let lp:u64=linked_media.mate(doc,left)
+  let rp:u64=linked_media.mate(doc,right)
+  if (lp==0)!=(rp==0) {return refused("[GA_LINKED_ROLL] Both sides of a linked cut need matching audio/video mates")}
+  if clip_locked(doc,left) or clip_locked(doc,right) or (lp!=0 and (clip_locked(doc,lp) or clip_locked(doc,rp))) {
+    return refused("[GA_LINKED_LOCKED] Roll needs unlocked lanes")
   }
+  var candidate:editor.Document=editor.copy_document(doc)
+  let applied:i64=editor.roll(candidate,left,right,delta)
+  if applied==0 {return refused("that cut cannot roll")}
+  if lp!=0 and editor.roll(candidate,lp,rp,applied)!=applied {return refused("[GA_LINKED_ROLL] Linked cut cannot apply the same roll")}
+  if not linked_geometry(candidate,left,lp) or not linked_geometry(candidate,right,rp) {return refused("[GA_LINKED_ROLL] Linked cut source ranges differ")}
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("slid", clip)
+  done("rolled",cast.wrap(if applied<0 {0-applied}else{applied}))
+}
+fn abutting(doc:ref<editor.Document>,clip:editor.Clip,before:bool) -> u64 effects {} {
+  var found:u64=0
+  var i:u64=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let other:editor.Clip=option.unwrap(editor.clip_at(doc,i))
+    if other.id!=clip.id and other.track==clip.track and
+      (if before {editor.clip_end(other)==clip.start}else{other.start==editor.clip_end(clip)}) {
+      if found!=0 {return 0}
+      found=other.id
+    }
+    i=i+1}
+  found
+}
+pub fn slide(state:ref<app.App>,clip:u64,delta:i64) -> Result effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let old:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("no such clip")},some(value)=>value,}
+  let before:u64=abutting(doc,old,true)
+  let after:u64=abutting(doc,old,false)
+  if before==0 or after==0 {return refused("that clip has no unique abutting neighbours to absorb a slide")}
+  let peer:u64=linked_media.mate(doc,clip)
+  let bp:u64=linked_media.mate(doc,before)
+  let ap:u64=linked_media.mate(doc,after)
+  if (peer==0 and (bp!=0 or ap!=0)) or (peer!=0 and (bp==0 or ap==0)) {
+    return refused("[GA_LINKED_SLIDE] Every affected neighbour needs matching audio/video mates")
+  }
+  if clip_locked(doc,clip) or clip_locked(doc,before) or clip_locked(doc,after) or
+    (peer!=0 and (clip_locked(doc,peer) or clip_locked(doc,bp) or clip_locked(doc,ap))) {
+    return refused("[GA_LINKED_LOCKED] Slide needs unlocked lanes")
+  }
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.slide(candidate,clip,delta) {return refused("that slide cannot preserve its neighbours")}
+  if peer!=0 {
+    let other:editor.Clip=option.unwrap(editor.clip(doc,peer))
+    if abutting(doc,other,true)!=bp or abutting(doc,other,false)!=ap or not editor.slide(candidate,peer,delta) {
+      return refused("[GA_LINKED_SLIDE] Linked neighbours cannot apply the same slide")
+    }
+  }
+  if not linked_geometry(candidate,clip,peer) or not linked_geometry(candidate,before,bp) or not linked_geometry(candidate,after,ap) {
+    return refused("[GA_LINKED_SLIDE] Linked slide source ranges differ")
+  }
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  done("slid",clip)
 }
 
 // ---------------------------------------------------------------------------
@@ -536,13 +729,48 @@ pub fn clear_selection(state: ref<app.App>) -> Result effects {alloc} {
 }
 
 pub fn group_selection(state: ref<app.App>) -> Result effects {alloc} {
-  var members: array<u64> = editor.selection(struct.borrow(state, field=document))
-  if array.len(members) < 2 { return refused("select at least two clips to group") }
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let id: u64 = editor.group(struct.borrow(state, field=document), array.view(members))
-  if id == 0 { return refused("those clips could not be grouped") }
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  var members:array<u64> =editor.selection(doc)
+  let selected:u64=array.len(members)
+  if selected<2 {return refused("select at least two clips to group")}
+  if doc.next_id==0 or doc.next_id==18446744073709551615 {
+    return refused("[GA_LINKED_CAPACITY] Group identity capacity is exhausted")
+  }
+  // Regrouping selected video halves must carry their existing audio mates too.
+  var i:u64=0
+  loop {if i>=selected {break}
+    let peer:u64=linked_media.mate(doc,array.get(members,i))
+    if peer!=0 {
+      var found:bool=false
+      var j:u64=0
+      loop {if j>=array.len(members) {break}
+        if array.get(members,j)==peer {found=true
+          break}
+        j=j+1}
+      if not found {array.push(members,peer)}
+    }
+    i=i+1}
+  i=0
+  loop {if i>=array.len(members) {break}
+    if clip_locked(doc,array.get(members,i)) {return refused("[GA_LINKED_LOCKED] A selected or linked lane is locked")}
+    i=i+1}
+  var candidate:editor.Document=editor.copy_document(doc)
+  let id:u64=editor.group(candidate,array.view(members))
+  if id==0 {return refused("those clips could not be grouped")}
+  // A group containing duplicate source-time pairs would make mate discovery
+  // ambiguous; refuse before committing instead of silently losing linkage.
+  i=0
+  loop {if i>=array.len(members) {break}
+    let clip:u64=array.get(members,i)
+    let peer:u64=linked_media.mate(doc,clip)
+    if peer!=0 and linked_media.mate(candidate,clip)!=peer {
+      return refused("[GA_LINKED_GROUP] Grouping would make an existing audio/video pair ambiguous")
+    }
+    i=i+1}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done("grouped", id)
+  done("grouped",id)
 }
 pub fn ungroup(state: ref<app.App>, group: u64) -> Result effects {alloc} {
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
@@ -601,6 +829,7 @@ pub fn set_fades(state: ref<app.App>, clip: u64, fade_in: i64, fade_out: i64) ->
 
 pub fn set_key(state: ref<app.App>, clip: u64, param: str, frame: i64, value: f64,
                interp: u32) -> Result effects {alloc} {
+  if paired_speed_key(struct.borrow(state,field=document),clip,param) {return refused("[GA_LINKED_SPEED] Linked rate automation must be edited on both streams together")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.set_key(struct.borrow(state, field=document), clip, param, frame, value, interp) {
     return refused("that parameter could not be keyed")
@@ -630,7 +859,20 @@ pub fn add_subtitle(state: ref<app.App>, start: i64, finish: i64, text: str) -> 
 // ---------------------------------------------------------------------------
 // Filters
 
+// Linked rate filters/curves need a correspondence between their two instances.
+// Refuse unsupported edits before either stream, history or revision can change.
+fn paired_speed_filter(doc:ref<editor.Document>,id:u64) -> bool effects {alloc} {
+  let slot:u64=match editor.filter_slot(doc,id) {none=>{return false},some(found)=>found,}
+  let clip:u64=struct.get(array.borrow(struct.borrow(doc,field=filters),slot),field=clip)
+  str.eq(editor.filter_kind(doc,id),"speed") and linked_media.mate(doc,clip)!=0
+}
+fn paired_speed_key(doc:ref<editor.Document>,clip:u64,param:str) -> bool effects {alloc} {
+  if linked_media.mate(doc,clip)==0 {return false}
+  let canonical:string=filter_keys.canonical(param)
+  str.eq(canonical,"speed") or str.starts_with(canonical,"speed.")
+}
 pub fn add_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effects {alloc} {
+  if str.eq(kind,"speed") and linked_media.mate(struct.borrow(state,field=document),clip)!=0 {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
     some(id) => { app.set_selected_filter(state, id)
@@ -640,6 +882,7 @@ pub fn add_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effects {
   }
 }
 pub fn remove_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
+  if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.remove_filter(struct.borrow(state, field=document), filter) {
     return refused("no such filter")
@@ -649,6 +892,7 @@ pub fn remove_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc}
   done("filter removed", filter)
 }
 pub fn toggle_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
+  if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let now: bool = editor.filter_enabled(struct.borrow(state, field=document), filter)
   if not editor.set_filter_enabled(struct.borrow(state, field=document), filter, not now) {
@@ -658,6 +902,7 @@ pub fn toggle_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc}
   done(if now { "filter disabled" } else { "filter enabled" }, filter)
 }
 pub fn reorder_filter(state: ref<app.App>, filter: u64, position: u32) -> Result effects {alloc} {
+  if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.reorder_filter(struct.borrow(state, field=document), filter, position) {
     return refused("no such filter")
@@ -666,6 +911,7 @@ pub fn reorder_filter(state: ref<app.App>, filter: u64, position: u32) -> Result
   done("filter reordered", filter)
 }
 pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64) -> Result effects {alloc} {
+  if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.set_filter_param(struct.borrow(state, field=document), filter, name, value) {
     return refused("no such filter")
@@ -676,6 +922,7 @@ pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64)
 
 pub fn set_filter_text_param(state: ref<app.App>, filter: u64, name: str, value: str)
                              -> Result effects {alloc} {
+  if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if not editor.set_filter_text_param(struct.borrow(state, field=document), filter,
     name, value) { return refused("no such filter") }
@@ -822,7 +1069,9 @@ pub fn ensure_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effect
 // Kept here rather than imported from the chrome module so the command layer does not
 // depend on the view; it is the same three-line scan.
 fn chrome_filter_of_kind(state: ref<app.App>, clip: u64, kind: str) -> u64 effects {alloc} {
-  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  filter_of_kind(struct.borrow(state,field=document),clip,kind)
+}
+fn filter_of_kind(doc:ref<editor.Document>,clip:u64,kind:str) -> u64 effects {alloc} {
   let count: u64 = editor.filter_count(doc, clip)
   var position: u32 = 0
   loop {
@@ -915,8 +1164,14 @@ fn fade_problem(state: ref<app.App>, clip: u64, name: str, value: f64, key: bool
 
 pub fn set_clip_field(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
   match fade_problem(state,clip,name,value,false) {none=>{},some(problem)=>{return refused(problem)},}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  set_clip_field_live(state, clip, name, value)
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  let outcome:Result=set_clip_field_document(candidate,clip,name,value)
+  if not outcome.ok {return outcome}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  outcome
 }
 
 fn write_fade_key(doc: ref<editor.Document>, clip: u64, name: str, value: f64) -> bool effects {alloc} {
@@ -926,16 +1181,37 @@ fn write_fade_key(doc: ref<editor.Document>, clip: u64, name: str, value: f64) -
   editor.set_key(doc,clip,name,frame,value,interp)
 }
 
-fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) -> Result effects {alloc} {
+fn set_clip_field_live(state:ref<app.App>,clip:u64,name:str,value:f64) -> Result effects {alloc} {
   match fade_problem(state,clip,name,value,false) {none=>{},some(problem)=>{return refused(problem)},}
-  if fade_field(name) and filter_keys.has(struct.borrow(state,field=document),clip,name) {
-    if not write_fade_key(struct.borrow(state,field=document),clip,name,value) {
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  let outcome:Result=set_clip_field_document(candidate,clip,name,value)
+  if not outcome.ok {return outcome}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  outcome
+}
+fn set_speed_document(doc:ref<editor.Document>,clip:u64,value:f64) -> Result effects {alloc} {
+  let old:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("no such clip")},some(found)=>found,}
+  let peer:u64=linked_media.mate(doc,clip)
+  if not math.is_finite(value) or value<0.0 {return refused("[GA_LINKED_SPEED] Speed must be finite and nonnegative")}
+  if editor.track_locked(doc,old.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  if peer!=0 {
+    let other:editor.Clip=option.unwrap(editor.clip(doc,peer))
+    if editor.track_locked(doc,other.track) {return refused("[GA_LINKED_LOCKED] Linked stream is locked")}
+  }
+  if not editor.set_clip_speed(doc,clip,value) {return refused("Speed cannot be set")}
+  if peer!=0 and not editor.set_clip_speed(doc,peer,value) {return refused("[GA_LINKED_SPEED] Linked speed cannot be set")}
+  if not linked_geometry(doc,clip,peer) {return refused("[GA_LINKED_SPEED] Linked rates differ")}
+  done("clip property set",clip)
+}
+fn set_clip_field_document(doc:ref<editor.Document>,clip:u64,name:str,value:f64) -> Result effects {alloc} {
+  if fade_field(name) and filter_keys.has(doc,clip,name) {
+    if not write_fade_key(doc,clip,name,value) {
       return refused("[GA_AUDIO_FADE_KEYS] Fade length could not be keyed")
     }
-    app.document_changed(state)
     return done("fade keyframe set",clip)
   }
-  let doc: ref<editor.Document> = struct.borrow(state, field=document)
   if str.eq(name, "gain") {
     if not math.is_finite(value) or value < 0.0 {
       return refused("[GA_AUDIO_GAIN_KEYS] Gain must be finite and nonnegative")
@@ -948,40 +1224,45 @@ fn set_clip_field_live(state: ref<app.App>, clip: u64, name: str, value: f64) ->
       if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
       let interp: u32 = gain_key_interp(doc, clip, frame)
       let _ = editor.set_key(doc, clip, "gain", frame, value, interp)
-      app.document_changed(state)
-      return done("gain keyframe set", clip)
+        return done("gain keyframe set", clip)
     }
   }
+  if str.eq(name,"speed") {return set_speed_document(doc,clip,value)}
   let frames: i64 = cast.sat(value)
   let ok: bool = if str.eq(name, "fade_in") {
-      editor.set_fade_in(struct.borrow(state, field=document), clip, frames)
+      editor.set_fade_in(doc, clip, frames)
     } else if str.eq(name, "fade_out") {
-      editor.set_fade_out(struct.borrow(state, field=document), clip, frames)
+      editor.set_fade_out(doc, clip, frames)
     } else if str.eq(name, "gain") {
-      editor.set_clip_gain(struct.borrow(state, field=document), clip, value)
+      editor.set_clip_gain(doc, clip, value)
     } else if str.eq(name, "pan") {
-      editor.set_clip_pan(struct.borrow(state, field=document), clip, value)
+      editor.set_clip_pan(doc, clip, value)
     } else if str.eq(name, "speed") {
-      editor.set_clip_speed(struct.borrow(state, field=document), clip, value)
+      editor.set_clip_speed(doc, clip, value)
     } else { false }
   if not ok { return refused("that clip property is not settable") }
-  app.document_changed(state)
   done("clip property set", clip)
 }
 
 // Reverse is a flag, not a value, so it toggles rather than being set to a number.
-pub fn toggle_clip_reverse(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  var now: bool = false
-  match editor.clip(struct.borrow(state, field=document), clip) {
-    none => { return refused("no clip selected") },
-    some(value) => { now = value.reverse },
+pub fn toggle_clip_reverse(state:ref<app.App>,clip:u64) -> Result effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let old:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("no clip selected")},some(found)=>found,}
+  let peer:u64=linked_media.mate(doc,clip)
+  if editor.track_locked(doc,old.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  if peer!=0 {
+    let other:editor.Clip=option.unwrap(editor.clip(doc,peer))
+    if editor.track_locked(doc,other.track) {return refused("[GA_LINKED_LOCKED] Linked stream is locked")}
   }
-  if not editor.set_clip_reverse(struct.borrow(state, field=document), clip, not now) {
-    return refused("no such clip")
-  }
+  var candidate:editor.Document=editor.copy_document(doc)
+  if not editor.set_clip_reverse(candidate,clip,not old.reverse) {return refused("no such clip")}
+  if peer!=0 and not editor.set_clip_reverse(candidate,peer,not old.reverse) {return refused("[GA_LINKED_REVERSE] Linked reverse cannot be set")}
+  if not linked_geometry(candidate,clip,peer) {return refused("[GA_LINKED_REVERSE] Linked directions differ")}
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
   app.document_changed(state)
-  done(if now { "playing forward" } else { "playing in reverse" }, clip)
+  done(if old.reverse {"playing forward"}else{"playing in reverse"},clip)
 }
 
 pub fn set_track_field(state: ref<app.App>, track: u64, name: str, value: f64) -> Result effects {alloc} {
@@ -991,39 +1272,43 @@ pub fn set_track_field(state: ref<app.App>, track: u64, name: str, value: f64) -
 }
 
 // One entry point for every inspector control: the domain says what is being written.
-pub fn set_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str, name: str,
-                     value: f64) -> Result effects {alloc} {
-  if domain == 1 { return set_clip_field(state, target, name, value) }
-  if domain == 3 { return set_track_field(state, target, name, value) }
-  if domain != 2 { return refused("nothing to set") }
-  var filter: u64 = target
-  let clip: u64 = app.current_clip(state)
-  if filter == 0 and clip == 0 { return refused("[GA_INSPECTOR_SELECTION] Select a timeline clip first") }
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if filter == 0 {
-    filter = chrome_filter_of_kind(state, clip, kind)
-    if filter == 0 {
-      match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
-        none => { return refused("no such clip") }, some(id) => { filter = id
-          app.document_changed(state) },
-      }
-    }
+pub fn set_parameter(state:ref<app.App>,domain:u32,target:u64,kind:str,name:str,value:f64) -> Result effects {alloc} {
+  if domain==1 {return set_clip_field(state,target,name,value)}
+  if domain!=2 and domain!=3 {return refused("nothing to set")}
+  let clip:u64=if linked_media.is_audio_kind(kind) {app.current_audio_clip(state)}else{app.current_clip(state)}
+  if domain==2 and target==0 and clip==0 {return refused("[GA_INSPECTOR_SELECTION] Select a timeline clip first")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  var filter:u64=target
+  if domain==2 and filter==0 {
+    if str.eq(kind,"speed") and linked_media.mate(candidate,clip)!=0 {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
+    filter=filter_of_kind(candidate,clip,kind)
+    if filter==0 {filter=match editor.add_filter(candidate,clip,kind) {none=>{return refused("no such clip")},some(id)=>id,}}
   }
-  update_parameter(state, domain, filter, name, value)
+  let outcome:Result=update_parameter_document(candidate,domain,filter,name,value)
+  if not outcome.ok {return outcome}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  outcome
 }
 
 // Continuation of a pointer drag. The initial write owns the single undo snapshot.
-pub fn update_parameter(state: ref<app.App>, domain: u32, target: u64, name: str,
-                        value: f64) -> Result effects {alloc} {
-  if domain == 1 { return set_clip_field_live(state, target, name, value) }
-  let outcome: Result = update_parameter_document(struct.borrow(state, field=document),domain,target,name,value)
-  if outcome.ok { app.document_changed(state) }
+pub fn update_parameter(state:ref<app.App>,domain:u32,target:u64,name:str,value:f64) -> Result effects {alloc} {
+  if domain==1 {return set_clip_field_live(state,target,name,value)}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  let outcome:Result=update_parameter_document(candidate,domain,target,name,value)
+  if outcome.ok {
+    if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+    let _=struct.replace(state,candidate,field=document)
+    app.document_changed(state)}
   outcome
 }
 
 fn update_parameter_document(doc: ref<editor.Document>, domain: u32, target: u64, name: str,
                              value: f64) -> Result effects {alloc} {
   if domain == 2 {
+    if paired_speed_filter(doc,target) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
     let slot: u64 = match editor.filter_slot(doc, target) {
       none => { return refused("that filter is missing") }, some(found) => found,
     }
@@ -1076,22 +1361,33 @@ fn parameter_key_interp(doc: ref<editor.Document>, clip: u64, param: str, frame:
   if str.eq(str.view(canonical),"blend.mode") { curve.hold() } else { curve.linear() }
 }
 
-pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: str,
-                          name: str, value: f64) -> Result effects {alloc} {
-  if domain == 1 and str.len(kind) == 0 and fade_field(name) {
+pub fn keyframe_parameter(state:ref<app.App>,domain:u32,target:u64,kind:str,name:str,value:f64) -> Result effects {alloc} {
+  if domain==1 and str.len(kind)==0 and fade_field(name) {
     match fade_problem(state,target,name,value,true) {none=>{},some(problem)=>{return refused(problem)},}
   }
-  let clip: u64 = app.current_clip(state)
-  if clip == 0 { return refused("no clip selected") }
-  let playhead: i64 = editor.playhead(struct.borrow(state, field=document))
-  let selected: editor.Clip = match editor.clip(struct.borrow(state, field=document), clip) {
+  let audio:bool=linked_media.is_audio_kind(kind) or (domain==1 and (str.eq(name,"gain") or str.eq(name,"pan")))
+  let clip:u64=if audio {app.current_audio_clip(state)}else{app.current_clip(state)}
+  if clip==0 {return refused("no clip selected")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  if str.eq(kind,"speed") and linked_media.mate(candidate,clip)!=0 {return refused("[GA_LINKED_SPEED] Linked rate automation cannot be edited independently")}
+  if domain==1 and paired_speed_key(candidate,clip,name) {return refused("[GA_LINKED_SPEED] Linked rate automation cannot be edited independently")}
+  let outcome:Result=keyframe_document(candidate,clip,domain,target,kind,name,value)
+  if not outcome.ok {return outcome}
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  outcome
+}
+fn keyframe_document(doc:ref<editor.Document>,clip:u64,domain:u32,target:u64,kind:str,name:str,value:f64) -> Result effects {alloc} {
+  let playhead: i64 = editor.playhead(doc)
+  let selected: editor.Clip = match editor.clip(doc, clip) {
     none => { return refused("selected clip is missing") }, some(found) => found,
   }
   let frame: i64 = playhead - selected.start
   if frame < 0 or frame >= selected.length { return refused("playhead is outside the clip") }
   if domain == 1 and target != clip { return refused("[GA_KEY_TARGET] Key target no longer matches the selected clip") }
   if domain == 2 and target != 0 {
-    let doc: ref<editor.Document> = struct.borrow(state,field=document)
     let slot: u64 = match editor.filter_slot(doc,target) {
       none=>{return refused("[GA_KEY_TARGET] That filter no longer exists")},some(found)=>found,
     }
@@ -1110,36 +1406,34 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
     return refused("[GA_AUDIO_GAIN_KEYS] Gain must be finite and nonnegative")
   }
   if not timeline_media.key_supported(str.view(qualified)) or
-     (not audio_gain and not clip_fade and editor.track_kind(struct.borrow(state, field=document), selected.track) !=
+     (not audio_gain and not clip_fade and editor.track_kind(doc, selected.track) !=
        editor.track_video()) or (domain == 1 and str.len(kind) != 0) or
      (domain == 2 and str.len(kind) == 0) or (domain != 1 and domain != 2) {
     return refused("[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet")
   }
   if not math.is_finite(value) { return refused("[GA_VIDEO_KEY_VALUE] Key value must be finite") }
-  if domain == 2 and not timeline_media.key_layer_supported(struct.borrow(state,field=document),selected,kind,playhead) {
+  if domain == 2 and not timeline_media.key_layer_supported(doc,selected,kind,playhead) {
     return refused("[GA_KEY_LAYER] This effect needs an upper clip over a lower picture and cannot key a transition side")
   }
   // K on a parameter row can precede the first ordinary parameter edit. Create
   // its filter along with the key so one Undo removes both changes.
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   if domain == 2 {
-    var instance: u64 = if target == 0 {chrome_filter_of_kind(state,clip,kind)}else{target}
+    var instance: u64 = if target == 0 {filter_of_kind(doc,clip,kind)}else{target}
     if instance == 0 {
-      match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
+      match editor.add_filter(doc, clip, kind) {
         none => { return refused("the filter could not be created") },
         some(id) => {instance=id},
       }
     }
-    filter_keys.migrate(struct.borrow(state,field=document),clip,instance,kind,name)
+    filter_keys.migrate(doc,clip,instance,kind,name)
     let _ = ref.swap(qualified,filter_keys.name(instance,kind,name))
   }
-  let interp: u32 = parameter_key_interp(struct.borrow(state, field=document), clip,
+  let interp: u32 = parameter_key_interp(doc, clip,
     str.view(qualified), frame)
-  if not editor.set_key(struct.borrow(state, field=document), clip,
+  if not editor.set_key(doc, clip,
                         str.view(qualified), frame, value, interp) {
     return refused("that parameter could not be keyed")
   }
-  app.document_changed(state)
   done("keyframe set", clip)
 }
 
@@ -1150,21 +1444,31 @@ pub fn keyframe_parameter(state: ref<app.App>, domain: u32, target: u64, kind: s
 pub fn copy_clip(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
   match editor.clip_snapshot(struct.borrow(state, field=document), clip) {
     none => refused("[GA_CLIPBOARD_COPY] No valid clip selected"),
-    some(value) => { app.set_clipboard(state,value)
+    some(value) => {
+      let doc:ref<editor.Document> = struct.borrow(state,field=document)
+      let peer:u64=linked_media.mate(doc,clip)
+      if peer!=0 {match editor.clip_snapshot(doc,peer) {none=>{return refused("[GA_CLIPBOARD_COPY] Linked stream content is invalid")},some(_)=>{},}}
+      let paired:option<editor.ClipSnapshot> = if peer==0 {option.none()} else {editor.clip_snapshot(doc,peer)}
+      app.set_clipboard(state,value)
+      let _=struct.replace(state,paired,field=clipboard_peer)
       done("copied", clip) },
   }
 }
 
-pub fn cut_clip(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
+pub fn cut_clip(state:ref<app.App>,clip:u64) -> Result effects {alloc} {
   let doc:ref<editor.Document> = struct.borrow(state,field=document)
-  let value:editor.Clip=match editor.clip(doc,clip) {none=>{return refused("[GA_CLIPBOARD_CUT] No clip selected")},some(found)=>found,}
-  if editor.track_locked(doc,value.track) {return refused("[GA_CLIPBOARD_CUT] Source track is locked")}
-  let saved:editor.ClipSnapshot=match editor.clip_snapshot(doc,clip) {none=>{return refused("[GA_CLIPBOARD_CUT] Clip content is invalid")},some(found)=>found,}
+  let saved:editor.ClipSnapshot=match editor.clip_snapshot(doc,clip) {none=>{return refused("[GA_CLIPBOARD_CUT] Clip content is invalid")},some(value)=>value,}
+  let peer:u64=linked_media.mate(doc,clip)
+  if peer!=0 {match editor.clip_snapshot(doc,peer) {none=>{return refused("[GA_CLIPBOARD_CUT] Linked stream content is invalid")},some(_)=>{},}}
+  let paired:option<editor.ClipSnapshot> = if peer==0 {option.none()} else {editor.clip_snapshot(doc,peer)}
   var candidate:editor.Document=editor.copy_document(doc)
   if not editor.ripple_delete(candidate,clip) {return refused("[GA_CLIPBOARD_CUT] Clip could not be removed")}
+  if peer!=0 and not editor.ripple_delete(candidate,peer) {return refused("[GA_LINKED_LOCKED] Linked stream could not be removed")}
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),doc)
   let _=struct.replace(state,candidate,field=document)
   app.set_clipboard(state,saved)
+  let _=struct.replace(state,paired,field=clipboard_peer)
   app.document_changed(state)
   done("cut",clip)
 }
@@ -1176,12 +1480,20 @@ pub fn paste_clip(state: ref<app.App>, track: u64, at: i64) -> Result effects {a
       some(_)=>{return refused("[GA_CLIPBOARD_IDENTITY] Copied media or child sequence was removed; copy the clip again")},
     }
   }
+  let audio_track:u64=app.default_audio_track(state)
+  let video_track:u64=app.default_video_track(state)
   var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
   let pasted:result<u64,string> = match struct.borrow(state,field=clipboard) {
     none=>{return refused("[GA_CLIPBOARD_EMPTY] Clipboard is empty")},
     some(saved)=>editor.paste_clip_snapshot(candidate,saved,track,at),
   }
   match pasted {err(problem)=>refused(text.concat("[GA_CLIPBOARD_PASTE] ",problem)),ok(id)=>{
+    match struct.borrow(state,field=clipboard_peer) {none=>{},some(saved)=>{
+      let other:u64=if saved.track_kind==editor.track_audio() {audio_track} else {video_track}
+      let peer:u64=match editor.paste_clip_snapshot(candidate,saved,other,at) {err(problem)=>{return refused(text.concat("[GA_LINKED_PASTE] ",problem))},ok(value)=>value,}
+      regroup_pair(candidate,id,peer)
+    },}
+    if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
     editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
     let _=struct.replace(state,candidate,field=document)
     app.document_changed(state)
@@ -1216,6 +1528,7 @@ pub fn razor_all(state: ref<app.App>) -> Result effects {alloc} {
   var candidate: editor.Document = editor.copy_document(struct.borrow(state,field=document))
   let cut: u64 = editor.split_all(candidate,candidate.active,editor.playhead(candidate))
   if cut == 0 { return refused("[GA_SPLIT_CONTEXT] No unlocked razor cut can preserve source time, fades, and effect history") }
+  if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
   let _ = struct.replace(state,candidate,field=document)
   app.document_changed(state)

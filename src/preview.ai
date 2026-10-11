@@ -137,7 +137,7 @@ fn images_with_source(state: ref<app.App>, width: u32, height: u32, profile: boo
   Images {pictures:out,source_ns:source_ns,plan_ns:plan_ns,program_ns:program_ns,source_key:source_key,source_held:source_held,source_frame:monitor_frame,program_frame:program_frame}
 }
 
-// Fill the waveform cache for every clip with audio, including video clips. This is the only place the application asks
+// Fill the waveform cache for audio lanes. Video lanes retain frame strips even for legacy combined clips. This is the only place the application asks
 // the provider for envelopes, so painting never does media work.
 pub fn waveforms(state: ref<app.App>) -> u64 effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   match waveforms_for_request(state,"",0) {
@@ -212,8 +212,9 @@ pub fn strip_lanes(state: ref<app.App>, view: StripView) -> result<array<u64>,st
 }
 fn strip_clip_matches(doc: ref<editor.Document>, clip: editor.Clip, video: bool) -> bool effects {alloc} {
   if clip.owner != doc.active {return false}
-  if not video {return chrome.clip_has_audio(doc,clip.id)}
+  if not video {return editor.track_kind(doc,clip.track) == editor.track_audio() and chrome.clip_has_audio(doc,clip.id)}
   if editor.track_kind(doc,clip.track) != editor.track_video() {return false}
+  if not editor.clip_has_video(clip) {return false}
   if clip.nested != 0 {return true}
   match editor.source_slot(doc,clip.source) {none=>false,some(slot)=>{
     let source: ref<editor.Source> = array.borrow(struct.borrow(doc,field=sources),slot)
@@ -768,6 +769,11 @@ fn write_selected_waveforms(state: ref<app.App>, root: str, limited: bool, selec
   var i: u64 = 0
   loop { if i >= array.len(struct.borrow(state, field=waveforms)) { break }
     let wave: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), i)
+    let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),wave.clip) {
+      some(value)=>value,none=>{i=i+1
+        continue},}
+    if not strip_clip_matches(struct.borrow(state,field=document),current,false) {i=i+1
+      continue}
     if limited {
       var wanted: bool=false
       var k: u64=0
@@ -828,7 +834,8 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
       }else{state.document_revision}
       let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{i=i+1
         continue},}
-      if revision != state.media_revision or document_revision != state.document_revision or
+      if not strip_clip_matches(struct.borrow(state,field=document),current,false) or
+          revision != state.media_revision or document_revision != state.document_revision or
           (not versioned and current.nested != 0) or current.source != source or current.length != length or
           timeline_media.source_frame(struct.borrow(state,field=document),current,current.start) != first or
           timeline_media.source_frame(struct.borrow(state,field=document),current,current.start+current.length-1) != last {i=i+1
@@ -998,7 +1005,8 @@ pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects 
       match text.parse_u64(str.view(array.borrow(fields,6))) {some(value)=>value,none=>{continue},}
     }else{0}
     let current: editor.Clip = match editor.clip(struct.borrow(state,field=document),clip) {some(value)=>value,none=>{continue},}
-    if revision != state.media_revision or current.owner != struct.get(struct.borrow(state,field=document),field=active) or
+    if not strip_clip_matches(struct.borrow(state,field=document),current,true) or
+        revision != state.media_revision or current.owner != struct.get(struct.borrow(state,field=document),field=active) or
         (current.nested != 0 and document_revision != state.document_revision) or
         current.source != source or frame < current.start or frame >= current.start+current.length or
         timeline_media.source_frame(struct.borrow(state,field=document),current,frame) != source_frame {continue}

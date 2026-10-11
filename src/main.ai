@@ -732,6 +732,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
                 err(problem) => {
                   app.set_status(state, str.view(problem))
                   pause_transport(state, source_playing)
+                  // A planning refusal must silence this device epoch before
+                  // paint. The inactive path below supersedes its producer and
+                  // releases held PCM during this same iteration.
+                  let _ = native_audio.request(library,"stop","")
+                  audio_active=false
+                  audio_preparing=false
                 },
                 ok(plan) => {
                   audio_task_generation = audio_generation
@@ -1719,7 +1725,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
   if str.eq(verb, "open") {
     if view.len(args) < 3 { say("open needs a project path")
       return 2 }
-    var opened: commands.Result = commands.open_project(state, view.get(args, 2))
+    var opened: commands.Result = commands.open_linked_project(state, view.get(args, 2))
     if not opened.ok { say(str.view(commands.message(opened)))
       return 1 }
     return run_window(state, "Genesis AIR")

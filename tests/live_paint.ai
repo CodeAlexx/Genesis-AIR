@@ -28,9 +28,10 @@ fn fixture(scratch: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.wr
   var source: commands.Result = commands.import_media(state, "live.mov", "Retained preview clip")
   let _ = commands.open_source(state, source.value)
   let added: commands.Result = commands.append_clip(state, app.default_video_track(state), source.value, 0, 900)
+  let audio: commands.Result = commands.append_clip(state,app.default_audio_track(state),source.value,0,900)
   let _ = commands.select_only(state, added.value)
   var peaks: array<f64> = [0.1, 0.8, 0.2, 0.5, 0.3, 0.9]
-  app.set_waveform(state,added.value,peaks,0,899,0)
+  app.set_waveform(state,audio.value,peaks,0,899,state.media_revision)
   var frame: i64 = 0
   loop { if frame >= 900 { break }
     array.push(struct.borrow(state, field=thumbnails), app.Thumbnail {clip: added.value, frame: frame, source:source.value,source_frame:frame,revision:0,document_revision:0,

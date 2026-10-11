@@ -312,6 +312,8 @@ fn gain_midpacket(suite:ref<test.Suite>,root:str) -> bool
     let _=test.check(suite,header.kind==5,"Gain edit occurs after a real old packet header")
     time.sleep_ms(200)
     let _=test.eq_u64(suite,transport.completed_total,0,"Old packet cannot complete while GUI credits are withheld")
+    let _=test.eq_str(suite,read(root,"producer-failure.tsv"),"",
+      "Credited body write survives a 200ms consumer hold beyond the 50ms credit poll")
     var changed:commands.Result=commands.set_track_gain(state,lane,1.05)
     let _=test.check(suite,changed.ok,"Actual track gain command succeeds during playback")
     let _=test.check(suite,state.document_revision>revision,"Gain edit advances document identity")
@@ -319,7 +321,17 @@ fn gain_midpacket(suite:ref<test.Suite>,root:str) -> bool
     let _=test.check(suite,editor.playing(struct.borrow(state,field=document)),"Gain edit leaves the Program transport playing")
     link.retire_window(transport)
     good=preview.request_window(state,root,transport,3,2,"gain after",30,20,480,270,false) and good
-    good=await_pair(transport,4) and good
+    let received:bool=await_pair(transport,4)
+    if not received {
+      // Preserve the first real producer cause before the intentional command
+      // owner closure below can produce a different terminal record.
+      let first_failure:string=read(root,"producer-failure.tsv")
+      let _=files.write_text(path.join(root,"first-producer-failure.tsv"),first_failure)
+      io.write(text.concat("gain first producer failure: ",text.concat(first_failure,"\n")))
+      preview.poll_failure(root,transport)
+      io.write(text.concat("gain first Link failure: ",text.concat(struct.borrow(transport,field=error),"\n")))
+    }
+    good=received and good
     good=check_packet(suite,transport,3,30,20) and good
     good=check_packet(suite,transport,4,31,20) and good
     let _=test.eq_u64(suite,transport.completed_total,2,"Only the new gain epoch owns accepted packets")
@@ -415,4 +427,3 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.done(suite)
   test.conclude(suite,path.join(root,"preview-batch-tests.json"),8)
 }
-

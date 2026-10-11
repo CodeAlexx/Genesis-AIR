@@ -26,7 +26,7 @@ fn fixture(root: str, name: str) -> app.App effects {alloc, env, fs.meta, fs.rea
   app.set_fonts(state, typeface.search_paths())
   var source: commands.Result = commands.import_media(state, "clip.mov", "Project source")
   let _ = commands.open_source(state, source.value)
-  let added: commands.Result = commands.append_clip(state, app.default_video_track(state), source.value, 0, 60)
+  let added: commands.Result = commands.append_source(state, source.value, 0, 60)
   let _ = commands.select_only(state, added.value)
   state
 }
@@ -298,7 +298,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = test.check(suite, session.offer_recovery(startup), "Recovery remains available")
   let _ = choice(startup, 0)
   let _ = test.check(suite, app.dirty(startup) and str.len(str.view(app.project_path(startup))) == 0, "Recovery opens a dirty copy for Save as")
-  let _ = test.eq_u64(suite, editor.clip_count(struct.borrow(startup, field=document)), 1, "Recovered timeline has its clip")
+  let _ = test.eq_u64(suite, editor.clip_count(struct.borrow(startup, field=document)), 2, "Recovery retains both video and audio clips")
   let _ = test.check(suite, not editor.playing(struct.borrow(startup, field=document)) and not editor.can_undo(struct.borrow(startup, field=history)), "Recovered transport is paused and history starts clean")
   let _ = commands.save_project(startup, str.view(path.join(str.view(root), "recovered-copy.air")))
   let _ = test.check(suite, not exists(str.view(two)), "Saving the recovered copy clears its managed recovery source")

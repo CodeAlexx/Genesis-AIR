@@ -38,6 +38,30 @@ try {
 } finally {
   $PSNativeCommandUseErrorActionPreference = $previousNativePreference
 }
+$editorIoPatch = Join-Path $here 'patches/air-editor-io.patch'
+if (-not (Test-Path -LiteralPath $editorIoPatch)) { throw '[GA_SDK_IO_PATCH_MISSING] The shared project codec overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $editorIoPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $editorIoPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_IO_PATCH_BASE] The project codec overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $editorIoPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_IO_PATCH_APPLY] Could not apply the shared project codec overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
+$channelPatch = Join-Path $here 'patches/air-channel-deadlines.patch'
+if (-not (Test-Path -LiteralPath $channelPatch)) { throw '[GA_SDK_CHANNEL_PATCH_MISSING] The shared channel deadline overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $channelPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $channelPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CHANNEL_PATCH_BASE] The channel deadline overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $channelPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CHANNEL_PATCH_APPLY] Could not apply the shared channel deadline overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
 $processPatch = Join-Path $here 'patches/air-process-wait-windows.patch'
 if (-not (Test-Path -LiteralPath $processPatch)) { throw '[GA_SDK_PROCESS_PATCH_MISSING] The Windows process overlay is missing.' }
 try {
@@ -93,6 +117,9 @@ if ($RunTests) { $sources += ,@('strip-viewport', 'tests/strip_viewport.ai') }
 if ($RunTests) { $sources += @(@('clip-clipboard', 'tests/clip_clipboard.ai'), @('clip-clipboard-media', 'tests/clip_clipboard_media.ai')) }
 if ($RunTests) { $sources += @(@('editing-safety', 'tests/editing_safety.ai'), @('picture-clock', 'tests/picture_clock.ai')) }
 if ($RunTests) { $sources += @(@('preview-batch', 'tests/preview_batch.ai'), @('preview-fifo', 'tests/preview_fifo.ai')) }
+if ($RunTests) { $sources += ,@('audio-plan-preflight', 'tests/audio_plan_preflight.ai') }
+if ($RunTests) { $sources += ,@('linked-media', 'tests/linked_media.ai') }
+if ($RunTests) { $sources += ,@('channel-deadlines', 'tests/channel_deadlines.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -135,6 +162,9 @@ if ($RunTests) { $targets += @('genesis-strip-viewport') }
 if ($RunTests) { $targets += @('genesis-clip-clipboard', 'genesis-clip-clipboard-media') }
 if ($RunTests) { $targets += @('genesis-editing-safety', 'genesis-picture-clock') }
 if ($RunTests) { $targets += @('genesis-preview-batch', 'genesis-preview-fifo') }
+if ($RunTests) { $targets += @('genesis-audio-plan-preflight') }
+if ($RunTests) { $targets += @('genesis-linked-media') }
+if ($RunTests) { $targets += @('genesis-channel-deadlines') }
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }

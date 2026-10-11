@@ -699,3 +699,72 @@ producer-exit cause remain in the [native validation record](WINDOWS_PLAYBACK_VA
 The [sanitized evidence archive](../archive/native-playback-reserve-2026-10-10.tar.gz)
 preserves source and receipts; its digest is recorded in the archive receipt and
 publication commit. Broader professional editing acceptance remains incomplete.
+
+## Linked lanes and audio refusal preflight
+
+This application slice separates V thumbnails from A processed waveforms and
+suppresses the V half's duplicate sound. It changes shared planning, controls and
+SDK document routing; the AA40 worker, codecs and GPU/color path remain unchanged.
+Properties audio edits target the A mate, and grouping retains linked mates.
+No new headless throughput or native cadence result is inferred from these edits.
+
+Contributing clip Pan/Speed curves and curves on enabled audio-filter instances
+report `GA_AUDIO_AUTOMATION_UNSUPPORTED`; this is explicit refusal, not animated
+DSP support. Audible offline leaves, including compound descendants and original
+Source audition, report `GA_AUDIO_SOURCE_OFFLINE`. Supported clip Gain/Fade curves
+retain their existing processing. Disabled clips, muted or sequence-local
+solo-excluded lanes, inactive/unreferenced sequences, no-audio or video-only
+branches, and half-open nonoverlap remain noncontributing. Static held clips are
+silent, but an enabled stored Speed curve still refuses: it could make a held
+clip progress. Disabled filter curves stay dormant. Hidden/locked tracks remain
+audible; scalar zero gain is not a bypass for positive Gain keys. Compound
+preflight includes the selected child history needed by cached DSP. Direct peak
+failures retain `GA_AUDIO_CLIP_ENV` and the underlying cause.
+
+The focused 61-case background oracle compares 1,536,000 PCM16 values (maximum
+0.735521 code at the unchanged one-code limit) and 384,000 independently decoded
+lossless-master values (maximum normalized error 1.207935e-7 at the unchanged
+2e-6 limit). Masked picture branches, source audition, refusal recovery, owned
+cache/partial cleanup and preservation of external sidecars are included. The
+prechange silent-loss failure and later fixture-authoring corrections remain
+retained. These are focused receipts, not native-device or desktop acceptance.
+
+Audio-plan failure stops the device before the next paint; export rejects the
+plan before acquiring output/cleanup ownership. No codec, DSP, color or worker
+change is introduced, and Genesis continues to use MM-AIR's runtime without its
+own FFmpeg executable/DLL bundle.
+
+The shared preview channel also has a focused backpressure repair: separate
+credit-poll/frame-write deadlines preserve reliable framing within a bounded
+two-second window-message budget. Four real-TCP cases / 18 checks and four exact
+wire oracles pass, including a 200 ms write stall, resumable no-credit expiry and
+fatal partial-frame refusal. The earlier BDF3 initiating cause remains unknown;
+these component checks do not qualify the changed application. See the
+[retained failure and protocol proof](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md#linked-lane-background-follow-up).
+
+The transport candidate passed media/audio fixtures but failed the existing
+Nudge success-message contract. The fresh contract candidate restores `nudged`;
+paired edit/refusal behavior is unchanged. A separate 757-control/four-tab tail
+passes; the coherent final result is recorded below.
+
+The final `linked-lanes-contract-final` build and full BackgroundOnly Windows
+gate pass; the verified application `06af1ab848cf1225c3bbb7f9896dd6dbdfa3148df95b8ed9f5241c9b20ca687b` is published with unchanged AA40
+worker/runtime. Acceptance includes linked controls 28/784, channel 4/18 plus
+four exact TCP wire oracles, retained preview 8/229, track scrolling 8/83,
+153 headless facts plus three native-drop checks, 757 four-tab control outcomes,
+the 61-case PCM/master preflight and exact 181-second / 37-chunk continuity.
+
+A separate three-case / 22-check real-1080p shared-source helper renders V-only
+tiles/A peaks and changing Program/scopes at frames 0, 90 and 179. Inspected
+background surfaces are not desktop or speaker tests. The initial SDK driver
+path error was repaired before launch without changing the candidate, and all
+failed gate/fixture/transport evidence remains retained. See the
+[complete validation scope](WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md#linked-lane-background-follow-up).
+
+Publication preserves protected originals and terminates no user application.
+Desktop clipboard, live audio/device clocks and sustained cadence remain
+deferred; older 1A49 timing cannot qualify this binary. Complete professional
+editing acceptance remains open. The
+[1,287-member immutable bundle](../archive/linked-media-windows-2026-10-10.tar.gz)
+has SHA256 `b822ed35284be3961abead18381aed7f23bb55aaafae2701d28c33d73ecd87bb`; the
+[receipt](validation/linked-media-windows-2026-10-10.json) binds its exact scope.

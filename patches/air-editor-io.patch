@@ -1,0 +1,54 @@
+diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
+--- a/stdlib/editor_io.ai
++++ b/stdlib/editor_io.ai
+@@ -15,6 +15,7 @@
+ import std.codec as codec
+ import std.editor as editor
+ import std.json as json
++import std.text as text
+ 
+ // The document format this build writes and the only revision it reads.
+ pub fn schema_name() -> string effects {alloc} { string.copy("air.editor.project") }
+@@ -58,6 +59,7 @@
+   codec.field_f64(w, "pan", value.pan)
+   codec.field_f64(w, "speed", value.speed)
+   codec.field_bool(w, "reverse", value.reverse)
++  if value.streams != editor.streams_both() {codec.field_u64(w,"streams",cast.wrap(value.streams))}
+   codec.end_object(w)
+   ()
+ }
+@@ -79,6 +81,15 @@
+ // writer's own state machine, so a structural mistake is an error here rather than text that
+ // fails to parse later.
+ pub fn encode(doc: ref<editor.Document>) -> result<string, codec.Error> effects {alloc} {
++  var stream_at: u64 = 0
++  loop {if stream_at >= array.len(struct.borrow(doc,field=clips)) {break}
++    let value: editor.Clip = array.get(struct.borrow(doc,field=clips),stream_at)
++    if not editor.stream_mask_valid(value.streams) {
++      let at: string = text.concat("/clips/",text.concat(string.from_int(stream_at),"/streams"))
++      return result.err(codec.error(codec.Code.Range,at,"stream mask 1..3",string.from_int(value.streams)))
++    }
++    stream_at=stream_at+1
++  }
+   var w: codec.Writer = codec.writer()
+   codec.begin_object(w)
+   codec.field_text(w, "schema", str.view(schema_name()))
+@@ -449,12 +460,17 @@
+         let pan: f64 = try codec.f64_field(document, entry, "pan")
+         let speed: f64 = try codec.f64_field(document, entry, "speed")
+         let reverse: bool = try codec.bool_field(document, entry, "reverse")
++        let streams: u64 = try codec.u64_or(document,entry,"streams",3)
++        if streams < 1 or streams > 3 {
++          let at: string = text.concat(codec.reader_path(entry),"/streams")
++          return result.err(codec.error(codec.Code.Range,at,"stream mask 1..3",string.from_int(streams)))
++        }
+         let _ = try codec.reader_finish(document, entry)
+         array.push(struct.borrow(doc, field=clips), editor.Clip {id: id, owner: owner,
+           source: source_id, nested: nested, source_in: source_in, length: length,
+           start: start, track: track, group: group, enabled: enabled, selected: selected,
+           fade_in: fade_in, fade_out: fade_out, gain: gain, pan: pan, speed: speed,
+-          reverse: reverse}) },
++          reverse: reverse, streams: cast.sat(streams)}) },
+     }
+   }
+ 

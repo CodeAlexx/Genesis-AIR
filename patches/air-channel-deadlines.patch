@@ -1,0 +1,33 @@
+diff --git a/stdlib/channel.ai b/stdlib/channel.ai
+--- a/stdlib/channel.ai
++++ b/stdlib/channel.ai
+@@ -383,19 +383,27 @@
+ // Reliable delivery. One credit is always reserved for `finish`, so a producer can
+ // always report its own completion even after it has saturated the channel.
+ pub fn send(state: ref<Sender>, kind: u64, data: view<byte>, deadline_ns: u64) -> result<unit, Error> effects {alloc, net} {
++  send_deadlines(state,kind,data,deadline_ns,deadline_ns)
++}
++
++// A short, retryable credit poll must not impose that same budget on a started
++// socket frame. Once bytes are written, expiry remains fatal: retrying a partial
++// frame would corrupt the stream. Both deadlines are absolute monotonic times.
++pub fn send_deadlines(state: ref<Sender>, kind: u64, data: view<byte>,
++    credit_deadline_ns: u64, write_deadline_ns: u64) -> result<unit, Error> effects {alloc, net} {
+   if state.failed { return result.err(fail(struct.borrow(state, field=error).code, "channel already failed")) }
+   if state.ended { return result.err(fail(1, "the channel consumer hung up")) }
+   if view.len(data) > state.max_message { return result.err(fail(5, "message exceeds the channel max_message")) }
+   loop {
+     if state.credits > 1 { break }
+-    match refill(state, deadline_ns) {
++    match refill(state, credit_deadline_ns) {
+       ok(_) => {},
+       err(error) => { var held: Error = error
+         if held.code == 3 { return result.err(fail(2, "channel is full")) }
+         return result.err(held) },
+     }
+   }
+-  write_frame(state, kind, data, deadline_ns)
++  write_frame(state, kind, data, write_deadline_ns)
+ }
+ 
+ /// Reliably stream one logical payload as ordered messages of the same kind. The

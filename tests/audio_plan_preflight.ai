@@ -1,0 +1,95 @@
+module genesis.tests.audio_plan_preflight
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/timeline_media.ai" as media
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn row(out: ref<string>, name: str, operation: str, result: str) -> unit effects {alloc} {
+  string.append(out,name)
+  string.append(out,"\t")
+  string.append(out,operation)
+  string.append(out,"\t")
+  string.append(out,result)
+  string.append(out,"\n")
+  ()
+}
+// WORKER ROOT; independently authored ROOT/cases.tsv and NAME.air, no mutation.
+pub fn main(args: view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 3 {return 2}
+  let worker: str = view.get(args,1)
+  let root: str = view.get(args,2)
+  let manifest: string = match files.read_text(path.join(root,"cases.tsv")) {ok(value)=>value,err(_)=>{return 2},}
+  var rows: array<string> = text.split(manifest,"\n")
+  var output: string = string.new()
+  var at: u64 = 0
+  loop {if at >= array.len(rows) {break}
+    var fields: array<string> = text.split(text.trim(array.borrow(rows,at)),"\t")
+    at=at+1
+    if array.len(fields) != 6 {continue}
+    let name: str = array.borrow(fields,0)
+    let clip_id: u64 = option.unwrap(text.parse_u64(array.borrow(fields,1)))
+    let first: i64 = option.unwrap(text.parse_i64(array.borrow(fields,2)))
+    let last: i64 = option.unwrap(text.parse_i64(array.borrow(fields,3)))
+    let execute: bool = str.eq(array.borrow(fields,4),"1")
+    let export: bool = str.eq(array.borrow(fields,5),"1")
+    let raw: string = match files.read_text(path.join(root,text.concat(name,".air"))) {ok(value)=>value,err(_)=>{return 2},}
+    var doc: editor.Document = match editor_io.decode(raw) {ok(value)=>value,err(problem)=>{io.write("Cannot decode independently authored project")
+      return 2},}
+    let before: string = encoded(doc)
+    let work: string = path.join(root,name)
+    let _ = files.mkdirs(work)
+    row(output,name,"whole",match media.audio_plan(doc,worker,first,path.join(work,"whole.wav")) {
+      ok(value)=>match value {none=>string.copy("SILENT"),some(_)=>string.copy("OK"),},err(problem)=>problem,})
+    row(output,name,"range",match media.audio_plan_range(doc,worker,first,last,path.join(work,"range.wav")) {
+      ok(value)=>{var plan: media.AudioPlan = value
+      string.copy(if array.len(struct.borrow(plan,field=sounds)) == 0 {"SILENT"}else{"OK"})},err(problem)=>problem,})
+    let clip: editor.Clip = option.unwrap(editor.clip(doc,clip_id))
+    row(output,name,"peaks",match media.clip_envelope_plan(doc,clip,8,path.join(work,"envelope.f32")) {
+      ok(_)=>string.copy("OK"),err(problem)=>problem,})
+    // Inspect the actual adapter wire plan without a GPU/decoder call. Audio-only
+    // clips on a V lane must neither add picture paths nor visit picture effects.
+    var picture_fonts: array<string> = array.new()
+    var picture_cache: media.RenderCache = media.render_cache(picture_fonts)
+    row(output,name,"picture",match media.frame_plan(doc,first,"PREVIEW",path.join(work,"picture.rgba"),
+        path.join(work,"picture-plan"),picture_cache) {
+      ok(lines)=>match files.write_text(path.join(work,"picture-plan.txt"),text.join(lines,"\n")) {
+        ok(_)=>string.copy("OK"),err(_)=>string.copy("WRITE ERROR"),},err(problem)=>problem,})
+    row(output,name,"filmstrip",match media.clip_picture_plan(doc,clip,first,"PREVIEW",path.join(work,"strip.rgba"),
+        path.join(work,"strip-plan"),picture_cache) {
+      ok(_)=>string.copy("OK"),err(problem)=>problem,})
+    row(output,name,"source",match media.source_audio_range(doc,worker,0,12,path.join(work,"source.wav")) {
+      ok(value)=>{var plan: media.AudioPlan = value
+      string.copy(if array.len(struct.borrow(plan,field=sounds)) == 0 {"SILENT"}else{"OK"})},err(problem)=>problem,})
+    if execute {
+      row(output,name,"audition",match media.prepare_audio(doc,worker,first,path.join(work,"whole.wav")) {
+        ok(value)=>string.copy(if value {"OK"}else{"SILENT"}),err(problem)=>problem,})
+      match media.audio_plan_range(doc,worker,first,last,path.join(work,"range.wav")) {
+        err(problem)=>row(output,name,"retained",problem),
+        ok(plan)=>{
+          var job: media.AudioJob = media.audio_job(plan,option.none())
+          row(output,name,"retained",match media.execute_playback_audio(job,"",0) {
+            err(problem)=>problem,ok(session)=>match media.shutdown_audio_checked(session) {
+              ok(_)=>string.copy("OK"),err(problem)=>problem,},})
+        },
+      }
+    }
+    if export {
+      var fonts: array<string> = array.new()
+      row(output,name,"export",match media.render_profile(doc,worker,path.join(work,"refusal.mkv"),fonts,"","",3) {
+        ok(_)=>string.copy("OK"),err(problem)=>problem,})
+    }
+    let after: string = encoded(doc)
+    if after != before {
+      let _ = files.write_text(path.join(work,"before.air"),before)
+      let _ = files.write_text(path.join(work,"after.air"),after)
+    }
+    row(output,name,"immutable",string.copy(if after == before {"OK"}else{"CHANGED"}))
+  }
+  match files.write_text(path.join(root,"observations.tsv"),output) {ok(_)=>0,err(_)=>1,}
+}
+

@@ -1,7 +1,8 @@
 param(
   [string]$Bin = (Join-Path $PSScriptRoot '../build-windows/native/bin/Release'),
   [string]$Worker = (Join-Path $PSScriptRoot '../genesis-gcompose.exe'),
-  [switch]$ControlsOnly
+  [switch]$ControlsOnly,
+  [switch]$BackgroundOnly
 )
 $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -49,9 +50,16 @@ try {
   $env:GENESIS_GCOMPOSE = $Worker
   if (-not $ControlsOnly) {
   Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
-  $clipboardResult = Invoke-Native 'genesis-ui-clipboard.exe' @()
-  Write-Host $clipboardResult.TrimEnd()
-  Set-Content -LiteralPath (Join-Path $root 'ui-clipboard-windows.log') -Value $clipboardResult
+  if (-not $BackgroundOnly) {
+    $clipboardResult = Invoke-Native 'genesis-ui-clipboard.exe' @()
+    Write-Host $clipboardResult.TrimEnd()
+    Set-Content -LiteralPath (Join-Path $root 'ui-clipboard-windows.log') -Value $clipboardResult
+  } else { Write-Host 'Background gate: live system clipboard check deferred.' }
+  & python (Join-Path $PSScriptRoot 'channel_deadlines.py') --binary (Join-Path $Bin 'genesis-channel-deadlines.exe') `
+    --root (Join-Path $work 'channel-deadlines') --report (Join-Path $root 'channel-deadlines-tests.json')
+  if ($LASTEXITCODE -ne 0) { throw 'The real TCP channel deadline gate failed.' }
+  Write-Host (Invoke-Native 'genesis-linked-media.exe' @((Join-Path $work 'linked-media'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'linked-media/linked-media-tests.json') -Destination (Join-Path $root 'linked-media-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-clip-clipboard.exe' @((Join-Path $work 'clip-clipboard'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'clip-clipboard/clip-clipboard-tests.json') -Destination (Join-Path $root 'clip-clipboard-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-editing-safety.exe' @((Join-Path $work 'editing-safety'))).TrimEnd()
@@ -89,9 +97,11 @@ try {
   $nativeU16Result = Invoke-Native 'genesis-native-u16-upload.exe' @()
   Write-Host $nativeU16Result.TrimEnd()
   Set-Content -LiteralPath (Join-Path $root 'native-u16-upload-windows.log') -Value $nativeU16Result
-  & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
-    --report (Join-Path $root 'native-audio-clock.json')
-  if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
+  if (-not $BackgroundOnly) {
+    & python (Join-Path $PSScriptRoot 'audio_clock.py') --library (Join-Path $Bin 'genesis-native-audio.dll') `
+      --report (Join-Path $root 'native-audio-clock.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Native audio device clock continuity failed.' }
+  } else { Write-Host 'Background gate: hardware audio clock check deferred.' }
   $identityResults = @(
     (Invoke-Native 'genesis-native-hdr-runtime.exe' @('idle', 'ignored')),
     (Invoke-Native 'genesis-native-hdr-runtime.exe' @('cpu', 'ignored')),
@@ -120,7 +130,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate panned device fixture.' }
   & ffmpeg -nostdin -y -v error -i $wave -af 'volume=0' -c:a pcm_s16le $silentWave
   if ($LASTEXITCODE -ne 0) { throw 'Could not generate silent device fixture.' }
-  Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd()
+  if (-not $BackgroundOnly) { Write-Host (Invoke-Native 'genesis-audio-device.exe' @($wave,$pannedWave,$silentWave)).TrimEnd() }
+  else { Write-Host 'Background gate: live speaker/device check deferred.' }
   $env:GENESIS_GCOMPOSE = $Worker
   if (Test-Path -LiteralPath $worker) {
     & python (Join-Path $PSScriptRoot 'clip_clipboard_media.py') `
@@ -230,6 +241,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Active nested audio warm cancellation and recovery acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_continuity.py') --worker $worker --report (Join-Path $root 'audio-continuity.json')
     if ($LASTEXITCODE -ne 0) { throw 'Long fractional-rate audio continuity and resumed-seek acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_plan_preflight.py') --binary (Join-Path $Bin 'genesis-audio-plan-preflight.exe') `
+      --worker $worker --root (Join-Path $work 'audio-plan-preflight') --report (Join-Path $root 'audio-plan-preflight.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Loaded-project audio preflight and valid-media recovery acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_reverse.py') --worker $worker --report (Join-Path $root 'reverse-audio-profile.json')
     if ($LASTEXITCODE -ne 0) { throw 'Long reverse audio and resampling acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'export_cancel.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `

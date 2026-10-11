@@ -59,7 +59,7 @@ fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process
   let _=editor.describe_source(doc,source,160,90,true,true,48000,2)
   var count: u64=0
   loop {if count==24 {break}
-    let track: u64=editor.add_track(doc,doc.active,editor.track_video(),"Reachable lane")
+    let track: u64=editor.add_track(doc,doc.active,if count==1 {editor.track_audio()}else{editor.track_video()},"Reachable lane")
     let _=editor.place(doc,track,source,0,60,0)
     count=count+1
   }
@@ -73,6 +73,8 @@ fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process
   app.mark_dirty(state,false)
   var peaks: array<f64> = [0.8,0.8,0.8,0.8,0.8,0.8]
   app.set_waveform(state,5,peaks,0,59,state.media_revision)
+  var audio_peaks: array<f64> = [0.8,0.8,0.8,0.8,0.8,0.8]
+  app.set_waveform(state,7,audio_peaks,0,59,state.media_revision)
   let media_revision: u64=state.media_revision
   let document_revision: u64=state.document_revision
   array.push(struct.borrow(state,field=thumbnails),app.Thumbnail {clip:5,frame:0,source:3,
@@ -95,7 +97,7 @@ fn long_fixture(root: str, length: i64, start: i64) -> app.App effects {alloc,fs
   let clip: u64=option.unwrap(editor.place(doc,track,source,0,length,start))
   commands.replace_project(state,doc)
   let _=editor.select_only(struct.borrow(state,field=document),clip)
-  let _=commands.set_clip_field(state,clip,"opacity",0.5)
+  let _=commands.set_clip_field(state,clip,"gain",0.5)
   let _=commands.undo(state)
   app.mark_dirty(state,false)
   state
@@ -175,8 +177,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.start(suite,"Wheel metadata owns modifier state after native file shortcuts")
   var wheel_state: app.App=fixture(root)
   let _=commands.select_only(wheel_state,5)
-  let _=commands.set_clip_field(wheel_state,5,"opacity",0.5)
-  let _=commands.undo(wheel_state)
+  let gain_edit:commands.Result=commands.set_clip_field(wheel_state,5,"gain",0.5)
+  let _=test.check(suite,gain_edit.ok and option.unwrap(editor.clip(struct.borrow(wheel_state,field=document),5)).gain==0.5,"A supported edit changes authored gain before Undo")
+  let gain_undo:commands.Result=commands.undo(wheel_state)
+  let _=test.check(suite,gain_undo.ok and option.unwrap(editor.clip(struct.borrow(wheel_state,field=document),5)).gain==1.0,"Undo restores authored gain and creates genuine Redo")
   app.mark_dirty(wheel_state,false)
   let _=test.check(suite,array.len(struct.borrow(struct.borrow(wheel_state,field=history),field=redo))>0,"Navigation starts with a real Redo snapshot to preserve")
   let wheel_authored: string=authored(wheel_state)
@@ -245,14 +249,16 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.check(suite,contained,"Every per-lane hit target is inside the visible header body")
   let _=test.done(suite)
 
-  let _=test.start(suite,"Thumbnails, waveform peaks and transition pixels follow the same scrolled lane")
+  let _=test.start(suite,"Frame strips and audio peaks follow their distinct scrolled lanes")
   let _=ref.swap(state,fixture(root))
   let _=app.set_track_scroll(state,1000,layout.height_of(frame.timeline))
   let _=ref.swap(model,painter.timeline_model(state,frame.timeline))
   let y: f64=timeline.track_top(model,23)
   var image: draw.Surface=painted(state,1600,980)
   let _=test.check(suite,pixel(image,frame.timeline.left+30.0,y+40.0,draw.rgb(12,240,30)),"Cached thumbnail paints in the reached bottom lane")
-  let _=test.check(suite,pixel(image,frame.timeline.left+96.0,y+23.0,draw.rgb(150,224,196)),"Cached stereo waveform paints in the same reached lane")
+  let _=test.check(suite,not pixel(image,frame.timeline.left+96.0,y+23.0,draw.rgb(150,224,196)),"Legacy V-lane waveform cache never overlays frame strips")
+  let audio_y: f64=timeline.track_top(model,22)
+  let _=test.check(suite,pixel(image,frame.timeline.left+96.0,audio_y+23.0,draw.rgb(150,224,196)),"Cached stereo peaks paint on the independently authored A lane")
   let _=test.check(suite,pixel(image,timeline.frame_to_x(model,60),y+10.0,draw.rgb(206,122,74)),"Transition seam paints over its authored lane")
   let header_body: f64=frame.timeline.bottom
   let colors: painter.Theme = painter.theme(state)

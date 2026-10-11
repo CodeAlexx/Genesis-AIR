@@ -233,16 +233,15 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     let source: u64 = app.current_source(state)
     if source == 0 { return note("pick a source in the media panel first") }
     let document: ref<editor.Document> = struct.borrow(state, field=document)
-    let frames: i64 = editor.source_frames(document, source)
+    let frames: i64 = editor.source_timeline_frames(document, source, document.active)
     let length: i64 = if frames > 0 { frames } else { 120 }
     let at: i64 = editor.playhead(document)
-    let track: u64 = app.default_video_track(state)
     var landed: commands.Result = if action == chrome.act_append() {
-        commands.append_clip(state, track, source, 0, length)
+        commands.append_source(state, source, 0, length)
       } else if action == chrome.act_overwrite() {
-        commands.overwrite_clip(state, track, source, 0, length, at)
+        commands.overwrite_source(state, source, 0, length, at)
       } else {
-        commands.insert_clip(state, track, source, 0, length, at)
+        commands.insert_source(state, source, 0, length, at)
       }
     return commands.message(landed)
   }
@@ -356,23 +355,23 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   if action == chrome.act_pool_add_clip() {
     if target == 0 { return note("no source selected") }
     let document: ref<editor.Document> = struct.borrow(state, field=document)
-    let frames: i64 = editor.source_frames(document, target)
+    let frames: i64 = editor.source_timeline_frames(document, target, document.active)
     let length: i64 = if frames > 0 { frames } else { 120 }
-    let track: u64 = app.default_video_track(state)
-    var landed: commands.Result = commands.append_clip(state, track, target, 0, length)
+    var landed: commands.Result = commands.append_source(state, target, 0, length)
     if not landed.ok { return commands.message(landed) }
     let _ = commands.select_only(state, landed.value)
     var named: string = editor.source_name(struct.borrow(state, field=document), target)
     var short: string = path.basename(str.view(named))
     var line: string = string.copy("Added ")
     string.append(line, str.view(short))
-    string.append(line, " to V1")
+    string.append(line, ": ")
+    string.append(line, str.view(commands.message(landed)))
     return line
   }
 
   // ---- filters ----
   if action == chrome.act_filter_add() {
-    let clip: u64 = app.current_clip(state)
+    let clip: u64 = if chrome.is_audio_kind(str.view(kind)) {app.current_audio_clip(state)} else {app.current_clip(state)}
     if clip == 0 { return note("select a clip first") }
     var landed: commands.Result = commands.ensure_filter(state, clip, str.view(kind))
     if landed.ok { app.set_selected_filter(state, landed.value) }

@@ -1069,6 +1069,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.dock_body
   let clip: u64 = app.current_clip(state)
+  let audio_clip: u64 = app.current_audio_clip(state)
   let scroll: f64 = app.dock_scroll(state)
   var cursor: f64 = area.top + 6.0 - scroll
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
@@ -1129,39 +1130,42 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
     },
   }
 
-  cursor = heading(out, area, cursor, "AUDIO")
-  match editor.clip(doc, clip) {
-    none => { },
-    some(value) => {
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "gain", "Audio gain",
-        audio_gain_value(doc, clip, value.gain),
-        0.0, 4.0, 0.05, clip != 0)
-    },
+  if clip_has_audio(doc,audio_clip) {
+    cursor = heading(out, area, cursor, "AUDIO")
+    match editor.clip(doc, audio_clip) {
+      none => { },
+      some(value) => {
+        cursor = param_row(out, area, cursor, domain_clip(), audio_clip, "", "gain", "Audio gain",
+          audio_gain_value(doc, audio_clip, value.gain),
+          0.0, 4.0, 0.05, audio_clip != 0)
+      },
+    }
+    cursor = kind_section(out, area, cursor, doc, audio_clip, "eq_3band",0)
+
+    cursor = heading(out, area, cursor, "DYNAMICS")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "compressor", "Compress")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "gate", "Gate")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "normalize", "Normalize")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "limiter", "Limiter")
+
+    cursor = heading(out, area, cursor, "EFFECTS")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "reverb", "Reverb")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "delay", "Delay")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "pitch", "Pitch")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "low_pass", "Low pass")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "high_pass", "High pass")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "tremolo", "Tremolo")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "bass", "Bass")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "treble", "Treble")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "notch", "Notch")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "chorus", "Chorus")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "flanger", "Flanger")
+    cursor = effect_switch(out, area, cursor, doc, audio_clip, "phaser", "Phaser")
+
+    cursor = heading(out, area, cursor, "GRAPHIC EQ")
+    cursor = kind_section(out, area, cursor, doc, audio_clip, "eq_10band",0)
+
   }
-  cursor = kind_section(out, area, cursor, doc, clip, "eq_3band",0)
-
-  cursor = heading(out, area, cursor, "DYNAMICS")
-  cursor = effect_switch(out, area, cursor, doc, clip, "compressor", "Compress")
-  cursor = effect_switch(out, area, cursor, doc, clip, "gate", "Gate")
-  cursor = effect_switch(out, area, cursor, doc, clip, "normalize", "Normalize")
-  cursor = effect_switch(out, area, cursor, doc, clip, "limiter", "Limiter")
-
-  cursor = heading(out, area, cursor, "EFFECTS")
-  cursor = effect_switch(out, area, cursor, doc, clip, "reverb", "Reverb")
-  cursor = effect_switch(out, area, cursor, doc, clip, "delay", "Delay")
-  cursor = effect_switch(out, area, cursor, doc, clip, "pitch", "Pitch")
-  cursor = effect_switch(out, area, cursor, doc, clip, "low_pass", "Low pass")
-  cursor = effect_switch(out, area, cursor, doc, clip, "high_pass", "High pass")
-  cursor = effect_switch(out, area, cursor, doc, clip, "tremolo", "Tremolo")
-  cursor = effect_switch(out, area, cursor, doc, clip, "bass", "Bass")
-  cursor = effect_switch(out, area, cursor, doc, clip, "treble", "Treble")
-  cursor = effect_switch(out, area, cursor, doc, clip, "notch", "Notch")
-  cursor = effect_switch(out, area, cursor, doc, clip, "chorus", "Chorus")
-  cursor = effect_switch(out, area, cursor, doc, clip, "flanger", "Flanger")
-  cursor = effect_switch(out, area, cursor, doc, clip, "phaser", "Phaser")
-
-  cursor = heading(out, area, cursor, "GRAPHIC EQ")
-  cursor = kind_section(out, area, cursor, doc, clip, "eq_10band",0)
 
   cursor = heading(out, area, cursor, "CLIP GRADE")
   cursor = kind_section(out, area, cursor, doc, clip, "brightness",0)
@@ -1296,6 +1300,7 @@ pub fn filters_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control>
 type AudioMetadataBudget = struct {remaining: u64}
 fn audio_metadata(doc: ref<editor.Document>, clip: editor.Clip,
     ancestors: ref<array<u64>>, budget: ref<AudioMetadataBudget>) -> bool effects {alloc} {
+  if not editor.clip_has_audio(clip) {return false}
   match editor.source_slot(doc,clip.source) {
     none=>{},some(slot)=>{
       if struct.get(array.borrow(struct.borrow(doc,field=sources),slot),field=has_audio) {return true}
@@ -1370,7 +1375,7 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
   let scroll: f64 = app.dock_scroll(state)
   // The meters occupy the top of the panel; the strips scroll beneath them.
   var cursor: f64 = area.top + meter_height() + 6.0 - scroll
-  let clip: u64 = app.current_clip(state)
+  let clip: u64 = app.current_audio_clip(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   var lanes: array<u64> = audio_tracks(doc)
   var index: u64 = 0

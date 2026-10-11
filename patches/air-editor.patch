@@ -1,5 +1,4 @@
 diff --git a/stdlib/editor.ai b/stdlib/editor.ai
-index 13f78f4..aa5646c 100644
 --- a/stdlib/editor.ai
 +++ b/stdlib/editor.ai
 @@ -17,6 +17,7 @@
@@ -10,7 +9,45 @@ index 13f78f4..aa5646c 100644
  
  // ---------------------------------------------------------------------------
  // Constants and kinds
-@@ -128,6 +129,11 @@ pub type Subtitle = struct { id: u64, owner: u64, start: i64, finish: i64, text:
+@@ -29,6 +30,27 @@
+ 
+ pub fn track_video() -> u32 effects {} { 0 }
+ pub fn track_audio() -> u32 effects {} { 1 }
++
++// Explicit stream routing is independent of lane presentation and scalar gain.
++// Legacy clips route both streams; zero is never an admitted mask.
++pub fn streams_video() -> u32 effects {} { 1 }
++pub fn streams_audio() -> u32 effects {} { 2 }
++pub fn streams_both() -> u32 effects {} { 3 }
++pub fn stream_mask_valid(value: u32) -> bool effects {} { value >= 1 and value <= 3 }
++pub fn clip_has_video(value: Clip) -> bool effects {} { value.streams == 1 or value.streams == 3 }
++pub fn clip_has_audio(value: Clip) -> bool effects {} { value.streams == 2 or value.streams == 3 }
++pub fn clip_streams(doc: ref<Document>, id: u64) -> u32 effects {} {
++  match clip(doc,id) {some(value)=>value.streams,none=>0,}
++}
++pub fn set_clip_streams(doc: ref<Document>, id: u64, value: u32) -> bool effects {} {
++  if not stream_mask_valid(value) {return false}
++  match clip_slot(doc,id) {
++    none=>false,some(slot)=>{
++      struct.set(array.borrow(struct.borrow(doc,field=clips),slot),value,field=streams)
++      true
++    },
++  }
++}
+ 
+ // Source-bounds policy. `bounds_clamp` keeps every edit inside the source and reports the
+ // clamped result; `bounds_reject` refuses the edit and mutates nothing. See `source_limit`.
+@@ -110,7 +132,8 @@
+   gain: f64,
+   pan: f64,
+   speed: f64,
+-  reverse: bool
++  reverse: bool,
++  streams: u32
+ }
+ 
+ pub type Transition = struct { id: u64, owner: u64, track: u64, center: i64, duration: i64, kind: u64 }
+@@ -128,6 +151,11 @@
  pub type Filter = struct { id: u64, clip: u64, kind: string, order: u32, enabled: bool }
  pub type FilterParam = struct { filter: u64, name: string, value: f64 }
  pub type FilterTextParam = struct { filter: u64, name: string, value: string }
@@ -22,7 +59,43 @@ index 13f78f4..aa5646c 100644
  
  pub type Sequence = struct { id: u64, name: string, fps: f64, width: u32, height: u32 }
  
-@@ -1097,7 +1103,9 @@ pub fn insert(doc: ref<Document>, track: u64, source: u64, source_in: i64, lengt
+@@ -614,7 +642,7 @@
+     enabled: old.enabled, selected: old.selected,
+     fade_in: if old.fade_in > want_len { want_len } else { old.fade_in },
+     fade_out: if old.fade_out > want_len { want_len } else { old.fade_out },
+-    gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
++    gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
+   true
+ }
+ 
+@@ -993,7 +1021,7 @@
+   array.push(struct.borrow(doc, field=clips), Clip {id: id, owner: owner, source: source,
+     nested: 0, source_in: want_in, length: want_len, start: if start < 0 { 0 } else { start },
+     track: track, group: 0, enabled: true, selected: false, fade_in: 0, fade_out: 0,
+-    gain: 1.0, pan: 0.0, speed: 1.0, reverse: false})
++    gain: 1.0, pan: 0.0, speed: 1.0, reverse: false, streams:streams_both()})
+   option.some(id)
+ }
+ 
+@@ -1024,7 +1052,7 @@
+   array.push(struct.borrow(doc, field=clips), Clip {id: id, owner: owner, source: 0,
+     nested: sequence, source_in: want_in, length: want_len,
+     start: if start < 0 { 0 } else { start }, track: track, group: 0, enabled: true,
+-    selected: false, fade_in: 0, fade_out: 0, gain: 1.0, pan: 0.0, speed: 1.0, reverse: false})
++    selected: false, fade_in: 0, fade_out: 0, gain: 1.0, pan: 0.0, speed: 1.0, reverse: false, streams:streams_both()})
+   option.some(id)
+ }
+ 
+@@ -1060,7 +1088,7 @@
+         start: if moved < 0 { 0 } else { moved }, track: value.track, group: value.group,
+         enabled: value.enabled, selected: value.selected, fade_in: value.fade_in,
+         fade_out: value.fade_out, gain: value.gain, pan: value.pan, speed: value.speed,
+-        reverse: value.reverse})
++        reverse: value.reverse, streams:value.streams})
+     }
+     index = index + 1
+   }
+@@ -1097,7 +1125,9 @@
    if track_locked(doc, track) { return option.none() }
    let start: i64 = if at < 0 { 0 } else { at }
    match clip_spanning(doc, track, start) {
@@ -33,15 +106,15 @@ index 13f78f4..aa5646c 100644
      none => { },
    }
    let want: i64 = if length < 1 { 1 } else { length }
-@@ -1117,10 +1125,117 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+@@ -1117,8 +1147,116 @@
    if track_locked(doc, track) { return option.none() }
    let start: i64 = if at < 0 { 0 } else { at }
    let want: i64 = if length < 1 { 1 } else { length }
 +  if not lift_range_possible(doc, track, start, start + want) {return option.none()}
    lift_range(doc, track, start, start + want)
    place(doc, track, source, source_in, want, start)
- }
- 
++}
++
 +// Copy owns only clip content, not the complete document or its undo history.
 +// The caller must retire snapshots when installing another project.
 +pub fn clip_snapshot(doc: ref<Document>, id: u64) -> option<ClipSnapshot> effects {alloc} {
@@ -125,6 +198,7 @@ index 13f78f4..aa5646c 100644
 +  if track_locked(doc,track) {return result.err("destination track is locked")}
 +  if not math.is_finite(saved.fps) or saved.fps <= 0.0 or saved.fps != sequence_fps(doc,owner) {return result.err("clipboard owner frame rate differs from the destination")}
 +  let old:Clip=saved.clip
++  if not stream_mask_valid(old.streams) {return result.err("clipboard stream mask is invalid")}
 +  if at < 0 or old.length <= 0 or at > 9223372036854775807-old.length or old.source_in < 0 {return result.err("clipboard frame range is invalid")}
 +  if old.source != 0 and old.nested == 0 {
 +    match source_slot(doc,old.source) {none=>{return result.err("clipboard source is missing")},some(_)=>{},}
@@ -141,17 +215,15 @@ index 13f78f4..aa5646c 100644
 +  let id:u64=fresh_id(candidate)
 +  array.push(struct.borrow(candidate,field=clips),Clip {id:id,owner:owner,source:old.source,nested:old.nested,
 +    source_in:old.source_in,length:old.length,start:at,track:track,group:0,enabled:old.enabled,selected:false,
-+    fade_in:old.fade_in,fade_out:old.fade_out,gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse})
++    fade_in:old.fade_in,fade_out:old.fade_out,gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams})
 +  if not snapshot_content(candidate,id,saved) {return result.err("clipboard automation is invalid")}
 +  let _=select_only(candidate,id)
 +  let _=ref.swap(doc,candidate)
 +  result.ok(id)
-+}
-+
+ }
+ 
  // ---------------------------------------------------------------------------
- // Trim, split and the ripple family
- //
-@@ -1129,28 +1244,149 @@ pub fn overwrite(doc: ref<Document>, track: u64, source: u64, source_in: i64, le
+@@ -1129,28 +1267,149 @@
  // / `ripple_trim_end` / `ripple_delete`, whose ripple-current-track-only rule is Shotcut's
  // default and is kept here.
  
@@ -216,7 +288,7 @@ index 13f78f4..aa5646c 100644
 +    length:if old.reverse {offset}else{old.length-offset},
 +    start:if old.reverse {old.start}else{frame},track:old.track,group:old.group,
 +    enabled:old.enabled,selected:old.selected,fade_in:old.fade_in,fade_out:old.fade_out,
-+    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse}
++    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams}
 +  trim_same_samples(doc,old,moved,rate)
 +}
 +
@@ -297,19 +369,21 @@ index 13f78f4..aa5646c 100644
 +        nested: old.nested, source_in: if old.reverse {add.sat(old.source_in,advance)} else {old.source_in}, length: offset, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: if old.fade_in > offset { offset } else { old.fade_in }, fade_out: 0,
-         gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
+-        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
++        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
        let right: u64 = fresh_id(doc)
        array.push(struct.borrow(doc, field=clips), Clip {id: right, owner: old.owner,
 -        source: old.source, nested: old.nested, source_in: add.sat(old.source_in, offset),
 +        source: old.source, nested: old.nested, source_in: if old.reverse {old.source_in} else {add.sat(old.source_in,advance)},
          length: old.length - offset, start: frame, track: old.track, group: old.group,
          enabled: old.enabled, selected: false, fade_in: 0, fade_out: old.fade_out,
-         gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
+-        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
++        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
 +      split_content(doc,old.id,right,offset)
        option.some(right)
      },
      none => option.none(),
-@@ -1165,7 +1401,8 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+@@ -1165,7 +1424,8 @@
    loop {
      if index >= array.len(struct.borrow(doc, field=clips)) { break }
      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
@@ -319,7 +393,7 @@ index 13f78f4..aa5646c 100644
        array.push(targets, value.id)
      }
      index = index + 1
-@@ -1180,56 +1417,254 @@ pub fn split_all(doc: ref<Document>, sequence: u64, frame: i64) -> u64 effects {
+@@ -1180,56 +1440,254 @@
    cuts
  }
  
@@ -338,14 +412,6 @@ index 13f78f4..aa5646c 100644
 -      if delta < 0 and old.source_in + delta < 0 {
 -        delta = 0 - old.source_in
 -        start = old.start + delta
--      }
--      let length: i64 = finish - start
--      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
--        nested: old.nested, source_in: old.source_in, length: old.length, start: start,
--        track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
--        fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
--        speed: old.speed, reverse: old.reverse})
--      set_range(doc, slot, add.sat(old.source_in, delta), if length < 1 { 1 } else { length })
 +// A native source's exclusive sample bound in owner-sequence units, before rounding.
 +// A final partial sequence frame is legal when its sampled native frame is still present:
 +// floor(position * native_fps / owner_fps) < native_frames. Do not test whole-frame duration.
@@ -364,18 +430,10 @@ index 13f78f4..aa5646c 100644
 +      if source.frames <= 0 {return option.none()}
 +      if source.fps <= 0.0 or not math.is_finite(source.fps) {return option.some(0.0)}
 +      option.some(cast.float(source.frames)*owner_fps/source.fps)
-     },
--    none => false,
-   }
- }
- 
--// TRIM the tail to a new length, holding the head. The length floor is `min_clip`.
--pub fn trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool effects {} {
--  match clip_slot(doc, id) {
--    some(slot) => {
--      let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
--      let want: i64 = if new_length < min_clip() { min_clip() } else { new_length }
--      set_range(doc, slot, old.source_in, want)
++    },
++  }
++}
++
 +// Use the renderer's actual floor operation for the last sample, including the
 +// f64 fps ratio. The continuous bound above proposes a clamp; this verifies it.
 +fn trim_sample_valid(doc: ref<Document>, value: Clip, position: f64) -> bool effects {} {
@@ -393,11 +451,10 @@ index 13f78f4..aa5646c 100644
 +      if source.frames <= 0 {return true}
 +      if source.fps <= 0.0 or not math.is_finite(source.fps) {return false}
 +      math.floor(position*(source.fps/owner_fps)) < cast.float(source.frames)
-     },
--    none => false,
-   }
- }
- 
++    },
++  }
++}
++
 +// Head trims move the curve's local origin. Keep all surrounding keys, and refuse
 +// unrepresented rate/envelope or temporal history instead of resetting it silently.
 +fn trim_context(doc: ref<Document>, old: Clip, delta: i64, length: i64) -> bool effects {alloc} {
@@ -503,7 +560,29 @@ index 13f78f4..aa5646c 100644
 +        if doc.source_bounds == bounds_reject() {return option.none()}
 +        start=if old.start-available < 0 {0}else{old.start-available}
 +        length=finish-start
-+      }
+       }
+-      let length: i64 = finish - start
+-      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
+-        nested: old.nested, source_in: old.source_in, length: old.length, start: start,
+-        track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+-        fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
+-      set_range(doc, slot, add.sat(old.source_in, delta), if length < 1 { 1 } else { length })
+-    },
+-    none => false,
+-  }
+-}
+-
+-// TRIM the tail to a new length, holding the head. The length floor is `min_clip`.
+-pub fn trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool effects {} {
+-  match clip_slot(doc, id) {
+-    some(slot) => {
+-      let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+-      let want: i64 = if new_length < min_clip() { min_clip() } else { new_length }
+-      set_range(doc, slot, old.source_in, want)
+-    },
+-    none => false,
+-  }
 +      if not head and length > add.sat(old.length,available) {
 +        if doc.source_bounds == bounds_reject() {return option.none()}
 +        length=add.sat(old.length,available)
@@ -553,7 +632,7 @@ index 13f78f4..aa5646c 100644
 +  let next: Clip = Clip {id:old.id,owner:old.owner,source:old.source,nested:old.nested,
 +    source_in:source_in,length:length,start:start,track:old.track,group:old.group,
 +    enabled:old.enabled,selected:old.selected,fade_in:fade_in,fade_out:fade_out,
-+    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse}
++    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams}
 +  if not trim_same_samples(doc,old,next,rate) {return option.none()}
 +  option.some(next)
 +}
@@ -589,8 +668,8 @@ index 13f78f4..aa5646c 100644
 +    }
 +    i=i+1}
 +  true
-+}
-+
+ }
+ 
  // RIPPLE TRIM the head: trim, then re-anchor the shortened clip at its original start and
  // slide the later same-track clips left by the amount actually trimmed, so the sequence stays
  // tight. Genesis `ripple_trim_start`.
@@ -607,7 +686,16 @@ index 13f78f4..aa5646c 100644
        if not trim_start(doc, id, new_start) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1252,13 +1687,15 @@ pub fn ripple_trim_start(doc: ref<Document>, id: u64, new_start: i64) -> bool ef
+@@ -1239,7 +1697,7 @@
+             nested: moved.nested, source_in: moved.source_in, length: moved.length,
+             start: was_start, track: moved.track, group: moved.group, enabled: moved.enabled,
+             selected: moved.selected, fade_in: moved.fade_in, fade_out: moved.fade_out,
+-            gain: moved.gain, pan: moved.pan, speed: moved.speed, reverse: moved.reverse})
++            gain: moved.gain, pan: moved.pan, speed: moved.speed, reverse: moved.reverse, streams:moved.streams})
+           shift_after(doc, track, was_end, 0 - delta, id)
+           true
+         },
+@@ -1252,13 +1710,15 @@
  
  // RIPPLE TRIM the tail: trim, then shift the later same-track clips by the length actually
  // applied, so shortening closes the gap and lengthening opens one. Genesis `ripple_trim_end`.
@@ -624,7 +712,7 @@ index 13f78f4..aa5646c 100644
        if not trim_end(doc, id, new_length) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1276,7 +1713,10 @@ pub fn ripple_trim_end(doc: ref<Document>, id: u64, new_length: i64) -> bool eff
+@@ -1276,7 +1736,10 @@
  // LIFT: remove the clip and leave the hole. Genesis `delete_clip`.
  pub fn lift(doc: ref<Document>, id: u64) -> bool effects {alloc} {
    match clip_slot(doc, id) {
@@ -636,7 +724,7 @@ index 13f78f4..aa5646c 100644
        true },
      none => false,
    }
-@@ -1288,6 +1728,7 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+@@ -1288,6 +1751,7 @@
      some(slot) => {
        let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
        let track: u64 = old.track
@@ -644,24 +732,10 @@ index 13f78f4..aa5646c 100644
        let finish: i64 = clip_end(old)
        let length: i64 = old.length
        remove_clip_slot(doc, slot)
-@@ -1303,56 +1744,62 @@ pub fn ripple_delete(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+@@ -1303,56 +1767,62 @@
  // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
  // up, because a clamped remnant would spill back into the range and never clear.
  // Genesis `lift_range`.
--pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
--  if to <= from { return () }
--  var passes: u64 = array.len(struct.borrow(doc, field=clips)) * 4 + 8
--  loop {
--    if passes == 0 { break }
--    passes = passes - 1
--    var hit: option<u64> = option.none()
--    var index: u64 = 0
--    loop {
--      if index >= array.len(struct.borrow(doc, field=clips)) { break }
--      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
--      if value.track == track and value.start < to and clip_end(value) > from {
--        hit = option.some(value.id)
--        break
 +// Guard every surviving trim before touching any clip. Planning the two survivors
 +// directly avoids an artificial Split fade boundary inside the removed interval.
 +pub fn lift_range_possible(doc: ref<Document>, track: u64, from: i64, to: i64) -> bool effects {alloc} {
@@ -681,7 +755,26 @@ index 13f78f4..aa5646c 100644
 +      if right_length >= min_clip() {
 +        let target: Clip = match trim_target(doc,value,to,true) {none=>{return false},some(found)=>found,}
 +        if target.start != to {return false}
-       }
++      }
++    }
++    i=i+1}
++  true
++}
+ pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
+   if to <= from { return () }
+-  var passes: u64 = array.len(struct.borrow(doc, field=clips)) * 4 + 8
+-  loop {
+-    if passes == 0 { break }
+-    passes = passes - 1
+-    var hit: option<u64> = option.none()
+-    var index: u64 = 0
+-    loop {
+-      if index >= array.len(struct.borrow(doc, field=clips)) { break }
+-      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
+-      if value.track == track and value.start < to and clip_end(value) > from {
+-        hit = option.some(value.id)
+-        break
+-      }
 -      index = index + 1
 -    }
 -    match hit {
@@ -715,13 +808,8 @@ index 13f78f4..aa5646c 100644
 -          else { let _ = trim_end(doc, id, left_length) }
 -        }
 -      },
-     }
+-    }
 -  }
-+    i=i+1}
-+  true
-+}
-+pub fn lift_range(doc: ref<Document>, track: u64, from: i64, to: i64) -> unit effects {alloc} {
-+  if to <= from { return () }
 +  if not lift_range_possible(doc,track,from,to) {return ()}
 +  var targets: array<u64> = array.new()
 +  var index: u64 = 0
@@ -746,7 +834,7 @@ index 13f78f4..aa5646c 100644
 +        source:old.source,nested:old.nested,source_in:planned_right.source_in,
 +        length:planned_right.length,start:planned_right.start,track:old.track,group:old.group,
 +        enabled:old.enabled,selected:false,fade_in:planned_right.fade_in,fade_out:planned_right.fade_out,
-+        gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse})
++        gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams})
 +      split_content(doc,id,right,to-old.start)
 +    } else if left_length >= min_clip() {let _ = trim_end(doc,id,left_length)}
 +      else if right_length >= min_clip() {let _ = trim_start(doc,id,to)}
@@ -755,7 +843,199 @@ index 13f78f4..aa5646c 100644
    ()
  }
  
-@@ -2131,9 +2578,8 @@ pub fn boundary_at(doc: ref<Document>, track: u64, center: i64)
+@@ -1389,7 +1859,7 @@
+         start: if moved < 0 { 0 } else { moved }, track: old.track, group: old.group,
+         enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
+         fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
+-        reverse: old.reverse})
++        reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1416,7 +1886,7 @@
+         start: if start < 0 { 0 } else { start }, track: track, group: old.group,
+         enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
+         fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
+-        reverse: old.reverse})
++        reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1453,7 +1923,7 @@
+     start: right.start + d, track: current.track, group: current.group,
+     enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
+     fade_out: current.fade_out, gain: current.gain, pan: current.pan, speed: current.speed,
+-    reverse: current.reverse})
++    reverse: current.reverse, streams:current.streams})
+   if not set_range(doc, right_slot, add.sat(right.source_in, d), right.length - d) { return 0 }
+   d
+ }
+@@ -1520,7 +1990,7 @@
+     nested: value.nested, source_in: value.source_in, length: value.length,
+     start: start + delta, track: value.track, group: value.group, enabled: value.enabled,
+     selected: value.selected, fade_in: value.fade_in, fade_out: value.fade_out,
+-    gain: value.gain, pan: value.pan, speed: value.speed, reverse: value.reverse})
++    gain: value.gain, pan: value.pan, speed: value.speed, reverse: value.reverse, streams:value.streams})
+   let before_slot: u64 = match clip_slot(doc, previous) { some(found) => found, none => { return false }, }
+   let _ = set_range(doc, before_slot, before.source_in, before_length)
+   let after_slot: u64 = match clip_slot(doc, next) { some(found) => found, none => { return false }, }
+@@ -1530,7 +2000,7 @@
+     start: after.start + delta, track: current.track, group: current.group,
+     enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
+     fade_out: current.fade_out, gain: current.gain, pan: current.pan, speed: current.speed,
+-    reverse: current.reverse})
++    reverse: current.reverse, streams:current.streams})
+   set_range(doc, after_slot, after_in, after_length)
+ }
+ 
+@@ -1545,7 +2015,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: value,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
++        speed: old.speed, reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1562,7 +2032,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: false,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
++        speed: old.speed, reverse: old.reverse, streams:old.streams})
+     }
+     index = index + 1
+   }
+@@ -1645,7 +2115,7 @@
+           nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+           track: old.track, group: id, enabled: old.enabled, selected: old.selected,
+           fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-          speed: old.speed, reverse: old.reverse})
++          speed: old.speed, reverse: old.reverse, streams:old.streams})
+       },
+       none => { },
+     }
+@@ -1667,7 +2137,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: 0, enabled: old.enabled, selected: old.selected,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
++        speed: old.speed, reverse: old.reverse, streams:old.streams})
+     }
+     index = index + 1
+   }
+@@ -1717,7 +2187,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length,
+         start: old.start + d, track: old.track, group: old.group, enabled: old.enabled,
+         selected: old.selected, fade_in: old.fade_in, fade_out: old.fade_out,
+-        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
++        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
+     }
+     index = index + 1
+   }
+@@ -1744,7 +2214,7 @@
+         source_in: old.source_in, length: old.length, start: old.start, track: old.track,
+         group: old.group, enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
+         fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
+-        reverse: old.reverse})
++        reverse: old.reverse, streams:old.streams})
+       let _ = set_range(doc, slot, old.source_in, old.length)
+       true
+     },
+@@ -1754,7 +2224,7 @@
+ 
+ // DETACH AUDIO: clone the clip onto an audio track at the same place and silence the
+ // original's audio, so its video is unchanged and its sound now plays from the clone.
+-// Genesis `detach_audio`, which likewise uses only existing fields. Returns the clone's id.
++// The explicit stream route suppresses the original even when it owns gain keys. Returns the clone's id.
+ pub fn detach_audio(doc: ref<Document>, id: u64) -> option<u64> effects {alloc} {
+   let old: Clip = match clip(doc, id) { some(found) => found, none => { return option.none() }, }
+   var target: u64 = 0
+@@ -1772,9 +2242,9 @@
+   let clone: u64 = fresh_id(doc)
+   array.push(struct.borrow(doc, field=clips), Clip {id: clone, owner: old.owner,
+     source: old.source, nested: old.nested, source_in: old.source_in, length: old.length,
+-    start: old.start, track: target, group: 0, enabled: true, selected: false,
++    start: old.start, track: target, group: 0, enabled: old.enabled, selected: false,
+     fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-    speed: old.speed, reverse: old.reverse})
++    speed: old.speed, reverse: old.reverse, streams:streams_audio()})
+   match clip_slot(doc, id) {
+     some(slot) => {
+       let current: Clip = array.get(struct.borrow(doc, field=clips), slot)
+@@ -1783,7 +2253,7 @@
+         start: current.start, track: current.track, group: current.group,
+         enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
+         fade_out: current.fade_out, gain: 0.0, pan: current.pan, speed: current.speed,
+-        reverse: current.reverse})
++        reverse: current.reverse, streams:streams_video()})
+     },
+     none => { },
+   }
+@@ -1803,7 +2273,7 @@
+   array.push(struct.borrow(doc, field=clips), Clip {id: still, owner: old.owner,
+     source: old.source, nested: old.nested, source_in: held, length: length, start: frame,
+     track: old.track, group: 0, enabled: true, selected: false, fade_in: 0, fade_out: 0,
+-    gain: 0.0, pan: old.pan, speed: 0.0, reverse: false})
++    gain: 0.0, pan: old.pan, speed: 0.0, reverse: false, streams:old.streams})
+   option.some(still)
+ }
+ 
+@@ -1819,7 +2289,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+         fade_in: want, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
++        speed: old.speed, reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1834,7 +2304,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+         fade_in: old.fade_in, fade_out: want, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
++        speed: old.speed, reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1848,7 +2318,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: math.max(0.0, value),
+-        pan: old.pan, speed: old.speed, reverse: old.reverse})
++        pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1882,7 +2352,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: value, reverse: old.reverse})
++        speed: value, reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1897,7 +2367,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: value})
++        speed: old.speed, reverse: value, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -1912,7 +2382,7 @@
+         nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
+         track: old.track, group: old.group, enabled: value, selected: old.selected,
+         fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
+-        speed: old.speed, reverse: old.reverse})
++        speed: old.speed, reverse: old.reverse, streams:old.streams})
+       true
+     },
+     none => false,
+@@ -2131,9 +2601,8 @@
  // Keyframes
  //
  // One flat, sorted store animates every parameter of every clip, plus the sequence-wide ones

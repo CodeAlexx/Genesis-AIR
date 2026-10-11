@@ -45,6 +45,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = commands.open_source(state, imported.value)
   let track: u64 = app.default_video_track(state)
   let added: commands.Result = commands.append_clip(state, track, imported.value, 0, 60)
+  let audio: commands.Result = commands.append_clip(state,app.default_audio_track(state),imported.value,0,60)
+  if not audio.ok {return 3}
   var source_first: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), view.get(args, 2), 0, 480, 270)
   let first_calls: u64 = provider.calls(struct.borrow(state, field=provider))
   var source_again: provider.Frame = provider.source_frame(struct.borrow(state, field=provider), view.get(args, 2), 0, 480, 270)
@@ -99,7 +101,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     let deadline: u64 = time.monotonic_ns() + 15000000000
     let _ = link.await_event(transport,2,4,deadline)
     let _ = preview.read_waveforms(state, root,4)
-    let embedded: bool = app.waveform_count(state) > 0
+    let embedded: bool = option.is_some(app.waveform_slot(state,audio.value)) and
+      not option.is_some(app.waveform_slot(state,added.value))
     let _ = link.await_event(transport,3,4,deadline)
     preview.read_thumbnails(state, root, 4)
     let strip: bool = array.len(struct.borrow(state, field=thumbnails)) >= 2

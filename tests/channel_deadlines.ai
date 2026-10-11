@@ -1,0 +1,59 @@
+module genesis.tests.channel_deadlines
+import std.channel as channel
+import std.testing as test
+import std.text as text
+import std.files as files
+import std.path as path
+fn code(value:result<unit,channel.Error> own) -> u64 effects {} {
+ match value {ok(_)=>0,err(problem)=>problem.code,}
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,net,time} {
+ if view.len(args)!=4 {return 2}
+ let mode:str=view.get(args,1)
+ let port:u64=match text.parse_u64(view.get(args,2)) {some(value)=>value,none=>0,}
+ let root:str=view.get(args,3)
+ let _=files.mkdirs(root)
+ var suite:test.Suite=test.suite(mode,false)
+ let _=test.start(suite,"RealTCP credit and started frame deadlines")
+ var raw:array<byte> = array.new()
+ var i:u64=0
+ loop {if i>=262144 {break}
+  let value:u8=cast.wrap((i*17+3)%256)
+  array.push(raw,cast.bits(value))
+  i=i+1}
+ let payload:bytes=bytes.copy(array.view(raw))
+ var ticket:channel.Ticket=channel.Ticket {port:port,token:string.copy("deadline-test"),capacity:2,max_message:262144}
+ var sender:channel.Sender=match channel.connect(ticket,time.monotonic_ns()+2000000000) {err(_)=>{return 1},ok(value)=>value,}
+ if str.eq(mode,"credit") {
+  let _=test.eq_u64(suite,code(channel.send(sender,11,b"first",time.monotonic_ns()+2000000000)),0,"Legacy send retains exact reliable delivery")
+  let sent:u64=sender.sent
+  let sequence:u64=sender.sequence
+  let begin:u64=time.monotonic_ns()
+  let full:u64=code(channel.send_deadlines(sender,12,b"second",begin+20000000,begin+2000000000))
+  let _=test.eq_u64(suite,full,channel.code_full(),"Short no-credit wait returns resumable full")
+  let _=test.check(suite,not sender.failed and sender.sent==sent and sender.sequence==sequence and sender.credits==1,"Full did not poison sender, consume credit or advance frame sequence")
+  let _=test.eq_u64(suite,code(channel.send_deadlines(sender,12,b"second",time.monotonic_ns()+2000000000,time.monotonic_ns()+2000000000)),0,"Later real peer credit permits same logical frame")
+  let _=test.check(suite,sender.sent==2 and sender.sequence==2 and not sender.failed,"Retry is exactly second frame, without drops")
+  let _=test.eq_u64(suite,code(channel.finish(sender,99,b"done",time.monotonic_ns()+2000000000)),0,"Reserved terminal credit is preserved")
+ }else{
+  let begin:u64=time.monotonic_ns()
+  let outcome:u64=if str.eq(mode,"legacy") {code(channel.send(sender,20,bytes.view(payload),begin+50000000))}
+   else {code(channel.send_deadlines(sender,20,bytes.view(payload),begin+50000000,begin+if str.eq(mode,"long") {2000000000}else{50000000}))}
+  let elapsed:u64=time.monotonic_ns()-begin
+  let _=files.write_text(path.join(root,"timing.tsv"),text.concat(string.from_int(elapsed),text.concat("\t",string.from_int(outcome))))
+  if str.eq(mode,"long") {
+   let _=test.eq_u64(suite,outcome,0,"Started 262KB frame completes under separate long write budget")
+   let _=test.check(suite,elapsed>50000000,"Started socket frame spans the controlled stall beyond the old 50ms budget")
+   let _=test.check(suite,not sender.failed and sender.sent==1 and sender.sequence==1 and sender.credits==1,"Full frame commits one credit and leaves sender healthy")
+   let _=test.eq_u64(suite,code(channel.finish(sender,99,b"done",time.monotonic_ns()+2000000000)),0,"Healthy sender can deliver completion after stalled write")
+  }else{
+   let _=test.eq_u64(suite,outcome,channel.code_empty(),"Real started-frame write expiry remains a deadline error")
+   let _=test.check(suite,sender.failed and sender.sent==0,"Partial socket write remains fatal and cannot be counted delivered")
+   let _=test.eq_u64(suite,code(channel.send_deadlines(sender,21,b"never",time.monotonic_ns()+2000000000,time.monotonic_ns()+2000000000)),channel.code_empty(),"Fatal stream cannot resume a different frame")
+   let _=test.check(suite,sender.sequence==1,"Refused post-failure call does not create another frame")
+  }
+ }
+ let _=channel.hang_up(sender)
+ let _=test.done(suite)
+ test.conclude(suite,path.join(root,"report.json"),1)
+}

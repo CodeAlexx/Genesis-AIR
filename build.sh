@@ -50,6 +50,35 @@ else
   exit 1
 fi
 
+editor_io_patch="$here/patches/air-editor-io.patch"
+if [ ! -f "$editor_io_patch" ]; then
+  echo 'genesis-air: [GA_SDK_IO_PATCH_MISSING] shared project codec overlay is missing' >&2
+  exit 1
+fi
+if git -C "$AIR_HOME" apply --reverse --check "$editor_io_patch" >/dev/null 2>&1; then
+  :
+elif git -C "$AIR_HOME" apply --check "$editor_io_patch" >/dev/null 2>&1; then
+  git -C "$AIR_HOME" apply "$editor_io_patch"
+else
+  echo 'genesis-air: [GA_SDK_IO_PATCH_BASE] project codec overlay does not match SDK; existing changes preserved' >&2
+  exit 1
+fi
+
+# Retryable credit polling and started-frame writes have distinct time budgets.
+channel_patch="$here/patches/air-channel-deadlines.patch"
+if [ ! -f "$channel_patch" ]; then
+  echo 'genesis-air: [GA_SDK_CHANNEL_PATCH_MISSING] shared channel deadline overlay is missing' >&2
+  exit 1
+fi
+if git -C "$AIR_HOME" apply --reverse --check "$channel_patch" >/dev/null 2>&1; then
+  :
+elif git -C "$AIR_HOME" apply --check "$channel_patch" >/dev/null 2>&1; then
+  git -C "$AIR_HOME" apply "$channel_patch"
+else
+  echo 'genesis-air: [GA_SDK_CHANNEL_PATCH_BASE] channel deadline overlay does not match SDK; existing changes preserved' >&2
+  exit 1
+fi
+
 mkdir -p "$here/build"
 mode=${MODE:-release}
 echo "genesis-air: building against AIR $AIR_SDK_COMMIT ($mode)"

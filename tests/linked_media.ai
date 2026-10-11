@@ -1,0 +1,812 @@
+// Application-linked edits: independently specified geometry and authored-content oracle.
+module genesis.tests.linked_media
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.text as text
+import std.math as math
+import std.testing as test
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/commands.ai" as commands
+import "../src/linked_media.ai" as linked
+import "../src/filter_keys.ai" as filter_keys
+import "../src/timeline_media.ai" as media
+import "../src/provider.ai" as provider
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+// Failure ledger includes complete document, all history snapshots and clipboard arrays.
+fn saved_content(saved:ref<editor.ClipSnapshot>) -> string effects {alloc} {
+  var out:string=text.concat(string.from_int(saved.clip.id),text.concat("|",string.from_int(saved.clip.streams)))
+  string.append(out,string.from_int(saved.clip.owner))
+  string.append(out,string.from_int(saved.clip.source))
+  string.append(out,string.from_int(saved.clip.nested))
+  string.append(out,string.from_int(saved.clip.start))
+  string.append(out,string.from_int(saved.clip.track))
+  string.append(out,string.from_int(saved.clip.group))
+  string.append(out,string.from_int(saved.clip.fade_in))
+  string.append(out,string.from_int(saved.clip.fade_out))
+  string.append(out,string.from_float(saved.clip.gain))
+  string.append(out,string.from_float(saved.clip.pan))
+  string.append(out,string.from_float(saved.fps))
+  string.append(out,string.from_int(saved.track_kind))
+  string.append(out,if saved.clip.enabled {"enabled"}else{"disabled"})
+  string.append(out,if saved.clip.selected {"selected"}else{"unselected"})
+  string.append(out,string.from_int(saved.clip.source_in))
+  string.append(out,string.from_int(saved.clip.length))
+  string.append(out,string.from_float(saved.clip.speed))
+  string.append(out,if saved.clip.reverse {"reverse"}else{"forward"})
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(saved,field=filters)) {break}
+    let f:ref<editor.Filter> =array.borrow(struct.borrow(saved,field=filters),i)
+    string.append(out,f.kind)
+    string.append(out,string.from_int(f.id))
+    string.append(out,string.from_int(f.order))
+    string.append(out,if f.enabled {"on"}else{"off"})
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=numeric)) {break}
+    let p:ref<editor.FilterParam> =array.borrow(struct.borrow(saved,field=numeric),i)
+    string.append(out,string.from_int(p.filter))
+    string.append(out,p.name)
+    string.append(out,string.from_float(p.value))
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=textual)) {break}
+    let p:ref<editor.FilterTextParam> =array.borrow(struct.borrow(saved,field=textual),i)
+    string.append(out,string.from_int(p.filter))
+    string.append(out,p.name)
+    string.append(out,p.value)
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=keys)) {break}
+    let k:ref<editor.ClipSnapshotKey> =array.borrow(struct.borrow(saved,field=keys),i)
+    string.append(out,k.param)
+    string.append(out,string.from_int(k.frame))
+    string.append(out,string.from_float(k.value))
+    string.append(out,string.from_int(k.interp))
+    i=i+1}
+  out
+}
+fn stable(state:ref<app.App>) -> string effects {alloc} {
+  var out:string=encoded(struct.borrow(state,field=document))
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,string.from_int(state.media_revision))
+  string.append(out,string.from_int(state.selected_filter))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  string.append(out,if state.clipboard_resource_valid {"live"}else{"retired"})
+  let history:ref<editor.History> =struct.borrow(state,field=history)
+  var i:u64=0
+  loop {if i>=editor.undo_depth(history) {break}
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),i)))
+    i=i+1}
+  string.append(out,"REDO")
+  i=0
+  loop {if i>=editor.redo_depth(history) {break}
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),i)))
+    i=i+1}
+  match struct.borrow(state,field=clipboard) {none=>{string.append(out,"empty")},some(value)=>{string.append(out,saved_content(value))},}
+  match struct.borrow(state,field=clipboard_peer) {none=>{string.append(out,"no peer")},some(value)=>{string.append(out,saved_content(value))},}
+  out
+}
+fn before(a:str,b:str) -> bool effects {} {
+  var i:u64=0
+  loop {if i>=str.len(a) or i>=str.len(b) {break}
+    let av:u8=cast.bits(view.get(str.bytes(a),i))
+    let bv:u8=cast.bits(view.get(str.bytes(b),i))
+    if av!=bv {return av<bv}
+    i=i+1}
+  str.len(a)<str.len(b)
+}
+// Normalize only newly allocated IDs and placement/selection/group membership.
+// Every scalar, text/numeric parameter, order/enable and local key stays compared.
+fn content(doc:ref<editor.Document>, id:u64) -> string effects {alloc} {
+  let original:editor.Clip=option.unwrap(editor.clip(doc,id))
+  var saved:editor.ClipSnapshot=editor.ClipSnapshot {clip:original,fps:editor.sequence_fps(doc,original.owner),track_kind:editor.track_kind(doc,original.track),filters:array.new(),numeric:array.new(),textual:array.new(),keys:array.new()}
+  // Independent document walk: never use the snapshot implementation as its oracle.
+  var entry_index:u64=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=filters)) {break}
+    let entry:ref<editor.Filter> = array.borrow(struct.borrow(doc,field=filters),entry_index)
+    if entry.clip==id {array.push(struct.borrow(saved,field=filters),editor.Filter {id:entry.id,clip:id,kind:string.copy(entry.kind),order:entry.order,enabled:entry.enabled})}
+    entry_index=entry_index+1}
+  entry_index=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=filter_params)) {break}
+    let entry:ref<editor.FilterParam> = array.borrow(struct.borrow(doc,field=filter_params),entry_index)
+    array.push(struct.borrow(saved,field=numeric),editor.FilterParam {filter:entry.filter,name:string.copy(entry.name),value:entry.value})
+    entry_index=entry_index+1}
+  entry_index=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=filter_text_params)) {break}
+    let entry:ref<editor.FilterTextParam> = array.borrow(struct.borrow(doc,field=filter_text_params),entry_index)
+    array.push(struct.borrow(saved,field=textual),editor.FilterTextParam {filter:entry.filter,name:string.copy(entry.name),value:string.copy(entry.value)})
+    entry_index=entry_index+1}
+  entry_index=0
+  loop {if entry_index>=array.len(struct.borrow(doc,field=keys)) {break}
+    let entry:editor.Key=array.get(struct.borrow(doc,field=keys),entry_index)
+    if entry.clip==id {array.push(struct.borrow(saved,field=keys),editor.ClipSnapshotKey {param:editor.name_text(doc,entry.param),frame:entry.frame,value:entry.value,interp:entry.interp})}
+    entry_index=entry_index+1}
+  let clip:editor.Clip=saved.clip
+  var out:string=string.new()
+  var fields:array<string> = [string.from_int(clip.streams),string.from_int(clip.source),string.from_int(clip.nested),string.from_int(clip.source_in),string.from_int(clip.length),
+    string.from_int(clip.fade_in),string.from_int(clip.fade_out),string.from_float(clip.gain),string.from_float(clip.pan),string.from_float(clip.speed),
+    if clip.reverse {string.copy("reverse")}else{string.copy("forward")},if clip.enabled {string.copy("enabled")}else{string.copy("disabled")},
+    string.from_float(saved.fps),string.from_int(saved.track_kind)]
+  var i:u64=0
+  loop {if i>=array.len(fields) {break}
+    string.append(out,array.borrow(fields,i))
+    string.append(out,"|")
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=filters)) {break}
+    let filter:ref<editor.Filter> = array.borrow(struct.borrow(saved,field=filters),i)
+    string.append(out,filter.kind)
+    string.append(out,string.from_int(filter.order))
+    string.append(out,if filter.enabled {"on"}else{"off"})
+    var p:u64=0
+    loop {if p>=array.len(struct.borrow(saved,field=numeric)) {break}
+      let entry:ref<editor.FilterParam> = array.borrow(struct.borrow(saved,field=numeric),p)
+      if entry.filter==filter.id {string.append(out,entry.name)
+        string.append(out,string.from_float(entry.value))}
+      p=p+1}
+    p=0
+    loop {if p>=array.len(struct.borrow(saved,field=textual)) {break}
+      let entry:ref<editor.FilterTextParam> = array.borrow(struct.borrow(saved,field=textual),p)
+      if entry.filter==filter.id {string.append(out,entry.name)
+        string.append(out,entry.value)}
+      p=p+1}
+    i=i+1}
+  var normalized:array<string> = array.new()
+  i=0
+  loop {if i>=array.len(struct.borrow(saved,field=keys)) {break}
+    let key:ref<editor.ClipSnapshotKey> = array.borrow(struct.borrow(saved,field=keys),i)
+    var named:string=string.copy(key.param)
+    var f:u64=0
+    loop {if f>=array.len(struct.borrow(saved,field=filters)) {break}
+      let old:u64=struct.get(array.borrow(struct.borrow(saved,field=filters),f),field=id)
+      let prefix:string=text.concat("filter.",text.concat(string.from_int(old),"."))
+      if str.starts_with(named,prefix) {named=text.concat("instance.",text.concat(string.from_int(f),text.concat(".",str.slice(named,str.len(prefix),str.len(named)))))
+        break}
+      f=f+1}
+    var point:string=named
+    string.append(point,"|")
+    string.append(point,string.from_int(key.frame))
+    string.append(point,"|")
+    string.append(point,string.from_float(key.value))
+    string.append(point,"|")
+    string.append(point,string.from_int(key.interp))
+    array.push(normalized,point)
+    i=i+1}
+  i=0
+  loop {if i>=array.len(normalized) {break}
+    var j:u64=i
+    loop {if j==0 {break}
+      let a:string=string.copy(array.borrow(normalized,j))
+      let b:string=string.copy(array.borrow(normalized,j-1))
+      if not before(a,b) {break}
+      array.swap(normalized,j,j-1)
+      j=j-1}
+    i=i+1}
+  i=0
+  loop {if i>=array.len(normalized) {break}
+    string.append(out,array.borrow(normalized,i))
+    string.append(out,";")
+    i=i+1}
+  out
+}
+
+fn missing(value:option<editor.Clip>) -> bool effects {} {match value {none=>true,some(_)=>false,}}
+fn source(state:ref<app.App>,audio:bool,video:bool) -> u64 effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let id:u64=editor.add_source(doc,"authored.wav","Authored linked source",600,30.0)
+  let _=editor.describe_source(doc,id,64,36,video,audio,48000,2)
+  id
+}
+fn fixture(root:str) -> app.App effects {alloc} {
+  var state:app.App=app.app(provider.fake(root))
+  let id:u64=source(state,true,true)
+  let result:commands.Result=commands.append_source(state,id,10,90)
+  let _=commands.select_only(state,result.value)
+  state
+}
+fn at(doc:ref<editor.Document>,track:u64,start:i64) -> u64 effects {} {
+  var i:u64=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let c:editor.Clip=option.unwrap(editor.clip_at(doc,i))
+    if c.track==track and c.start==start {return c.id}
+    i=i+1}
+  0
+}
+fn pair(suite:ref<test.Suite>,state:ref<app.App>,id:u64,start:i64,input:i64,length:i64) -> unit effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let peer:u64=linked.mate(doc,id)
+  let _=test.check(suite,id!=0 and peer!=0,"Both individually owned routed clips exist")
+  if id==0 or peer==0 {return ()}
+  let v:editor.Clip=option.unwrap(editor.clip(doc,id))
+  let a:editor.Clip=option.unwrap(editor.clip(doc,peer))
+  let _=test.eq_u64(suite,cast.sat(v.streams),1,"Selected video carries picture only")
+  let _=test.eq_u64(suite,cast.sat(a.streams),2,"Mate carries sound only")
+  let _=test.check(suite,v.group!=0 and v.group==a.group,"Dedicated pair group preserved")
+  let _=test.check(suite,v.source==a.source and v.nested==a.nested and v.owner==a.owner,"Source and owner stay identical")
+  let _=test.check(suite,v.speed==a.speed and v.reverse==a.reverse,"Playback mapping stays identical")
+  let _=test.check(suite,v.start==start and a.start==start,"Both timeline starts equal independent expected frame")
+  let _=test.check(suite,v.source_in==input and a.source_in==input,"Both source points equal independent expected frame")
+  let _=test.check(suite,v.length==length and a.length==length,"Both authored lengths equal independent expected frame")
+  ()
+}
+fn edit(state:ref<app.App>,id:u64,operation:u64) -> commands.Result effects {alloc} {
+  if operation==0 {return commands.move_clip(state,id,app.default_video_track(state),15)}
+  if operation==1 {return commands.nudge(state,id,5)}
+  if operation==2 {return commands.trim_start(state,id,15)}
+  if operation==3 {return commands.trim_end(state,id,75)}
+  if operation==4 {return commands.ripple_trim_end(state,id,75)}
+  if operation==5 {return commands.slip(state,id,5)}
+  if operation==6 {return commands.lift(state,id)}
+  if operation==7 {return commands.ripple_delete(state,id)}
+  if operation==8 {return commands.cut_clip(state,id)}
+  commands.split_at_playhead(state)
+}
+fn roundtrip(suite:ref<test.Suite>,state:ref<app.App>,before:str,after:str,depth:u64) -> unit effects {alloc} {
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Exactly one document snapshot captured")
+  let undone:commands.Result=commands.undo(state)
+  let _=test.check(suite,undone.ok,"Undo succeeds")
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo restores the entire original authored graph")
+  let redone:commands.Result=commands.redo(state)
+  let _=test.check(suite,redone.ok,"Redo succeeds")
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),after,"Redo restores the entire edited authored graph")
+  ()
+}
+fn author(state:ref<app.App>,id:u64) -> unit effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let peer:u64=linked.mate(doc,id)
+  let vf:u64=option.unwrap(editor.add_filter(doc,id,"brightness"))
+  let af:u64=option.unwrap(editor.add_filter(doc,peer,"gain"))
+  let _=editor.set_filter_param(doc,vf,"level",0.7)
+  let _=editor.set_filter_param(doc,af,"level",0.6)
+  let _=editor.set_key(doc,id,filter_keys.name(vf,"brightness","level"),-5,0.25,1)
+  let _=editor.set_key(doc,id,filter_keys.name(vf,"brightness","level"),95,0.9,1)
+  let _=editor.set_key(doc,peer,"gain",0,0.2,1)
+  let _=editor.set_key(doc,peer,"gain",80,0.8,1)
+  let _=editor.set_clip_gain(doc,peer,0.75)
+  let _=editor.set_clip_pan(doc,peer,-0.3)
+  ()
+}
+// Locate the same shared controls that the native Properties painter and hit test use.
+fn row(controls:ref<array<chrome.Control>>,action:u32,kind:str,name:str) -> option<u64> effects {alloc} {
+  var i:u64=0
+  loop {if i>=array.len(controls) {break}
+    let c:ref<chrome.Control> =array.borrow(controls,i)
+    if c.action==action and str.eq(chrome.kind_of(c),kind) and str.eq(chrome.name_of(c),name) {return option.some(i)}
+    i=i+1}
+  option.none()
+}
+fn click_property(state:ref<app.App>,action:u32,kind:str,name:str) -> bool effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let frame:layout.Frame=layout.frame(1600.0,980.0)
+  app.set_dock_tab(state,chrome.tab_properties())
+  let _=app.set_dock_scroll(state,0.0)
+  var initial:array<chrome.Control> =chrome.properties_panel(frame,state)
+  let old:u64=match row(initial,action,kind,name) {none=>{return false},some(i)=>i,}
+  let top:f64=struct.get(array.borrow(initial,old),field=area).top
+  let _=app.set_dock_scroll(state,math.max(0.0,top-frame.dock_body.top-70.0))
+  var visible:array<chrome.Control> =chrome.properties_panel(frame,state)
+  let at:u64=match row(visible,action,kind,name) {none=>{return false},some(i)=>i,}
+  let c:ref<chrome.Control> =array.borrow(visible,at)
+  if not c.enabled {return false}
+  let box:layout.Rect=c.area
+  if box.top<frame.dock_body.top or box.bottom>frame.dock_body.bottom {return false}
+  let x:f64=(box.left+box.right)*0.5
+  let y:f64=(box.top+box.bottom)*0.5
+  let _=input.pointer_down(state,1600.0,980.0,x,y)
+  let _=input.pointer_up(state,1600.0,980.0,x,y)
+  true
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Genesis linked lane commands",false)
+  var operation:u64=0
+  loop {if operation==10 {break}
+    let _=test.start(suite,text.concat("Independent paired edit geometry and one Undo/Redo ",string.from_int(operation)))
+    var state:app.App=fixture(root)
+    let id:u64=app.current_clip(state)
+    let src:u64=option.unwrap(editor.clip(struct.borrow(state,field=document),id)).source
+    let second:commands.Result=commands.append_source(state,src,100,30)
+    let follower:u64=second.value
+    let doc:ref<editor.Document> =struct.borrow(state,field=document)
+    let a2:u64=editor.add_track(doc,doc.active,editor.track_audio(),"Independent audio")
+    let independent:u64=option.unwrap(editor.place(doc,a2,src,200,30,90))
+    let _=editor.set_clip_streams(doc,independent,2)
+    let _=commands.select_only(state,id)
+    if operation==9 {author(state,id)
+      let _=commands.seek(state,30)}
+    let before:string=encoded(struct.borrow(state,field=document))
+    let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+    let result:commands.Result=edit(state,id,operation)
+    let _=test.check(suite,result.ok,"Paired edit succeeds")
+    if result.ok {
+      if operation<6 {
+        pair(suite,state,id,if operation==0 or operation==2 {15}else{if operation==1 {5}else{0}},if operation==2 {25}else{if operation==5 {15}else{10}},if operation==2 or operation==3 or operation==4 {75}else{90})
+      } else if operation==9 {
+        pair(suite,state,id,0,10,30)
+        pair(suite,state,result.value,30,40,60)
+        let _=test.check(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),id)).group!=option.unwrap(editor.clip(struct.borrow(state,field=document),result.value)).group,"Cut halves have independent linked groups")
+        var frame:i64=0
+        loop {if frame==90 {break}
+          let selected:u64=if frame<30 {id}else{result.value}
+          let doc:ref<editor.Document> =struct.borrow(state,field=document)
+          let audio:u64=linked.mate(doc,selected)
+          var brightness:u64=0
+          var f:u64=0
+          loop {if f>=array.len(struct.borrow(doc,field=filters)) {break}
+            let item:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),f)
+            if item.clip==selected and str.eq(item.kind,"brightness") {brightness=item.id}
+            f=f+1}
+          let actual:f64=filter_keys.value(doc,selected,brightness,"brightness","level",frame,0.7)
+          let expected:f64=0.25+cast.float(frame+5)*0.0065
+          let _=test.check(suite,brightness!=0 and math.abs(actual-expected)<0.000000001,"Both halves preserve independently authored visual curve at every owner frame")
+          let gain:f64=editor.clip_value_at(doc,audio,"gain",frame,0.75)
+          let expected_gain:f64=0.2+cast.float(if frame<80 {frame}else{80})*0.0075
+          let _=test.check(suite,math.abs(gain-expected_gain)<0.000000001,"Both audio halves preserve full authored gain context at every owner frame")
+          frame=frame+1}
+      } else {let _=test.check(suite,missing(editor.clip(struct.borrow(state,field=document),id)),"Deleted video does not survive as a stale half")
+        let _=test.eq_u64(suite,editor.clip_count(struct.borrow(state,field=document)),3,"Both primary stream clips were removed")}
+      let actual:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),follower))
+      let expected:i64=if operation==4 {75}else{if operation==7 or operation==8 {0}else{90}}
+      pair(suite,state,follower,expected,100,30)
+      let _=test.eq_i64(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),independent)).start,90,"Unrelated A lane is unchanged")
+      let after:string=encoded(struct.borrow(state,field=document))
+      roundtrip(suite,state,before,after,depth)
+    }
+    let _=test.done(suite)
+    operation=operation+1}
+
+  let _=test.start(suite,"Locked audio mate refuses every paired edit without any transaction change")
+  var state:app.App=fixture(root)
+  let id:u64=app.current_clip(state)
+  author(state,id)
+  let _=commands.copy_clip(state,id)
+  let _=commands.nudge(state,id,1)
+  let _=commands.undo(state)
+  let _=commands.seek(state,30)
+  let audio_track:u64=app.default_audio_track(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),audio_track,true)
+  app.mark_dirty(state,false)
+  let ledger:string=stable(state)
+  operation=0
+  loop {if operation==10 {break}
+    let result:commands.Result=edit(state,id,operation)
+    let _=test.check(suite,not result.ok,text.concat("Locked peer refuses operation ",string.from_int(operation)))
+    let _=test.eq_str(suite,stable(state),ledger,"Refusal preserves graph, redo, content revisions, selection and paired clipboard")
+    operation=operation+1}
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Insert and overwrite place both streams and refuse locked audio transactionally")
+  operation=0
+  loop {if operation==2 {break}
+    var placed:app.App=fixture(root)
+    let selected:u64=app.current_clip(placed)
+    let source_id:u64=option.unwrap(editor.clip(struct.borrow(placed,field=document),selected)).source
+    let original:string=encoded(struct.borrow(placed,field=document))
+    let depth:u64=editor.undo_depth(struct.borrow(placed,field=history))
+    let result:commands.Result=if operation==0 {commands.insert_source(placed,source_id,200,15,30)}else{commands.overwrite_source(placed,source_id,200,15,30)}
+    let _=test.check(suite,result.ok,"Both-lane range placement succeeds")
+    if result.ok {pair(suite,placed,result.value,30,200,15)
+      let after:string=encoded(struct.borrow(placed,field=document))
+      roundtrip(suite,placed,original,after,depth)}
+    let audio_track:u64=app.default_audio_track(placed)
+    let _=editor.set_track_lock(struct.borrow(placed,field=document),audio_track,true)
+    let before_locked:string=stable(placed)
+    let refused:commands.Result=if operation==0 {commands.insert_source(placed,source_id,200,15,10)}else{commands.overwrite_source(placed,source_id,200,15,10)}
+    let _=test.check(suite,not refused.ok,"Locked audio cannot cause partial video placement")
+    let _=test.eq_str(suite,stable(placed),before_locked,"No partial placement or history capture")
+    operation=operation+1}
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Pair Copy/Paste/Cut preserves authored filters and off-body scoped keys")
+  let _=ref.swap(state,fixture(root))
+  let clip:u64=app.current_clip(state)
+  let audio:u64=linked.mate(struct.borrow(state,field=document),clip)
+  author(state,clip)
+  let video_content:string=content(struct.borrow(state,field=document),clip)
+  let audio_content:string=content(struct.borrow(state,field=document),audio)
+  let _=test.eq_u64(suite,app.current_audio_clip(state),audio,"Video selection resolves audio inspector to its actual mate")
+  let _=test.check(suite,commands.copy_clip(state,clip).ok,"Pair Copy succeeds")
+  let original:string=encoded(struct.borrow(state,field=document))
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let paste_audio_track:u64=app.default_audio_track(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),paste_audio_track,true)
+  let paste_locked:string=stable(state)
+  let refused_paste:commands.Result=commands.paste_clip(state,app.default_video_track(state),120)
+  let _=test.check(suite,not refused_paste.ok,"Locked A cannot publish only a pasted V half")
+  let _=test.eq_str(suite,stable(state),paste_locked,"Pair Paste refusal preserves clipboard and all history")
+  let _=editor.set_track_lock(struct.borrow(state,field=document),paste_audio_track,false)
+  let pasted:commands.Result=commands.paste_clip(state,app.default_video_track(state),120)
+  let _=test.check(suite,pasted.ok,"Pair Paste succeeds")
+  if pasted.ok {
+    pair(suite,state,pasted.value,120,10,90)
+    let mate:u64=linked.mate(struct.borrow(state,field=document),pasted.value)
+    let _=test.eq_str(suite,content(struct.borrow(state,field=document),pasted.value),video_content,"Picture fields/filter order/parameters/raw scoped curve survive remapped IDs")
+    let _=test.eq_str(suite,content(struct.borrow(state,field=document),mate),audio_content,"Audio fields and full gain context survive paired Paste")
+    let after:string=encoded(struct.borrow(state,field=document))
+    roundtrip(suite,state,original,after,depth)
+  }
+  let cut_before:string=encoded(struct.borrow(state,field=document))
+  let cut_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let cut:commands.Result=commands.cut_clip(state,clip)
+  let _=test.check(suite,cut.ok,"Pair Cut succeeds")
+  if cut.ok {let _=test.check(suite,missing(editor.clip(struct.borrow(state,field=document),clip)) and missing(editor.clip(struct.borrow(state,field=document),audio)),"Cut removes video and audio together")
+    let after:string=encoded(struct.borrow(state,field=document))
+    roundtrip(suite,state,cut_before,after,cut_depth)
+    let restored:commands.Result=commands.paste_clip(state,app.default_video_track(state),240)
+    let _=test.check(suite,restored.ok,"Cut clipboard still owns both pieces after Undo/Redo")
+    if restored.ok {let _=test.eq_str(suite,content(struct.borrow(state,field=document),restored.value),video_content,"Restored picture content stays exact")
+      let restored_mate:u64=linked.mate(struct.borrow(state,field=document),restored.value)
+      let _=test.eq_str(suite,content(struct.borrow(state,field=document),restored_mate),audio_content,"Restored sound content stays exact")}}
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Legacy native Open migration is in-memory; explicit Save reopens idempotently")
+  var legacy:app.App=app.app(provider.fake(root))
+  let src:u64=source(legacy,true,true)
+  let legacy_track:u64=app.default_video_track(legacy)
+  let old:u64=option.unwrap(editor.place(struct.borrow(legacy,field=document),legacy_track,src,10,90,0))
+  let _=editor.set_clip_gain(struct.borrow(legacy,field=document),old,0.7)
+  let raw:string=encoded(struct.borrow(legacy,field=document))
+  let input:string=path.join(root,"immutable-legacy.air")
+  let saved:string=path.join(root,"explicit-linked-save.air")
+  let _=files.write_text(input,raw)
+  let opened:commands.Result=commands.open_linked_project(legacy,input)
+  let _=test.check(suite,opened.ok and opened.value==1,"One legacy AV clip becomes one pair")
+  let _=test.check(suite,app.dirty(legacy),"Migration requests explicit Save")
+  pair(suite,legacy,old,0,10,90)
+  let _=test.eq_str(suite,match files.read_text(input){ok(value)=>value,err(_)=>string.copy("read failed"),},raw,"Original project bytes remain unchanged")
+  let _=test.check(suite,commands.save_project(legacy,saved).ok,"Explicit new-path Save succeeds")
+  let graph:string=encoded(struct.borrow(legacy,field=document))
+  let reopened:commands.Result=commands.open_linked_project(legacy,saved)
+  let _=test.check(suite,reopened.ok and reopened.value==0 and not app.dirty(legacy),"Already routed project is not split a second time")
+  let _=test.eq_str(suite,encoded(struct.borrow(legacy,field=document)),graph,"Save/Open preserves the entire routed graph")
+  let _=test.eq_str(suite,match files.read_text(input){ok(value)=>value,err(_)=>string.copy("read failed"),},raw,"Migration and Save never touch original bytes")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Audio planning emits one real contribution for a V/A pair; mute is silence")
+  let _=ref.swap(state,fixture(root))
+  match media.audio_plan_range(struct.borrow(state,field=document),"unused-worker",0,30,"unused.wav") {err(_)=>{let _=test.check(suite,false,"Paired audio plan resolves")},ok(value)=>{var plan:media.AudioPlan=value
+    let _=test.eq_u64(suite,array.len(struct.borrow(plan,field=sounds)),1,"One routed audio descriptor; no doubled embedded video audio")
+    let _=test.eq_u64(suite,plan.frames,48000,"30 owner frames are exactly 48000 samples")},}
+  let muted_track:u64=app.default_audio_track(state)
+  let _=editor.set_track_muted(struct.borrow(state,field=document),muted_track,true)
+  match media.audio_plan_range(struct.borrow(state,field=document),"unused-worker",0,30,"unused.wav") {err(_)=>{let _=test.check(suite,false,"Muted routed plan resolves")},ok(value)=>{var plan:media.AudioPlan=value
+    let _=test.eq_u64(suite,array.len(struct.borrow(plan,field=sounds)),0,"Mute A does not leak a second contribution from V")},}
+  let _=test.check(suite,commands.program(state,editor.play()).ok and editor.playing(struct.borrow(state,field=document)),"Model Play begins without mutating pair membership")
+  let _=commands.seek(state,45)
+  pair(suite,state,app.current_clip(state),0,10,90)
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),45,"Model seek remains exact owner frame")
+  let _=test.done(suite)
+  let _=test.start(suite,"Single-stream sources choose the correct lane; AV append lock is atomic")
+  operation=0
+  loop {if operation==2 {break}
+    var single:app.App=app.app(provider.fake(root))
+    let src:u64=source(single,operation==0,operation!=0)
+    let added:commands.Result=commands.append_source(single,src,10,30)
+    let _=test.check(suite,added.ok,"Single-stream source can be appended")
+    let _=test.eq_u64(suite,editor.clip_count(struct.borrow(single,field=document)),1,"One source stream creates one clip")
+    if added.ok {let actual:editor.Clip=option.unwrap(editor.clip(struct.borrow(single,field=document),added.value))
+      let _=test.check(suite,actual.streams==if operation==0 {2}else{1},"Routing mask follows original Source metadata")
+      let expected:u64=if operation==0 {app.default_audio_track(single)}else{app.default_video_track(single)}
+      let _=test.eq_u64(suite,actual.track,expected,"Source is placed on the correct visible lane")}
+    operation=operation+1}
+  let _=ref.swap(state,fixture(root))
+  let first:u64=app.current_clip(state)
+  let src:u64=option.unwrap(editor.clip(struct.borrow(state,field=document),first)).source
+  let locked_audio:u64=app.default_audio_track(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),locked_audio,true)
+  let before:string=stable(state)
+  let append:commands.Result=commands.append_source(state,src,100,30)
+  let _=test.check(suite,not append.ok,"AV append cannot bypass locked audio lane")
+  let _=test.eq_str(suite,stable(state),before,"Failed pair append captures nothing and adds neither half")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Static speed and reverse edit both streams once; locked mate preserves history")
+  let _=ref.swap(state,fixture(root))
+  let selected:u64=app.current_clip(state)
+  let original:string=encoded(struct.borrow(state,field=document))
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let rate:commands.Result=commands.set_clip_field(state,selected,"speed",1.5)
+  let _=test.check(suite,rate.ok,"Supported static speed changes atomically")
+  let a:u64=linked.mate(struct.borrow(state,field=document),selected)
+  let vbody:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),selected))
+  let abody:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),a))
+  let _=test.check(suite,vbody.speed==1.5 and abody.speed==1.5,"Both source-time maps use authored 1.5 rate")
+  let after:string=encoded(struct.borrow(state,field=document))
+  roundtrip(suite,state,original,after,depth)
+  let before_reverse:string=encoded(struct.borrow(state,field=document))
+  let reverse_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let reverse:commands.Result=commands.toggle_clip_reverse(state,selected)
+  let _=test.check(suite,reverse.ok,"Paired Reverse succeeds")
+  let peer:u64=linked.mate(struct.borrow(state,field=document),selected)
+  let _=test.check(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),selected)).reverse and option.unwrap(editor.clip(struct.borrow(state,field=document),peer)).reverse,"Both pieces reverse the same source interval")
+  let reverse_after:string=encoded(struct.borrow(state,field=document))
+  roundtrip(suite,state,before_reverse,reverse_after,reverse_depth)
+  let _=commands.undo(state)
+  let lock_track:u64=app.default_audio_track(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),lock_track,true)
+  let locked:string=stable(state)
+  let locked_rate:commands.Result=commands.set_clip_field(state,selected,"speed",0.5)
+  let _=test.check(suite,not locked_rate.ok,"Locked mate refuses speed")
+  let _=test.eq_str(suite,stable(state),locked,"Speed refusal preserves all Undo/Redo snapshots")
+  let locked_reverse:commands.Result=commands.toggle_clip_reverse(state,selected)
+  let _=test.check(suite,not locked_reverse.ok,"Locked mate refuses Reverse")
+  let _=test.eq_str(suite,stable(state),locked,"Reverse refusal preserves all content and history")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Audio inspector creates effect on the selected video's actual A mate")
+  let _=ref.swap(state,fixture(root))
+  let selected:u64=app.current_clip(state)
+  let audio:u64=app.current_audio_clip(state)
+  let original:string=encoded(struct.borrow(state,field=document))
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let applied:commands.Result=commands.set_parameter(state,2,0,"compressor","threshold",0.25)
+  let _=test.check(suite,applied.ok,"Auto-created audio inspector parameter succeeds")
+  if applied.ok {
+    let doc:ref<editor.Document> =struct.borrow(state,field=document)
+    let slot:u64=option.unwrap(editor.filter_slot(doc,applied.value))
+    let filter:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),slot)
+    let _=test.eq_u64(suite,filter.clip,audio,"Compressor belongs to A, never silent picture-only V")
+    let _=test.eq_str(suite,filter.kind,"compressor","Correct authored audio effect family")
+    let _=test.check(suite,filter.clip!=selected,"Selected V remains picture-only")
+    let after:string=encoded(struct.borrow(state,field=document))
+    roundtrip(suite,state,original,after,depth)}
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Unsupported linked Speed filter and key edits explicitly preserve authored data")
+  let _=ref.swap(state,fixture(root))
+  let selected:u64=app.current_clip(state)
+  let original:string=stable(state)
+  var add:commands.Result=commands.add_filter(state,selected,"speed")
+  let _=test.check(suite,not add.ok and text.contains(add.message,"GA_LINKED_SPEED"),"Independent linked rate filter is explicitly refused")
+  let _=test.eq_str(suite,stable(state),original,"No filter or history was created on refusal")
+  var parameter:commands.Result=commands.set_parameter(state,2,0,"speed","rate",2.0)
+  let _=test.check(suite,not parameter.ok and text.contains(parameter.message,"GA_LINKED_SPEED"),"Auto-created independent rate filter is refused")
+  let _=test.eq_str(suite,stable(state),original,"No hidden auto-created rate filter survives")
+  let _=commands.seek(state,30)
+  let keyed_before:string=stable(state)
+  var keyed:commands.Result=commands.keyframe_parameter(state,1,selected,"","speed",2.0)
+  let _=test.check(suite,not keyed.ok and text.contains(keyed.message,"GA_LINKED_SPEED"),"Unsupported paired speed automation is explicit")
+  let _=test.eq_str(suite,stable(state),keyed_before,"Refused automation preserves pair, selection, revision and snapshots")
+  let _=test.done(suite)
+  operation=0
+  loop {if operation==2 {break}
+    let _=test.start(suite,text.concat("Linked abutting Roll/Slide exact geometry and failure atomicity ",string.from_int(operation)))
+    var cuts:app.App=app.app(provider.fake(root))
+    let source_id:u64=source(cuts,true,true)
+    let left:commands.Result=commands.append_source(cuts,source_id,10,30)
+    let middle:commands.Result=commands.append_source(cuts,source_id,50,30)
+    let right:commands.Result=commands.append_source(cuts,source_id,90,30)
+    let _=commands.select_only(cuts,middle.value)
+    let before:string=encoded(struct.borrow(cuts,field=document))
+    let depth:u64=editor.undo_depth(struct.borrow(cuts,field=history))
+    let edited:commands.Result=if operation==0 {commands.roll(cuts,left.value,middle.value,5)}else{commands.slide(cuts,middle.value,5)}
+    let _=test.check(suite,edited.ok,"Abutting paired timeline edit succeeds")
+    if edited.ok {
+      pair(suite,cuts,left.value,0,10,35)
+      pair(suite,cuts,middle.value,35,if operation==0 {55}else{50},if operation==0 {25}else{30})
+      pair(suite,cuts,right.value,if operation==0 {60}else{65},if operation==0 {90}else{95},if operation==0 {30}else{25})
+      let after:string=encoded(struct.borrow(cuts,field=document))
+      roundtrip(suite,cuts,before,after,depth)}
+    let _=commands.undo(cuts)
+    let locked_track:u64=app.default_audio_track(cuts)
+    let _=editor.set_track_lock(struct.borrow(cuts,field=document),locked_track,true)
+    let locked:string=stable(cuts)
+    let refusal:commands.Result=if operation==0 {commands.roll(cuts,left.value,middle.value,5)}else{commands.slide(cuts,middle.value,5)}
+    let _=test.check(suite,not refusal.ok,"Locked counterpart refuses complete abutting edit")
+    let _=test.eq_str(suite,stable(cuts),locked,"Locked refusal preserves full graph and redo history")
+    let _=editor.set_track_lock(struct.borrow(cuts,field=document),locked_track,false)
+    let unpaired:u64=linked.mate(struct.borrow(cuts,field=document),if operation==0 {middle.value}else{right.value})
+    let _=editor.lift(struct.borrow(cuts,field=document),unpaired)
+    let incomplete:string=stable(cuts)
+    let mismatched:commands.Result=if operation==0 {commands.roll(cuts,left.value,middle.value,5)}else{commands.slide(cuts,middle.value,5)}
+    let _=test.check(suite,not mismatched.ok,"A missing counterpart cannot absorb half an edit")
+    let _=test.eq_str(suite,stable(cuts),incomplete,"Mixed paired/unpaired refusal preserves all original pieces")
+    let _=test.done(suite)
+    operation=operation+1}
+  let _=test.start(suite,"Cross-A-lane linked follower cannot be shifted by only its picture lane")
+  let _=ref.swap(state,fixture(root))
+  let primary:u64=app.current_clip(state)
+  let src:u64=option.unwrap(editor.clip(struct.borrow(state,field=document),primary)).source
+  let follower:commands.Result=commands.append_source(state,src,100,30)
+  let follower_audio:u64=linked.mate(struct.borrow(state,field=document),follower.value)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let alternate:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A cross-lane follower")
+  let _=editor.move_clip(doc,follower_audio,alternate,90)
+  let _=commands.select_only(state,primary)
+  let _=commands.copy_clip(state,primary)
+  let _=commands.nudge(state,primary,1)
+  let _=commands.undo(state)
+  let ledger:string=stable(state)
+  operation=0
+  loop {if operation==5 {break}
+    let result:commands.Result=if operation==0 {commands.ripple_trim_end(state,primary,75)} else if operation==1 {commands.ripple_delete(state,primary)} else if operation==2 {commands.insert_source(state,src,200,15,45)} else if operation==3 {commands.overwrite_source(state,src,200,25,80)} else {commands.cut_clip(state,primary)}
+    let _=test.check(suite,not result.ok,text.concat("Cross-lane follower edit refuses operation ",string.from_int(operation)))
+    let _=test.eq_str(suite,stable(state),ledger,"No routed source-time, clipboard or redo snapshot is partially changed")
+    pair(suite,state,follower.value,90,100,30)
+    operation=operation+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"Fresh AV placement respects an independently configured A1 mixer")
+  var mixed:app.App=app.app(provider.fake(root))
+  let src:u64=source(mixed,true,true)
+  let audio_track:u64=app.default_audio_track(mixed)
+  let _=editor.set_track_gain(struct.borrow(mixed,field=document),audio_track,0.35)
+  let _=editor.set_track_pan(struct.borrow(mixed,field=document),audio_track,-0.6)
+  let _=editor.set_track_muted(struct.borrow(mixed,field=document),audio_track,true)
+  let added:commands.Result=commands.append_source(mixed,src,10,90)
+  let _=test.check(suite,added.ok,"Fresh AV import is compatible with non-neutral A1 mixer")
+  if added.ok {
+    pair(suite,mixed,added.value,0,10,90)
+    let doc:ref<editor.Document> =struct.borrow(mixed,field=document)
+    let slot:u64=option.unwrap(editor.track_slot(doc,audio_track))
+    let lane:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),slot)
+    let _=test.check(suite,lane.gain==0.35 and lane.pan== -0.6 and lane.muted,"A1 gain, pan and mute stay independently authored")
+    let mate:u64=linked.mate(doc,added.value)
+    let _=test.eq_u64(suite,option.unwrap(editor.clip(doc,mate)).track,audio_track,"New sound is visibly owned by configured A1")
+    match media.audio_plan_range(doc,"unused-worker",0,30,"unused.wav") {err(_)=>{let _=test.check(suite,false,"Muted new pair resolves")},ok(value)=>{var plan:media.AudioPlan=value
+      let _=test.eq_u64(suite,array.len(struct.borrow(plan,field=sounds)),0,"Configured A1 mute does not leak legacy V audio")},}
+  }
+  let _=test.done(suite)
+  let _=test.start(suite,"Properties Audio rows display and edit the actual mate while V stays selected")
+  let _=ref.swap(state,fixture(root))
+  let selected:u64=app.current_clip(state)
+  let sound:u64=linked.mate(struct.borrow(state,field=document),selected)
+  let _=editor.set_clip_gain(struct.borrow(state,field=document),selected,1.7)
+  let _=editor.set_clip_gain(struct.borrow(state,field=document),sound,0.35)
+  let _=commands.seek(state,12)
+  let frame:layout.Frame=layout.frame(1600.0,980.0)
+  var rows:array<chrome.Control> =chrome.properties_panel(frame,state)
+  let gain_row:option<u64> =row(rows,chrome.act_param_set(),"","gain")
+  let found:bool=match gain_row {none=>false,some(index)=>{
+    let c:ref<chrome.Control> =array.borrow(rows,index)
+    let _=test.eq_u64(suite,c.target,sound,"Rendered Properties audio gain targets actual A clip")
+    let _=test.near_f64(suite,c.value,0.35,0.000000001,"Rendered value comes from A, not V gain1.7")
+    c.domain==chrome.domain_clip() and c.enabled},}
+  let _=test.check(suite,found,"Properties exposes an enabled actual audio control")
+  let _=test.check(suite,click_property(state,chrome.act_param_inc(),"","gain"),"Pointer hits visible gain+ in real shared Properties control list")
+  let _=test.near_f64(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),sound)).gain,0.4,0.000000001,"Gain+ changes A by its declared .05 step")
+  let _=test.near_f64(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),selected)).gain,1.7,0.000000001,"Gain+ leaves picture-only V untouched")
+  let _=test.check(suite,click_property(state,chrome.act_param_dec(),"","gain"),"Pointer hits gain- on A")
+  let _=test.near_f64(suite,option.unwrap(editor.clip(struct.borrow(state,field=document),sound)).gain,0.35,0.000000001,"Gain- restores A authored value")
+  rows=chrome.properties_panel(frame,state)
+  let key_row:option<u64> =row(rows,chrome.act_param_key(),"","gain")
+  let correct_key:bool=match key_row {none=>false,some(index)=>struct.get(array.borrow(rows,index),field=target)==sound,}
+  let _=test.check(suite,correct_key,"Rendered gain K carries actual A target")
+  let _=test.check(suite,click_property(state,chrome.act_param_key(),"","gain"),"Pointer gain K invokes audio key command while V remains selected")
+  let _=test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),sound,"gain"),1,"A owns the audible key")
+  let _=test.eq_u64(suite,editor.key_count(struct.borrow(state,field=document),selected,"gain"),0,"V has no silent fake audio key")
+  let _=test.near_f64(suite,editor.clip_value_at(struct.borrow(state,field=document),sound,"gain",12,99.0),0.35,0.000000001,"Key value and clip-local time are exact")
+  let _=test.eq_u64(suite,app.current_clip(state),selected,"Pointer audio edits preserve V selection")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Properties EQ and compressor lookup and pointer edits belong to A")
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let veq:u64=option.unwrap(editor.add_filter(doc,selected,"eq_3band"))
+  let aeq:u64=option.unwrap(editor.add_filter(doc,sound,"eq_3band"))
+  let vc:u64=option.unwrap(editor.add_filter(doc,selected,"compressor"))
+  let ac:u64=option.unwrap(editor.add_filter(doc,sound,"compressor"))
+  let _=editor.set_filter_param(doc,veq,"low",-7.0)
+  let _=editor.set_filter_param(doc,aeq,"low",3.5)
+  let _=editor.set_filter_param(doc,vc,"threshold",-1.0)
+  let _=editor.set_filter_param(doc,ac,"threshold",-24.0)
+  rows=chrome.properties_panel(frame,state)
+  let eq_row:option<u64> =row(rows,chrome.act_param_set(),"eq_3band","low")
+  let correct_eq:bool=match eq_row {none=>false,some(index)=>{
+    let c:ref<chrome.Control> =array.borrow(rows,index)
+    c.target==aeq and math.abs(c.value-3.5)<0.000000001},}
+  let _=test.check(suite,correct_eq,"Rendered EQ row resolves A instance/value despite distinct V instance")
+  let comp_row:option<u64> =row(rows,chrome.act_param_set(),"compressor","threshold")
+  let correct_comp:bool=match comp_row {none=>false,some(index)=>{
+    let c:ref<chrome.Control> =array.borrow(rows,index)
+    c.target==ac and math.abs(c.value+24.0)<0.000000001},}
+  let _=test.check(suite,correct_comp,"Rendered compressor resolves actual A filter/value")
+  let _=test.check(suite,click_property(state,chrome.act_param_inc(),"eq_3band","low"),"Actual EQ+ pointer control is reachable")
+  let _=test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),aeq,"low",99.0),4.0,0.000000001,"EQ+ changes actual A filter")
+  let _=test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),veq,"low",99.0),-7.0,0.000000001,"EQ+ leaves V instance unchanged")
+  let _=test.check(suite,click_property(state,chrome.act_param_inc(),"compressor","threshold"),"Actual compressor+ control is reachable")
+  let _=test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),ac,"threshold",99.0),-23.0,0.000000001,"Compressor changes A threshold by declared1dB step")
+  let _=test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),vc,"threshold",99.0),-1.0,0.000000001,"Compressor leaves V instance unchanged")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Grouping V selection retains all mates and paired nudge with exact Undo/Redo")
+  let _=ref.swap(state,fixture(root))
+  let first:u64=app.current_clip(state)
+  let source_id:u64=option.unwrap(editor.clip(struct.borrow(state,field=document),first)).source
+  let second:commands.Result=commands.append_source(state,source_id,100,30)
+  let first_audio:u64=linked.mate(struct.borrow(state,field=document),first)
+  let second_audio:u64=linked.mate(struct.borrow(state,field=document),second.value)
+  let _=commands.select_only(state,first)
+  let _=commands.add_to_selection(state,second.value)
+  let original:string=encoded(struct.borrow(state,field=document))
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let grouped:commands.Result=commands.group_selection(state)
+  let _=test.check(suite,grouped.ok,"Two selected V clips expand their existing A mates before Group")
+  if grouped.ok {
+    let doc:ref<editor.Document> =struct.borrow(state,field=document)
+    let _=test.check(suite,option.unwrap(editor.clip(doc,first)).group==grouped.value and option.unwrap(editor.clip(doc,second.value)).group==grouped.value and option.unwrap(editor.clip(doc,first_audio)).group==grouped.value and option.unwrap(editor.clip(doc,second_audio)).group==grouped.value,"All four actual pieces share the new user group")
+    let _=test.eq_u64(suite,linked.mate(doc,first),first_audio,"First pair remains uniquely linked")
+    let _=test.eq_u64(suite,linked.mate(doc,second.value),second_audio,"Second pair remains uniquely linked")
+    let after:string=encoded(doc)
+    roundtrip(suite,state,original,after,depth)
+    let nudge_before:string=encoded(struct.borrow(state,field=document))
+    let nudge_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+    let moved:commands.Result=commands.nudge(state,first,5)
+    let _=test.check(suite,moved.ok,"Paired nudge still works inside expanded user group")
+    pair(suite,state,first,5,10,90)
+    pair(suite,state,second.value,90,100,30)
+    let nudge_after:string=encoded(struct.borrow(state,field=document))
+    roundtrip(suite,state,nudge_before,nudge_after,nudge_depth)}
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Invalid/locked/ambiguous grouping refuses without graph or history changes")
+  let _=ref.swap(state,fixture(root))
+  let first:u64=app.current_clip(state)
+  let initial:string=stable(state)
+  let lonely:commands.Result=commands.group_selection(state)
+  let _=test.check(suite,not lonely.ok,"One selected V does not silently group its already linked pair")
+  let _=test.eq_str(suite,stable(state),initial,"Failed insufficient-selection Group captures nothing")
+  let source_id:u64=option.unwrap(editor.clip(struct.borrow(state,field=document),first)).source
+  let second:commands.Result=commands.append_source(state,source_id,100,30)
+  let _=commands.select_only(state,first)
+  let _=commands.add_to_selection(state,second.value)
+  let _=commands.nudge(state,first,1)
+  let _=commands.undo(state)
+  let _=test.eq_u64(suite,editor.redo_depth(struct.borrow(state,field=history)),1,"Grouping refusal ledger contains a real redo snapshot")
+  let audio_lane:u64=app.default_audio_track(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),audio_lane,true)
+  let locked:string=stable(state)
+  let refusal:commands.Result=commands.group_selection(state)
+  let _=test.check(suite,not refusal.ok,"Locked expanded mate lane refuses Group atomically")
+  let _=test.eq_str(suite,stable(state),locked,"Locked Group leaves original pair memberships and revision/history unchanged")
+  let _=editor.set_track_lock(struct.borrow(state,field=document),audio_lane,false)
+  let second_audio:u64=linked.mate(struct.borrow(state,field=document),second.value)
+  let video_lane:u64=app.default_video_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let _=editor.move_clip(doc,second.value,video_lane,0)
+  let _=editor.move_clip(doc,second_audio,audio_lane,0)
+  let _=editor.slip(doc,second.value,-90)
+  let _=editor.slip(doc,second_audio,-90)
+  let first_audio:u64=linked.mate(doc,first)
+  let _=editor.trim_end(doc,first,30)
+  let _=editor.trim_end(doc,first_audio,30)
+  let ambiguous:string=stable(state)
+  let refuse_ambiguous:commands.Result=commands.group_selection(state)
+  let _=test.check(suite,not refuse_ambiguous.ok,"Identical mappings would lose unique mate identity and must refuse")
+  let _=test.eq_str(suite,stable(state),ambiguous,"Ambiguous Group preserves all original memberships and snapshots")
+  let _=test.done(suite)
+  let _=test.start(suite,"Properties audio controls reflect metadata, not temporary playback suppression")
+  var picture_only:app.App=app.app(provider.fake(root))
+  let src:u64=source(picture_only,false,true)
+  let placed:commands.Result=commands.append_source(picture_only,src,0,30)
+  let _=commands.select_only(picture_only,placed.value)
+  rows=chrome.properties_panel(frame,picture_only)
+  let no_audio:bool=match row(rows,chrome.act_param_set(),"","gain") {none=>true,some(_)=>false,}
+  let no_eq:bool=match row(rows,chrome.act_param_set(),"eq_3band","low") {none=>true,some(_)=>false,}
+  let no_compressor:bool=match row(rows,chrome.act_filter_add(),"compressor","") {none=>true,some(_)=>false,}
+  let _=test.check(suite,no_audio and no_eq and no_compressor,"Pure picture source exposes no misleading Audio/EQ/Dynamics controls")
+  operation=0
+  loop {if operation==2 {break}
+    var unavailable:app.App=fixture(root)
+    let video:u64=app.current_clip(unavailable)
+    let audio:u64=linked.mate(struct.borrow(unavailable,field=document),video)
+    let doc:ref<editor.Document> =struct.borrow(unavailable,field=document)
+    if operation==0 {let slot:u64=option.unwrap(editor.clip_slot(doc,audio))
+      struct.set(array.borrow(struct.borrow(doc,field=clips),slot),false,field=enabled)}else{
+      let source_id:u64=option.unwrap(editor.clip(doc,video)).source
+      let slot:u64=option.unwrap(editor.source_slot(doc,source_id))
+      struct.set(array.borrow(struct.borrow(doc,field=sources),slot),false,field=online)}
+    rows=chrome.properties_panel(frame,unavailable)
+    let gain:option<u64> =row(rows,chrome.act_param_set(),"","gain")
+    let retained:bool=match gain {none=>false,some(index)=>struct.get(array.borrow(rows,index),field=target)==audio,}
+    let _=test.check(suite,retained,"Disabled clip or temporarily offline media keeps editable original A controls")
+    operation=operation+1}
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"linked-media-tests.json"),28)
+}

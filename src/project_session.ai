@@ -35,7 +35,7 @@ fn apply(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.wri
     var changed: commands.Result = commands.new_project(state)
     result = commands.message(changed)
   } else if action == app.ProjectAction.Open {
-    var changed: commands.Result = commands.open_project(state, str.view(target))
+    var changed: commands.Result = commands.open_linked_project(state, str.view(target))
     result = commands.message(changed)
   } else if action == app.ProjectAction.Recover {
     match recovery.recover(state,str.view(target)) {

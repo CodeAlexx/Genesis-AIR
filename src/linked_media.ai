@@ -1,0 +1,238 @@
+// Document-level video/audio routing. Every public mutation commits one candidate.
+module genesis.linked_media
+import std.editor as editor
+import std.math as math
+import std.text as text
+
+pub fn is_audio_kind(kind:str) -> bool effects {} {
+  str.eq(kind,"gain") or str.eq(kind,"pan") or str.eq(kind,"eq_3band") or
+  str.eq(kind,"eq_10band") or str.eq(kind,"compressor") or str.eq(kind,"gate") or
+  str.eq(kind,"normalize") or str.eq(kind,"reverb") or str.eq(kind,"delay") or
+  str.eq(kind,"pitch") or str.eq(kind,"low_pass") or str.eq(kind,"high_pass") or
+  str.eq(kind,"tremolo") or str.eq(kind,"bass") or str.eq(kind,"treble") or
+  str.eq(kind,"notch") or str.eq(kind,"chorus") or str.eq(kind,"flanger") or
+  str.eq(kind,"phaser") or str.eq(kind,"limiter")
+}
+fn domain(kind:str) -> u32 effects {} {
+  if str.eq(kind,"speed") {return 3}
+  if is_audio_kind(kind) {return 2}
+  if str.eq(kind,"brightness") or str.eq(kind,"contrast") or str.eq(kind,"saturation") or
+      str.eq(kind,"gamma") or str.eq(kind,"hue") or str.eq(kind,"white_balance") or
+      str.eq(kind,"sharpen") or str.eq(kind,"blur") or str.eq(kind,"glow") or
+      str.eq(kind,"vignette") or str.eq(kind,"grain") or str.eq(kind,"sepia") or
+      str.eq(kind,"mono") or str.eq(kind,"invert") or str.eq(kind,"levels") or
+      str.eq(kind,"lift_gamma_gain") or str.eq(kind,"crop") or str.eq(kind,"size_position") or
+      str.eq(kind,"rotate") or str.eq(kind,"flip") or str.eq(kind,"mirror") or
+      str.eq(kind,"chroma_key") or str.eq(kind,"mask") or str.eq(kind,"opacity") or
+      str.eq(kind,"blend") or str.eq(kind,"text") or str.eq(kind,"timer") or
+      str.eq(kind,"denoise") or str.eq(kind,"stabilize") or str.eq(kind,"lut3d") {return 1}
+  0
+}
+fn key_domain(doc:ref<editor.Document>,clip:u64,param:str) -> u32 effects {alloc} {
+  if str.eq(param,"fade_in") or str.eq(param,"fade_out") or str.eq(param,"speed") {return 3}
+  if str.eq(param,"gain") or str.eq(param,"pan") {return 2}
+  if str.eq(param,"opacity") {return 1}
+  var parts:array<string> = text.split(param,".")
+  if array.len(parts)==2 {return domain(str.view(array.borrow(parts,0)))}
+  if array.len(parts)!=4 or not str.eq(array.borrow(parts,0),"filter") {return 0}
+  let id:u64=match text.parse_u64(array.borrow(parts,1)) {none=>0,some(value)=>value,}
+  let digits:string=string.from_int(id)
+  if id==0 or not str.eq(digits,array.borrow(parts,1)) {return 0}
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(doc,field=filters)) {break}
+    let filter:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),i)
+    if filter.id==id and filter.clip==clip and str.eq(struct.borrow(filter,field=kind),array.borrow(parts,2)) {
+      return domain(str.view(array.borrow(parts,2)))
+    }
+    i=i+1}
+  0
+}
+fn same_time(a:editor.Clip,b:editor.Clip) -> bool effects {} {
+  a.owner==b.owner and a.source==b.source and a.nested==b.nested and a.start==b.start and
+  a.source_in==b.source_in and a.length==b.length and a.speed==b.speed and a.reverse==b.reverse
+}
+pub fn mate(doc:ref<editor.Document>,id:u64) -> u64 effects {} {
+  let old:editor.Clip=match editor.clip(doc,id) {none=>{return 0},some(value)=>value,}
+  if old.group==0 or (old.streams!=1 and old.streams!=2) {return 0}
+  var found:u64=0
+  var i:u64=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let item:editor.Clip=option.unwrap(editor.clip_at(doc,i))
+    if item.group==old.group {
+      if item.id!=id and item.streams+old.streams==3 and same_time(old,item) {
+        if found!=0 {return 0}
+        found=item.id
+      }
+    }
+    i=i+1}
+  found
+}
+fn destination(doc:ref<editor.Document>,video:u64,audio:u64,preserve_mixer:bool) -> bool effects {} {
+  let v:u64=match editor.track_slot(doc,video) {none=>{return false},some(slot)=>slot,}
+  let a:u64=match editor.track_slot(doc,audio) {none=>{return false},some(slot)=>slot,}
+  let vt:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),v)
+  let at:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),a)
+  at.kind==editor.track_audio() and at.owner==vt.owner and not at.locked and
+  math.is_finite(at.gain) and at.gain>=0.0 and math.is_finite(at.pan) and at.pan>= -1.0 and at.pan<=1.0 and
+  (not preserve_mixer or (math.is_finite(vt.gain) and vt.gain>=0.0 and math.is_finite(vt.pan) and vt.pan>= -1.0 and vt.pan<=1.0 and
+  at.gain==vt.gain and at.pan==vt.pan and at.muted==vt.muted and at.solo==vt.solo))
+}
+fn compatible(doc:ref<editor.Document>,video:u64,audio:u64) -> bool effects {} {
+  destination(doc,video,audio,true)
+}
+fn vacant(doc:ref<editor.Document>,old:editor.Clip,track:u64) -> bool effects {} {
+  if old.start<0 or old.length<=0 or old.start>9223372036854775807-old.length {return false}
+  let end:i64=old.start+old.length
+  var i:u64=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let item:editor.Clip=option.unwrap(editor.clip_at(doc,i))
+    if item.track==track {
+      if item.start<0 or item.length<=0 or item.start>9223372036854775807-item.length {return false}
+      if item.start<end and item.start+item.length>old.start {return false}
+    }
+    i=i+1}
+  true
+}
+fn partition(doc:ref<editor.Document>,id:u64,stream:u32) -> result<unit,string> effects {alloc} {
+  var kept:array<editor.Key> = array.new()
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(doc,field=keys)) {break}
+    let key:editor.Key=array.get(struct.borrow(doc,field=keys),i)
+    var retain:bool=true
+    if key.clip==id {
+      let named:string=editor.name_text(doc,key.param)
+      let kind:u32=key_domain(doc,id,str.view(named))
+      if kind==0 {return result.err("[GA_LINKED_CONTEXT] Unknown authored automation cannot be separated")}
+      retain=kind==3 or kind==stream
+    }
+    if retain {array.push(kept,key)}
+    i=i+1}
+  var remove:array<u64> = array.new()
+  i=0
+  loop {if i>=array.len(struct.borrow(doc,field=filters)) {break}
+    let filter:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),i)
+    if filter.clip==id {
+      let kind:u32=domain(str.view(struct.borrow(filter,field=kind)))
+      if kind==0 {return result.err("[GA_LINKED_CONTEXT] Unknown authored filter cannot be separated")}
+      if kind!=3 and kind!=stream {array.push(remove,filter.id)}
+    }
+    i=i+1}
+  let _=struct.replace(doc,kept,field=keys)
+  i=0
+  loop {if i>=array.len(remove) {break}
+    let _=editor.remove_filter(doc,array.get(remove,i))
+    i=i+1}
+  result.ok(())
+}
+pub fn separate(doc:ref<editor.Document>,id:u64,audio_track:u64) -> result<u64,string> effects {alloc} {
+  separate_impl(doc,id,audio_track,true)
+}
+// New placement has no prior mix to preserve; the chosen A lane is authored intent.
+// Existing-clip separation and migration continue to preserve their old mixer.
+pub fn separate_import(doc:ref<editor.Document>,id:u64,audio_track:u64) -> result<u64,string> effects {alloc} {
+  separate_impl(doc,id,audio_track,false)
+}
+fn separate_impl(doc:ref<editor.Document>,id:u64,audio_track:u64,preserve_mixer:bool) -> result<u64,string> effects {alloc} {
+  let old:editor.Clip=match editor.clip(doc,id) {none=>{return result.err("[GA_LINKED_TARGET] Clip is missing")},some(value)=>value,}
+  match editor.track_slot(doc,old.track) {none=>{return result.err("[GA_LINKED_TRACK] Video lane is missing")},some(_)=>{},}
+  if old.streams!=3 or editor.track_kind(doc,old.track)!=editor.track_video() or editor.track_locked(doc,old.track) {
+    return result.err("[GA_LINKED_TARGET] Separation needs an unlocked legacy video clip")
+  }
+  if old.group!=0 {return result.err("[GA_LINKED_GROUP] Existing user group must be ungrouped before separation")}
+  if not destination(doc,old.track,audio_track,preserve_mixer) {return result.err("[GA_LINKED_TRACK] Audio lane mixer or owner differs, or lane is locked")}
+  if not vacant(doc,old,audio_track) {return result.err("[GA_LINKED_OCCUPIED] Audio destination is occupied")}
+  var saved:editor.ClipSnapshot=match editor.clip_snapshot(doc,id) {none=>{return result.err("[GA_LINKED_TARGET] Clip snapshot is unavailable")},some(value)=>value,}
+  if doc.next_id==0 or array.len(struct.borrow(saved,field=filters))+2>=18446744073709551615-doc.next_id {
+    return result.err("[GA_LINKED_CAPACITY] Pair identity capacity is exhausted")
+  }
+  struct.set(saved,editor.track_audio(),field=track_kind)
+  var candidate:editor.Document=editor.copy_document(doc)
+  let active:u64=candidate.active
+  struct.set(candidate,old.owner,field=active)
+  let audio:u64=match editor.paste_clip_snapshot(candidate,saved,audio_track,old.start) {
+    err(problem)=>{return result.err(text.concat("[GA_LINKED_CONTEXT] ",problem))},ok(value)=>value,}
+  let _=try partition(candidate,id,1)
+  let _=try partition(candidate,audio,2)
+  let _=editor.set_clip_streams(candidate,id,1)
+  let _=editor.set_clip_streams(candidate,audio,2)
+  var members:array<u64> = [id,audio]
+  let _=editor.group(candidate,array.view(members))
+  var i:u64=0
+  loop {if i>=editor.clip_count(candidate) {break}
+    let item:editor.Clip=option.unwrap(editor.clip_at(candidate,i))
+    let selected:bool=match editor.clip(doc,item.id) {none=>false,some(value)=>value.selected,}
+    struct.set(array.borrow(struct.borrow(candidate,field=clips),i),selected,field=selected)
+    i=i+1}
+  struct.set(candidate,active,field=active)
+  let _=ref.swap(doc,candidate)
+  result.ok(audio)
+}
+fn audio_lane(doc:ref<editor.Document>,old:editor.Clip) -> result<u64,string> effects {alloc} {
+  var found:u64=0
+  var distance:u64=18446744073709551615
+  let vslot:u64=option.unwrap(editor.track_slot(doc,old.track))
+  let order:u32=struct.get(array.borrow(struct.borrow(doc,field=tracks),vslot),field=order)
+  var i:u64=0
+  loop {if i>=editor.track_count(doc) {break}
+    let track:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),i)
+    let id:u64=track.id
+    let apart:u64=cast.wrap(if track.order>=order {track.order-order}else{order-track.order})
+    if compatible(doc,old.track,id) and vacant(doc,old,id) and apart<distance {found=id
+      distance=apart}
+    i=i+1}
+  if found!=0 {return result.ok(found)}
+  if doc.next_id==0 or doc.next_id>=18446744073709551615-1 {return result.err("[GA_LINKED_CAPACITY] Audio lane identity capacity is exhausted")}
+  let gain:f64=editor.track_gain(doc,old.track)
+  let pan:f64=editor.track_pan(doc,old.track)
+  if not math.is_finite(gain) or gain<0.0 or not math.is_finite(pan) or pan< -1.0 or pan>1.0 {
+    return result.err("[GA_LINKED_TRACK] Video lane mixer is invalid")
+  }
+  let muted:bool=struct.get(array.borrow(struct.borrow(doc,field=tracks),vslot),field=muted)
+  let solo:bool=struct.get(array.borrow(struct.borrow(doc,field=tracks),vslot),field=solo)
+  // Inserting one display lane must not wrap the shared order domain.
+  i=0
+  loop {if i>=editor.track_count(doc) {break}
+    let track:ref<editor.Track> = array.borrow(struct.borrow(doc,field=tracks),i)
+    if track.owner==old.owner and track.order==4294967295 {
+      return result.err("[GA_LINKED_CAPACITY] Audio lane order capacity is exhausted")
+    }
+    i=i+1}
+  let id:u64=editor.add_track(doc,old.owner,editor.track_audio(),"Linked audio")
+  let slot:u64=option.unwrap(editor.track_slot(doc,id))
+  struct.set(array.borrow(struct.borrow(doc,field=tracks),slot),gain,field=gain)
+  struct.set(array.borrow(struct.borrow(doc,field=tracks),slot),pan,field=pan)
+  struct.set(array.borrow(struct.borrow(doc,field=tracks),slot),muted,field=muted)
+  struct.set(array.borrow(struct.borrow(doc,field=tracks),slot),solo,field=solo)
+  let _=editor.reorder_track(doc,id,order+1)
+  result.ok(id)
+}
+pub fn migrate_legacy(doc:ref<editor.Document>) -> result<u64,string> effects {alloc} {
+  var candidate:editor.Document=editor.copy_document(doc)
+  var ids:array<u64> = array.new()
+  var i:u64=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let clip:editor.Clip=option.unwrap(editor.clip_at(doc,i))
+    if clip.streams==3 and editor.track_kind(doc,clip.track)==editor.track_video() {array.push(ids,clip.id)}
+    i=i+1}
+  i=0
+  loop {if i>=array.len(ids) {break}
+    let id:u64=array.get(ids,i)
+    let old:editor.Clip=option.unwrap(editor.clip(candidate,id))
+    match editor.track_slot(candidate,old.track) {none=>{return result.err("[GA_LINKED_TRACK] Legacy video lane is missing")},some(_)=>{},}
+    if editor.track_locked(candidate,old.track) {return result.err("[GA_LINKED_TARGET] Legacy video lane is locked")}
+    var audible:bool=old.nested!=0
+    if old.source!=0 {
+      let slot:u64=match editor.source_slot(candidate,old.source) {none=>{return result.err("[GA_LINKED_CONTEXT] Legacy source is missing")},some(value)=>value,}
+      audible=struct.get(array.borrow(struct.borrow(candidate,field=sources),slot),field=has_audio)
+      if not struct.get(array.borrow(struct.borrow(candidate,field=sources),slot),field=has_video) {
+        return result.err("[GA_LINKED_CONTEXT] Audio-only media on a legacy video lane requires an explicit move")
+      }
+    }
+    if audible {
+      let lane:u64=try audio_lane(candidate,old)
+      let _=try separate(candidate,id,lane)
+    }else{let _=editor.set_clip_streams(candidate,id,1)}
+    i=i+1}
+  if array.len(ids)>0 {let _=ref.swap(doc,candidate)}
+  result.ok(array.len(ids))
+}

@@ -538,3 +538,134 @@ Sanitized evidence is preserved in
 archive receipt and publication commit. This checkpoint qualifies the
 specific editing, recovery, export and bounded native cadence contracts above;
 it does not mark the complete professional editing goal achieved.
+
+## Linked-lane background follow-up
+
+The preceding installed 1A49/native-window sections are historical acceptance
+for their exact binary. The following slice is background-only; it does not
+repeat desktop clipboard, live audio, hardware-clock or sustained cadence tests.
+
+Shared source-aware imports produce V-only/A-only linked clips, V bitmaps and A
+processed peaks, with one audio contribution. Properties reads and edits A while
+V is selected; Group includes and preserves existing mates. Paired edit success
+has one Undo/Redo transaction, and unsupported or locked edits preserve the
+complete graph/history. Native migration leaves the original file unchanged
+until Save; unsafe conversion opens the original graph with a warning.
+
+The focused Windows CPU linked fixture passes 28 cases / 784 checks, including
+actual generated controls and pointer dispatch. It is separate from independent
+picture/PCM decoding and from a real native window. The earlier locked-Slip failure remains retained; Properties/Group checks cover
+the two reported integration defects without changing expected outcomes.
+
+Contributing clip Pan/Speed curves and curves on enabled audio-filter instances
+report `GA_AUDIO_AUTOMATION_UNSUPPORTED`; this is explicit refusal, not animated
+DSP support. Audible offline leaves, including compound descendants and original
+Source audition, report `GA_AUDIO_SOURCE_OFFLINE`. Supported clip Gain/Fade curves
+retain their existing processing. Disabled clips, muted or sequence-local
+solo-excluded lanes, inactive/unreferenced sequences, no-audio or video-only
+branches, and half-open nonoverlap remain noncontributing. Static held clips are
+silent, but an enabled stored Speed curve still refuses: it could make a held
+clip progress. Disabled filter curves stay dormant. Hidden/locked tracks remain
+audible; scalar zero gain is not a bypass for positive Gain keys. Compound
+preflight includes the selected child history needed by cached DSP. Direct peak
+failures retain `GA_AUDIO_CLIP_ENV` and the underlying cause.
+
+The focused 61-case background oracle compares 1,536,000 PCM16 values (maximum
+0.735521 code at the unchanged one-code limit) and 384,000 independently decoded
+lossless-master values (maximum normalized error 1.207935e-7 at the unchanged
+2e-6 limit). Masked picture branches, source audition, refusal recovery, owned
+cache/partial cleanup and preservation of external sidecars are included. The
+prechange silent-loss failure and later fixture-authoring corrections remain
+retained. These are focused receipts, not native-device or desktop acceptance.
+
+Audio-plan failure stops the device before the next paint; export rejects the
+plan before acquiring output/cleanup ownership. No codec, DSP, color or worker
+change is introduced, and Genesis continues to use MM-AIR's runtime without its
+own FFmpeg executable/DLL bundle.
+
+The first coherent `linked-lanes-controls-final` build succeeded, but its
+BackgroundOnly gate failed the timeline-track-scroll fixture (eight cases / 81
+checks). That fixture used an unsupported opacity edit which historically added
+an unchanged Undo snapshot. The new atomic refusal correctly preserves history,
+so the fixture's assumed Undo step was invalid. The correction uses supported
+Gain 0.5, verifies the actual edit and Undo restoration before testing wheel
+scrolling; the corrected final count is eight cases / 83 checks. Production was unchanged,
+and the original failed build/gate evidence remains retained. The fresh
+`linked-lanes-controls-retry` build proceeded; this fixture
+correction is not a relaxed media, control or atomicity threshold.
+
+The `linked-lanes-controls-retry` gate then exposed a real preview transport
+failure: the retained-producer fixture reported six passed, one failed and one
+skipped case / 214 checks. The same binary passed isolated execution and repeat
+one (eight cases / 228 checks), then failed repeat two. Its first terminal record
+is request 2 / snapshot 1, `[GA_PREVIEW_CHANNEL] channel deadline expired`, on the
+old packet before the Gain replacement. Link closure is therefore reproduced,
+not inferred from a generic UI message. These failures and passing retries are
+retained; a retry pass does not erase the failure.
+
+The shared channel used one 50 ms credit-poll/write budget, so backpressure could
+leave a frame write with an expired deadline and permanently poison Sender.
+The frozen `patches/air-channel-deadlines.patch` adds reusable
+`std.channel.send_deadlines` with separate credit-poll and frame-write deadlines.
+Preview still polls credit in short steps and bounds each current window message
+to two seconds. Cancellation occurs between complete messages: a partially
+written frame is fatal and must never be reset into a different frame.
+
+Focused real-TCP proof passes four cases / 18 checks plus four independent exact
+wire oracles. A controlled 200 ms started-write stall succeeds with the separate
+long write deadline and delivers exact payload/completion; the old or short
+write deadline fails after 4,079 payload bytes and cannot emit another frame.
+No-credit expiry remains resumable, preserving credits and sequence until the
+same logical frame is retried. Legacy send semantics are unchanged. These are
+protocol component proofs; the coherent application gate is recorded below.
+
+The `linked-lanes-transport-final` build was retained for the next gate. This
+evidence does not establish the initiating cause of the earlier BDF3 native-Gain failure, which remains
+unknown.
+
+The `linked-lanes-transport-final` BackgroundOnly run passed the media, audio and
+native fixtures, including the 61-case audio-plan gate, then failed the last
+headless facts contract: successful Nudge returned `moved` where the existing
+expected result was `nudged`. The sole follow-up production correction restores
+Nudge's success message/value; refusals and the atomic paired Move remain
+unchanged. The failed source snapshot, gate log and reports remain retained.
+No other enforced headless-fact mismatch was found.
+
+A separate controls-tail run passes 757 reported clicks and all four dock-tab
+overlap checks, plus real Windows Unicode preview and coded errors. That partial
+validation did not replace a complete coherent gate. The final contract build
+and its independent `agent-linked-streams-contract-final` helper subsequently
+passed the accepted background gate below.
+
+The coherent `linked-lanes-contract-final` build and complete
+`tests/windows.ps1 -BackgroundOnly` gate pass, and the verified payload is
+published in the Genesis root. Application SHA256 is `06af1ab848cf1225c3bbb7f9896dd6dbdfa3148df95b8ed9f5241c9b20ca687b`;
+the unchanged worker is `aa40b96c631c82cfc834d027678e95a00bd8d5f61db54f15e7c7ecefcf74228c`. Protected original projects/media are
+unchanged; no user application was terminated and no desktop/device test was
+performed. MM-AIR runtime reuse and the absence of a separate Genesis FFmpeg
+bundle are retained.
+
+The final background gate includes linked controls 28 cases / 784 checks,
+channel deadlines four cases / 18 checks plus four exact wire oracles, retained
+preview eight / 229, track scrolling eight / 83, 153 headless facts plus three
+native-drop checks, and 757 control outcomes across all four dock tabs. The
+61-case audio-plan oracle retains the numerical limits above. A 181-second
+continuity check passes 37 chunks / 36 boundaries with exact samples.
+
+The separate real-1080p helper passes three cases / 22 checks against the frozen
+shared source. Its background raster snapshots at frames 0, 90 and 179 show
+V-only filmstrip tiles, A processed waveform extent, Program/scopes updates and
+`00:00:00:00`, `00:00:01:30`, `00:00:02:59`. Source is intentionally inactive in
+that fixture. The driver's initial SDK relative-path error was repaired before
+client launch; the candidate did not change and the failed setup is retained.
+These are inspected helper surfaces, not a live desktop or device test.
+
+Desktop clipboard, live audio, hardware-clock behavior and sustained cadence
+remain deferred for this build. Earlier 1A49 cadence evidence cannot qualify
+06AF; complete professional editing acceptance remains false. All earlier
+failed gates, retries and fixture corrections remain retained.
+
+The [immutable 1,287-member evidence bundle](../archive/linked-media-windows-2026-10-10.tar.gz)
+has SHA256 `b822ed35284be3961abead18381aed7f23bb55aaafae2701d28c33d73ecd87bb`. The
+[acceptance receipt](validation/linked-media-windows-2026-10-10.json) binds exact
+source, build, reports, published payload and archive digests.

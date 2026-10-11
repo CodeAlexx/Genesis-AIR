@@ -37,7 +37,7 @@ with FP32 intermediate math and 16-bit channel quantization. Set
 `GENESIS_GPU_PREVIEW=0` to use the reference CPU transform. Masters retain that
 reference transform. The current validated candidate also has a runtime-qualified
 native-size P010/PQ preview shader; unsupported configurations use the reference.
-The current native editor passes a bounded 133.89-second playback check from the
+The earlier playback checkpoint passed a bounded 133.89-second playback check from the
 supplied 4K/59.94 source with live stereo audio and fitted 480x270 monitors. Its
 steady interval presents 59.9377 changed pictures/s without skipped positions or
 presentations beyond the existing two-frame lateness limit. Fullscreen 4K,
@@ -46,8 +46,16 @@ unqualified; [measured results and restrictions](docs/FFMPEG_GPU_PREVIEW.md) dis
 headless preparation from actual display performance.
 
 The [current native playback validation](docs/WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md)
-records the installed build's editing, modal recovery, export and native cadence
+records each qualified build's editing, modal recovery, export and native cadence
 checks alongside the retained failed and incomplete timing experiments.
+
+Video with sound now uses linked video and audio lanes: frame thumbnails on V1,
+processed waveforms on A1, with synchronized edits and one sound contribution.
+Native Open converts supported older layouts in memory; Save keeps the new layout.
+[Linked-lane behavior and validation](docs/LINKED_MEDIA_WINDOWS_2026-10-10.md)
+describe conversion safeguards and the background test scope. The linked-lane build
+passed the complete background Windows gate and a bounded check of the supplied
+1080p clip; desktop, speaker and sustained playback timing checks remain deferred.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -1301,6 +1309,29 @@ and [control ledger](docs/CONTROL_COVERAGE.md#native-playback-reserve-and-recove
 The [evidence archive](archive/native-playback-reserve-2026-10-10.tar.gz) preserves
 the source and receipts; its digest is recorded in the archive receipt and publication commit. Professional editing acceptance
 remains incomplete.
+
+## Loaded audio preflight (pending acceptance)
+
+The next candidate explicitly refuses loaded audio automation that the renderer
+cannot preserve. An audible clip with animated Pan, Speed or an enabled audio
+filter reports `GA_AUDIO_AUTOMATION_UNSUPPORTED`; it no longer silently renders
+the scalar setting. Supported clip Gain and Fade curves remain supported.
+An audible offline source reports `GA_AUDIO_SOURCE_OFFLINE`, including independent
+Source audition. Disabled, muted, solo-excluded, nonoverlapping, held and no-audio
+branches retain intentional silence. Disabled filter curves remain dormant;
+unrelated video automation does not block audio. Hidden/locked lanes remain
+audible, and nested checks retain the selected child interval needed for DSP
+history. Processed direct-waveform failures retain their `GA_AUDIO_CLIP_ENV`
+context.
+
+The window stops the audio device before painting a preflight failure. Export
+rejects unsupported audio before taking output ownership and preserves externally
+owned partial/signal sidecars. This adds explicit refusals, not dynamic Pan,
+Speed or audio-filter DSP. Initial focused private PCM checks pass and the old
+silent-loss baseline is retained; expanded compressor/export checks and the
+`audio-plan-preflight-final` coherent Windows/native acceptance remain pending.
+The installed **1A49/AA40** reserve checkpoint above remains the last published
+build. No new cadence, physical A/V or complete professional acceptance is claimed.
 
 ## Known gaps
 

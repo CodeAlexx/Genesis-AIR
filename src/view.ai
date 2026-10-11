@@ -400,7 +400,8 @@ fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state
     match editor.clip(document, clip) {
       none => { },
       some(value) => {
-        if entry.source != value.source or entry.length != value.length or entry.revision != state.media_revision or
+        if value.owner != sequence or editor.track_kind(document,value.track) != editor.track_audio() or
+            not editor.clip_has_audio(value) or entry.source != value.source or entry.length != value.length or entry.revision != state.media_revision or
             entry.document_revision != state.document_revision or
             timeline_media.source_frame(document,value,value.start) != entry.first or
             timeline_media.source_frame(document,value,value.start+value.length-1) != entry.last {index=index+1
@@ -434,7 +435,8 @@ fn paint_thumbnails(canvas: ref<draw.Canvas>, state: ref<app.App>, model: ref<ti
     let thumb: ref<app.Thumbnail> = array.borrow(struct.borrow(state, field=thumbnails), i)
     i = i + 1
     let clip: editor.Clip = match editor.clip(doc, thumb.clip) {none => { continue }, some(value) => value,}
-    if clip.owner != doc.active or clip.source != thumb.source or thumb.revision != state.media_revision or
+    if clip.owner != doc.active or editor.track_kind(doc,clip.track) != editor.track_video() or
+        not editor.clip_has_video(clip) or clip.source != thumb.source or thumb.revision != state.media_revision or
         (clip.nested != 0 and thumb.document_revision != state.document_revision) or
         thumb.frame < clip.start or thumb.frame >= clip.start+clip.length or
         timeline_media.source_frame(doc,clip,thumb.frame) != thumb.source_frame {continue}
