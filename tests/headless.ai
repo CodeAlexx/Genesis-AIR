@@ -7,6 +7,7 @@ module genesis.tests
 
 import std.draw as draw
 import std.editor as editor
+import std.editor_io as editor_io
 import std.files as files
 import std.path as path
 import std.timeline as timeline
@@ -192,6 +193,35 @@ fn digest(state: ref<app.App>) -> string effects {alloc} {
         string.append(out, str.view(string.from_int(track)))
         string.append(out, "]")
       },
+    }
+    index = index + 1
+  }
+  out
+}
+
+// The complete authored graph and every Undo/Redo snapshot remain modal-owned.
+fn prompt_ledger(state: ref<app.App>) -> string effects {alloc} {
+  var out: string = match editor_io.encode(struct.borrow(state, field=document)) {
+    ok(value) => value, err(_) => string.copy("encode failed"),
+  }
+  string.append(out, string.from_int(state.document_revision))
+  string.append(out, if app.dirty(state) { "dirty" } else { "clean" })
+  let history: ref<editor.History> = struct.borrow(state, field=history)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(history, field=undo)) { break }
+    string.append(out, "undo")
+    match editor_io.encode(array.borrow(struct.borrow(history, field=undo), index)) {
+      ok(value) => { string.append(out, value) }, err(_) => { string.append(out, "encode failed") },
+    }
+    index = index + 1
+  }
+  index = 0
+  loop {
+    if index >= array.len(struct.borrow(history, field=redo)) { break }
+    string.append(out, "redo")
+    match editor_io.encode(array.borrow(struct.borrow(history, field=redo), index)) {
+      ok(value) => { string.append(out, value) }, err(_) => { string.append(out, "encode failed") },
     }
     index = index + 1
   }
@@ -542,10 +572,19 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_b("prompt_takes_text", str.len(str.view(app.prompt_text(state))) != 0)
   let _ = input.text(state, 233)
   emit_b("prompt_takes_unicode", str.eq(str.view(app.prompt_text(state)), "/aé"))
+  let prompt_before: string = prompt_ledger(state)
+  let prompt_focus: u32 = app.focus(state)
+  let prompt_menu: u32 = app.open_menu(state)
   let _ = input.menu_access(state, 102)
-  emit_b("menu_access_opens_file", app.open_menu(state) == chrome.menu_file())
+  emit_b("prompt_menu_blocked", app.prompt_active(state) and
+    app.prompt_action(state) == chrome.act_save() and
+    str.eq(str.view(app.prompt_text(state)), "/aé") and
+    app.focus(state) == prompt_focus and app.open_menu(state) == prompt_menu and
+    str.eq(str.view(prompt_ledger(state)), str.view(prompt_before)))
   let _ = input.key(state, 65307, false, false)
   emit_b("prompt_escapes", not app.prompt_active(state))
+  let _ = input.menu_access(state, 102)
+  emit_b("menu_access_opens_file", app.open_menu(state) == chrome.menu_file())
 
   // B. save and load round trip
   var saved: commands.Result = commands.save_project(state, project)
@@ -592,12 +631,12 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = files.write_text(str.view(cube_file), "LUT_3D_SIZE 2\n")
   var lut_filter: commands.Result = commands.add_filter(restored, second.value, "lut3d")
   app.set_selected_filter(restored, lut_filter.value)
-  app.begin_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "test.cube")
+  app.begin_filter_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "test.cube",app.selected_filter(restored))
   let _ = input.commit_prompt(restored)
   let recorded_path: string = editor.filter_text_param(
     struct.borrow(restored, field=document), lut_filter.value, "path", "")
   emit_b("lut_relative_path", str.eq(str.view(recorded_path), str.view(cube_file)))
-  app.begin_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "missing.cube")
+  app.begin_filter_prompt(restored, chrome.act_filter_value(), "LUT .cube file", "missing.cube",app.selected_filter(restored))
   let missing_lut_note: string = input.commit_prompt(restored)
   emit_b("lut_missing_refused", text.contains(str.view(missing_lut_note), "unavailable"))
   emit_b("lut_path_preserved", str.eq(str.view(editor.filter_text_param(

@@ -389,7 +389,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var audio_task_end: i64 = 0
   var audio_task_output: string = string.new()
   var semantic_cache: window_cache.Cache = window_cache.cache()
-  var window_measure: window_profile.Profile = window_profile.profile()
+  var window_measure: window_profile.Profile = match window_profile.startup() {
+    ok(value)=>value,err(problem)=>{app.set_status(state,str.view(problem))
+      window_profile.idle()},}
+  struct.set(state,window_measure.enabled,field=window_timing_requested)
+  var timing_transport_playing:bool=false
+  var timing_flush_pending:bool=false
+  var timing_limit_pending:bool=false
   var sound_signature: string = string.new()
   var sound_revision: u64 = 0
   var previous_source: bool = false
@@ -486,7 +492,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     if not app.running(state) { break }
     var passive_changed: bool = false
     var window_row: window_profile.Row = window_profile.row()
-    struct.set(window_row,window_profile.stamp(window_measure),field=begin)
+    struct.set(window_row,if window_measure.enabled or state.window_timing_requested {clock.start()}else{0},field=begin)
     let selected_source_id: u64 = struct.get(struct.borrow(state,field=document),field=monitor_source)
     if displayed_source_id != selected_source_id {
       // A new source must never label the previous source's pixels/time with its
@@ -787,6 +793,35 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     }
     // A dropped-file import below can replace/edit the document after the audio
     // clock was selected. Never apply that old device epoch to the new content.
+    // Recorder I/O follows native audio service/retirement. A Stop plus Help-off
+    // in the same input batch cannot flush before the device is stopped.
+    if state.window_timing_requested != window_measure.enabled {
+      if state.window_timing_requested {
+        match window_profile.start_local(provider.media_root(struct.borrow(state,field=provider))) {
+          ok(value)=>{let _=ref.swap(window_measure,value)
+            app.set_status(state,text.concat("Recording playback timing: ",struct.borrow(window_measure,field=path)))},
+          err(problem)=>{struct.set(state,false,field=window_timing_requested)
+            app.set_status(state,str.view(problem))},}
+      }else{
+        match window_profile.stop(window_measure) {
+          ok(_)=>{app.set_status(state,text.concat(if timing_limit_pending {"Playback timing saved (50,000-row limit): "}else{"Playback timing saved: "},struct.borrow(window_measure,field=path)))},
+          err(problem)=>{app.set_status(state,str.view(problem))},}
+      }
+      timing_limit_pending=false
+      timing_flush_pending=false
+      dirty=true
+    }
+    if timing_flush_pending {
+      timing_flush_pending=false
+      if window_measure.enabled {
+        match window_profile.flush_checked(window_measure) {ok(_)=>{},err(problem)=>{
+          struct.set(state,false,field=window_timing_requested)
+          app.set_status(state,str.view(problem))
+          diagnostics.record(struct.borrow(struct.borrow(state,field=provider),field=scratch),
+            "GA_WINDOW_PROFILE_WRITE",str.view(problem),"window-timing-stop")
+          dirty=true},}
+      }
+    }
     let audio_follow_revision: u64 = state.document_revision
     let audio_follow_media: u64 = state.media_revision
     previous_source = source_playing
@@ -1390,6 +1425,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       diagnostics.record(str.view(scratch), "GA_EDITOR", str.view(status), "window")
       last_recorded_error = status
     }
+    let timing_doc:ref<editor.Document> =struct.borrow(state,field=document)
+    let timing_playing:bool=editor.playing(timing_doc) or
+      struct.get(struct.borrow(timing_doc,field=monitor),field=playing)
+    let defer_timing_write:bool=not app.running(state) or (audio_active and not timing_playing)
     if window_measure.enabled {
       struct.set(window_row,window_profile.stamp(window_measure),field=end)
       struct.set(window_row,array.len(struct.borrow(pictures,field=frames)),field=prepared)
@@ -1397,10 +1436,33 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       struct.set(window_row,semantic_cache.rebuilds,field=rebuilds)
       struct.set(window_row,strip_requested,field=strips)
       struct.set(window_row,drained,field=inputs)
-      window_profile.record(window_measure,window_row)
+      let timing_record:result<unit,string> =if defer_timing_write {
+        window_profile.record_buffered_checked(window_measure,window_row)
+      }else{window_profile.record_checked(window_measure,window_row)}
+      match timing_record {
+        ok(_)=>{
+          if window_measure.rows>=50000 {
+            struct.set(state,false,field=window_timing_requested)
+            if defer_timing_write {timing_limit_pending=true}else{
+              let _=window_profile.stop(window_measure)
+              app.set_status(state,text.concat("Playback timing saved (50,000-row limit): ",struct.borrow(window_measure,field=path)))
+              dirty=true}
+          }
+        },err(problem)=>{
+          struct.set(state,false,field=window_timing_requested)
+          app.set_status(state,str.view(problem))
+          diagnostics.record(struct.borrow(struct.borrow(state,field=provider),field=scratch),
+            "GA_WINDOW_PROFILE_WRITE",str.view(problem),"window-timing")
+          dirty=true
+        },}
     }
+    // Retain the Stop-input row in memory; next loop services native audio
+    // before it publishes this pending partial block or turns recording off.
+    if window_measure.enabled and ((timing_transport_playing and not timing_playing) or defer_timing_write) {
+      timing_flush_pending=true
+    }
+    timing_transport_playing=timing_playing
   }
-  window_profile.flush(window_measure)
   // Leaving the scope joins every task; stop an export at its next frame instead of
   // holding the closed window open until it finishes.
   if array.len(export_jobs) > 0 { timeline_media.request_export_cancel(str.view(export_cancel)) }
@@ -1416,6 +1478,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   let _ = tasks.join_next<bool>(audio_jobs,30000)
   release_playback_output(first_pcm,str.view(audio_task_output))
   preview_link.close_commands(audio_transport)
+  match window_profile.stop(window_measure) {ok(_)=>{},err(problem)=>{
+    let scratch:string=string.copy(str.view(struct.borrow(struct.borrow(state,field=provider),field=scratch)))
+    diagnostics.record(str.view(scratch),"GA_WINDOW_PROFILE_WRITE",str.view(problem),"window-close")
+    say(str.view(problem))},}
   preview.stop(str.view(preview_root))
   preview.stop(str.view(strip_root))
   let _ = preview_link.wake(strip_transport,true)

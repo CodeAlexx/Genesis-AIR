@@ -98,6 +98,7 @@ drag_is_one_undo_step	true
 prompt_open	true
 prompt_takes_text	true
 prompt_takes_unicode	true
+prompt_menu_blocked	true
 menu_access_opens_file	true
 prompt_escapes	true
 saved	true

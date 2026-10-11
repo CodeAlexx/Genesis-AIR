@@ -5,6 +5,8 @@ import std.editor_io as editor_io
 import std.font as font
 import std.geometry as geometry
 import std.math as math
+import std.files as files
+import std.text as text
 import std.curve as curve
 import std.timeline as timeline
 import "../src/view.ai" as painter
@@ -43,6 +45,56 @@ fn prompt_document(state: ref<app.App>) -> string effects {alloc} {
     ok(value) => value,
     err(_) => string.copy("encode failed"),
   }
+}
+fn prompt_state(state:ref<app.App>) -> string effects {alloc} {
+  var out:string=prompt_document(state)
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  let history:ref<editor.History> =struct.borrow(state,field=history)
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(history,field=undo)) {break}
+    string.append(out,"undo")
+    match editor_io.encode(array.borrow(struct.borrow(history,field=undo),i)) {err(_)=>{string.append(out,"encode failed")},ok(value)=>{string.append(out,value)},}
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(history,field=redo)) {break}
+    string.append(out,"redo")
+    match editor_io.encode(array.borrow(struct.borrow(history,field=redo),i)) {err(_)=>{string.append(out,"encode failed")},ok(value)=>{string.append(out,value)},}
+    i=i+1}
+  out
+}
+fn action_box(controls:ref<array<chrome.Control>>,action:u32,target:u64) -> layout.Rect effects {} {
+  var i:u64=0
+  loop {if i>=array.len(controls) {break}
+    let entry:ref<chrome.Control> =array.borrow(controls,i)
+    if entry.action==action and entry.target==target {return entry.area}
+    i=i+1}
+  layout.rect(0.0,0.0,0.0,0.0)
+}
+fn title_bitmap(doc:ref<editor.Document>,prefix:str,fonts:ref<array<string>>) -> bytes effects {alloc,fs.meta,fs.read,fs.write} {
+  var cache:media.RenderCache=media.render_cache(fonts)
+  struct.set(cache,480,field=width)
+  struct.set(cache,270,field=height)
+  match media.frame_plan(doc,0,"PREVIEW","unused",prefix,cache) {
+    err(_)=>{return bytes.copy(b"")},ok(_)=>{},
+  }
+  let file:string=text.concat(prefix,".title0.rgba")
+  match files.read_bytes(str.view(file)) {err(_)=>bytes.copy(b""),ok(value)=>value,}
+}
+// Independent placement oracle: draw each authored row at its explicit pixel
+// baseline. Avoid a normalized y roundtrip that changes antialiasing fractions.
+fn title_line_bitmap(fonts:ref<array<string>>,line:str,row:u64) -> bytes effects {alloc,fs.meta,fs.read} {
+  let cap:f64=36.0*270.0/856.0
+  var face:font.Font=match typeface.load(fonts,typeface.px_for(cap)) {
+    err(_)=>{return bytes.copy(b"")},ok(value)=>value,
+  }
+  var canvas:draw.Canvas=draw.canvas(option.unwrap(draw.surface(480,270)))
+  draw.clear(canvas,draw.transparent())
+  let x:f64=240.0-font.measure(face,line)*0.5
+  let y:f64=135.0+cast.float(row)*cap*1.3
+  typeface.draw_label(canvas,face,x,y,line,cap)
+  var surface:draw.Surface=draw.finish(canvas)
+  draw.surface_rgba(surface)
 }
 fn histogram_pixel(surface: ref<draw.Surface>, frame: layout.Frame, bucket: u64, channel: u64) -> draw.Color effects {} {
   let column: f64 = (layout.width_of(frame.dock_body)-12.0)/64.0
@@ -342,7 +394,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let prompt_before: string = prompt_document(typing)
   let prompt_revision: u64 = typing.document_revision
   let prompt_undos: u64 = array.len(struct.borrow(struct.borrow(typing,field=history),field=undo))
-  app.begin_prompt(typing,chrome.act_filter_value(),"Title text","PRIVATE CUT0")
+  app.begin_filter_prompt(typing,chrome.act_filter_value(),"Title text","PRIVATE CUT0",title_filter.value)
   let _ = input.key(typing,69,false,true)
   let _ = test.eq_str(suite,app.prompt_text(typing),"PRIVATE CUT0","Physical letter waits for a committed text event")
   var removed: u64 = 0
@@ -359,7 +411,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var blank_picture: draw.Surface = flat(draw.rgb(0,0,0))
   var blank_program: draw.Surface = flat(draw.rgb(0,0,0))
   let _ = painter.render(typing,prompt_image,1600,980,true,blank_picture,blank_program)
-  let prompt_box: layout.Rect = layout.prompt_panel(1600.0,980.0)
+  let prompt_box: layout.Rect = painter.prompt_bounds(typing,1600.0,980.0)
   let selected_color: draw.Color = option.unwrap(draw.surface_pixel(struct.borrow(prompt_image,field=surface),cast.sat(prompt_box.left+26.0),cast.sat(prompt_box.top+56.0)))
   let wanted_color: draw.Color = painter.theme(typing).focus
   let _ = test.check(suite,selected_color.r == wanted_color.r and selected_color.g == wanted_color.g and selected_color.b == wanted_color.b,"Select All paints an actual selection highlight")
@@ -388,12 +440,12 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = commands.save_project(typing,edited_project)
   let _ = commands.open_project(typing,edited_project)
   let _ = test.eq_str(suite,editor.filter_text_param(struct.borrow(typing,field=document),title_filter.value,"content",""),"EDIT","Save/Open retains the committed Unicode-capable title")
-  app.begin_prompt(typing,chrome.act_filter_value(),"Title text","日本😀")
+  app.begin_filter_prompt(typing,chrome.act_filter_value(),"Title text","日本😀",title_filter.value)
   let _ = input.key(typing,widgets.key_backspace(),false,false)
   let _ = test.eq_str(suite,app.prompt_text(typing),"日本","Backspace removes an entire supplementary Unicode scalar")
   let _ = input.key(typing,widgets.key_backspace(),false,false)
   let _ = test.eq_str(suite,app.prompt_text(typing),"日","Backspace never leaves a partial CJK UTF-8 sequence")
-  app.begin_prompt(typing,chrome.act_filter_value(),"Title text","xé")
+  app.begin_filter_prompt(typing,chrome.act_filter_value(),"Title text","xé",title_filter.value)
   let _ = input.key(typing,widgets.key_backspace(),false,false)
   let _ = test.eq_str(suite,app.prompt_text(typing),"x","Backspace removes a base and its combining marks together")
   let _ = input.key(typing,widgets.key_a(),true,false)
@@ -409,6 +461,152 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = input.text(typing,88)
   let _ = test.eq_str(suite,app.prompt_text(typing),"","Late committed text cannot edit a closed prompt")
   let _ = test.done(suite)
+
+  let _=test.start(suite,"Modal title owns its opening target while background input is inert")
+  var modal:app.App=fixture(scratch)
+  let modal_clip:u64=app.current_clip(modal)
+  let first_title:commands.Result=commands.add_filter(modal,modal_clip,"text")
+  let second_title:commands.Result=commands.add_filter(modal,modal_clip,"text")
+  let _=commands.set_filter_text_param(modal,first_title.value,"content","FIRST")
+  let _=commands.set_filter_text_param(modal,second_title.value,"content","SECOND")
+  app.set_selected_filter(modal,first_title.value)
+  app.set_dock_tab(modal,chrome.tab_filters())
+  var modal_controls:array<chrome.Control> =chrome.filters_panel(frame,modal)
+  let edit_box:layout.Rect=action_box(modal_controls,chrome.act_filter_value(),first_title.value)
+  let other_box:layout.Rect=action_box(modal_controls,chrome.act_filter_pick(),second_title.value)
+  let _=test.check(suite,layout.width_of(edit_box)>0.0 and layout.width_of(other_box)>0.0,"Use actual painted title and filter controls")
+  let _=commands.program(modal,editor.play())
+  let _=input.pointer_down(modal,1600.0,980.0,(edit_box.left+edit_box.right)*0.5,(edit_box.top+edit_box.bottom)*0.5)
+  let _=test.check(suite,app.prompt_active(modal) and app.prompt_multiline(modal) and app.prompt_filter(modal)==first_title.value,"Real Edit control captures title owner")
+  let _=test.check(suite,not editor.playing(struct.borrow(modal,field=document)),"Opening the modal draft parks transport")
+  let modal_before:string=prompt_state(modal)
+  let zoom_before:f64=app.zoom(modal)
+  let _=input.pointer_down(modal,1600.0,980.0,(other_box.left+other_box.right)*0.5,(other_box.top+other_box.bottom)*0.5)
+  let _=input.pointer_move(modal,1600.0,980.0,frame.timeline.right-10.0,frame.timeline.top+90.0)
+  let _=input.pointer_up(modal,1600.0,980.0,frame.timeline.right-10.0,frame.timeline.top+90.0)
+  let _=input.wheel(modal,1600.0,980.0,frame.timeline.left+100.0,frame.timeline.top+10.0,true,3,true)
+  let _=input.menu_access(modal,70)
+  let _=input.key(modal,111,true,false)
+  let _=input.key(modal,122,true,false)
+  let _=test.eq_u64(suite,app.selected_filter(modal),first_title.value,"Outside click cannot retarget draft")
+  let _=test.eq_str(suite,prompt_state(modal),modal_before,"Pointer, shortcuts and wheel preserve document and every history snapshot")
+  let _=test.near_f64(suite,app.zoom(modal),zoom_before,0.0,"Modal wheel does not navigate the timeline")
+  let _=test.check(suite,app.open_menu(modal)==0 and app.prompt_action(modal)==chrome.act_filter_value(),"Alt menu and Open shortcut cannot replace the draft")
+  // Selection is harmless view state; committing still uses the captured target.
+  app.set_selected_filter(modal,second_title.value)
+  let _=input.key(modal,widgets.key_a(),true,false)
+  app.prompt_push(modal,"BOUND FIRST")
+  let modal_depth:u64=editor.undo_depth(struct.borrow(modal,field=history))
+  let _=input.key(modal,widgets.key_return(),false,false)
+  let _=test.eq_str(suite,editor.filter_text_param(struct.borrow(modal,field=document),first_title.value,"content",""),"BOUND FIRST","Harmless selection change does not invalidate or redirect commit")
+  let _=test.eq_str(suite,editor.filter_text_param(struct.borrow(modal,field=document),second_title.value,"content",""),"SECOND","Unrelated selected filter is unchanged")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(modal,field=history)),modal_depth+1,"Bound commit has one Undo")
+  let _=commands.undo(modal)
+  let _=test.eq_str(suite,editor.filter_text_param(struct.borrow(modal,field=document),first_title.value,"content",""),"FIRST","Undo restores original title")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Removed or replaced title targets refuse without document or history changes")
+  var retired:app.App=fixture(scratch)
+  let retired_clip:u64=app.current_clip(retired)
+  let retired_title:commands.Result=commands.add_filter(retired,retired_clip,"text")
+  let _=commands.set_filter_text_param(retired,retired_title.value,"content","ORIGINAL")
+  app.begin_filter_prompt(retired,chrome.act_filter_value(),"Title text","DRAFT",retired_title.value)
+  let _=commands.remove_filter(retired,retired_title.value)
+  let removed_before:string=prompt_state(retired)
+  let removed_note:string=input.commit_prompt(retired)
+  let _=test.check(suite,text.contains(removed_note,"GA_PROMPT_TARGET"),"Deleted opening filter has coded refusal")
+  let _=test.eq_str(suite,prompt_state(retired),removed_before,"Refusal preserves exact document, dirty/revision and every Undo/Redo snapshot")
+  let _=test.check(suite,app.prompt_active(retired) and str.eq(str.view(app.prompt_text(retired)),"DRAFT"),"Failed target validation retains the draft for cancellation")
+  let _=input.cancel_prompt(retired)
+  let _=commands.undo(retired)
+  app.begin_filter_prompt(retired,chrome.act_filter_value(),"Title text","DRAFT",retired_title.value)
+  let _=commands.lift(retired,retired_clip)
+  let clip_removed:string=prompt_state(retired)
+  let clip_note:string=input.commit_prompt(retired)
+  let _=test.check(suite,text.contains(clip_note,"GA_PROMPT_TARGET"),"Deleted owning clip cannot be silently recreated")
+  let _=test.eq_str(suite,prompt_state(retired),clip_removed,"Missing clip refusal preserves redo/history exactly")
+  let _=input.cancel_prompt(retired)
+  let _=commands.undo(retired)
+  app.begin_filter_prompt(retired,chrome.act_filter_value(),"Title text","DRAFT",retired_title.value)
+  // Same numeric IDs across replacement are not the same project identity.
+  var replacement:editor.Document=editor.copy_document(struct.borrow(retired,field=document))
+  commands.replace_project(retired,replacement)
+  let replacement_before:string=prompt_state(retired)
+  let replaced_note:string=input.commit_prompt(retired)
+  let _=test.check(suite,text.contains(replaced_note,"GA_PROMPT_TARGET"),"Replacement with reused IDs is rejected")
+  let _=test.eq_str(suite,prompt_state(retired),replacement_before,"Cross-project refusal cannot capture or overwrite")
+  let _=input.cancel_prompt(retired)
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Unicode multiline title input survives Save/Open and line rasters")
+  var multiline:app.App=fixture(scratch)
+  app.set_fonts(multiline,typeface.search_paths())
+  let multiline_title:commands.Result=commands.add_filter(multiline,app.current_clip(multiline),"text")
+  app.begin_filter_prompt(multiline,chrome.act_filter_value(),"Title text","",multiline_title.value)
+  let _=input.text(multiline,26085)
+  let _=input.text(multiline,26412)
+  let _=input.key(multiline,widgets.key_return(),false,true)
+  let _=input.text(multiline,13)
+  let _=input.text(multiline,67)
+  let _=input.text(multiline,85)
+  let _=input.text(multiline,84)
+  let _=test.eq_str(suite,app.prompt_text(multiline),"日本\nCUT","Shift+Enter inserts exactly one newline and WM_CHAR Return cannot commit twice")
+  let _=test.check(suite,app.prompt_active(multiline),"Shift+Enter leaves draft active")
+  var multiline_paint:painter.Renderer=painter.renderer()
+  let _=painter.render(multiline,multiline_paint,1600,980,true,blank_picture,blank_program)
+  let multiline_box:layout.Rect=painter.prompt_bounds(multiline,1600.0,980.0)
+  let _=test.check(suite,layout.height_of(multiline_box)>layout.height_of(layout.prompt_panel(1600.0,980.0)),"Multiline draft has a visible larger text field")
+  let _=input.key(multiline,widgets.key_return(),false,false)
+  let _=test.eq_str(suite,editor.filter_text_param(struct.borrow(multiline,field=document),multiline_title.value,"content",""),"日本\nCUT","Plain Enter commits the exact authored newline")
+  let multiline_file:string=path.join(scratch,"multiline-title.air")
+  let _=commands.save_project(multiline,multiline_file)
+  let _=commands.open_project(multiline,multiline_file)
+  let _=test.eq_str(suite,editor.filter_text_param(struct.borrow(multiline,field=document),multiline_title.value,"content",""),"日本\nCUT","Saved/reopened Unicode title retains both lines")
+  let raster_prefix:string=path.join(scratch,"multiline-raster")
+  let raster:bytes=title_bitmap(struct.borrow(multiline,field=document),raster_prefix,struct.borrow(multiline,field=fonts))
+  let first_raster:bytes=title_line_bitmap(struct.borrow(multiline,field=fonts),"日本",0)
+  let second_raster:bytes=title_line_bitmap(struct.borrow(multiline,field=fonts),"CUT",1)
+  let count:u64=480*270*4
+  let _=test.check(suite,view.len(bytes.view(raster))==count and view.len(bytes.view(first_raster))==count and view.len(bytes.view(second_raster))==count,"Title engine and two independent line surfaces were prepared")
+  var exact_lines:bool=true
+  var first_ink:u64=0
+  var second_ink:u64=0
+  var pixel:u64=3
+  if view.len(bytes.view(raster))==count and view.len(bytes.view(first_raster))==count and view.len(bytes.view(second_raster))==count {
+    loop {if pixel>=count {break}
+      let actual:u8=cast.bits(view.get(bytes.view(raster),pixel))
+      let upper:u8=cast.bits(view.get(bytes.view(first_raster),pixel))
+      let lower:u8=cast.bits(view.get(bytes.view(second_raster),pixel))
+      if upper>0 {first_ink=first_ink+1}
+      if lower>0 {second_ink=second_ink+1}
+      // Antialiased shadows/descenders can overlap: the two coverage layers
+      // combine by source-over, rather than the maximum individual alpha.
+      let expected:u8=cast.sat(math.round(cast.float(upper)+cast.float(lower)-cast.float(upper)*cast.float(lower)/255.0))
+      if actual!=expected {exact_lines=false}
+      pixel=pixel+4}
+  }else{exact_lines=false}
+  if not exact_lines {
+    let _=files.write_bytes(str.view(path.join(scratch,"failed-multiline.rgba")),bytes.view(raster))
+    let _=files.write_bytes(str.view(path.join(scratch,"failed-first-line.rgba")),bytes.view(first_raster))
+    let _=files.write_bytes(str.view(path.join(scratch,"failed-second-line.rgba")),bytes.view(second_raster))
+  }
+  let _=test.check(suite,exact_lines and first_ink>0 and second_ink>0,"Every alpha byte equals the independent two-line placement union")
+  media.cleanup_plan(raster_prefix)
+  app.begin_prompt(multiline,chrome.act_save(),"Path","one.air")
+  let _=test.check(suite,not app.prompt_multiline(multiline),"Ordinary path prompts remain single-line")
+  let _=input.text(multiline,10)
+  let _=test.eq_str(suite,app.prompt_text(multiline),"one.air","Pasted newline is not admitted into path prompts")
+  let _=input.cancel_prompt(multiline)
+  app.begin_filter_prompt(multiline,chrome.act_filter_value(),"Title text","CTRL ACCEPT",multiline_title.value)
+  let undo_before_control_return:u64=editor.undo_depth(struct.borrow(multiline,field=history))
+  let _=input.key(multiline,widgets.key_return(),true,true)
+  let after_control_return:string=prompt_state(multiline)
+  let _=input.text(multiline,10)
+  let _=test.check(suite,not app.prompt_active(multiline),"Ctrl+Shift+Return commits rather than inserting a key newline")
+  let _=test.eq_str(suite,editor.filter_text_param(struct.borrow(multiline,field=document),multiline_title.value,"content",""),"CTRL ACCEPT","Native Ctrl+Return LF cannot append a duplicate line after commit")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(multiline,field=history)),undo_before_control_return+1,"Ctrl+Shift+Return commits exactly one Undo transaction")
+  let _=test.eq_str(suite,prompt_state(multiline),after_control_return,"Following native LF cannot mutate the committed document or history")
+  let _=test.done(suite)
 
   let _ = test.start(suite, "Audio gain K and sliders edit clip-local keys with one undo")
   var keyed: app.App = app.app(provider.fake(scratch))

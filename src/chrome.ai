@@ -147,6 +147,7 @@ pub fn act_diagnostics() -> u32 effects {} { 93 }
 pub fn act_sequence_preset() -> u32 effects {} { 94 }
 pub fn act_camera_cut() -> u32 effects {} { 96 }
 pub fn act_recover() -> u32 effects {} { 95 }
+pub fn act_record_timing() -> u32 effects {} { 97 }
 
 // ---------------------------------------------------------------------------
 
@@ -368,7 +369,9 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     return out
   }
   top = menu_item(out, state, left, top, act_about(), 0, "About Genesis AIR", false)
-  let _ = menu_item(out, state, left, top, act_diagnostics(), 0, "Show error details", false)
+  top = menu_item(out, state, left, top, act_diagnostics(), 0, "Show error details", false)
+  let _ = menu_item(out, state, left, top, act_record_timing(), 0,
+    "Record playback timing", state.window_timing_requested)
   out
 }
 

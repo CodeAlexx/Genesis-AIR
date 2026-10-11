@@ -526,10 +526,18 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   ()
 }
 
+pub fn prompt_bounds(state:ref<app.App>,width:f64,height:f64) -> layout.Rect effects {} {
+  let box:layout.Rect=layout.prompt_panel(width,height)
+  if not app.prompt_multiline(state) {return box}
+  let span:f64=math.max(132.0,math.min(300.0,height-32.0))
+  let top:f64=(height-span)*0.5
+  layout.rect(box.left,top,box.right,top+span)
+}
 fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                 width: f64, height: f64) -> unit effects {alloc} {
   if not app.prompt_active(state) { return () }
-  let box: layout.Rect = layout.prompt_panel(width, height)
+  let multiline:bool=app.prompt_multiline(state)
+  let box: layout.Rect = prompt_bounds(state,width,height)
   fill_at(canvas, box.left + 7.0, box.top + 7.0, box.right + 7.0,
     box.bottom + 7.0, draw.rgb(8, 9, 12))
   fill(canvas, box, colors.panel_head)
@@ -537,28 +545,39 @@ fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   var title: string = app.prompt_label(state)
   label(canvas, struct.borrow(state, field=typography), box.left + 18.0, box.top + 18.0, str.view(title), type_title(), colors.text)
   let field: layout.Rect = layout.rect(box.left + 18.0, box.top + 48.0,
-    box.right - 18.0, box.top + 84.0)
+    box.right - 18.0, if multiline {box.bottom-48.0}else{box.top+84.0})
   fill(canvas, field, colors.background)
   outline(canvas, field, colors.edge)
   var whole: string = app.prompt_text(state)
-  let count: u64 = str.len(str.view(whole))
   let capacity: u64 = fits(layout.width_of(field) - 24.0, type_body())
-  let first: u64 = if count > capacity { font.cluster_start(str.view(whole), count - capacity) } else { 0 }
-  var visible: string = string.copy(str.slice(str.view(whole), first, count))
-  let shown: f64 = math.min(layout.width_of(field) - 16.0,
-    ui_text.width(struct.borrow(state, field=typography), str.view(visible), type_body()))
-  if app.prompt_selected_all(state) and count > 0 {
-    fill_at(canvas, field.left + 7.0, field.top + 7.0, field.left + 9.0 + shown,
-      field.bottom - 7.0, colors.focus)
+  var rows:array<string> =if multiline {text.split(str.view(whole),"\n")}else{[string.copy(str.view(whole))]}
+  let total:u64=array.len(rows)
+  let row_height:f64=22.0
+  let slots:u64=if multiline {cast.sat(math.max(1.0,math.floor((layout.height_of(field)-16.0)/row_height)))}else{1}
+  let first_row:u64=if total>slots {total-slots}else{0}
+  let saved:draw.State=draw.state(canvas)
+  match geometry.rect(field.left+1.0,field.top+1.0,field.right-1.0,field.bottom-1.0) {none=>{},some(area)=>{let _=draw.clip_rect(canvas,area)},}
+  var row:u64=first_row
+  loop {if row>=total {break}
+    let line:str=str.view(array.borrow(rows,row))
+    let count:u64=str.len(line)
+    let first:u64=if count>capacity {font.cluster_start(line,count-capacity)}else{0}
+    let visible:str=str.slice(line,first,count)
+    let shown:f64=math.min(layout.width_of(field)-16.0,ui_text.width(struct.borrow(state,field=typography),visible,type_body()))
+    let top:f64=field.top+cast.float(row-first_row)*row_height
+    if app.prompt_selected_all(state) and (count>0 or row+1<total) {
+      fill_at(canvas,field.left+7.0,top+7.0,field.left+9.0+shown,top+29.0,colors.focus)
+    }
+    label(canvas,struct.borrow(state,field=typography),field.left+8.0,top+11.0,visible,type_body(),colors.text)
+    if row+1==total and not app.prompt_selected_all(state) {
+      let caret:f64=field.left+8.0+shown
+      fill_at(canvas,caret,top+8.0,caret+2.0,top+29.0,colors.accent)
+    }
+    row=row+1
   }
-  label(canvas, struct.borrow(state, field=typography), field.left + 8.0, field.top + 11.0, str.view(visible),
-    type_body(), colors.text)
-  let caret: f64 = field.left + 8.0 + shown
-  if not app.prompt_selected_all(state) {
-    fill_at(canvas, caret, field.top + 8.0, caret + 2.0, field.bottom - 7.0, colors.accent)
-  }
+  draw.restore(canvas,saved)
   label(canvas, struct.borrow(state, field=typography), box.left + 18.0, box.bottom - 28.0,
-    "Enter to accept    Escape to cancel", type_small(), colors.dim)
+    if multiline {"Shift+Enter: new line    Enter: accept    Escape: cancel"}else{"Enter to accept    Escape to cancel"}, type_small(), colors.dim)
   ()
 }
 

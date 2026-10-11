@@ -55,7 +55,17 @@ Native Open converts supported older layouts in memory; Save keeps the new layou
 [Linked-lane behavior and validation](docs/LINKED_MEDIA_WINDOWS_2026-10-10.md)
 describe conversion safeguards and the background test scope. The linked-lane build
 passed the complete background Windows gate and a bounded check of the supplied
-1080p clip; desktop, speaker and sustained playback timing checks remain deferred.
+1080p clip. Separately scoped [native workflow evidence](docs/NATIVE_WORKFLOW_WINDOWS_2026-10-11.md)
+now covers linked audio controls, multiline Unicode titles, modal safety, export
+Cancel/retry and a short runtime timing trace on the earlier 056E candidate.
+The installed F718 build passes the complete background Windows gate, its own
+exact audio-device proof and a short native linked-lane workflow. The broader title
+and export observations retain their earlier 056E scope. Sustained cadence,
+root-ready and the final evidence archive remain unqualified. The F718 first-epoch
+native timing traces fail the unchanged strict cadence gate: five omitted positions
+at 1080p, and nine omissions plus five presentations more than two frames late
+for fitted 4K. A pixel-credit transport candidate is pending new acceptance.
+Physical speaker/display alignment and fullscreen 4K remain unqualified.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -438,8 +448,26 @@ The `audio` command writes the program mix from the current playhead for inspect
 | Tab | next inspector tab |
 | Page Up / Page Down, wheel over the dock | scroll the inspector |
 
-Text values and the file chooser fallback use a centered prompt: type the value, Enter to
-accept, Escape to cancel.
+Text values and the file chooser fallback use a centered prompt: type the value,
+**Enter** accepts and **Escape** cancels. In a title-content draft, **Shift+Enter**
+adds a line; **Ctrl+A** selects the draft text rather than running the editor's
+razor shortcut. The draft is modal: timeline, inspector and transport shortcuts
+stay behind it until accept or cancel. Accept edits the original title filter as
+one undo step; it cannot apply the text to a different selected clip. If the
+original project, sequence, clip, filter or content no longer matches, acceptance
+is refused and the replacement target is preserved.
+
+**Help > Record playback timing** starts a trace in the running native window,
+without changing playback or project history. Each recording reserves a new file
+inside that app's private media session; the status line shows its path. **Stop**
+and end-of-clip flush pending rows while recording remains armed for another
+Play. Turn the Help toggle off to flush and finish the trace; closing the window
+also flushes it. Traces retain the existing 46-column format, buffer 128 rows and
+stop at 50,000 rows, including poll-only iterations. Creation or write failures
+report `GA_WINDOW_PROFILE_CREATE` or `GA_WINDOW_PROFILE_WRITE` and disable the
+recorder without stopping playback. Startup `GENESIS_WINDOW_PROFILE` recording
+remains available. The new menu path still needs native acceptance on the final
+build; adding a recorder does not establish cadence or physical A/V alignment.
 
 To put a video on the timeline, use toolbar **Add** to choose and import the file, select its
 row in **MEDIA**, then choose **Add clip** at the bottom of that panel. Import alone does not
@@ -1310,9 +1338,9 @@ The [evidence archive](archive/native-playback-reserve-2026-10-10.tar.gz) preser
 the source and receipts; its digest is recorded in the archive receipt and publication commit. Professional editing acceptance
 remains incomplete.
 
-## Loaded audio preflight (pending acceptance)
+## Historical loaded audio preflight stage
 
-The next candidate explicitly refuses loaded audio automation that the renderer
+The audio-preflight candidate explicitly refuses loaded audio automation that the renderer
 cannot preserve. An audible clip with animated Pan, Speed or an enabled audio
 filter reports `GA_AUDIO_AUTOMATION_UNSUPPORTED`; it no longer silently renders
 the scalar setting. Supported clip Gain and Fade curves remain supported.
@@ -1328,10 +1356,14 @@ The window stops the audio device before painting a preflight failure. Export
 rejects unsupported audio before taking output ownership and preserves externally
 owned partial/signal sidecars. This adds explicit refusals, not dynamic Pan,
 Speed or audio-filter DSP. Initial focused private PCM checks pass and the old
-silent-loss baseline is retained; expanded compressor/export checks and the
-`audio-plan-preflight-final` coherent Windows/native acceptance remain pending.
-The installed **1A49/AA40** reserve checkpoint above remains the last published
-build. No new cadence, physical A/V or complete professional acceptance is claimed.
+silent-loss baseline is retained. Expanded compressor/export checks and the
+`audio-plan-preflight-final` acceptance were pending at that stage, when
+**1A49/AA40** was the installed reserve checkpoint. The later published **06AF/AA40**
+linked-lane build includes the completed background preflight checks described in
+the [linked-lane record](docs/LINKED_MEDIA_WINDOWS_2026-10-10.md).
+The current native-title/recorder continuation has separate pending acceptance in
+the [2026-10-11 workflow record](docs/NATIVE_WORKFLOW_WINDOWS_2026-10-11.md).
+No new cadence, physical A/V or complete professional acceptance is claimed here.
 
 ## Known gaps
 

@@ -109,6 +109,126 @@ fn edit_transactions(suite: ref<test.Suite>, root: str) -> unit effects {alloc,f
   let _ = test.done(suite)
   ()
 }
+fn recorder_lifecycle(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _=test.start(suite,"Timing menu and exclusive local recorder lifecycle preserve editor state")
+  var state:app.App =app.app(provider.fake(root))
+  let before:string=encoded(struct.borrow(state,field=document))
+  let history:string=history_bytes(struct.borrow(state,field=history))
+  let revision:u64=state.document_revision
+  let _=test.check(suite,not state.window_timing_requested,"Timing is opt-in for a new editor")
+  var attempt:u64=0
+  loop {if attempt>=2 {break}
+    app.set_open_menu(state,chrome.menu_help())
+    var controls:array<chrome.Control> =chrome.menu_popup(layout.frame(1600.0,980.0),state)
+    var i:u64=0
+    var clicked:bool=false
+    loop {if i>=array.len(controls) {break}
+      let control:ref<chrome.Control> =array.borrow(controls,i)
+      if control.action==chrome.act_record_timing() {
+        let x:f64=(control.area.left+control.area.right)*0.5
+        let y:f64=(control.area.top+control.area.bottom)*0.5
+        let _=input.pointer_down(state,1600.0,980.0,x,y)
+        clicked=true
+        break}
+      i=i+1}
+    let _=test.check(suite,clicked and state.window_timing_requested==(attempt==0),"Actual Help control toggles timing request both ways")
+    attempt=attempt+1}
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Record/stop does not edit the authored document")
+  let _=test.eq_str(suite,history_bytes(struct.borrow(state,field=history)),history,"Record/stop leaves Undo/Redo unchanged")
+  let _=test.eq_u64(suite,state.document_revision,revision,"Record/stop leaves document revision unchanged")
+  let prior:string=path.join(root,"exclusive-existing.tsv")
+  let _=files.write_text(prior,"DO NOT REPLACE\n")
+  let refused:bool=match profile.start_at(prior,true) {ok(_)=>false,err(problem)=>text.contains(problem,"[GA_WINDOW_PROFILE_CREATE]"),}
+  let unchanged:string=match files.read_text(prior) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.check(suite,refused and unchanged=="DO NOT REPLACE\n","Exclusive start refuses collision without truncating prior evidence")
+  var first:profile.Profile =match profile.start_local(root) {ok(value)=>value,err(_)=>profile.idle(),}
+  let first_path:string=string.copy(struct.borrow(first,field=path))
+  let _=test.check(suite,first.enabled,"Local start reserves a real exclusive trace")
+  var row:profile.Row =profile.row()
+  struct.set(row,909,field=program)
+  let written:bool=match profile.record_checked(first,row) {ok(_)=>true,err(_)=>false,}
+  let before_stop:string=match files.read_text(first_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.check(suite,written and first.buffered==1 and before_stop==profile.header(),"Partial block is buffered under the unchanged 46-column header")
+  let stopped:bool=match profile.stop(first) {ok(_)=>true,err(_)=>false,}
+  let after_stop:string=match files.read_text(first_path) {ok(value)=>value,err(_)=>string.new(),}
+  var lines:array<string> =text.split(after_stop,"\n")
+  let complete:bool=array.len(lines)==3
+  let _=test.check(suite,stopped and not first.enabled and first.buffered==0 and complete,"Stop flushes the complete final partial block")
+  if complete {
+    var fields:array<string> =text.split(array.borrow(lines,1),"\t")
+    let _=test.check(suite,array.len(fields)==46 and str.eq(array.borrow(fields,8),"909"),"Stopped trace preserves all columns and actual displayed-frame value")
+  }
+  let _=profile.record_checked(first,row)
+  let _=profile.stop(first)
+  let after_again:string=match files.read_text(first_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.eq_str(suite,after_again,after_stop,"Repeated stop and disabled record never append")
+  var second:profile.Profile =match profile.start_local(root) {ok(value)=>value,err(_)=>profile.idle(),}
+  let _=test.check(suite,second.enabled and not str.eq(struct.borrow(second,field=path),first_path),"Restart uses a new exclusive trace path")
+  let _=profile.stop(second)
+  let after_restart:string=match files.read_text(first_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.eq_str(suite,after_restart,after_stop,"Restart leaves the earlier completed trace immutable")
+  let unwritable:string=path.join(root,"append-directory")
+  let _=files.mkdirs(unwritable)
+  var broken:profile.Profile =profile.Profile {enabled:true,path:string.copy(unwritable),pending:string.new(),rows:0,buffered:0,previous_ns:0}
+  let _=profile.record_checked(broken,row)
+  let error:bool=match profile.stop(broken) {ok(_)=>false,err(problem)=>text.contains(problem,"[GA_WINDOW_PROFILE_WRITE]"),}
+  let _=test.check(suite,error and not broken.enabled and broken.buffered==0,"Actual append failure is coded and retires the recorder without retrying a partial write")
+  let missing:string=path.join(root,"missing-timing-parent/trace.tsv")
+  let start_error:bool=match profile.start_at(missing,true) {ok(_)=>false,err(problem)=>text.contains(problem,"[GA_WINDOW_PROFILE_CREATE]"),}
+  let _=test.check(suite,start_error,"Actual uncreatable destination returns a coded creation failure")
+  let _=test.done(suite)
+  ()
+}
+fn recorder_stop_order(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
+  let _=test.start(suite,"Buffered Stop/cap rows publish only after simulated audio retirement")
+  // Component sequencing proof, not a physical waveOut/device observation.
+  var measure:profile.Profile=match profile.start_local(root) {ok(value)=>value,err(_)=>profile.idle(),}
+  let target:string=string.copy(struct.borrow(measure,field=path))
+  var row:profile.Row=profile.row()
+  struct.set(row,true,field=playing)
+  var i:u64=0
+  loop {if i>=127 {break}
+    struct.set(row,cast.wrap(i),field=program)
+    let _=profile.record_checked(measure,row)
+    i=i+1}
+  let before:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.check(suite,measure.buffered==127 and before==profile.header(),"Playing prefix remains buffered immediately before the flush threshold")
+  // Native main chooses buffered serialization when the input stopped the
+  // transport but its next-loop audio-service phase has not run yet.
+  struct.set(row,false,field=playing)
+  struct.set(row,1,field=inputs)
+  let retained:bool=match profile.record_buffered_checked(measure,row) {ok(_)=>true,err(_)=>false,}
+  let held:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.check(suite,retained and measure.buffered==128 and measure.rows==128 and held==before,"Stop input at 128 rows does not append before simulated device retirement")
+  var audio_retired:bool=false
+  let _=test.check(suite,not audio_retired and measure.enabled,"Pending Stop row leaves recorder armed while retirement is pending")
+  audio_retired=true
+  let flushed:bool=if audio_retired {match profile.flush_checked(measure) {ok(_)=>true,err(_)=>false,}}else{false}
+  let after:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  var lines:array<string> =text.split(after,"\n")
+  let _=test.check(suite,flushed and measure.enabled and measure.buffered==0 and array.len(lines)==130,"After simulated retirement one flush publishes all 128 rows and remains armed")
+  if array.len(lines)==130 {
+    var fields:array<string> =text.split(array.borrow(lines,128),"\t")
+    let _=test.check(suite,array.len(fields)==46 and str.eq(array.borrow(fields,19),"0") and str.eq(array.borrow(fields,30),"1"),"Published final row retains stopped transport and its input-event witness")}
+  let _=profile.flush_checked(measure)
+  let once:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.eq_str(suite,once,after,"Repeated pending flush cannot duplicate the Stop row")
+  let _=profile.stop(measure)
+  var capped:profile.Profile=match profile.start_local(root) {ok(value)=>value,err(_)=>profile.idle(),}
+  let cap_path:string=string.copy(struct.borrow(capped,field=path))
+  struct.set(capped,49999,field=rows)
+  // A closing window may retain a playing document until native retirement.
+  struct.set(row,true,field=playing)
+  let _=profile.record_buffered_checked(capped,row)
+  let cap_before:string=match files.read_text(cap_path) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.check(suite,capped.rows==50000 and capped.buffered==1 and capped.enabled and cap_before==profile.header(),"50,000th closing row with a still-playing document defers filesystem work until simulated retirement")
+  let cap_stopped:bool=match profile.stop(capped) {ok(_)=>true,err(_)=>false,}
+  let cap_after:string=match files.read_text(cap_path) {ok(value)=>value,err(_)=>string.new(),}
+  var cap_lines:array<string> =text.split(cap_after,"\n")
+  let _=test.check(suite,cap_stopped and not capped.enabled and capped.buffered==0 and array.len(cap_lines)==3,"Close/cap finalization after simulated retirement commits the exact final row")
+  let _=test.done(suite)
+  ()
+}
 pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
   if view.len(args) < 2 {return 2}
   let root: str = view.get(args,1)
@@ -290,5 +410,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _ = test.check(suite,str.eq(array.borrow(poll_fields,41),"-1") and str.eq(array.borrow(poll_fields,42),"-1"),"Poll-only row retains unavailable decode-frame sentinels")
   let _ = test.check(suite,str.eq(array.borrow(poll_fields,43),"0") and str.eq(array.borrow(poll_fields,44),"0") and str.eq(array.borrow(poll_fields,45),"0\n"),"Poll-only row does not invent issued or owned decode credit")
   let _ = test.done(suite)
-  test.conclude(suite,path.join(root,"window-cache-tests.json"),8)
+  recorder_lifecycle(suite,root)
+  recorder_stop_order(suite,root)
+  test.conclude(suite,path.join(root,"window-cache-tests.json"),10)
 }

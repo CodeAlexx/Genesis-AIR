@@ -70,6 +70,10 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   let domain: u32 = struct.get(control, field=domain)
   let target: u64 = struct.get(control, field=target)
   let value: f64 = struct.get(control, field=value)
+  if action==chrome.act_record_timing() {
+    struct.set(state,not state.window_timing_requested,field=window_timing_requested)
+    return note(if state.window_timing_requested {"Starting playback timing..."}else{"Stopping playback timing..."})
+  }
   let low: f64 = struct.get(control, field=low)
   let high: f64 = struct.get(control, field=high)
   let step: f64 = struct.get(control, field=step)
@@ -388,9 +392,11 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     app.set_selected_filter(state, target)
     let document: ref<editor.Document> = struct.borrow(state, field=document)
     let seed: string = editor.filter_text_param(document, target, str.view(name), "")
-    app.begin_prompt(state, action, if str.eq(str.view(kind), "text") {
-      "Title text" } else { "LUT .cube file" }, str.view(seed))
-    return note("enter a value; empty clears it")
+    let _=commands.program(state,editor.pause())
+    let _=commands.monitor(state,editor.pause())
+    app.begin_filter_prompt(state, action, if str.eq(str.view(kind), "text") {
+      "Title text" } else { "LUT .cube file" }, str.view(seed),target)
+    return note(if app.prompt_multiline(state) {"Shift+Enter adds a line; Enter accepts; empty clears it"}else{"enter a value; empty clears it"})
   }
   if action == chrome.act_filter_toggle() {
     var landed: commands.Result = commands.toggle_filter(state, target)
@@ -505,6 +511,7 @@ fn edge_zone() -> f64 effects {} { 7.0 }
 // The bool lets the window repaint only when visible hover state actually changed.
 pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
                      y: f64) -> bool effects {alloc} {
+  if app.prompt_active(state) {return false}
   if session.pending(state) { return false }
   let frame: layout.Frame = layout.frame(width, height)
   var menus: array<chrome.Control> = chrome.menu_bar(frame, state)
@@ -534,6 +541,7 @@ pub fn pointer_hover(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  if app.prompt_active(state) {return note("")}
   if session.modal(state) {
     var controls: array<chrome.Control> = chrome.project_choices(width, height, state)
     match chrome.hit(controls, x, y) {
@@ -546,9 +554,6 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
   app.end_parameter_drag(state)
   app.end_gesture(state)
   let frame: layout.Frame = layout.frame(width, height)
-  if app.prompt_active(state) and layout.contains(layout.prompt_panel(width, height), x, y) {
-    return note("")
-  }
   if state.fullscreen != 0 {
     let source: bool = state.fullscreen == 2
     app.set_focus(state, if source { app.panel_source() } else { app.panel_program() })
@@ -747,6 +752,7 @@ fn seek_monitor_bar(state: ref<app.App>, frame: layout.Frame, source: bool, x: f
 // so the whole gesture becomes ONE undo step.
 pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
                     y: f64) -> string effects {alloc} {
+  if app.prompt_active(state) {return note("")}
   if session.pending(state) { return note("") }
   if app.parameter_dragging(state) { return continue_parameter_drag(state, x) }
   if app.dock_scroll_dragging(state) {
@@ -789,6 +795,7 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
 
 pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
                   y: f64) -> string effects {alloc} {
+  if app.prompt_active(state) {return note("")}
   if app.parameter_dragging(state) {
     let line: string = continue_parameter_drag(state, x)
     app.end_parameter_drag(state)
@@ -864,6 +871,7 @@ pub fn wheel_event(state: ref<app.App>, width: f64, height: f64,
 // held and scrolls otherwise.
 pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
              down: bool, lines: u32, zooming: bool) -> string effects {alloc} {
+  if app.prompt_active(state) {return note("")}
   if session.pending(state) { return note("") }
   let frame: layout.Frame = layout.frame(width, height)
   if layout.contains(frame.dock, x, y) {
@@ -915,9 +923,12 @@ pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.
   if not app.prompt_active(state) { return note("") }
   let action: u32 = app.prompt_action(state)
   let typed: string = app.prompt_text(state)
+  let filter:u64=app.prompt_filter(state)
+  if action==chrome.act_filter_value() and not app.prompt_target_valid(state) {
+    return note("[GA_PROMPT_TARGET] The opening filter or clip changed; cancel and reopen this draft")
+  }
   app.end_prompt(state)
   if action == chrome.act_filter_value() {
-    let filter: u64 = app.selected_filter(state)
     let kind: string = editor.filter_kind(struct.borrow(state, field=document), filter)
     if str.eq(str.view(kind), "text") {
       var landed: commands.Result = commands.set_filter_text_param(state, filter,
@@ -1007,23 +1018,6 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     }
     return note("")
   }
-  if state.fullscreen != 0 and code == widgets.key_escape() {
-    struct.set(state, 0, field=fullscreen)
-    app.end_gesture(state)
-    return note("Editor view")
-  }
-  if code == 65480 and not app.prompt_active(state) {
-    struct.set(state, if state.fullscreen != 0 { 0 } else if app.focus(state) == app.panel_source() { 2 } else { 1 }, field=fullscreen)
-    return note("Fullscreen toggled")
-  }
-  if app.parameter_dragging(state) and code == widgets.key_escape() {
-    app.end_parameter_drag(state)
-    var restored: commands.Result = commands.undo(state)
-    return note("Parameter edit cancelled")
-  }
-  if app.parameter_dragging(state) and control and (code == widgets.key_z() or code == widgets.key_y()) {
-    app.end_parameter_drag(state)
-  }
   if app.prompt_active(state) {
     if control and code == widgets.key_a() {
       app.prompt_select_all(state)
@@ -1042,9 +1036,31 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
       app.prompt_backspace(state)
       return note("")
     }
-    if code == widgets.key_return() { return commit_prompt(state) }
+    if code == widgets.key_return() {
+      if shift and not control and app.prompt_multiline(state) {app.prompt_push(state,"\n")
+        return note("")}
+      return commit_prompt(state)
+    }
     return note("")
   }
+  if state.fullscreen != 0 and code == widgets.key_escape() {
+    struct.set(state, 0, field=fullscreen)
+    app.end_gesture(state)
+    return note("Editor view")
+  }
+  if code == 65480 and not app.prompt_active(state) {
+    struct.set(state, if state.fullscreen != 0 { 0 } else if app.focus(state) == app.panel_source() { 2 } else { 1 }, field=fullscreen)
+    return note("Fullscreen toggled")
+  }
+  if app.parameter_dragging(state) and code == widgets.key_escape() {
+    app.end_parameter_drag(state)
+    var restored: commands.Result = commands.undo(state)
+    return note("Parameter edit cancelled")
+  }
+  if app.parameter_dragging(state) and control and (code == widgets.key_z() or code == widgets.key_y()) {
+    app.end_parameter_drag(state)
+  }
+
 
   if control and (code == 115 or code == 111) {
     var control: chrome.Control = chrome.button(if code == 115 { chrome.act_save() } else { chrome.act_open() },
@@ -1178,6 +1194,8 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
 // that deliver a key-down followed by a text event.
 pub fn text(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
   if not app.prompt_active(state) { return note("") }
+  if scalar==10 and app.prompt_multiline(state) {app.prompt_push(state,"\n")
+    return note("")}
   // Ctrl+letter, Backspace and Return also generate WM_CHAR control codes.
   // Their physical key events already own those actions.
   if scalar < 32 or scalar == 127 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343) { return note("") }
@@ -1192,6 +1210,7 @@ pub fn text(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
 // Open a custom menu from the host's Alt+letter access event. The same operation is used
 // on Linux and Windows; only the adapter that produces MenuAccess differs.
 pub fn menu_access(state: ref<app.App>, scalar: u32) -> string effects {alloc} {
+  if app.prompt_active(state) {return note("")}
   if session.pending(state) { return note("") }
   var which: u32 = chrome.menu_none()
   if scalar == 70 or scalar == 102 { which = chrome.menu_file() }

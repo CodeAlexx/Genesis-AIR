@@ -77,10 +77,10 @@ pub fn drag() -> Drag effects {} {
 // retires it; ordinary edits and Undo leave the copied settings untouched.
 
 
-// A one-line prompt. There is no file dialog on this platform's canvas window, so the
-// actions that need a path ask for one in the status line. The prompt holds the action it
-// will run when the line is committed, so a keystroke cannot be misrouted.
-pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string, selected_all: bool }
+// A modal draft owns its opening target; selection is independent view state.
+pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string, selected_all: bool,
+  target_filter:u64,target_clip:u64,target_sequence:u64,target_project:u64,
+  target_kind:string,original:string,multiline:bool }
 
 // A deferred project replacement belongs to the session, never to the document.
 pub type ProjectAction = enum { None, New, Open, Recover, Close }
@@ -140,6 +140,7 @@ pub type App = struct {
   fullscreen: u32,
   media_revision: u64,
   project_epoch: u64,
+  window_timing_requested: bool,
   document_revision: u64,
   waveforms: array<Waveform>,
   thumbnails: array<Thumbnail>,
@@ -175,11 +176,13 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
     clipboard: option.none(), clipboard_peer:option.none(), clipboard_resource_valid: false,
     gesture: drag(),
-    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), selected_all: false},
+    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), selected_all: false,
+      target_filter:0,target_clip:0,target_sequence:0,target_project:0,
+      target_kind:string.new(),original:string.new(),multiline:false},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     recovery_lease: option.none(), recovered_lease: option.none(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, document_revision: 0, waveforms: array.new(), thumbnails: array.new(),
+    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, window_timing_requested:false, document_revision: 0, waveforms: array.new(), thumbnails: array.new(),
     presented_source_frame: -1, presented_program_frame: -1, audio_left: 0.0, audio_right: 0.0,
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
@@ -507,9 +510,57 @@ pub fn begin_prompt(state: ref<App>, action: u32, label: str, seed: str) -> unit
   struct.set(asking, true, field=active)
   struct.set(asking, action, field=action)
   struct.set(asking, false, field=selected_all)
+  struct.set(asking,0,field=target_filter)
+  struct.set(asking,0,field=target_clip)
+  struct.set(asking,0,field=target_sequence)
+  struct.set(asking,state.project_epoch,field=target_project)
+  struct.set(asking,false,field=multiline)
+  let _=ref.swap(struct.borrow(asking,field=target_kind),string.new())
+  let _=ref.swap(struct.borrow(asking,field=original),string.copy(seed))
   let _ = ref.swap(struct.borrow(asking, field=label), string.copy(label))
   let _ = ref.swap(struct.borrow(asking, field=buffer), string.copy(seed))
   ()
+}
+pub fn begin_filter_prompt(state:ref<App>,action:u32,label:str,seed:str,filter:u64) -> unit effects {alloc} {
+  begin_prompt(state,action,label,seed)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  struct.set(asking,filter,field=target_filter)
+  match editor.filter_slot(doc,filter) {
+    none=>{},some(slot)=>{
+      let item:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),slot)
+      let clip_id:u64=item.clip
+      struct.set(asking,clip_id,field=target_clip)
+      let kind:string=editor.filter_kind(doc,filter)
+      struct.set(asking,str.eq(str.view(kind),"text"),field=multiline)
+      let original:string=editor.filter_text_param(doc,filter,if str.eq(str.view(kind),"text") {"content"}else{"path"},"")
+      let _=ref.swap(struct.borrow(asking,field=original),original)
+      let _=ref.swap(struct.borrow(asking,field=target_kind),kind)
+      match editor.clip(doc,clip_id) {none=>{},some(clip)=>{struct.set(asking,clip.owner,field=target_sequence)},}
+    },
+  }
+  ()
+}
+pub fn prompt_multiline(state:ref<App>) -> bool effects {} {
+  prompt_active(state) and struct.get(struct.borrow(state,field=prompt),field=multiline)
+}
+pub fn prompt_filter(state:ref<App>) -> u64 effects {} {
+  struct.get(struct.borrow(state,field=prompt),field=target_filter)
+}
+pub fn prompt_target_valid(state:ref<App>) -> bool effects {alloc} {
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  if asking.target_filter==0 or asking.target_clip==0 or asking.target_project!=state.project_epoch {return false}
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let slot:u64=match editor.filter_slot(doc,asking.target_filter) {none=>{return false},some(value)=>value,}
+  let item:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),slot)
+  let owner:u64=item.clip
+  let kind:string=string.copy(str.view(struct.borrow(item,field=kind)))
+  let clip:editor.Clip=match editor.clip(doc,asking.target_clip) {none=>{return false},some(value)=>value,}
+  if owner!=asking.target_clip or clip.owner!=asking.target_sequence or
+      not str.eq(str.view(kind),str.view(struct.borrow(asking,field=target_kind))) {return false}
+  let content:string=editor.filter_text_param(doc,asking.target_filter,
+    if asking.multiline {"content"}else{"path"},"")
+  str.eq(str.view(content),str.view(struct.borrow(asking,field=original)))
 }
 pub fn prompt_push(state: ref<App>, text: str) -> unit effects {alloc} {
   if not prompt_active(state) { return () }
@@ -536,6 +587,11 @@ pub fn end_prompt(state: ref<App>) -> unit effects {alloc} {
   struct.set(asking, false, field=active)
   struct.set(asking, 0, field=action)
   struct.set(asking, false, field=selected_all)
+  struct.set(asking,false,field=multiline)
+  struct.set(asking,0,field=target_filter)
+  struct.set(asking,0,field=target_clip)
+  let _=ref.swap(struct.borrow(asking,field=target_kind),string.new())
+  let _=ref.swap(struct.borrow(asking,field=original),string.new())
   let _ = ref.swap(struct.borrow(asking, field=buffer), string.new())
   ()
 }
