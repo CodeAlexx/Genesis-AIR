@@ -113,3 +113,16 @@ target_compile_features(genesis-native-u16-upload PRIVATE c_std_11)
 target_compile_definitions(genesis-native-u16-upload PRIVATE CL_TARGET_OPENCL_VERSION=120 _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS "GENESIS_COMPOSITOR_SOURCE=\"${genesis_compositor_include}\"")
 target_link_libraries(genesis-native-u16-upload PRIVATE "${GENESIS_OPENCL_LIBRARY}")
 set_target_properties(genesis-native-u16-upload PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Exercise the exact Windows transport adapter. Fault hooks are confined to
+# component fixtures; the production runtime retains its real Winsock calls.
+foreach(genesis_net_fixture IN ITEMS classifier policy resource)
+  add_executable(genesis-net-loopback-${genesis_net_fixture}
+    "${GENESIS_ROOT}/tests/net_loopback_${genesis_net_fixture}_windows.c")
+  target_include_directories(genesis-net-loopback-${genesis_net_fixture} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
+  target_compile_features(genesis-net-loopback-${genesis_net_fixture} PRIVATE c_std_11)
+  target_compile_definitions(genesis-net-loopback-${genesis_net_fixture} PRIVATE
+    "GENESIS_NET_SOURCE=\"${CMAKE_SOURCE_DIR}/runtime/windows/air_net_win32.c\"")
+  target_link_libraries(genesis-net-loopback-${genesis_net_fixture} PRIVATE air_rt)
+  set_target_properties(genesis-net-loopback-${genesis_net_fixture} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endforeach()

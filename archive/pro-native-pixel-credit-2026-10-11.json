@@ -1,0 +1,34 @@
+{
+  "schema": "genesis.pro_native.generic_acceptance_archive_receipt.v1",
+  "passed": true,
+  "prefix": "pro-native-pixel-credit-2026-10-11",
+  "archive": "archive/pro-native-pixel-credit-2026-10-11.tar.gz",
+  "archive_sha256": "d58b1c5be498a663aa0c673a68c0dd0727bfd93dddc9f1aac0305e6d99de5f98",
+  "app_sha256": "3b5eee99965db27e0604fb6408109245edd9b0b8b1e50b62c75361edb0cc7093",
+  "worker_sha256": "aa40b96c631c82cfc834d027678e95a00bd8d5f61db54f15e7c7ecefcf74228c",
+  "audio_adapter_sha256": "005f5f01f943a7183919f706fa3869356f8fea99574d09b781ff0340fb91ab59",
+  "entries": 1221,
+  "all_members_read_back": true,
+  "sanitized": true,
+  "git_index_filtered_equality": true,
+  "published_payload_verified": true,
+  "acceptance_receipt_sha256": {
+    "frozen": "74405b8e104aa35aaf8531984f9d277141bd68e8c746e6c8d9a3ddb095d7db2e",
+    "build": "f20f5fe40b4e7fdae74374528dab4652594027c943f0abdcce4fde4a0e5049e7",
+    "background": "bb4edf6dd3dfe5ed4592eb5386adaad55587d676aee8a601817161fbea138bda",
+    "publication": "630eafcc50041594b676dce7133d76bca193b51b34eea027138a9ca3c83147d6",
+    "root-ready": "d7b3a988ecfe5c3fc6930519e2f1f5b42de33dae39191e3b64f5e660fc2df370",
+    "native-ui": "b4b398b1212bd107f508cc5aa79712f4edef94286ae5c60de07cf166cf11804d",
+    "device": "ccbed5511975d81940e738fc823aba5f7d7a8a9578e9b97a1fb24a72a055b79c",
+    "accepted-background-log": "90888daac646df50c62548b4ec0204119e35ebea9fb19bb3b86afc0cdc9126f5",
+    "accepted-background-exit": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+  },
+  "qualified_cadence_summary_sha256": [
+    "e3513241dc697055a3e4cc9eef5cdcc9707e18656d5fed951739097f3b714840",
+    "69491f83876c64d4d7ee04e2f137954de5d16c1e195ca3dd8af21bfbc5d15ba6"
+  ],
+  "historical_f718_failures_preserved": true,
+  "helper_sha256": "d2d4836e1e9d1fdbd3d195da7611ad3517e4a54d1597d99a638fcebd9666b54d",
+  "pinned_sanitization_helper_sha256": "c31c1155b475f810b1c8b343cc06af70ccdb6d3b0f45531acbef4fa3ff4ccac8",
+  "complete_professional_editing_acceptance": false
+}

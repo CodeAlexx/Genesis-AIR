@@ -9,7 +9,7 @@ import std.text as text
 import "../src/preview_link.ai" as link
 type Producer=struct {ticket:channel.Ticket,root:string,mode:u64}
 fn image(size:u32,seed:u64) -> draw.Surface effects {alloc} {
-  var out:draw.Surface=option.unwrap(draw.surface(size,if size == 1280 {720}else{size}))
+  var out:draw.Surface=option.unwrap(draw.surface(size,if size == 1280 {720}else if size == 480 {270}else{size}))
   var at:u64=0
   loop {if at >= array.len(struct.borrow(out,field=pixels)) {break}
     let value:u8=cast.wrap((at*37+seed)%256)
@@ -19,7 +19,7 @@ fn image(size:u32,seed:u64) -> draw.Surface effects {alloc} {
   out
 }
 fn exact(surface:ref<draw.Surface>,size:u32,seed:u64) -> bool effects {} {
-  if surface.width != size or surface.height != (if size == 1280 {720}else{size}) {return false}
+  if surface.width != size or surface.height != (if size == 1280 {720}else if size == 480 {270}else{size}) {return false}
   var at:u64=0
   loop {if at >= array.len(struct.borrow(surface,field=pixels)) {break}
     let expected:u8=cast.wrap((at*37+seed)%256)
@@ -65,6 +65,21 @@ fn produce(config:Producer own) -> bool effects {alloc,fs.meta,fs.read,fs.write,
     program=image(16,93)
     good=match link.notify_pixels(peer,root,source,program,"FIFO 日本",false,stamp(2),
       link.FramePosition {source_frame:4,program_frame:6,revision:71},time.monotonic_ns()) {ok(value)=>value,err(_)=>false,} and good
+  }else if owned.mode == 8 or owned.mode == 9 {
+    if owned.mode == 8 {
+      good=match send(peer,root,1,1,16,false) {ok(value)=>value,err(_)=>false,}
+      if not link.next(peer) or peer.command_kind != 10 {return false}
+    }
+    // One parked-Source monitor packet must finish without a consumer poll.
+    // The second packet and unheld Source retain bounded backpressure.
+    var failure:string=string.new()
+    good=match send(peer,root,if owned.mode == 8 {2}else{1},if owned.mode == 8 {3}else{2},480,owned.mode == 8) {ok(value)=>value,err(error)=>{failure=error
+      false},}
+    let _=files.write_text(path.join(root,"first-published"),if good {"yes"}else{"bad"})
+    if good {good=match send(peer,root,if owned.mode == 8 {3}else{2},if owned.mode == 8 {3}else{2},480,owned.mode == 8) {ok(value)=>value,err(error)=>{failure=error
+      false},}}
+    let _=files.write_text(path.join(root,"producer-error.txt"),failure)
+    let _=files.write_text(path.join(root,"published"),if good {"yes"}else{"bad"})
   }else if owned.mode < 2 {
     good=match send(peer,root,1,2,16,false) {ok(value)=>value,err(_)=>false,}
     good=match send(peer,root,2,2,16,owned.mode == 1) {ok(value)=>value,err(_)=>false,} and good
@@ -109,17 +124,30 @@ fn check_active(transport:ref<link.Link>,id:u64,source_seed:u64,held:bool) -> bo
     transport.position.revision == 71 and transport.timing.generation == id and transport.timing.request_ns == id*101 and
     str.eq(struct.borrow(transport,field=pixel_error),"FIFO 日本")
 }
+fn check_monitor(transport:ref<link.Link>,id:u64,held:bool) -> bool effects {alloc} {
+  if not link.select_completed(transport,id) {return false}
+  var images:array<draw.Surface> =link.take_images(transport,id)
+  if array.len(images) != 2 {return false}
+  var program:draw.Surface=option.unwrap(array.pop(images))
+  var source:draw.Surface=option.unwrap(array.pop(images))
+  var restored:draw.Surface=link.restore_source(transport)
+  exact(program,480,91+id) and (if held {source.width == 0}else{exact(source,480,13+id)}) and
+    exact(restored,if held {16}else{480},if held {14}else{13+id}) and transport.timing.generation == id and
+    transport.position.program_frame == cast.sat(id*3) and transport.position.revision == 71
+}
 fn run(suite:ref<test.Suite>,root:str,mode:u64) -> unit effects {alloc,fs.meta,fs.read,fs.write,io.write,net,thread,time} {
   let _=files.mkdirs(root)
-  let _=files.write_text(path.join(root,"request.id"),if mode == 7 {"1"}else{"2"})
+  let _=files.write_text(path.join(root,"request.id"),if mode == 7 or mode == 8 {"1"}else{"2"})
   var transport:link.Link=match link.open_pixels() {ok(value)=>value,err(_)=>{let _=test.check(suite,false,"Open transport")
     return ()},}
+  var carried:channel.Ticket=link.ticket(transport)
+  let _=test.check(suite,carried.capacity <= channel.transport_bound()/carried.max_message,"Pixel lane stays inside shared transport byte bound")
   task.scope {
     var jobs:array<task<bool>> =array.new()
     array.push(jobs,task.spawn(Producer {ticket:link.ticket(transport),root:string.copy(root),mode:mode},fn=produce))
     let _=test.check(suite,match link.connect(transport) {ok(_)=>true,err(_)=>false,},"Connected socket lanes")
     let requested:bool=if mode == 7 {match link.frame(transport,1,41,3,2,71) {ok(_)=>true,err(_)=>false,}}
-      else{match link.window_frame(transport,1,2,41,3,2,71,false) {ok(_)=>true,err(_)=>false,}}
+      else{match link.window_frame(transport,1,if mode == 8 {1}else{2},41,3,2,71,false) {ok(_)=>true,err(_)=>false,}}
     let _=test.check(suite,requested,"Reserved bounded window or legacy single request")
     let _=test.check(suite,marker(root,"started"),"Producer receives kind10 manifest")
     if mode == 7 {
@@ -131,6 +159,35 @@ fn run(suite:ref<test.Suite>,root:str,mode:u64) -> unit effects {alloc,fs.meta,f
       let _=test.eq_u64(suite,transport.completed_total,2,"Legacy packet count retained")
       let _=test.eq_u64(suite,transport.overwritten_total,1,"Legacy coalescing counted exactly once")
       let _=test.eq_u64(suite,link.next_completed(transport),0,"Legacy has no FIFO opt-in")
+    }else if mode == 8 or mode == 9 {
+      var complete:bool=true
+      if mode == 8 {
+        let _=test.check(suite,match link.await_ready(transport,1,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Parked Source seeded")
+        let _=test.check(suite,check_packet(transport,1,14,false),"Parked Source original pixels exact")
+        // Return the consumed seed credits before the native-present stall begins.
+        link.poll(transport)
+        let _=files.write_text(path.join(root,"request.id"),"3")
+        let _=test.check(suite,match link.window_frame(transport,2,3,41,6,4,71,false) {ok(_)=>true,err(_)=>false,},"Two monitor positions reserved")
+        // No poll between issuing and this file witness. Credit refill is not
+        // needed to send this held packet's data AND its completion message.
+        let finished:bool=marker(root,"first-published")
+        let published:string=match files.read_text(path.join(root,"first-published")) {ok(value)=>value,err(_)=>"missing",}
+        complete=finished and str.eq(published,"yes")
+        let _=test.check(suite,complete,"First held monitor DONE finishes while native consumer is blocked")
+      }else{
+        time.sleep_ms(150)
+        let _=test.check(suite,not tasks.requested_at(path.join(root,"published")),"Two unheld monitor packets preserve bounded backpressure")
+      }
+      if complete {
+        let _=test.check(suite,match link.await_ready(transport,if mode == 8 {3}else{2},time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Both monitor packets complete after consumer resumes")
+        let _=test.check(suite,marker(root,"published"),"Retained producer finishes bounded window")
+        let _=test.eq_u64(suite,transport.completed_total,if mode == 8 {3}else{2},"Exactly issued monitor packets complete")
+        let _=test.eq_u64(suite,transport.overwritten_total,0,"No monitor packet replaced")
+        let _=test.check(suite,not link.select_completed(transport,if mode == 8 {3}else{2}),"Second monitor packet cannot pass first")
+        let _=test.check(suite,check_monitor(transport,if mode == 8 {2}else{1},mode == 8),"First monitor pixels and authored position exact")
+        let _=test.check(suite,check_monitor(transport,if mode == 8 {3}else{2},mode == 8),"Second monitor pixels held Source and position exact")
+        let _=test.eq_u64(suite,link.next_completed(transport),0,"Two-packet FIFO remains bounded and drains")
+      }
     }else if mode < 2 {
       let _=test.check(suite,match link.await_ready(transport,2,time.monotonic_ns()+5000000000) {ok(_)=>true,err(_)=>false,},"Both packets complete before any take")
       link.poll(transport)
@@ -183,9 +240,9 @@ fn run(suite:ref<test.Suite>,root:str,mode:u64) -> unit effects {alloc,fs.meta,f
 pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,thread,time} {
   if view.len(args) < 2 {return 2}
   let root:str=view.get(args,1)
-  var suite:test.Suite=test.suite("Owned two-frame preview FIFO",true)
+  var suite:test.Suite=test.suite("Owned two-frame preview FIFO",false)
   var mode:u64=0
-  loop {if mode >= 8 {break}
+  loop {if mode >= 10 {break}
     let _=test.start(suite,str.view(string.from_int(mode)))
     run(suite,path.join(root,str.view(string.from_int(mode))),mode)
     let _=test.done(suite)

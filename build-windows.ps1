@@ -63,6 +63,18 @@ try {
   }
 } finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
 $processPatch = Join-Path $here 'patches/air-process-wait-windows.patch'
+$loopbackPatch = Join-Path $here 'patches/air-net-loopback-windows.patch'
+if (-not (Test-Path -LiteralPath $loopbackPatch)) { throw '[GA_SDK_LOOPBACK_PATCH_MISSING] The Windows loopback transport overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $loopbackPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $loopbackPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_LOOPBACK_PATCH_BASE] The loopback overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $loopbackPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_LOOPBACK_PATCH_APPLY] Could not apply the Windows loopback transport overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
 if (-not (Test-Path -LiteralPath $processPatch)) { throw '[GA_SDK_PROCESS_PATCH_MISSING] The Windows process overlay is missing.' }
 try {
   $PSNativeCommandUseErrorActionPreference = $false
@@ -91,6 +103,18 @@ try {
   $PSNativeCommandUseErrorActionPreference = $previousNativePreference
 }
 $buildRoot = Join-Path $here 'build-windows'
+$presentPatch = Join-Path $here 'patches/air-ui-present-immediate-windows.patch'
+if (-not (Test-Path -LiteralPath $presentPatch)) { throw '[GA_SDK_PRESENT_PATCH_MISSING] The Windows presenter overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $presentPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $presentPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PRESENT_PATCH_BASE] The presenter overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $presentPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PRESENT_PATCH_APPLY] Could not apply the Windows presenter overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
 $generated = if ($GeneratedDirectory) { [IO.Path]::GetFullPath($GeneratedDirectory) } else { Join-Path $buildRoot 'generated' }
 New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
 function WslPath([string]$Value) {
@@ -165,6 +189,7 @@ if ($RunTests) { $targets += @('genesis-preview-batch', 'genesis-preview-fifo') 
 if ($RunTests) { $targets += @('genesis-audio-plan-preflight') }
 if ($RunTests) { $targets += @('genesis-linked-media') }
 if ($RunTests) { $targets += @('genesis-channel-deadlines') }
+if ($RunTests) { $targets += @('genesis-net-loopback-classifier', 'genesis-net-loopback-policy', 'genesis-net-loopback-resource') }
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }

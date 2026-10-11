@@ -1,0 +1,80 @@
+diff --git a/runtime/windows/air_ui_presenter_win32.cpp b/runtime/windows/air_ui_presenter_win32.cpp
+--- a/runtime/windows/air_ui_presenter_win32.cpp
++++ b/runtime/windows/air_ui_presenter_win32.cpp
+@@ -30,6 +30,8 @@
+                          std::uint32_t height) = 0;
+     virtual void paint(HDC paint_dc) = 0;
+     virtual const char *driver() const = 0;
++    virtual const char *mode() const = 0;
++    virtual std::uint32_t present_options() const = 0;
+ };
+ 
+ class Direct2dPresenter final : public Presenter {
+@@ -70,16 +72,28 @@
+     }
+ 
+     const char *driver() const override { return "direct2d"; }
++    const char *mode() const override {
++        return present_flags() == D2D1_PRESENT_OPTIONS_IMMEDIATELY ? "immediate" : "refresh-wait";
++    }
++    std::uint32_t present_options() const override { return static_cast<std::uint32_t>(present_flags()); }
+ 
+ private:
+     static std::uint32_t nonzero(std::uint32_t value) { return value == 0u ? 1u : value; }
++
++    static constexpr D2D1_PRESENT_OPTIONS present_flags() {
++#if defined(AIR_WIN32_CANVAS_PRESENT_IMMEDIATE) && AIR_WIN32_CANVAS_PRESENT_IMMEDIATE
++        return D2D1_PRESENT_OPTIONS_IMMEDIATELY;
++#else
++        return D2D1_PRESENT_OPTIONS_NONE;
++#endif
++    }
+ 
+     bool create_target() {
+         if (!factory_) return false;
+         const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties();
+         const D2D1_HWND_RENDER_TARGET_PROPERTIES window_properties =
+             D2D1::HwndRenderTargetProperties(
+-                window_, D2D1::SizeU(target_width_, target_height_), D2D1_PRESENT_OPTIONS_NONE);
++                window_, D2D1::SizeU(target_width_, target_height_), present_flags());
+         const HRESULT result = factory_->CreateHwndRenderTarget(
+             properties, window_properties, target_.ReleaseAndGetAddressOf());
+         // AIR canvas dimensions and RGB buffers are physical client pixels. Direct2D uses
+@@ -205,6 +219,8 @@
+     }
+ 
+     const char *driver() const override { return "gdi"; }
++    const char *mode() const override { return "not-applicable"; }
++    std::uint32_t present_options() const override { return UINT32_MAX; }
+ 
+ private:
+     HWND window_ = nullptr;
+@@ -285,3 +301,13 @@
+     if (presenter == nullptr || presenter->implementation == nullptr) return "none";
+     return presenter->implementation->driver();
+ }
++
++// Actual implementation metadata. This does not imply physical scanout cadence.
++extern "C" const char *air_ui_presenter_mode(const air_ui_presenter *presenter) {
++    if (presenter == nullptr || presenter->implementation == nullptr) return "none";
++    return presenter->implementation->mode();
++}
++extern "C" std::uint32_t air_ui_presenter_present_options(const air_ui_presenter *presenter) {
++    if (presenter == nullptr || presenter->implementation == nullptr) return UINT32_MAX;
++    return presenter->implementation->present_options();
++}
+diff --git a/runtime/windows/air_ui_presenter_win32.h b/runtime/windows/air_ui_presenter_win32.h
+--- a/runtime/windows/air_ui_presenter_win32.h
++++ b/runtime/windows/air_ui_presenter_win32.h
+@@ -23,6 +23,11 @@
+                              uint32_t width, uint32_t height);
+ void air_ui_presenter_paint(air_ui_presenter *presenter, HDC paint_dc);
+ const char *air_ui_presenter_driver(const air_ui_presenter *presenter);
++/* Actual mode/flags of this instance, including auto-GDI fallback; not a timing claim.
++ * D2D flags0 = refresh-wait(default), flags2 = compile-time opt-in immediate.
++ * UINT32_MAX means no Direct2D presentation options (GDI or no instance). */
++const char *air_ui_presenter_mode(const air_ui_presenter *presenter);
++uint32_t air_ui_presenter_present_options(const air_ui_presenter *presenter);
+ 
+ #ifdef __cplusplus
+ }

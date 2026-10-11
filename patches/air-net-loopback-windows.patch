@@ -1,0 +1,71 @@
+diff --git a/runtime/windows/air_net_win32.c b/runtime/windows/air_net_win32.c
+--- a/runtime/windows/air_net_win32.c
++++ b/runtime/windows/air_net_win32.c
+@@ -248,6 +248,8 @@
+     }
+ }
+ 
++static int ensure_bounded_tcp_send_room(SOCKET handle);
++
+ air_result_socket air_net_tcp_connect(air_view host, uint16_t port) {
+     char *name = copy_host(host);
+     if (name == NULL) return socket_error(AIR_NET_INVALID_ADDRESS);
+@@ -303,7 +305,48 @@
+         closesocket(candidate);
+     }
+     freeaddrinfo(addresses);
++    if (connected != INVALID_SOCKET && !ensure_bounded_tcp_send_room(connected)) {
++        closesocket(connected); return socket_error(AIR_NET_IO);
++    }
+     return connected == INVALID_SOCKET ? socket_error(code) : socket_ok(connected);
++}
++
++/* Windows loopback streams use bounded send room for reliable local channels.
++   Verify the connected peer and the OS readback; remote TCP retains defaults.
++   Each endpoint has a 1 MiB send allowance; receive buffers are unchanged. */
++static int classify_loopback_peer(const struct sockaddr_storage *peer, int size) {
++    if (peer == NULL || size < (int)sizeof peer->ss_family) return -1;
++    if (peer->ss_family == AF_INET) {
++        if (size < (int)sizeof(struct sockaddr_in)) return -1;
++        const struct sockaddr_in *v4 = (const struct sockaddr_in *)peer;
++        return (ntohl(v4->sin_addr.s_addr) >> 24) == 127;
++    }
++    if (peer->ss_family == AF_INET6) {
++        if (size < (int)sizeof(struct sockaddr_in6)) return -1;
++        const unsigned char *v6 = (const unsigned char *)&((const struct sockaddr_in6 *)peer)->sin6_addr;
++        int zero = 1;
++        for (int i=0;i<15;++i) if (v6[i] != 0) zero = 0;
++        if (zero && v6[15] == 1) return 1;
++        zero = 1;
++        for (int i=0;i<10;++i) if (v6[i] != 0) zero = 0;
++        return zero && v6[10] == 255 && v6[11] == 255 && v6[12] == 127;
++    }
++    return -1;
++}
++static int ensure_bounded_tcp_send_room(SOCKET handle) {
++    struct sockaddr_storage peer;
++    memset(&peer, 0, sizeof peer);
++    int peer_size = sizeof peer;
++    if (getpeername(handle, (struct sockaddr *)&peer, &peer_size) != 0) return 0;
++    const int loopback = classify_loopback_peer(&peer, peer_size);
++    if (loopback < 0) return 0;
++    if (!loopback) return 1; /* Remote TCP keeps the existing OS policy. */
++    const int wanted = 1048576;
++    int actual = 0, size = sizeof actual;
++    return setsockopt(handle, SOL_SOCKET, SO_SNDBUF,
++        (const char *)&wanted, sizeof wanted) == 0 &&
++        getsockopt(handle, SOL_SOCKET, SO_SNDBUF,
++        (char *)&actual, &size) == 0 && size == sizeof actual && actual == wanted;
+ }
+ 
+ static int numeric_address(const char *host, uint16_t port, struct sockaddr_storage *storage,
+@@ -409,6 +452,9 @@
+             if (!set_nonblocking(accepted, 1)) {
+                 closesocket(accepted);
+                 return socket_error(AIR_NET_IO);
++            }
++            if (!ensure_bounded_tcp_send_room(accepted)) {
++                closesocket(accepted); return socket_error(AIR_NET_IO);
+             }
+             return socket_ok(accepted);
+         }

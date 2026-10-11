@@ -58,14 +58,40 @@ passed the complete background Windows gate and a bounded check of the supplied
 1080p clip. Separately scoped [native workflow evidence](docs/NATIVE_WORKFLOW_WINDOWS_2026-10-11.md)
 now covers linked audio controls, multiline Unicode titles, modal safety, export
 Cancel/retry and a short runtime timing trace on the earlier 056E candidate.
-The installed F718 build passes the complete background Windows gate, its own
+The earlier F718 build passes the complete background Windows gate, its own
 exact audio-device proof and a short native linked-lane workflow. The broader title
-and export observations retain their earlier 056E scope. Sustained cadence,
-root-ready and the final evidence archive remain unqualified. The F718 first-epoch
+and export observations retain their earlier 056E scope. That checkpoint did not
+qualify sustained cadence or complete its final root-ready/archive acceptance. The F718 first-epoch
 native timing traces fail the unchanged strict cadence gate: five omitted positions
 at 1080p, and nine omissions plus five presentations more than two frames late
-for fitted 4K. A pixel-credit transport candidate is pending new acceptance.
+for fitted 4K. The pixel-credit checkpoint below has separate passing timing and
+native workflow evidence and is now published in the root workspace.
 Physical speaker/display alignment and fullscreen 4K remain unqualified.
+
+The published `pro-native-pixel-credit-2026-10-11` build combines a bounded loopback
+socket policy, 16×64 KiB pixel-channel messages and an isolated Genesis opt-in to
+immediate Direct2D presentation. The channel still allows 1 MiB payload; native
+send allowances are separate from application pixel storage. Focused FIFO,
+presenter checks, coherent build and same-binary full background retry pass.
+Its exact audio-device gate also passes. First-epoch native cadence passes at
+59.9985 changed pictures/s over 137.687 steady seconds for 1080p60, and 59.9393/s
+over 166.001 steady seconds for the 4K/59.94 source in a fitted 480×270 monitor.
+Both steady intervals have zero omitted/repeated positions, early/backward or
+more-than-two-frame late presentations, audio-queue drains and packet overwrites.
+The full 50,000-row recorder traces retain startup repeats/drains; the unchanged
+parser excludes its fixed first second and final half-second. This qualifies
+these bounded recorded intervals, not the whole source or physical scanout.
+Its fresh native workflow verifies linked lanes, scrub/scopes synchronization,
+gain/pan/mute/unmute, Program and Source playback, silent Stop, nonblank rewind
+and private Save/Open persistence. Title/export observations retain their earlier
+056E scope. Fresh root-ready passes with both monitors populated at zero and
+separate V1 filmstrip/A1 waveform. The [evidence bundle](archive/pro-native-pixel-credit-2026-10-11.tar.gz)
+and [archive receipt](archive/pro-native-pixel-credit-2026-10-11.json) retain the
+source and validation results; the receipt records the archive SHA. The first background attempt failed
+the unchanged playback-timing picture-gap limit; a focused repeat passed, and a
+separate full retry retained 64 fresh reports without replacing that failure.
+The SDK presentation default remains
+refresh-wait; software submission does not prove every-frame physical scanout.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -1361,9 +1387,11 @@ silent-loss baseline is retained. Expanded compressor/export checks and the
 **1A49/AA40** was the installed reserve checkpoint. The later published **06AF/AA40**
 linked-lane build includes the completed background preflight checks described in
 the [linked-lane record](docs/LINKED_MEDIA_WINDOWS_2026-10-10.md).
-The current native-title/recorder continuation has separate pending acceptance in
+The current native-title/recorder continuation has separately scoped acceptance and
+root publication in
 the [2026-10-11 workflow record](docs/NATIVE_WORKFLOW_WINDOWS_2026-10-11.md).
-No new cadence, physical A/V or complete professional acceptance is claimed here.
+Its bounded fitted-monitor cadence does not qualify physical A/V synchronization,
+fullscreen or compound 4K60, or complete professional editing.
 
 ## Known gaps
 

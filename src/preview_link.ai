@@ -37,8 +37,14 @@ pub fn open() -> result<Link,string> effects {alloc,net,time} {
   open_mode(false)
 }
 pub fn open_pixels() -> result<Link,string> effects {alloc,net,time} {open_mode(true)}
+fn pixel_chunk_bytes() -> u64 effects {} {65536}
 fn open_mode(pixels: bool) -> result<Link,string> effects {alloc,net,time} {
-  var events: channel.Receiver = match channel.open(if pixels {4}else{64},if pixels {262144}else{1024}) {
+  // Sixteen 64 KiB messages keep the shared 1 MiB in-flight bound. Fifteen
+  // usable credits let one held 480x270 packet (header, eight chunks, optional
+  // detail, DONE) finish while native presentation blocks the consumer. This
+  // does not promise a whole two-picture window or unheld larger packet fits;
+  // those retain bounded credit waits and the two-packet completed FIFO.
+  var events: channel.Receiver = match channel.open(if pixels {16}else{64},if pixels {pixel_chunk_bytes()}else{1024}) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
   result.ok(Link {events:events,commands:array.new(),ready:0,waveforms:0,
@@ -255,7 +261,7 @@ fn send_pixel_bytes(peer: ref<Peer>, root: str, id: u64, bounded:bool, data: vie
     -> result<bool,string> effects {alloc,fs.meta,fs.read,net,time} {
   var offset: u64 = 0
   loop {if offset >= view.len(data) {break}
-    let count: u64 = if view.len(data)-offset > 262144 {262144}else{view.len(data)-offset}
+    let count: u64 = if view.len(data)-offset > pixel_chunk_bytes() {pixel_chunk_bytes()}else{view.len(data)-offset}
     if not try send_pixels_part(peer,root,id,bounded,6,view.slice(data,offset,offset+count)) {return result.ok(false)}
     offset=offset+count
   }

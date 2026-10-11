@@ -156,7 +156,7 @@ The later cadence measurements below fail; publication of the binaries does not
 qualify cadence or complete this acceptance checkpoint. The owned F718 native
 window closes normally after the measurements.
 
-## F718 cadence failures and pending pixel-credit candidate
+## F718 cadence failures before the pixel-credit candidate
 
 The Help recorder was armed before Play. The unchanged parser selects the first
 predeclared uninterrupted Program epoch, excluding the fixed first second and
@@ -177,15 +177,139 @@ Increasing channel credits while retaining the one-megabyte transport bound
 passed the focused Linux fixture but failed the Windows held-frame and
 cancellation/recovery checks. That candidate was rejected; the original
 transport source and maintained fixture were restored exactly. A private
-native socket-buffer probe and prototype are under investigation. Their results
-do not qualify a production change or replace the failed cadence measurements.
+native socket-buffer probe led to the bounded component candidate below. These
+results do not replace the failed cadence measurements.
 
-The `pro-native-pixel-credit-2026-10-11` transport candidate is a separate pending
-continuation. New source/build/background, exact device/native, sustained cadence,
-root-ready and publication evidence must agree before its public archive can be
-created. The old verified-stage archive plan remains unexecuted. The new planned
-bundle is `archive/pro-native-pixel-credit-2026-10-11.tar.gz`, with a separate
-archive receipt. Its builder retains the F718 failures and earlier 056E evidence,
+## Published pixel-credit checkpoint: bounded cadence and native workflow
+
+The pixel lane uses 16×64 KiB messages, retaining the channel's 1 MiB payload
+bound. The reusable Windows adapter changes only OS-verified loopback TCP peers:
+each connected/accepted endpoint requests and verifies a 1 MiB send allowance.
+Remote TCP and UDP retain their defaults. Local command/metadata lanes also use
+this policy, so two bidirectional TCP lanes provide 4 MiB send allowance per Link.
+This is an allowance, not measured committed kernel memory or total application
+storage. Receive buffers, channel framing, CPU pixel packets and prepared frames
+remain separate resources.
+
+The maintained FIFO fixture restores the original Japanese string and passes
+10 cases / 134 checks on both Windows and Linux. Earlier private mojibake and
+failed credit-only receipts remain historical. The native address classifier
+passes 20 checks and buffer policy passes 19. Separate IPv4/IPv6 resource runs
+each open 32 TCP pairs, verify 33,603,584 real bytes and close all owned handles
+with unchanged before/after handle counts. Their 64 connected endpoints expose
+64 MiB configured send allowance; no aggregate-memory measurement is inferred.
+
+The shared Direct2D presenter keeps `D2D1_PRESENT_OPTIONS_NONE` as the SDK default.
+Genesis's isolated runtime build opts into `D2D1_PRESENT_OPTIONS_IMMEDIATELY`;
+initial and recreated targets use the same option. Driver reporting distinguishes
+Direct2D from GDI, whose presentation options are not applicable. Each private
+default/immediate component variant passes 97 checks and 2,150,400 exact RGB
+comparisons covering resize, retained/next images, injected target recreation,
+GDI and construction-failure fallback. Recreation was injected after a real
+successful EndDraw, not produced by actual device loss. The component windows
+closed normally; they do not qualify the combined editor's cadence.
+
+The display snapshot reports approximately 59.951 Hz monitor timing and
+59.953 Hz DWM composition. Immediate presentation removes the render target's
+refresh wait; it does not prove that every 60 fps software submission reaches
+physical scanout. Exact software clock/queue checks, physical display cadence and
+speaker/photon alignment remain separate scopes. No physical synchronization,
+fullscreen or compound-4K60 acceptance is claimed.
+
+The `pro-native-pixel-credit-2026-10-11` transport candidate builds coherently with
+application `3b5eee99965db27e0604fb6408109245edd9b0b8b1e50b62c75361edb0cc7093`
+and audio DLL `005f5f01f943a7183919f706fa3869356f8fea99574d09b781ff0340fb91ab59`.
+Build receipt `f20f5fe40b4e7fdae74374528dab4652594027c943f0abdcce4fde4a0e5049e7`
+binds this candidate. The first full background attempt fails the unchanged
+`tests/playback_timing.py` lossless picture-gap limit: 355.1998 ms exceeds 250 ms.
+The trace already owns a ready picture before one 327.8562 ms consumer-loop stall;
+steady provider timing remains within 3 ms without errors. This localizes the
+observed gap, not its initiating system cause. The failed exit/log and complete
+raw timing evidence remain retained.
+
+An unchanged focused repeat passes with 1,006 observations, 240 pictures,
+42.6766 ms maximum gap and 33.525 ms lag. It does not replace the failed full gate.
+A second full background invocation of the same 3B5E build passes with exit zero
+and 64 fresh report snapshots, retained in its exclusive `repeat1` log/start/receipt.
+The accepted log digest is
+`90888daac646df50c62548b4ec0204119e35ebea9fb19bb3b86afc0cdc9126f5`.
+Its maintained playback fixture records 1,008 observations, 240 pictures,
+42.4514 ms maximum gap, 33.3541667 ms lag and no observed underrun. This result
+leaves the first failed full attempt and earlier focused pass intact; it does not
+classify or repair the first consumer stall's cause.
+
+The exact 3B5E/005F audio-device gate passes with receipt
+`ccbed5511975d81940e738fc823aba5f7d7a8a9578e9b97a1fb24a72a055b79c`.
+Its requested twenty-second clock test measures 18.99 seconds and 2,378 polls,
+with −0.362 ms interval drift, 0.416 ms phase range and zero drained/resumed
+shortfall. Stereo, hard-left, silent, meter and Stop fixtures bind the actual
+loaded 005F module. This isolated device proof does not establish physical hearing
+or speaker/display alignment.
+
+The unchanged native menu-timing parser passes both predeclared first Program
+epochs on this exact candidate:
+
+| Source / ordinary monitor | Native steady seconds | Device steady seconds | Changed pictures / frame range | Pictures/s | Maximum gap |
+| --- | ---: | ---: | --- | ---: | ---: |
+| 1080p60 / fitted 480×270 | 137.6867878 | 137.6844792 | 8,262 / 60–8,321 | 59.9984946413 | 20.244 ms |
+| 4K/59.94 / fitted 480×270 | 166.0013750 | 165.9985625 | 9,951 / 60–10,010 | 59.9392625513 | 24.358 ms |
+
+Each steady interval has zero omitted or repeated positions, backward/early
+presentations, presentations more than two frames late, device-queue drains and
+packet overwrites. Maximum after-presentation lag is zero frames. The fixed
+selection remains the first second and final half-second excluded, at least 120
+steady native/device seconds required, and no input rows discarded.
+
+Both recorders reach their automatic 50,000-row limit with complete 46-column
+rows; the closed original and immutable copied traces are byte-identical. The
+qualified intervals exceed the unchanged duration gate without extending the
+recorder cap or selecting a later epoch. Every raw row remains preserved: the
+1080p raw selected epoch contains one repeat, two startup queue drains and a
+139.6834 ms maximum gap; 4K contains two repeats, two startup drains and a
+239.9414 ms maximum gap. These raw values are not relabeled as steady zero-drop
+results. Raw digests are
+`b855fc5c3a05ed8a18bda3c091a2b6b1155485e4f2e90a2647159e4c314b1b77`
+and `c1f6ad96737fd7b024cadb5a9b69554431f34977a7ac092623e3769192eec432`.
+The new build-bound archive adapter preserves the original parser reports and
+derives app/worker/audio identity from the predeclared coherent build receipt;
+the historical F718 adapter remains unchanged.
+
+Fresh native workflow receipt
+`b4b398b1212bd107f508cc5aa79712f4edef94286ae5c60de07cf166cf11804d`
+binds the actual loaded 005F module, exact 3B5E build and saved graph. Its 4K
+observations include nonblank rewind to zero,
+seek to `00:00:06:57` showing the snake picture with changed histogram/RGB/luma,
+and drag to `00:00:02:58` showing the beach with matching marker, picture and
+scopes. V1 filmstrip, A1 waveform and A1 gain 0.60 / pan −0.50 respond. Program
+Play changes pictures with active postmix stereo meters; Mute leaves silent
+meters while video advances, and Unmute restores active output. Program Stop
+pauses both transports and leaves empty meters. Independent Source Play changes
+Source picture/time with active output while Program remains parked; Source Stop
+leaves silent output. Private native Save as/Open restores both positions, mixer
+values, separate lanes and decoded pictures after asynchronous completion. The
+saved graph is independently checked, and the owned test process closes normally.
+This final native scope covers those observations; title/export interaction was
+not repeated on 3B5E and retains its historical 056E proof.
+
+Root publication passes using the explicitly selected `repeat1` background
+receipt/log/exit. Published app 3B5E, audio 005F and worker AA40 match the coherent
+build; the original failed full attempt remains separately recorded. Protected
+projects/media remain unchanged and the shared MM-AIR runtime policy is preserved.
+Fresh root-ready passes with receipt
+`d7b3a988ecfe5c3fc6930519e2f1f5b42de33dae39191e3b64f5e660fc2df370`.
+The maximized published editor opens the private 1080p project through its native
+chooser, showing populated Source/Program pictures paused at `00:00:00:00`,
+V1 filmstrip without waveform and A1's separate waveform. Its actual loaded root
+005F module capture is bound by
+`6555e2966aa418d7cb35a7b3e5290ff4239780bee3815e64dc54067e960782f5`.
+This root-ready check confirms the installed state; its cadence remains separately
+qualified by the exact build-bound traces above.
+
+The old verified-stage archive plan remains unexecuted. The final
+[evidence bundle](../archive/pro-native-pixel-credit-2026-10-11.tar.gz) and
+[archive receipt](../archive/pro-native-pixel-credit-2026-10-11.json) retain the
+qualified source and validation results. The receipt records the bundle's SHA.
+The bundle retains the F718 failures and earlier 056E evidence,
 source identities and sanitized driver artifacts with their original scope.
 Focused passes above do not replace those gates. Fullscreen 4K remains deferred.
 Genesis reuses MM-AIR's runtime; no separate FFmpeg executable/DLL bundle is added.
