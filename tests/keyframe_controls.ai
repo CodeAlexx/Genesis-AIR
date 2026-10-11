@@ -1,0 +1,318 @@
+module genesis.tests.keyframe_controls
+import std.editor as editor
+import std.editor_io as store
+import std.curve as curve
+import std.files as files
+import std.image as image
+import "../src/ui_text.ai" as ui_text
+import "../src/typeface.ai" as typeface
+import "../src/timeline_media.ai" as media
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/filter_keys.ai" as keys
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn transaction(state: ref<app.App>) -> string effects {alloc} {
+  var out: string = encoded(struct.borrow(state,field=document))
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  let history: ref<editor.History> = struct.borrow(state,field=history)
+  var i: u64 = 0
+  loop {if i >= editor.undo_depth(history) {break}
+    string.append(out,"undo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),i)))
+    i=i+1}
+  i=0
+  loop {if i >= editor.redo_depth(history) {break}
+    string.append(out,"redo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),i)))
+    i=i+1}
+  out
+}
+fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App = app.app(provider.fake(root))
+  let track: u64 = app.default_video_track(state)
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let source: u64 = editor.add_source(doc,"keys.mov","Keys",120,30.0)
+  let _=editor.describe_source(doc,source,64,36,true,false,0,0)
+  let clip: u64 = option.unwrap(editor.place(doc,track,source,0,30,7))
+  let filter: u64 = option.unwrap(editor.add_filter(doc,clip,"brightness"))
+  let _=editor.set_filter_param(doc,filter,"level",1.0)
+  let second: u64 = option.unwrap(editor.add_filter(doc,clip,"brightness"))
+  let _=editor.set_filter_param(doc,second,"level",1.0)
+  let _=editor.set_filter_enabled(doc,second,false)
+  let named: string = keys.name(filter,"brightness","level")
+  let _=editor.set_key(doc,clip,str.view(named),0,1.0,curve.linear())
+  let _=editor.set_key(doc,clip,str.view(named),10,1.5,curve.hold())
+  let _=editor.set_key(doc,clip,str.view(named),20,0.75,curve.linear())
+  let _=commands.select_only(state,clip)
+  app.set_selected_filter(state,filter)
+  app.set_dock_tab(state,1)
+  let _=commands.seek(state,7)
+  app.mark_dirty(state,false)
+  state
+}
+type Row = struct {area: layout.Rect, enabled: bool}
+fn control(state: ref<app.App>, action: u32, target: u64) -> Row effects {alloc} {
+  var list: array<chrome.Control> = chrome.filters_panel(layout.frame(1600.0,1400.0),state)
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    let item: ref<chrome.Control> = array.borrow(list,i)
+    if item.action == action and item.target == target {
+      return Row {area:item.area,enabled:item.enabled}
+    }
+    i=i+1}
+  Row {area:layout.rect(0.0,0.0,0.0,0.0),enabled:false}
+}
+fn click(state: ref<app.App>, action: u32, target: u64) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var item: Row = control(state,action,target)
+  if layout.width_of(item.area) == 0.0 {return string.copy("missing")}
+  input.pointer_down(state,1600.0,1400.0,(item.area.left+item.area.right)*0.5,(item.area.top+item.area.bottom)*0.5)
+}
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite: test.Suite = test.suite("Keyframe controls",false)
+  var state: app.App = fixture(root)
+  let clip: u64 = app.current_clip(state)
+  let filter: u64 = state.selected_filter
+  let named: string = keys.name(filter,"brightness","level")
+  let _=test.start(suite,"Actual inspector key navigation respects local time and history")
+  let revision: u64 = state.document_revision
+  let before: string = transaction(state)
+  let _=test.check(suite,control(state,chrome.act_key_next(),filter).enabled,"Next key exists in the actual control list")
+  let _=test.check(suite,click(state,chrome.act_key_next(),filter) == "sought keyframe","Pointer dispatch seeks a key")
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),17,"Local key10 seeks owner frame17")
+  let _=test.check(suite,editor.undo_depth(struct.borrow(state,field=history)) == 0 and state.document_revision == revision and not app.dirty(state),"Navigation preserves history/revision/dirty")
+  let _=commands.seek(state,7)
+  let _=test.eq_str(suite,transaction(state),before,"After restoring only transport position all authored/history bytes match")
+  let _=commands.seek(state,17)
+  let _=click(state,chrome.act_key_previous(),filter)
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),7,"Previous key finds exact owner start")
+  let _=commands.seek(state,12)
+  let _=test.check(suite,not control(state,chrome.act_key_delete(),filter).enabled,"Delete disabled between keys")
+  let _=test.check(suite,not control(state,chrome.act_key_interp_next(),filter).enabled,"Interpolation disabled between keys")
+  let _=test.done(suite)
+  let _=test.start(suite,"Interpolation uses shared38 modes, exact current key, and one Undo")
+  let _=commands.seek(state,7)
+  let baseline: string = encoded(struct.borrow(state,field=document))
+  let depth: u64 = editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.check(suite,click(state,chrome.act_key_interp_next(),filter) == "keyframe interpolation set","Actual Ease button changes Linear to Smooth")
+  let _=test.eq_u64(suite,cast.wrap(option.unwrap(keys.exact(struct.borrow(state,field=document),clip,str.view(named),0)).interp),cast.wrap(curve.smooth()),"Interpolation ID comes from SDK")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Exactly one Undo")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),baseline,"Undo restores every authored field")
+  let _=commands.redo(state)
+  var mode: u32 = 0
+  loop {if mode >= curve.interp_count() {break}
+    let changed: commands.Result = commands.manage_key(state,2,filter,"brightness","level",3,mode)
+    let _=test.check(suite,changed.ok,"All SDK interpolation modes are accepted")
+    let saved: string = encoded(struct.borrow(state,field=document))
+    var loaded: editor.Document = match store.decode(str.view(saved)) {err(_)=>{return 3},ok(value)=>value,}
+    let _=test.eq_u64(suite,cast.wrap(option.unwrap(keys.exact(loaded,clip,str.view(named),0)).interp),cast.wrap(mode),"Saved mode survives fresh decode")
+    mode=mode+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"Delete restores scalar fallback without legacy curve resurrection or sibling changes")
+  var legacy: app.App = fixture(root)
+  let lclip: u64 = app.current_clip(legacy)
+  let first: u64 = legacy.selected_filter
+  let ldoc: ref<editor.Document> = struct.borrow(legacy,field=document)
+  let second: u64 = option.unwrap(editor.filter_at(ldoc,lclip,1))
+  let scoped: string = keys.name(first,"brightness","level")
+  let _=editor.remove_key(ldoc,lclip,str.view(scoped),0)
+  let _=editor.remove_key(ldoc,lclip,str.view(scoped),10)
+  let _=editor.remove_key(ldoc,lclip,str.view(scoped),20)
+  let _=editor.set_key(ldoc,lclip,"brightness.level",0,1.5,curve.hold())
+  let snapshot: string = encoded(ldoc)
+  let _=test.near_f64(suite,keys.value(ldoc,lclip,second,"brightness","level",7,1.0),1.5,0.0,"Disabled duplicate inherits old curve")
+  let _=test.check(suite,click(legacy,chrome.act_key_delete(),first) == "keyframe deleted","Actual deletion succeeds")
+  let _=test.near_f64(suite,keys.value(struct.borrow(legacy,field=document),lclip,first,"brightness","level",7,1.0),1.0,0.0,"Final deletion restores selected scalar")
+  let _=test.near_f64(suite,keys.value(struct.borrow(legacy,field=document),lclip,second,"brightness","level",7,1.0),1.5,0.0,"Sibling authored/evaluated curve preserved")
+  let _=test.check(suite,not control(legacy,chrome.act_key_delete(),first).enabled,"No phantom Delete after last key")
+  let _=commands.undo(legacy)
+  let _=test.eq_str(suite,encoded(struct.borrow(legacy,field=document)),snapshot,"One Undo restores complete legacy graph")
+  let _=commands.redo(legacy)
+  let saved: string = encoded(struct.borrow(legacy,field=document))
+  var loaded: editor.Document = match store.decode(str.view(saved)) {err(_)=>{return 4},ok(value)=>value,}
+  let _=test.near_f64(suite,keys.value(loaded,lclip,first,"brightness","level",7,1.0),1.0,0.0,"Fresh open retains selected scalar fallback")
+  let _=test.near_f64(suite,keys.value(loaded,lclip,second,"brightness","level",7,1.0),1.5,0.0,"Fresh open retains duplicate curve")
+  let _=test.done(suite)
+  let _=test.start(suite,"Refusals preserve document selection history redo and revisions")
+  let _=commands.undo(state)
+  let exact_state: string = transaction(state)
+  let failures: array<u32> = [0,1,2,3,4]
+  var index: u64 = 0
+  loop {if index >= array.len(failures) {break}
+    let rejected: commands.Result = if index == 0 {commands.manage_key(state,2,999,"brightness","level",2,0)}
+      else if index == 1 {commands.manage_key(state,2,filter,"contrast","level",2,0)}
+      else if index == 2 {commands.manage_key(state,2,filter,"brightness","level",3,38)}
+      else if index == 3 {commands.manage_key(state,1,clip,"","pan",3,2)}
+      else {commands.manage_key(state,2,filter,"brightness","level",9,0)}
+    let _=test.check(suite,not rejected.ok,"Stale/unsupported/invalid action refused")
+    let _=test.eq_str(suite,transaction(state),exact_state,"Every refusal preserves complete transaction")
+    index=index+1}
+  let track: u64 = option.unwrap(editor.clip(struct.borrow(state,field=document),clip)).track
+  let _=editor.set_track_lock(struct.borrow(state,field=document),track,true)
+  let locked: string = transaction(state)
+  let refused: commands.Result = commands.manage_key(state,2,filter,"brightness","level",2,0)
+  let _=test.check(suite,not refused.ok,"Locked mutation refused")
+  let _=test.eq_str(suite,transaction(state),locked,"Locked mutation preserves Redo and complete state")
+  let _=test.done(suite)
+  let _=test.start(suite,"Blend modes remain held and context keys are not navigated")
+  var held: app.App = fixture(root)
+  let hclip: u64 = app.current_clip(held)
+  let hdoc: ref<editor.Document> = struct.borrow(held,field=document)
+  let blend: u64 = option.unwrap(editor.add_filter(hdoc,hclip,"blend"))
+  let bn: string = keys.name(blend,"blend","mode")
+  let _=editor.set_key(hdoc,hclip,str.view(bn),0,0.0,curve.hold())
+  app.set_selected_filter(held,blend)
+  let _=test.check(suite,not control(held,chrome.act_key_interp_next(),blend).enabled,"Held enum never advertises interpolation cycling")
+  let hb: string = transaction(held)
+  let bad_mode: commands.Result = commands.manage_key(held,2,blend,"blend","mode",3,curve.linear())
+  let _=test.check(suite,not bad_mode.ok,"Hold-only enum rejects linear interpolation")
+  let _=test.eq_str(suite,transaction(held),hb,"Blend refusal preserves complete state")
+  let _=test.done(suite)
+  let _=test.start(suite,"Navigation skips signed context knots and out-of-body mutations refuse")
+  var context: app.App = fixture(root)
+  let cclip: u64 = app.current_clip(context)
+  let cf: u64 = context.selected_filter
+  let cn: string = keys.name(cf,"brightness","level")
+  let _=editor.set_key(struct.borrow(context,field=document),cclip,str.view(cn),-9,0.8,curve.smooth())
+  let _=editor.set_key(struct.borrow(context,field=document),cclip,str.view(cn),35,1.2,curve.linear())
+  let prior: commands.Result = commands.manage_key(context,2,cf,"brightness","level",0,0)
+  let _=test.check(suite,not prior.ok,"Previous ignores negative interpolation context")
+  let _=commands.seek(context,27)
+  let next: commands.Result = commands.manage_key(context,2,cf,"brightness","level",1,0)
+  let _=test.check(suite,not next.ok,"Next ignores beyond-body interpolation context")
+  let _=commands.seek(context,45)
+  let cb: string = transaction(context)
+  let outside: commands.Result = commands.manage_key(context,2,cf,"brightness","level",2,0)
+  let _=test.check(suite,not outside.ok,"Outside-body mutation refused")
+  let _=test.eq_str(suite,transaction(context),cb,"Outside-body refusal preserves exact state")
+  let _=test.done(suite)
+  let _=test.start(suite,"Clip gain and signed fade keys share management with safe refusal")
+  var envelope: app.App = fixture(root)
+  let ec: u64 = app.current_clip(envelope)
+  let _=editor.set_key(struct.borrow(envelope,field=document),ec,"gain",0,-1.0,curve.linear())
+  let invalid_gain: string = transaction(envelope)
+  var rejected_gain: commands.Result = commands.manage_key(envelope,1,ec,"","gain",3,curve.smooth())
+  let _=test.check(suite,not rejected_gain.ok and text.contains(str.view(struct.borrow(rejected_gain,field=message)),"GA_AUDIO_GAIN_KEYS"),"Invalid gain cannot become an apparently successful interpolation edit")
+  let _=test.eq_str(suite,transaction(envelope),invalid_gain,"Gain refusal preserves raw document and all history")
+  let repaired: commands.Result = commands.manage_key(envelope,1,ec,"","gain",2,0)
+  let _=test.check(suite,repaired.ok and not keys.has(struct.borrow(envelope,field=document),ec,"gain"),"Delete can repair a negative saved gain key")
+  let _=editor.set_key(struct.borrow(envelope,field=document),ec,"fade_in",0,-4.0,curve.linear())
+  let _=editor.set_key(struct.borrow(envelope,field=document),ec,"fade_in",10,8.0,curve.smooth())
+  let signed: commands.Result = commands.manage_key(envelope,1,ec,"","fade_in",3,curve.sine_in_out())
+  let _=test.check(suite,signed.ok,"Signed existing fade knots remain valid authored context")
+  let point: editor.Key = option.unwrap(keys.exact(struct.borrow(envelope,field=document),ec,"fade_in",0))
+  let _=test.check(suite,point.value == -4.0 and point.interp == curve.sine_in_out(),"Interpolation retains exact signed fade value")
+  let _=test.done(suite)
+  let _=test.start(suite,"All named interpolations fit separate row at supported UI scales")
+  var labels: app.App = fixture(root)
+  let lf: u64 = labels.selected_filter
+  app.set_fonts(labels,typeface.search_paths())
+  let _=test.check(suite,ui_text.available(struct.borrow(labels,field=typography)),"Actual TrueType metrics are loaded")
+  let scales: array<f64> = [1.0,1.5,2.0]
+  var si: u64 = 0
+  loop {if si >= array.len(scales) {break}
+    let scale: f64 = array.get(scales,si)
+    ui_text.set_scale(struct.borrow(labels,field=typography),scale)
+    var mode: u32 = 0
+    loop {if mode >= curve.interp_count() {break}
+      let _=commands.manage_key(labels,2,lf,"brightness","level",3,mode)
+      var rows: array<chrome.Control> = chrome.filters_panel(layout.frame(1600.0,1400.0),labels)
+      var found: bool = false
+      var j: u64 = 0
+      loop {if j >= array.len(rows) {break}
+        let row: ref<chrome.Control> = array.borrow(rows,j)
+        if row.action == chrome.act_none() and row.target == lf {
+          let line: string = chrome.label_of(row)
+          if line == curve.interp_name(mode) {
+            let box: layout.Rect = row.area
+            let size: f64 = row.size
+            let _=test.check(suite,size >= 8.0 and size <= 20.0,"Named mode uses supported painter size")
+            let wide: f64 = ui_text.width(struct.borrow(labels,field=typography),str.view(line),size)
+            let _=test.check(suite,wide+8.0 <= layout.width_of(box),"Actual glyph metrics fit named mode without adjacent button overlap")
+            found=true
+          }
+        }
+        j=j+1
+      }
+      let _=test.check(suite,found,"Exact full SDK interpolation name is exposed")
+      mode=mode+1
+    }
+    si=si+1
+  }
+  let _=test.done(suite)
+  if view.len(args) == 4 {actual_media(suite,root,view.get(args,2),view.get(args,3))}
+  test.conclude(suite,path.join(root,"keyframe-controls-tests.json"),if view.len(args) == 4 {9}else{8})
+}
+fn actual_media(suite: ref<test.Suite>, root: str, worker: str, source: str)
+    -> unit effects {alloc,env,fs.meta,fs.read,fs.write,process,net,time} {
+  let _=test.start(suite,"Actual dispatch edits survive open and drive both preview and lossless export")
+  let folder: string = path.join(root,"media")
+  let _=files.mkdirs(str.view(folder))
+  var state: app.App = app.app(provider.gcompose(worker,str.view(folder)))
+  let imported: commands.Result = commands.import_media(state,source,"Key media")
+  let _=test.check(suite,imported.ok,"Real media import succeeds")
+  let active: u64 = struct.get(struct.borrow(state,field=document),field=active)
+  let _=editor.set_sequence_format(struct.borrow(state,field=document),active,64,36,30.0)
+  let made: commands.Result = commands.append_clip(state,app.default_video_track(state),imported.value,0,24)
+  let _=commands.select_only(state,made.value)
+  let first: commands.Result = commands.keyframe_parameter(state,2,0,"brightness","level",1.0)
+  let filter: u64 = chrome.filter_of_kind(struct.borrow(state,field=document),made.value,"brightness")
+  let _=commands.seek(state,10)
+  let _=commands.keyframe_parameter(state,2,filter,"brightness","level",1.5)
+  let _=commands.seek(state,20)
+  let _=commands.keyframe_parameter(state,2,filter,"brightness","level",0.75)
+  app.set_dock_tab(state,1)
+  app.set_selected_filter(state,filter)
+  let _=commands.seek(state,0)
+  let _=test.check(suite,first.ok and click(state,chrome.act_key_interp_next(),filter) == "keyframe interpolation set","Real pointer sets Smooth")
+  let _=click(state,chrome.act_key_next(),filter)
+  let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),10,"Real pointer seeks key10")
+  let _=test.check(suite,click(state,chrome.act_key_delete(),filter) == "keyframe deleted","Real pointer removes middle key")
+  let project: string = path.join(str.view(folder),"edited.air")
+  let saved: commands.Result = commands.save_project(state,str.view(project))
+  let opened: commands.Result = commands.open_project(state,str.view(project))
+  let _=test.check(suite,saved.ok and opened.ok,"Saved graph opens through actual command")
+  var fonts: array<string> = array.new()
+  var cache: media.RenderCache = media.render_cache(fonts)
+  media.configure_preview(struct.borrow(state,field=document),cache)
+  let positions: array<i64> = [0,5,10,15,20,0]
+  var i: u64 = 0
+  loop {if i >= array.len(positions) {break}
+    let at: i64 = array.get(positions,i)
+    let _=commands.seek(state,at)
+    let prefix: string = path.join(str.view(folder),"picture")
+    match media.frame_plan(struct.borrow(state,field=document),at,"PREVIEW","unused",str.view(prefix),cache) {
+      err(problem)=>{let _=test.check(suite,false,problem)},ok(lines)=>{
+        var plan: array<string> = lines
+        var picture: provider.Frame = provider.program_plan(struct.borrow(state,field=provider),plan,64,36,cache.width,cache.height)
+        let _=test.check(suite,picture.ok,"Rendered actual edited preview")
+        if picture.ok {
+          let png: bytes = image.encode_png(struct.borrow(picture,field=pixels))
+          let _=image.write_file(path.join(str.view(folder),text.concat(string.from_int(i),".png")),png)
+        }
+      },
+    }
+    media.cleanup_plan(str.view(prefix))
+    i=i+1
+  }
+  let _=editor.set_export_range(struct.borrow(state,field=document),0,24)
+  match media.render_profile(struct.borrow(state,field=document),worker,path.join(str.view(folder),"edited.mkv"),fonts,"","",3) {
+    err(problem)=>{let _=test.check(suite,false,problem)},ok(_)=>{let _=test.check(suite,true,"Export actual edited 16-bit master")},
+  }
+  let _=test.done(suite)
+  ()
+}

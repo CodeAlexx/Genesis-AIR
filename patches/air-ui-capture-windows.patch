@@ -1,0 +1,20 @@
+diff --git a/runtime/windows/air_ui_win32.c b/runtime/windows/air_ui_win32.c
+--- a/runtime/windows/air_ui_win32.c
++++ b/runtime/windows/air_ui_win32.c
+@@ -468,9 +468,13 @@
+     case WM_LBUTTONUP:
+     case WM_RBUTTONUP:
+         if (!window->canvas) return DefWindowProcW(handle, message, wparam, lparam);
+-        window->releasing_capture = 1;
+-        (void)ReleaseCapture();
+-        window->releasing_capture = 0;
++        /* A second-button release must not steal the remaining button's drag.
++           Suppress capture-loss only for the ordinary final-button release. */
++        if ((wparam & (MK_LBUTTON | MK_RBUTTON)) == 0) {
++            window->releasing_capture = 1;
++            (void)ReleaseCapture();
++            window->releasing_capture = 0;
++        }
+         pointer_event(window, 7u, wparam, lparam, message == WM_RBUTTONUP, 0);
+         return 0;
+     case WM_CANCELMODE:

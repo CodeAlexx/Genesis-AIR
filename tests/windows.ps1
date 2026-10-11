@@ -50,6 +50,11 @@ try {
   $env:GENESIS_GCOMPOSE = $Worker
   if (-not $ControlsOnly) {
   Write-Host (Invoke-Native 'genesis-ui-pixels.exe' @()).TrimEnd()
+  $captureResult = Invoke-Native 'genesis-ui-capture.exe' @()
+  $captureReport = $captureResult | ConvertFrom-Json
+  if (-not $captureReport.passed -or $captureReport.checks -ne 25) { throw 'Native pointer capture gate failed.' }
+  Write-Host $captureResult.TrimEnd()
+  Set-Content -LiteralPath (Join-Path $root 'ui-capture-windows.json') -Value $captureResult
   if (-not $BackgroundOnly) {
     $clipboardResult = Invoke-Native 'genesis-ui-clipboard.exe' @()
     Write-Host $clipboardResult.TrimEnd()
@@ -66,6 +71,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'The native loopback transport policy/resource gate failed.' }
   Write-Host (Invoke-Native 'genesis-linked-media.exe' @((Join-Path $work 'linked-media'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'linked-media/linked-media-tests.json') -Destination (Join-Path $root 'linked-media-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-snap-controls.exe' @((Join-Path $work 'snap-controls'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'snap-controls/snap-controls-tests.json') -Destination (Join-Path $root 'snap-controls-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-audio-context.exe' @((Join-Path $work 'audio-context'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'audio-context/audio-context-tests.json') -Destination (Join-Path $root 'audio-context-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-clip-clipboard.exe' @((Join-Path $work 'clip-clipboard'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'clip-clipboard/clip-clipboard-tests.json') -Destination (Join-Path $root 'clip-clipboard-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-editing-safety.exe' @((Join-Path $work 'editing-safety'))).TrimEnd()
@@ -195,6 +204,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Per-frame monitor and timeline bitmap acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'keyed_video.py') --worker $worker --client (Join-Path $Bin 'genesis-keyed-video.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Inspector picture-key preview/master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'keyframe_controls.py') --worker $worker `
+      --client (Join-Path $Bin 'genesis-keyframe-controls.exe') --report (Join-Path $root 'keyframe-controls-media.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Key management preview/master pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'preview_canvas.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Small-sequence preview/master pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'large_preview.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
@@ -247,6 +259,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Active nested audio warm cancellation and recovery acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_continuity.py') --worker $worker --report (Join-Path $root 'audio-continuity.json')
     if ($LASTEXITCODE -ne 0) { throw 'Long fractional-rate audio continuity and resumed-seek acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_edit_context.py') --client (Join-Path $Bin 'genesis-audio-edit-context.exe') `
+      --binary (Join-Path $Bin 'Genesis-AIR.exe') --worker $worker --report (Join-Path $root 'audio-edit-context.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Preserved audio edit context PCM/peaks/export acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_nested_edit_context.py') --client (Join-Path $Bin 'genesis-audio-nested-edit-context.exe') `
+      --worker $worker --report (Join-Path $root 'audio-nested-edit-context.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Descendant-shortened nested audio context PCM/peaks acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_plan_preflight.py') --binary (Join-Path $Bin 'genesis-audio-plan-preflight.exe') `
       --worker $worker --root (Join-Path $work 'audio-plan-preflight') --report (Join-Path $root 'audio-plan-preflight.json')
     if ($LASTEXITCODE -ne 0) { throw 'Loaded-project audio preflight and valid-media recovery acceptance failed.' }
@@ -255,6 +273,10 @@ try {
     & python (Join-Path $PSScriptRoot 'export_cancel.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --worker $worker --wrapper (Join-Path $Bin 'genesis-worker-wrapper.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Active export cancellation and retry acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'export_ownership.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --fixture (Join-Path $Bin 'genesis-export-ownership-worker.exe') --helper (Join-Path $Bin 'air-file-publish.exe') `
+      --report (Join-Path $root 'export-ownership.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Exclusive export ownership and no-replace publication acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'media_sessions.py') --fixture (Join-Path $Bin 'genesis-media-session.exe') `
       --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') --report (Join-Path $root 'media-sessions.json')
     if ($LASTEXITCODE -ne 0) { throw 'Concurrent media session isolation acceptance failed.' }
@@ -281,6 +303,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'live-paint-tests.json') -Destination (Join-Path $root 'live-paint-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-inspector.exe' @($work)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'inspector-tests.json') -Destination (Join-Path $root 'inspector-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-keyframe-controls.exe' @((Join-Path $work 'keyframe-controls'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'keyframe-controls/keyframe-controls-tests.json') -Destination (Join-Path $root 'keyframe-controls-tests.json') -Force
   $fadeControls = Join-Path $work 'fade-controls'
   Write-Host (Invoke-Native 'genesis-fade-controls.exe' @($fadeControls)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $fadeControls 'fade-controls-tests.json') -Destination (Join-Path $root 'fade-controls-tests.json') -Force

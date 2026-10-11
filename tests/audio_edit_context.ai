@@ -1,0 +1,121 @@
+module genesis.tests.audio_edit_context
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/timeline_media.ai" as media
+
+fn render(doc:ref<editor.Document>,worker:str,root:str,label:str) -> result<unit,string>
+ effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+ let prefix:string=path.join(root,label)
+ let encoded:string=match editor_io.encode(doc) {ok(value)=>value,err(_)=>{return result.err("encode failed")},}
+ let _=match files.write_text(text.concat(prefix,".air"),encoded) {ok(_)=>(),err(_)=>{return result.err("save failed")},}
+ let _=try media.prepare_audio(doc,worker,0,text.concat(prefix,".wav"))
+ if editor.duration(doc)>75 {
+  let _=try media.prepare_audio(doc,worker,75,text.concat(prefix,"-fresh.wav"))
+ }
+ var plan:media.AudioPlan=try media.audio_plan_range(doc,worker,0,editor.duration(doc),"unused.wav")
+ let _=match files.write_text(text.concat(prefix,".plan"),text.join(struct.borrow(plan,field=sounds),"\n")) {ok(_)=>(),err(_)=>{return result.err("plan failed")},}
+ var held:option<media.AudioSession> = option.none()
+ var first:i64=0
+ var pass:u64=0
+ var manifest:string=string.new()
+ loop {if first>=editor.duration(doc) {break}
+  let width:i64=if pass%3==0 {13}else if pass%3==1 {17}else{29}
+  let last:i64=if first+width<editor.duration(doc) {first+width}else{editor.duration(doc)}
+  let chunk:string=text.concat(prefix,text.concat("-pull-",text.concat(string.from_int(pass),".wav")))
+  let request:media.AudioPlan=try media.audio_plan_range(doc,worker,first,last,chunk)
+  var job:media.AudioJob=media.audio_job(request,ref.swap(held,option.none()))
+  match media.execute_playback_audio(job,"",0) {err(problem)=>{return result.err(problem)},ok(session)=>{let _=ref.swap(held,option.some(session))},}
+  string.append(manifest,chunk)
+  string.append(manifest,"\n")
+  first=last
+  pass=pass+1
+ }
+ match held {none=>{},some(session)=>{let _=try media.shutdown_audio_checked(session)},}
+ let _=match files.write_text(text.concat(prefix,"-pulls.txt"),manifest) {ok(_)=>(),err(_)=>{return result.err("pull manifest failed")},}
+ var index:u64=0
+ loop {if index>=editor.clip_count(doc) {break}
+  let clip:editor.Clip=option.unwrap(editor.clip_at(doc,index))
+  index=index+1
+  if clip.owner!=doc.active {continue}
+  let peaks:array<f64> =try media.clip_envelope(doc,clip,600,worker,prefix,"",0)
+  var values:array<string> = array.new()
+  var k:u64=0
+  loop {if k>=array.len(peaks) {break}
+   array.push(values,string.from_float(array.get(peaks,k)))
+   k=k+1
+  }
+  let _=match files.write_text(text.concat(prefix,text.concat("-peaks-",text.concat(string.from_int(clip.id),".txt"))),text.join(values,"\n")) {ok(_)=>(),err(_)=>{return result.err("peaks failed")},}
+ }
+ result.ok(())
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+ if view.len(args)!=3 and view.len(args)!=5 {return 2}
+ let worker:str=view.get(args,1)
+ let root:str=view.get(args,2)
+ if view.len(args)==5 {
+  if not str.eq(view.get(args,3),"--cancel") {return 2}
+  let start:i64=match text.parse_i64(view.get(args,4)) {none=>{return 2},some(v)=>v,}
+  let raw:string=match files.read_text(path.join(root,"cancel.air")) {ok(v)=>v,err(_)=>{return 2},}
+  var document:editor.Document=match editor_io.decode(raw) {ok(v)=>v,err(_)=>{return 2},}
+  let plan:media.AudioPlan=match media.audio_plan_range(document,worker,start,start+15,path.join(root,"cancelled.wav")) {ok(v)=>v,err(v)=>{io.write(v)
+   return 3},}
+  var job:media.AudioJob=media.audio_job(plan,option.none())
+  let answer:result<media.AudioSession,string> =media.execute_playback_audio(job,root,1)
+  match answer {ok(session)=>{let _=media.shutdown_audio_checked(session)
+    return 4},err(problem)=>{let _=files.write_text(path.join(root,"cancel-result.txt"),problem)
+    if text.contains(problem,"[GA_AUDIO_STREAM_CANCELLED]") {return 0}
+    io.write(problem)
+    return 5},}
+ }
+ let manifest:string=match files.read_text(path.join(root,"cases.tsv")) {ok(v)=>v,err(_)=>{return 2},}
+ var rows:array<string> =text.split(manifest,"\n")
+ var operations:string=string.new()
+ var i:u64=0
+ loop {if i>=array.len(rows) {break}
+  let name:str=text.trim(array.borrow(rows,i))
+  i=i+1
+  if str.len(name)==0 {continue}
+  let raw:string=match files.read_text(path.join(root,text.concat(name,".air"))) {ok(v)=>v,err(_)=>{return 2},}
+  var original:editor.Document=match editor_io.decode(raw) {ok(v)=>v,err(problem)=>{io.write("decode failed")
+   return 2},}
+  var split:editor.Document=editor.copy_document(original)
+  let right:u64=match editor.split(split,20,60) {none=>{io.write("split refused")
+   return 3},some(id)=>id,}
+  var head:editor.Document=editor.copy_document(original)
+  if not editor.trim_start(head,20,60) {io.write("head refused")
+   return 3}
+  var tail:editor.Document=editor.copy_document(original)
+  if not editor.trim_end(tail,20,60) {io.write("tail refused")
+   return 3}
+  let base:editor.Clip=option.unwrap(editor.clip(original,20))
+  let repeated_at:i64=if base.speed!=1.0 {74}else{75}
+  let moved_at:i64=if base.speed!=1.0 {62}else{61}
+  var repeated:editor.Document=editor.copy_document(split)
+  if not editor.trim_start(repeated,right,repeated_at) {io.write("repeated head refused")
+   return 3}
+  var moved:editor.Document=editor.copy_document(original)
+  if not editor.trim_start(moved,20,moved_at) {io.write("moved head refused")
+   return 3}
+  let moved_clip:editor.Clip=option.unwrap(editor.clip(moved,20))
+  if not editor.move_clip(moved,20,moved_clip.track,moved_at+2) {io.write("move refused")
+   return 3}
+  match render(original,worker,root,text.concat(name,"-original")) {ok(_)=>{},err(problem)=>{io.write(problem)
+   return 4},}
+  match render(split,worker,root,text.concat(name,"-split")) {ok(_)=>{},err(problem)=>{io.write(problem)
+   return 4},}
+  match render(head,worker,root,text.concat(name,"-head")) {ok(_)=>{},err(problem)=>{io.write(problem)
+   return 4},}
+  match render(tail,worker,root,text.concat(name,"-tail")) {ok(_)=>{},err(problem)=>{io.write(problem)
+   return 4},}
+  match render(repeated,worker,root,text.concat(name,"-repeated")) {ok(_)=>{},err(problem)=>{io.write(problem)
+   return 4},}
+  match render(moved,worker,root,text.concat(name,"-moved")) {ok(_)=>{},err(problem)=>{io.write(problem)
+   return 4},}
+  string.append(operations,name)
+  string.append(operations,"\tACCEPTED\n")
+ }
+ match files.write_text(path.join(root,"operations.tsv"),operations) {ok(_)=>0,err(_)=>2,}
+}

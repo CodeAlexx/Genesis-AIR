@@ -11,6 +11,7 @@ module genesis.chrome
 
 import std.application_theme as themes
 import std.editor as editor
+import std.curve as curve
 import std.text as text
 import std.editor_view as editor_view
 import std.timeline as timeline
@@ -139,6 +140,11 @@ pub fn act_param_set() -> u32 effects {} { 82 }
 pub fn act_param_toggle() -> u32 effects {} { 83 }
 pub fn act_param_reset() -> u32 effects {} { 84 }
 pub fn act_param_key() -> u32 effects {} { 85 }
+pub fn act_key_previous() -> u32 effects {} { 100 }
+pub fn act_key_next() -> u32 effects {} { 101 }
+pub fn act_key_delete() -> u32 effects {} { 102 }
+pub fn act_key_interp_previous() -> u32 effects {} { 103 }
+pub fn act_key_interp_next() -> u32 effects {} { 104 }
 
 pub fn act_menu() -> u32 effects {} { 90 }
 pub fn act_about() -> u32 effects {} { 91 }
@@ -890,7 +896,7 @@ fn animated_value(doc: ref<editor.Document>, clip: u64, param: str, fallback: f6
   fallback
 }
 
-fn param_row(out: ref<array<Control>>, area: layout.Rect, top: f64, domain: u32,
+fn param_row(doc: ref<editor.Document>, out: ref<array<Control>>, area: layout.Rect, top: f64, domain: u32,
              target: u64, kind: str, name: str, text: str, value: f64, low: f64,
              high: f64, step: f64, live: bool) -> f64 effects {alloc} {
   let bottom: f64 = top + row_height()
@@ -955,7 +961,56 @@ fn param_row(out: ref<array<Control>>, area: layout.Rect, top: f64, domain: u32,
   array.push(out, bar)
   array.push(out, up)
   array.push(out, key)
-  bottom
+  key_management_row(doc,out,area,bottom,domain,target,kind,name)
+}
+
+fn key_management_row(doc: ref<editor.Document>, out: ref<array<Control>>, area: layout.Rect,
+                      top: f64, domain: u32, target: u64, kind: str, name: str) -> f64 effects {alloc} {
+  if domain != domain_clip() and domain != domain_filter() {return top}
+  var clip: u64 = target
+  if domain == domain_filter() {
+    let slot: u64 = match editor.filter_slot(doc,target) {none=>{return top},some(value)=>value,}
+    clip=struct.get(array.borrow(struct.borrow(doc,field=filters),slot),field=clip)
+  }
+  let owner: editor.Clip = match editor.clip(doc,clip) {none=>{return top},some(value)=>value,}
+  let named: string = filter_keys.curve_name(doc,clip,if domain == domain_filter() {target}else{0},kind,name)
+  if not filter_keys.has(doc,clip,str.view(named)) {return top}
+  let local: i64 = editor.playhead(doc)-owner.start
+  let exact: option<editor.Key> = filter_keys.exact(doc,clip,str.view(named),local)
+  let current: u32 = match exact {none=>curve.linear(),some(point)=>point.interp,}
+  let present: bool = option.is_some(exact) and local >= 0 and local < owner.length
+  let locked: bool = editor.track_locked(doc,owner.track)
+  let held: bool = str.eq(kind,"blend") and str.eq(name,"mode")
+  var labels: array<string> = ["Prev key","Next key","Delete key","Ease <",
+    if present {curve.interp_name(current)}else{string.copy("Between keys")},"Ease >"]
+  var actions: array<u32> = [act_key_previous(),act_key_next(),act_key_delete(),
+    act_key_interp_previous(),act_none(),act_key_interp_next()]
+  let wide: f64 = math.max(1.0,layout.width_of(area)-8.0)
+  let edge: f64 = math.min(60.0,wide*0.23)
+  var i: u64 = 0
+  loop {if i == 6 {break}
+    let y: f64 = if i < 3 {top}else{top+row_height()}
+    let left: f64 = area.left+4.0+if i < 3 {wide*cast.float(i)/3.0}
+      else if i == 3 {0.0}else if i == 4 {edge}else{wide-edge}
+    let right: f64 = if i < 3 {left+wide/3.0}
+      else if i == 3 {left+edge}else if i == 4 {area.right-4.0-edge}else{area.right-4.0}
+    var item: Control = button(array.get(actions,i),str.view(array.borrow(labels,i)),
+      layout.rect(left,y+1.0,right-2.0,y+row_height()-1.0),false)
+    let nearby: bool = if i < 2 {option.is_some(filter_keys.neighbor(doc,clip,str.view(named),local,owner.length,i == 1))}else{false}
+    struct.set(item,if i < 2 {nearby}else{present and not locked and i != 4 and not (held and i >= 3)},field=enabled)
+    struct.set(item,domain,field=domain)
+    struct.set(item,target,field=target)
+    struct.set(item,cast.float(current),field=value)
+    let _=ref.swap(struct.borrow(item,field=kind),string.copy(kind))
+    let _=ref.swap(struct.borrow(item,field=name),string.copy(name))
+    // Reserve a separate interpolation row. The conservative cap bounds every
+    // English glyph even when the dock is narrowed; the full name is retained.
+    let label: str = str.view(array.borrow(labels,i))
+    struct.set(item,math.min(14.0,math.max(1.0,(right-left-10.0)/math.max(1.0,cast.float(str.len(label))))),field=size)
+    array.push(out,item)
+    i=i+1
+  }
+  top+row_height()*2.0
 }
 
 fn switch_row(out: ref<array<Control>>, area: layout.Rect, top: f64, action: u32,
@@ -1027,7 +1082,7 @@ fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
     let value: f64 = if id == 0 { base } else {
       filter_keys.value(doc,clip,id,kind,str.view(owned_name),editor.playhead(doc),base)
     }
-    cursor = param_row(out, area, cursor, domain_filter(), id, kind, str.view(owned_name),
+    cursor = param_row(doc, out, area, cursor, domain_filter(), id, kind, str.view(owned_name),
       str.view(owned_label), value, struct.get(spec, field=low),
       struct.get(spec, field=high), struct.get(spec, field=step), id != 0)
     index = index + 1
@@ -1108,16 +1163,16 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
     else { editor.filter_param(doc, blend_id, "mode", 0.0) }
   let blend_label: string = blend_name(blend_value)
   cursor = text_row(out, area, cursor, "Mode", str.view(blend_label))
-  cursor = param_row(out, area, cursor, domain_filter(), blend_id, "blend", "mode", "Blend mode",
+  cursor = param_row(doc, out, area, cursor, domain_filter(), blend_id, "blend", "mode", "Blend mode",
     blend_value, 0.0, 11.0, 1.0, blend_id != 0)
 
   cursor = heading(out, area, cursor, "FADES")
   match editor.clip(doc, clip) {
     none => { },
     some(value) => {
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "fade_in", "Fade in",
+      cursor = param_row(doc, out, area, cursor, domain_clip(), clip, "", "fade_in", "Fade in",
         math.max(0.0,animated_value(doc,clip,"fade_in",cast.float(value.fade_in))), 0.0, 240.0, 1.0, clip != 0)
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "fade_out", "Fade out",
+      cursor = param_row(doc, out, area, cursor, domain_clip(), clip, "", "fade_out", "Fade out",
         math.max(0.0,animated_value(doc,clip,"fade_out",cast.float(value.fade_out))), 0.0, 240.0, 1.0, clip != 0)
     },
   }
@@ -1126,7 +1181,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
   match editor.clip(doc, clip) {
     none => { },
     some(value) => {
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "speed", "Rate",
+      cursor = param_row(doc, out, area, cursor, domain_clip(), clip, "", "speed", "Rate",
         value.speed, 0.1, 4.0, 0.05, clip != 0)
       cursor = switch_row(out, area, cursor, act_param_toggle(), domain_clip(), clip, "",
         "reverse", "Reverse", value.reverse)
@@ -1138,7 +1193,7 @@ pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Contr
     match editor.clip(doc, audio_clip) {
       none => { },
       some(value) => {
-        cursor = param_row(out, area, cursor, domain_clip(), audio_clip, "", "gain", "Audio gain",
+        cursor = param_row(doc, out, area, cursor, domain_clip(), audio_clip, "", "gain", "Audio gain",
           audio_gain_value(doc, audio_clip, value.gain),
           0.0, 4.0, 0.05, audio_clip != 0)
       },
@@ -1392,9 +1447,9 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
       if not available { index = index + 1
         continue }
       cursor = heading(out, area, cursor, str.view(title))
-      cursor = param_row(out, area, cursor, domain_track(), id, "", "gain", "Gain",
+      cursor = param_row(doc, out, area, cursor, domain_track(), id, "", "gain", "Gain",
         editor.track_gain(doc, id), 0.0, 2.0, 0.05, available)
-      cursor = param_row(out, area, cursor, domain_track(), id, "", "pan", "Pan",
+      cursor = param_row(doc, out, area, cursor, domain_track(), id, "", "pan", "Pan",
         editor.track_pan(doc, id), -1.0, 1.0, 0.05, available)
       let top: f64 = cursor
       let half: f64 = (area.left + area.right) * 0.5
@@ -1428,10 +1483,10 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
   if clip_has_audio(doc, clip) {
     cursor = heading(out, area, cursor, "SELECTED CLIP AUDIO")
     match editor.clip(doc, clip) { none => {}, some(value) => {
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "gain", "Clip gain",
+      cursor = param_row(doc, out, area, cursor, domain_clip(), clip, "", "gain", "Clip gain",
         audio_gain_value(doc, clip, value.gain),
         0.0, 4.0, 0.05, true)
-      cursor = param_row(out, area, cursor, domain_clip(), clip, "", "pan", "Clip pan", value.pan, -1.0, 1.0, 0.05, true)
+      cursor = param_row(doc, out, area, cursor, domain_clip(), clip, "", "pan", "Clip pan", value.pan, -1.0, 1.0, 0.05, true)
     }, }
     cursor = kind_section(out, area, cursor, doc, clip, "eq_3band",0)
     var kinds: array<string> = audio_kinds()

@@ -497,8 +497,6 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     string.append(asking, ":  ")
     string.append(asking, str.view(app.prompt_text(state)))
     label(canvas, struct.borrow(state, field=typography), 8.0, area.top + 6.0, str.view(asking), type_title(), colors.accent)
-    let caret: f64 = 8.0 + ui_text.width(struct.borrow(state, field=typography), str.view(asking), type_title()) + 2.0
-    fill_at(canvas, caret, area.top + 5.0, caret + 5.0, area.top + 14.0, colors.accent)
     label(canvas, struct.borrow(state, field=typography), area.right - 260.0, area.top + 6.0,
       "Enter to accept    Escape to cancel", type_small(), colors.dim)
     return ()
@@ -533,6 +531,33 @@ pub fn prompt_bounds(state:ref<app.App>,width:f64,height:f64) -> layout.Rect eff
   let top:f64=(height-span)*0.5
   layout.rect(box.left,top,box.right,top+span)
 }
+pub fn prompt_field(state:ref<app.App>,width:f64,height:f64) -> layout.Rect effects {} {
+  let box:layout.Rect=prompt_bounds(state,width,height)
+  layout.rect(box.left+18.0,box.top+48.0,box.right-18.0,
+    if app.prompt_multiline(state) {box.bottom-48.0}else{box.top+84.0})
+}
+fn prompt_slots(state:ref<app.App>,field:layout.Rect) -> u64 effects {} {
+  if app.prompt_multiline(state) {cast.sat(math.max(1.0,math.floor((layout.height_of(field)-16.0)/22.0)))}else{1}
+}
+// Paint and pointer hit testing share row origins, font metrics and scrolling.
+pub fn prompt_offset(state:ref<app.App>,width:f64,height:f64,x:f64,y:f64) -> u64 effects {alloc} {
+  let field:layout.Rect=prompt_field(state,width,height)
+  let slots:u64=prompt_slots(state,field)
+  app.prompt_keep_visible(state,layout.width_of(field)-20.0,slots)
+  let whole:string=app.prompt_text(state)
+  let value:str=str.view(whole)
+  var row:u64=app.prompt_first_row(state)+cast.sat(math.max(0.0,math.min(cast.float(slots-1),math.floor((y-field.top-7.0)/22.0))))
+  if app.prompt_dragging(state) and app.prompt_multiline(state) {
+    if y<field.top and app.prompt_first_row(state)>0 {row=app.prompt_first_row(state)-1}
+    if y>field.bottom {row=app.prompt_first_row(state)+slots}
+  }
+  let total:u64=app.prompt_row(value,str.len(value))
+  if row>total {row=total}
+  let start:u64=app.prompt_row_start(value,row)
+  let end:u64=app.prompt_line_end(value,start)
+  let local:f64=x-field.left-8.0+app.prompt_scroll_x(state)
+  start+ui_text.offset_at_x(struct.borrow(state,field=typography),str.slice(value,start,end),type_body(),local)
+}
 fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                 width: f64, height: f64) -> unit effects {alloc} {
   if not app.prompt_active(state) { return () }
@@ -544,34 +569,40 @@ fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   outline(canvas, box, colors.focus)
   var title: string = app.prompt_label(state)
   label(canvas, struct.borrow(state, field=typography), box.left + 18.0, box.top + 18.0, str.view(title), type_title(), colors.text)
-  let field: layout.Rect = layout.rect(box.left + 18.0, box.top + 48.0,
-    box.right - 18.0, if multiline {box.bottom-48.0}else{box.top+84.0})
+  let field: layout.Rect = prompt_field(state,width,height)
   fill(canvas, field, colors.background)
   outline(canvas, field, colors.edge)
   var whole: string = app.prompt_text(state)
-  let capacity: u64 = fits(layout.width_of(field) - 24.0, type_body())
-  var rows:array<string> =if multiline {text.split(str.view(whole),"\n")}else{[string.copy(str.view(whole))]}
-  let total:u64=array.len(rows)
+  let value:str=str.view(whole)
+  let total:u64=app.prompt_row(value,str.len(value))+1
   let row_height:f64=22.0
-  let slots:u64=if multiline {cast.sat(math.max(1.0,math.floor((layout.height_of(field)-16.0)/row_height)))}else{1}
-  let first_row:u64=if total>slots {total-slots}else{0}
+  let slots:u64=prompt_slots(state,field)
+  app.prompt_keep_visible(state,layout.width_of(field)-20.0,slots)
+  let first_row:u64=app.prompt_first_row(state)
+  let caret:u64=app.prompt_caret(state)
+  let anchor:u64=app.prompt_anchor(state)
+  let lo:u64=if caret<anchor {caret}else{anchor}
+  let hi:u64=if caret>anchor {caret}else{anchor}
+  let origin:f64=field.left+8.0-app.prompt_scroll_x(state)
   let saved:draw.State=draw.state(canvas)
   match geometry.rect(field.left+1.0,field.top+1.0,field.right-1.0,field.bottom-1.0) {none=>{},some(area)=>{let _=draw.clip_rect(canvas,area)},}
   var row:u64=first_row
-  loop {if row>=total {break}
-    let line:str=str.view(array.borrow(rows,row))
-    let count:u64=str.len(line)
-    let first:u64=if count>capacity {font.cluster_start(line,count-capacity)}else{0}
-    let visible:str=str.slice(line,first,count)
-    let shown:f64=math.min(layout.width_of(field)-16.0,ui_text.width(struct.borrow(state,field=typography),visible,type_body()))
+  loop {if row>=total or row-first_row>=slots {break}
+    let start:u64=app.prompt_row_start(value,row)
+    let end:u64=app.prompt_line_end(value,start)
+    let line:str=str.slice(value,start,end)
     let top:f64=field.top+cast.float(row-first_row)*row_height
-    if app.prompt_selected_all(state) and (count>0 or row+1<total) {
-      fill_at(canvas,field.left+7.0,top+7.0,field.left+9.0+shown,top+29.0,colors.focus)
+    if hi>start and lo<=end and lo<hi {
+      let left:u64=if lo>start {lo-start}else{0}
+      let right:u64=if hi<end {hi-start}else{end-start}
+      let from:f64=origin+ui_text.caret_x(struct.borrow(state,field=typography),line,type_body(),left)
+      let to:f64=origin+ui_text.caret_x(struct.borrow(state,field=typography),line,type_body(),right)+if hi>end {5.0}else{0.0}
+      fill_at(canvas,from,top+7.0,to,top+29.0,colors.focus)
     }
-    label(canvas,struct.borrow(state,field=typography),field.left+8.0,top+11.0,visible,type_body(),colors.text)
-    if row+1==total and not app.prompt_selected_all(state) {
-      let caret:f64=field.left+8.0+shown
-      fill_at(canvas,caret,top+8.0,caret+2.0,top+29.0,colors.accent)
+    label(canvas,struct.borrow(state,field=typography),origin,top+11.0,line,type_body(),colors.text)
+    if caret>=start and caret<=end {
+      let x:f64=origin+ui_text.caret_x(struct.borrow(state,field=typography),line,type_body(),caret-start)
+      fill_at(canvas,x,top+8.0,x+2.0,top+29.0,colors.accent)
     }
     row=row+1
   }

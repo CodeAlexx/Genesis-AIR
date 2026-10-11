@@ -7,6 +7,7 @@ BLOCKED, not passed, when the worker or a fixture is missing.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -272,7 +273,14 @@ def headless(airc, stdlib):
         # The saved project is the AIR editor schema, not a Genesis-only invention.
         stored = json.loads((root / "project.air").read_text())
         assert stored["schema"] == "air.editor.project", stored["schema"]
-        assert stored["revision"] == 2, stored["revision"]
+        contexts = [(clip, clip["audio_context"]) for clip in stored["clips"]
+                    if "audio_context" in clip]
+        assert stored["revision"] == (3 if contexts else 2), stored["revision"]
+        for clip, context in contexts:
+            sample = lambda frame: math.floor(frame * 48000 / context["fps"] + 0.5)
+            assert 0 <= context["offset"] <= context["length"] - clip["length"]
+            assert context["crop_start"] == sample(context["origin"] + context["offset"]) - sample(context["origin"])
+            assert context["output_frames"] == sample(context["origin"] + context["length"]) - sample(context["origin"])
         assert len(stored["filter_text_params"]) == 1
         assert stored["filter_text_params"][0]["name"] == "caption"
         assert stored["filter_text_params"][0]["value"] == "AIR title"
@@ -395,6 +403,27 @@ def main():
         print(f"BLOCKED: {stdlib} has no std.editor", file=sys.stderr)
         return 1
 
+    with TemporaryDirectory(prefix="genesis-audio-context-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "audio_context.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "audio-context-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  audio context: {report['checks']} shared model/codec checks")
+    with TemporaryDirectory(prefix="genesis-keyframe-controls-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "keyframe_controls.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "keyframe-controls-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  keyframe controls: {report['checks']} shared UI/controller checks")
+    with TemporaryDirectory(prefix="genesis-snap-controls-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "snap_controls.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "snap-controls-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  snap controls: {report['checks']} shared pointer/transaction checks")
     headless(airc, stdlib)
     controls(airc, stdlib)
 
@@ -418,6 +447,17 @@ def main():
         real_blocked = True
     else:
         gcompose_smoke(airc, binary, stdlib, worker, Path(args.media))
+        with TemporaryDirectory(prefix="genesis-nested-edit-context-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib))
+            client = Path(temporary) / "genesis-audio-nested-edit-context"
+            done = run([airc, "build", HERE / "audio_nested_edit_context.ai",
+                        "--mode", "release", "-o", client], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            done = run([sys.executable, HERE / "audio_nested_edit_context.py",
+                        "--client", client, "--worker", worker.resolve(),
+                        "--report", Path(temporary) / "audio-nested-edit-context.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  nested edit context: 16 PCM and waveform cases")
 
     print("genesis-air: tests complete")
     return 1 if args.media and real_blocked else 0

@@ -169,7 +169,7 @@ fn recorder_lifecycle(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.
   let _=test.eq_str(suite,after_restart,after_stop,"Restart leaves the earlier completed trace immutable")
   let unwritable:string=path.join(root,"append-directory")
   let _=files.mkdirs(unwritable)
-  var broken:profile.Profile =profile.Profile {enabled:true,path:string.copy(unwritable),pending:string.new(),rows:0,buffered:0,previous_ns:0}
+  var broken:profile.Profile =profile_for_test(unwritable,true,0,0)
   let _=profile.record_checked(broken,row)
   let error:bool=match profile.stop(broken) {ok(_)=>false,err(problem)=>text.contains(problem,"[GA_WINDOW_PROFILE_WRITE]"),}
   let _=test.check(suite,error and not broken.enabled and broken.buffered==0,"Actual append failure is coded and retires the recorder without retrying a partial write")
@@ -179,6 +179,164 @@ fn recorder_lifecycle(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.
   let _=test.done(suite)
   ()
 }
+
+fn profile_for_test(target:str,enabled:bool,count:u64,previous:u64) -> profile.Profile effects {alloc} {
+  var out:profile.Profile=profile.idle()
+  struct.set(out,enabled,field=enabled)
+  let _=struct.replace(out,string.copy(target),field=path)
+  struct.set(out,count,field=rows)
+  struct.set(out,previous,field=previous_ns)
+  out
+}
+fn changed_observation(row:ref<profile.Row>,at:u64) -> unit effects {} {
+  if at==0 {struct.set(row,7,field=program)}
+  if at==1 {struct.set(row,7,field=source)}
+  if at==2 {struct.set(row,7,field=heard_before)}
+  if at==3 {struct.set(row,7,field=heard_after)}
+  if at==4 {struct.set(row,7,field=samples_before)}
+  if at==5 {struct.set(row,7,field=samples_after)}
+  if at==6 {struct.set(row,7,field=queued_before)}
+  if at==7 {struct.set(row,7,field=queued_after)}
+  if at==8 {struct.set(row,7,field=origin)}
+  if at==9 {struct.set(row,59.94,field=fps)}
+  if at==10 {struct.set(row,7,field=last)}
+  if at==11 {struct.set(row,true,field=source_mode)}
+  if at==12 {struct.set(row,true,field=playing)}
+  if at==13 {struct.set(row,true,field=clock_ok)}
+  if at==14 {struct.set(row,true,field=present_ok)}
+  if at==15 {struct.set(row,7,field=revision)}
+  if at==16 {struct.set(row,7,field=media_revision)}
+  if at==17 {struct.set(row,7,field=width)}
+  if at==18 {struct.set(row,7,field=height)}
+  if at==19 {struct.set(row,7,field=prepared)}
+  if at==20 {struct.set(row,7,field=snapshot)}
+  if at==21 {struct.set(row,7,field=rebuilds)}
+  if at==22 {struct.set(row,7,field=strips)}
+  if at==23 {struct.set(row,7,field=inputs)}
+  if at==24 {struct.set(row,7,field=prepared_first)}
+  if at==25 {struct.set(row,7,field=prepared_last)}
+  if at==26 {struct.set(row,7,field=requested_frame)}
+  if at==27 {struct.set(row,7,field=in_flight)}
+  if at==28 {struct.set(row,7,field=received)}
+  if at==29 {struct.set(row,7,field=completed)}
+  if at==30 {struct.set(row,7,field=overwritten)}
+  if at==31 {struct.set(row,7,field=window_first_id)}
+  if at==32 {struct.set(row,7,field=window_last_id)}
+  if at==33 {struct.set(row,7,field=window_first_frame)}
+  if at==34 {struct.set(row,7,field=window_last_frame)}
+  if at==35 {struct.set(row,7,field=window_count)}
+  if at==36 {struct.set(row,7,field=owned_credit)}
+  if at==37 {struct.set(row,7,field=reserved_credit)}
+  ()
+}
+fn recorder_retention(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
+  let _=test.start(suite,"Native observations survive semantic poll retention and exact heartbeat")
+  let target:string=path.join(root,"retained-observations.tsv")
+  var measure:profile.Profile=match profile.start_at(target,true) {ok(value)=>value,err(_)=>profile.idle(),}
+  var row:profile.Row=profile.row()
+  struct.set(row,100,field=begin)
+  struct.set(row,200,field=end)
+  let _=profile.record_buffered_checked(measure,row)
+  struct.set(row,300,field=begin)
+  struct.set(row,400,field=end)
+  struct.set(row,99,field=wait)
+  struct.set(row,88,field=signature)
+  let _=profile.record_buffered_checked(measure,row)
+  let _=test.eq_u64(suite,measure.rows,1,"An identical poll with different loop/wait/signature timings spends no row")
+  struct.set(row,16000199,field=end)
+  let _=profile.record_buffered_checked(measure,row)
+  let _=test.eq_u64(suite,measure.rows,1,"Identical state at 16ms minus one nanosecond remains compact")
+  struct.set(row,16000200,field=end)
+  let _=profile.record_buffered_checked(measure,row)
+  let _=test.eq_u64(suite,measure.rows,2,"Exact 16ms heartbeat retains the unchanged observation")
+  struct.set(row,100,field=end)
+  let _=profile.record_buffered_checked(measure,row)
+  let _=test.eq_u64(suite,measure.rows,3,"Backward timestamps are retained rather than hidden or subtracted unsigned")
+  let _=profile.record_buffered_checked(measure,row)
+  let _=test.eq_u64(suite,measure.rows,4,"Equal timestamps remain visible for malformed/synthetic clock diagnostics")
+  let _=profile.stop(measure)
+  let trace:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  var lines:array<string> =text.split(trace,"\n")
+  let _=test.check(suite,array.len(lines)==6,"Stop flushes exactly the retained rows plus unchanged header")
+  if array.len(lines)>1 {
+    var columns:array<string> =text.split(array.borrow(lines,1),"\t")
+    let _=test.eq_u64(suite,array.len(columns),46,"Retention leaves every existing trace column intact")}
+  var at:u64=0
+  loop {if at>=38 {break}
+    var sample:profile.Profile=profile_for_test("",true,0,0)
+    var first:profile.Row=profile.row()
+    struct.set(first,1000,field=end)
+    let _=profile.record_buffered_checked(sample,first)
+    var changed:profile.Row=profile.row()
+    struct.set(changed,1001,field=end)
+    changed_observation(changed,at)
+    let _=profile.record_buffered_checked(sample,changed)
+    let label:string=text.concat("Semantic field retained: ",string.from_int(at))
+    let _=test.eq_u64(suite,sample.rows,2,label)
+    // Every field returns to the prior value; compare against the last retained
+    // state, including counters, not a historical maximum or the latest poll.
+    struct.set(first,1002,field=end)
+    let _=profile.record_buffered_checked(sample,first)
+    let _=test.eq_u64(suite,sample.rows,3,"Returning semantic value is retained, including decreasing counters")
+    at=at+1}
+  var mandatory:profile.Profile=profile_for_test("",true,0,0)
+  var observation:profile.Row=profile.row()
+  struct.set(observation,100,field=present_begin)
+  struct.set(observation,200,field=present_end)
+  // False clock and false present success must not filter a real attempt.
+  struct.set(observation,300,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  struct.set(observation,301,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  let _=test.eq_u64(suite,mandatory.rows,2,"Repeated shown-frame failed present attempts with clock false are always retained")
+  struct.set(observation,0,field=present_begin)
+  struct.set(observation,0,field=present_end)
+  struct.set(observation,0,field=heard_before)
+  struct.set(observation,0,field=heard_after)
+  struct.set(observation,302,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  struct.set(observation,303,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  let _=test.eq_u64(suite,mandatory.rows,4,"Sampled frame zero survives even with false clock and zero device counts")
+  struct.set(observation,-1,field=heard_before)
+  struct.set(observation,-1,field=heard_after)
+  struct.set(observation,481,field=samples_before)
+  struct.set(observation,304,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  struct.set(observation,305,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  let _=test.eq_u64(suite,mandatory.rows,6,"Unsuccessful clock with actual sampled values is never coalesced")
+  struct.set(observation,0,field=samples_before)
+  struct.set(observation,1,field=inputs)
+  struct.set(observation,306,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  struct.set(observation,307,field=end)
+  let _=profile.record_buffered_checked(mandatory,observation)
+  let _=test.eq_u64(suite,mandatory.rows,8,"Repeated input counts represent distinct input batches and always survive")
+  var zero_sample:profile.Row=profile.row()
+  struct.set(zero_sample,true,field=clock_sampled)
+  struct.set(zero_sample,308,field=end)
+  let _=profile.record_buffered_checked(mandatory,zero_sample)
+  struct.set(zero_sample,309,field=end)
+  let _=profile.record_buffered_checked(mandatory,zero_sample)
+  let _=test.eq_u64(suite,mandatory.rows,10,"Actual-query marker keeps failed zero-valued samples with both heard frames unavailable")
+
+  let _=test.done(suite)
+  let _=test.start(suite,"High-frequency idle polls retain 130 seconds without consuming the fixed row cap")
+  var sustained:profile.Profile=profile_for_test("",true,0,0)
+  var poll:profile.Row=profile.row()
+  at=0
+  loop {if at>=130000 {break}
+    struct.set(poll,at*1000000,field=begin)
+    struct.set(poll,at*1000000+999999,field=end)
+    let _=profile.record_buffered_checked(sustained,poll)
+    at=at+1}
+  let _=test.eq_u64(suite,sustained.rows,8125,"One-kilohertz identical polls retain the exact predetermined 16ms heartbeat count")
+  let _=test.check(suite,sustained.enabled and sustained.rows<50000,"The unchanged cap remains available beyond the strict 120-second minimum")
+  let _=test.done(suite)
+  ()
+}
+
 fn recorder_stop_order(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
   let _=test.start(suite,"Buffered Stop/cap rows publish only after simulated audio retirement")
   // Component sequencing proof, not a physical waveOut/device observation.
@@ -339,7 +497,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _ = test.start(suite,"Native profile writer keeps field order, bounded output and disabled silence")
   let diagnostic: string = path.join(root,"profile-writer.tsv")
   let _ = files.write_text(diagnostic,"")
-  var measure: profile.Profile = profile.Profile {enabled:true,path:string.copy(diagnostic),pending:string.new(),rows:49999,buffered:0,previous_ns:321}
+  var measure: profile.Profile = profile_for_test(diagnostic,true,49999,321)
   var row: profile.Row = profile.row()
   struct.set(row,11,field=begin)
   struct.set(row,22,field=present_begin)
@@ -389,14 +547,14 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let unchanged: string = match files.read_text(diagnostic) {ok(value)=>value,err(_)=>string.new(),}
   let _ = test.check(suite,report == unchanged,"Over-cap rows cannot append or grow output")
   let disabled: string = path.join(root,"disabled-profile.tsv")
-  var inactive: profile.Profile = profile.Profile {enabled:false,path:string.copy(disabled),pending:string.new(),rows:0,buffered:0,previous_ns:0}
+  var inactive: profile.Profile = profile_for_test(disabled,false,0,0)
   profile.record(inactive,row)
   profile.flush(inactive)
   let exists: bool = match files.exists(disabled) {ok(value)=>value,err(_)=>false,}
   let _ = test.check(suite,not exists and inactive.rows == 0,"Disabled profile never creates a file or records rows")
   let poll_path: string = path.join(root,"profile-poll.tsv")
   let _ = files.write_text(poll_path,"")
-  var poll_measure: profile.Profile = profile.Profile {enabled:true,path:string.copy(poll_path),pending:string.new(),rows:0,buffered:0,previous_ns:0}
+  var poll_measure: profile.Profile = profile_for_test(poll_path,true,0,0)
   var poll_row: profile.Row = profile.row()
   profile.context(poll_row,false,true,1234,60.0,18007,22,33)
   profile.record(poll_measure,poll_row)
@@ -412,5 +570,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _ = test.done(suite)
   recorder_lifecycle(suite,root)
   recorder_stop_order(suite,root)
-  test.conclude(suite,path.join(root,"window-cache-tests.json"),10)
+  recorder_retention(suite,root)
+  test.conclude(suite,path.join(root,"window-cache-tests.json"),12)
 }

@@ -78,7 +78,8 @@ pub fn drag() -> Drag effects {} {
 
 
 // A modal draft owns its opening target; selection is independent view state.
-pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string, selected_all: bool,
+pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string,
+  caret:u64,anchor:u64,first_row:u64,scroll_x:f64,goal_x:f64,dragging:bool,
   target_filter:u64,target_clip:u64,target_sequence:u64,target_project:u64,
   target_kind:string,original:string,multiline:bool }
 
@@ -176,7 +177,8 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
     clipboard: option.none(), clipboard_peer:option.none(), clipboard_resource_valid: false,
     gesture: drag(),
-    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), selected_all: false,
+    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(),
+      caret:0,anchor:0,first_row:0,scroll_x:0.0,goal_x:-1.0,dragging:false,
       target_filter:0,target_clip:0,target_sequence:0,target_project:0,
       target_kind:string.new(),original:string.new(),multiline:false},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
@@ -492,24 +494,35 @@ pub fn prompt_text(state: ref<App>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(struct.borrow(state, field=prompt), field=buffer)))
 }
 pub fn prompt_selected_all(state: ref<App>) -> bool effects {} {
-  struct.get(struct.borrow(state, field=prompt), field=selected_all)
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  str.len(str.view(struct.borrow(asking,field=buffer)))>0 and
+    math.min(cast.float(asking.caret),cast.float(asking.anchor))==0.0 and
+    math.max(cast.float(asking.caret),cast.float(asking.anchor))==cast.float(str.len(str.view(struct.borrow(asking,field=buffer))))
 }
 pub fn prompt_select_all(state: ref<App>) -> unit effects {} {
-  if prompt_active(state) { struct.set(struct.borrow(state, field=prompt), true, field=selected_all) }
+  if prompt_active(state) {
+    let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+    struct.set(asking,0,field=anchor)
+    struct.set(asking,str.len(str.view(struct.borrow(asking,field=buffer))),field=caret)
+    struct.set(asking,-1.0,field=goal_x)
+  }
   ()
 }
 pub fn prompt_delete_selection(state: ref<App>) -> unit effects {alloc} {
-  if not prompt_active(state) or not prompt_selected_all(state) { return () }
-  let asking: ref<Prompt> = struct.borrow(state, field=prompt)
-  let _ = ref.swap(struct.borrow(asking, field=buffer), string.new())
-  struct.set(asking, false, field=selected_all)
+  if not prompt_active(state) or prompt_caret(state)==prompt_anchor(state) { return () }
+  prompt_replace(state,"")
   ()
 }
 pub fn begin_prompt(state: ref<App>, action: u32, label: str, seed: str) -> unit effects {alloc} {
   let asking: ref<Prompt> = struct.borrow(state, field=prompt)
   struct.set(asking, true, field=active)
   struct.set(asking, action, field=action)
-  struct.set(asking, false, field=selected_all)
+  struct.set(asking,str.len(seed),field=caret)
+  struct.set(asking,str.len(seed),field=anchor)
+  struct.set(asking,0,field=first_row)
+  struct.set(asking,0.0,field=scroll_x)
+  struct.set(asking,-1.0,field=goal_x)
+  struct.set(asking,false,field=dragging)
   struct.set(asking,0,field=target_filter)
   struct.set(asking,0,field=target_clip)
   struct.set(asking,0,field=target_sequence)
@@ -562,31 +575,164 @@ pub fn prompt_target_valid(state:ref<App>) -> bool effects {alloc} {
     if asking.multiline {"content"}else{"path"},"")
   str.eq(str.view(content),str.view(struct.borrow(asking,field=original)))
 }
+pub fn prompt_caret(state:ref<App>) -> u64 effects {} {state.prompt.caret}
+pub fn prompt_anchor(state:ref<App>) -> u64 effects {} {state.prompt.anchor}
+pub fn prompt_first_row(state:ref<App>) -> u64 effects {} {state.prompt.first_row}
+pub fn prompt_scroll_x(state:ref<App>) -> f64 effects {} {state.prompt.scroll_x}
+pub fn prompt_dragging(state:ref<App>) -> bool effects {} {state.prompt.dragging}
+pub fn prompt_line_start(value:str,at:u64) -> u64 effects {} {
+  var cursor:u64=if at>str.len(value) {str.len(value)}else{at}
+  loop {if cursor==0 {break}
+    if view.get(str.bytes(value),cursor-1)==10 {break}
+    cursor=cursor-1}
+  cursor
+}
+pub fn prompt_line_end(value:str,at:u64) -> u64 effects {} {
+  var cursor:u64=if at>str.len(value) {str.len(value)}else{at}
+  loop {if cursor>=str.len(value) {break}
+    if view.get(str.bytes(value),cursor)==10 {break}
+    cursor=cursor+1}
+  cursor
+}
+pub fn prompt_row(value:str,at:u64) -> u64 effects {} {
+  let limit:u64=if at>str.len(value) {str.len(value)}else{at}
+  var cursor:u64=0
+  var row:u64=0
+  loop {if cursor>=limit {break}
+    if view.get(str.bytes(value),cursor)==10 {row=row+1}
+    cursor=cursor+1}
+  row
+}
+pub fn prompt_row_start(value:str,row:u64) -> u64 effects {} {
+  var cursor:u64=0
+  var found:u64=0
+  loop {if cursor>=str.len(value) or found>=row {break}
+    if view.get(str.bytes(value),cursor)==10 {found=found+1}
+    cursor=cursor+1}
+  cursor
+}
+fn prompt_replace(state:ref<App>,insert:str) -> unit effects {alloc} {
+  let current:string=prompt_text(state)
+  let caret:u64=prompt_caret(state)
+  let anchor:u64=prompt_anchor(state)
+  let lo:u64=if caret<anchor {caret}else{anchor}
+  let hi:u64=if caret>anchor {caret}else{anchor}
+  var built:string=string.copy(str.slice(str.view(current),0,lo))
+  string.append(built,insert)
+  string.append(built,str.slice(str.view(current),hi,str.len(str.view(current))))
+  // Combining text may join the preceding cluster: leave the insertion caret
+  // on a complete supported std.font cluster, never within the joined mark.
+  let boundary:u64=lo+str.len(insert)
+  let start:u64=font.cluster_start(str.view(built),boundary)
+  let at:u64=if start==boundary {boundary}else{font.cluster_end(str.view(built),start)}
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  let _=ref.swap(struct.borrow(asking,field=buffer),built)
+  struct.set(asking,at,field=caret)
+  struct.set(asking,at,field=anchor)
+  struct.set(asking,-1.0,field=goal_x)
+  ()
+}
+pub fn prompt_delete(state:ref<App>) -> unit effects {alloc} {
+  if not prompt_active(state) {return ()}
+  if prompt_caret(state)!=prompt_anchor(state) {prompt_delete_selection(state)
+    return ()}
+  let current:string=prompt_text(state)
+  let at:u64=prompt_caret(state)
+  if at>=str.len(str.view(current)) {return ()}
+  struct.set(struct.borrow(state,field=prompt),font.cluster_end(str.view(current),at),field=anchor)
+  prompt_replace(state,"")
+}
+// Directions: left/right, line Home/End, previous/next line. Control changes
+// Home/End to the document endpoints. The caller retains modal key policy.
+pub fn prompt_move(state:ref<App>,direction:u32,control:bool,extend:bool) -> unit effects {alloc} {
+  if not prompt_active(state) {return ()}
+  let current:string=prompt_text(state)
+  let value:str=str.view(current)
+  let caret:u64=prompt_caret(state)
+  let anchor:u64=prompt_anchor(state)
+  var next:u64=caret
+  let start:u64=prompt_line_start(value,caret)
+  let stop:u64=prompt_line_end(value,caret)
+  if direction<=1 {
+    if not extend and caret!=anchor {next=if direction==0 {if caret<anchor {caret}else{anchor}}else{if caret>anchor {caret}else{anchor}}}
+    else {next=if direction==0 {font.cluster_before(value,caret)}else{font.cluster_end(value,caret)}}
+  }else if direction==2 {next=if control {0}else{start}}
+  else if direction==3 {next=if control {str.len(value)}else{stop}}
+  else if direction==4 or direction==5 {
+    if not prompt_multiline(state) {return ()}
+    var goal:f64=state.prompt.goal_x
+    if goal<0.0 {goal=ui_text.caret_x(struct.borrow(state,field=typography),str.slice(value,start,stop),10.0,caret-start)}
+    var other:u64=start
+    if direction==4 and start>0 {other=prompt_line_start(value,start-1)}
+    if direction==5 and stop<str.len(value) {other=stop+1}
+    let end:u64=prompt_line_end(value,other)
+    next=other+ui_text.offset_at_x(struct.borrow(state,field=typography),str.slice(value,other,end),10.0,goal)
+    struct.set(struct.borrow(state,field=prompt),goal,field=goal_x)
+  }
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  struct.set(asking,next,field=caret)
+  if not extend {struct.set(asking,next,field=anchor)}
+  if direction<4 {struct.set(asking,-1.0,field=goal_x)}
+  ()
+}
+pub fn prompt_pointer(state:ref<App>,offset:u64,extend:bool) -> unit effects {alloc} {
+  let current:string=prompt_text(state)
+  let at:u64=font.cluster_start(str.view(current),offset)
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  struct.set(asking,at,field=caret)
+  if not extend {struct.set(asking,at,field=anchor)}
+  struct.set(asking,-1.0,field=goal_x)
+  struct.set(asking,true,field=dragging)
+  ()
+}
+pub fn prompt_release(state:ref<App>) -> unit effects {} {struct.set(struct.borrow(state,field=prompt),false,field=dragging)
+  ()}
+pub fn prompt_keep_visible(state:ref<App>,width:f64,rows:u64) -> unit effects {alloc} {
+  let current:string=prompt_text(state)
+  let caret:u64=prompt_caret(state)
+  let row:u64=prompt_row(str.view(current),caret)
+  let slots:u64=if rows==0 {1}else{rows}
+  var first:u64=prompt_first_row(state)
+  if row<first {first=row}
+  if row-first>=slots {first=row-slots+1}
+  let start:u64=prompt_line_start(str.view(current),caret)
+  let stop:u64=prompt_line_end(str.view(current),caret)
+  let x:f64=ui_text.caret_x(struct.borrow(state,field=typography),str.slice(str.view(current),start,stop),10.0,caret-start)
+  var scroll:f64=prompt_scroll_x(state)
+  let span:f64=math.max(1.0,width)
+  if x<scroll {scroll=x}
+  if x>scroll+span {scroll=x-span}
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  struct.set(asking,first,field=first_row)
+  struct.set(asking,scroll,field=scroll_x)
+  ()
+}
 pub fn prompt_push(state: ref<App>, text: str) -> unit effects {alloc} {
   if not prompt_active(state) { return () }
   if str.len(text) == 0 { return () }
-  prompt_delete_selection(state)
-  string.append(struct.borrow(struct.borrow(state, field=prompt), field=buffer), text)
+  prompt_replace(state,text)
   ()
 }
 pub fn prompt_backspace(state: ref<App>) -> unit effects {alloc} {
   if not prompt_active(state) { return () }
-  if prompt_selected_all(state) {
+  if prompt_caret(state)!=prompt_anchor(state) {
     prompt_delete_selection(state)
     return ()
   }
-  var held: string = prompt_text(state)
-  let count: u64 = str.len(str.view(held))
-  if count == 0 { return () }
-  var shorter: string = string.copy(str.slice(str.view(held), 0, font.cluster_before(str.view(held), count)))
-  let _ = ref.swap(struct.borrow(struct.borrow(state, field=prompt), field=buffer), shorter)
+  let held:string=prompt_text(state)
+  let at:u64=prompt_caret(state)
+  if at==0 {return ()}
+  struct.set(struct.borrow(state,field=prompt),font.cluster_before(str.view(held),at),field=anchor)
+  prompt_replace(state,"")
   ()
 }
 pub fn end_prompt(state: ref<App>) -> unit effects {alloc} {
   let asking: ref<Prompt> = struct.borrow(state, field=prompt)
   struct.set(asking, false, field=active)
   struct.set(asking, 0, field=action)
-  struct.set(asking, false, field=selected_all)
+  struct.set(asking,0,field=caret)
+  struct.set(asking,0,field=anchor)
+  struct.set(asking,false,field=dragging)
   struct.set(asking,false,field=multiline)
   struct.set(asking,0,field=target_filter)
   struct.set(asking,0,field=target_clip)

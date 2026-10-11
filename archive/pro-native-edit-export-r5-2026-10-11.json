@@ -1,0 +1,34 @@
+{
+  "schema": "genesis.pro_native.generic_acceptance_archive_receipt.v1",
+  "passed": true,
+  "prefix": "pro-native-edit-export-r5-2026-10-11",
+  "archive": "archive/pro-native-edit-export-r5-2026-10-11.tar.gz",
+  "archive_sha256": "4d5077b23a12cc78434be179c0b9af43db157e6bf795654ac518542c99aa379c",
+  "app_sha256": "b07975912822d2d8a19fbcc4ac89ec21f4a7e7f797f041ad94b66e25173b4b74",
+  "worker_sha256": "a8e662712fd9812011b783b3abe8b239a17b1bddbb45434a2bf974c34a4495b7",
+  "audio_adapter_sha256": "75f931f6313ffab3fa10d1b5bb49a68c7d643b2126094fd6131dd555e9d7d4ba",
+  "entries": 3200,
+  "all_members_read_back": true,
+  "sanitized": true,
+  "git_index_filtered_equality": true,
+  "published_payload_verified": true,
+  "acceptance_receipt_sha256": {
+    "frozen": "563a35d3db05e4f7ed6a7a43ac71a40c72780cebf2c5b2166245e9e8fbd62998",
+    "build": "c6fa429d185c135b1c7a51236889a9aaacf563b76c901c75139b4b90304eab6d",
+    "background": "7037dd636eb1a8629c938f20de98c54ff852f1695679688af8e03155b31cef45",
+    "publication": "8c2d22d900c0c3b6bd751c8dfc65702a261d8038b3f65783b3e6616a95549aa1",
+    "root-ready": "5ded0cb74e5a45540deef94841d5629e90af55e180f0f85e6ab8bfadf49b17db",
+    "native-ui": "9aa1b8ee70775d44a4476da7b3e493cdaf20029596c2364c202f2d0d0de88210",
+    "device": "b3158f100cfe4d8861fa7cfcf6996f7e62d2552bea28eb495b7178575141d1bf",
+    "accepted-background-log": "f83e270c975ad851b25bbbf5327950c33a62651b027237fb6c1395e6626dca67",
+    "accepted-background-exit": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+  },
+  "qualified_cadence_summary_sha256": [
+    "8e410a338f7cb621b9ed781ba5dc93f52f1fbaf6dbe16acc295b9550df759af3",
+    "1f87914d2066fece3739d025335b9292802069a72d8aa881d34152d19d48c57a"
+  ],
+  "historical_f718_failures_preserved": true,
+  "helper_sha256": "0eecef9362932216c1a989b0804b95cb7031f73449e00cc0dffe601170f9363c",
+  "pinned_sanitization_helper_sha256": "c31c1155b475f810b1c8b343cc06af70ccdb6d3b0f45531acbef4fa3ff4ccac8",
+  "complete_professional_editing_acceptance": false
+}

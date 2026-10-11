@@ -1,0 +1,202 @@
+module genesis.tests.snap_controls
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import std.timeline as timeline
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/view.ai" as painter
+import "../src/provider.ai" as provider
+import "../src/linked_media.ai" as linked
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("ENCODE_FAILED"),}
+}
+fn stable(state:ref<app.App>) -> string effects {alloc} {
+  var out:string=encoded(struct.borrow(state,field=document))
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,string.from_int(state.media_revision))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  let h:ref<editor.History> =struct.borrow(state,field=history)
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(h,field=undo)) {break}
+    string.append(out,"UNDO")
+    string.append(out,encoded(array.borrow(struct.borrow(h,field=undo),i)))
+    i=i+1}
+  i=0
+  loop {if i>=array.len(struct.borrow(h,field=redo)) {break}
+    string.append(out,"REDO")
+    string.append(out,encoded(array.borrow(struct.borrow(h,field=redo),i)))
+    i=i+1}
+  out
+}
+fn fixture(root:str,zoom:f64,anchor:i64,source_in:i64) -> app.App effects {alloc} {
+  var state:app.App=app.app(provider.fake(root))
+  var doc:editor.Document=editor.document(30.0,320,180)
+  let source:u64=editor.add_source(doc,"synthetic.mov","Synthetic",1000,30.0)
+  let _=editor.describe_source(doc,source,320,180,true,true,48000,2)
+  let video:u64=editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let audio:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let other:u64=editor.add_track(doc,doc.active,editor.track_video(),"Anchor")
+  let clip:u64=option.unwrap(editor.place(doc,video,source,source_in,40,100))
+  let _=linked.separate_import(doc,clip,audio)
+  let _=editor.place(doc,other,source,300,30,anchor)
+  let _=editor.select_only(doc,clip)
+  commands.replace_project(state,doc)
+  let _=app.set_zoom(state,zoom)
+  let _=commands.set_clip_field(state,clip,"gain",0.7)
+  let _=commands.undo(state)
+  app.mark_dirty(state,false)
+  state
+}
+fn lane_y(state:ref<app.App>,model:ref<timeline.Timeline>) -> f64 effects {alloc} {
+  let id:u64=app.current_clip(state)
+  let clip:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),id))
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(model,field=tracks)) {break}
+    if struct.get(array.borrow(struct.borrow(model,field=tracks),i),field=id)==clip.track {return timeline.track_top(model,i)+25.0}
+    i=i+1}
+  -1.0
+}
+fn drag(state:ref<app.App>,grab:i64,drop:i64,kind:u32,suite:ref<test.Suite>) -> string
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let frame:layout.Frame=layout.frame(1600.0,980.0)
+  var model:timeline.Timeline=painter.timeline_model(state,frame.timeline)
+  let y:f64=lane_y(state,model)
+  let x:f64=timeline.frame_to_x(model,grab)
+  let release:f64=timeline.frame_to_x(model,drop)
+  let _=input.pointer_down(state,1600.0,980.0,x,y)
+  let _=test.eq_u64(suite,cast.sat(app.gesture_kind(state)),cast.sat(kind),"Actual clip hit starts intended gesture")
+  let before:string=stable(state)
+  let _=input.pointer_move(state,1600.0,980.0,release,y)
+  let _=test.eq_str(suite,stable(state),before,"Preview movement creates no authored/history mutation")
+  let note:string=input.pointer_up(state,1600.0,980.0,release,y)
+  let _=test.eq_u64(suite,cast.sat(app.gesture_kind(state)),cast.sat(app.drag_none()),"Release clears capture state")
+  note
+}
+fn geometry(suite:ref<test.Suite>,state:ref<app.App>,start:i64,length:i64,source_in:i64) -> unit effects {alloc} {
+  let id:u64=app.current_clip(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let v:editor.Clip=option.unwrap(editor.clip(doc,id))
+  let a:editor.Clip=option.unwrap(editor.clip(doc,linked.mate(doc,id)))
+  let _=test.check(suite,v.start==start and v.length==length and v.source_in==source_in,"Video authored edge/range is independently expected")
+  let _=test.check(suite,a.start==start and a.length==length and a.source_in==source_in and a.speed==v.speed and a.reverse==v.reverse,"Linked audio has exactly the same authored source-time mapping")
+  let _=test.check(suite,v.streams==1 and a.streams==2,"Snap retains separate picture/audio domains")
+  ()
+}
+fn undo_once(suite:ref<test.Suite>,state:ref<app.App>,before:str,depth:u64) -> unit effects {alloc} {
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Only committed edit creates one Undo")
+  let after:string=encoded(struct.borrow(state,field=document))
+  let _=test.check(suite,commands.undo(state).ok,"One Undo succeeds")
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"One Undo restores complete authored document")
+  let _=test.check(suite,commands.redo(state).ok,"One Redo succeeds")
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),after,"Redo restores exact snapped document")
+  ()
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Authored-boundary Snap",false)
+  var zooms:array<f64> = [0.5,1.0,2.0]
+  let _=test.start(suite,"Interior grab offsets all align leading and trailing authored edges")
+  var z:u64=0
+  loop {if z>=array.len(zooms) {break}
+    var offset:i64=16
+    loop {if offset>24 {break}
+      var state:app.App=fixture(root,array.get(zooms,z),200,100)
+      let before:string=encoded(struct.borrow(state,field=document))
+      let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+      let _=drag(state,100+offset,198+offset,app.drag_move(),suite)
+      geometry(suite,state,200,40,100)
+      undo_once(suite,state,before,depth)
+      let _=ref.swap(state,fixture(root,array.get(zooms,z),200,100))
+      let trailing_before:string=encoded(struct.borrow(state,field=document))
+      let trailing_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+      let _=drag(state,100+offset,158+offset,app.drag_move(),suite)
+      geometry(suite,state,160,40,100)
+      undo_once(suite,state,trailing_before,trailing_depth)
+      offset=offset+4}
+    z=z+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"Near-edge head and tail grabs snap the edge rather than the pointer")
+  z=0
+  loop {if z>=array.len(zooms) {break}
+    let zoom:f64=array.get(zooms,z)
+    let offset:i64=if zoom==0.5 {4}else{1}
+    var state:app.App=fixture(root,zoom,120,100)
+    let before:string=encoded(struct.borrow(state,field=document))
+    let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+    let _=drag(state,100+offset,118+offset,app.drag_trim_start(),suite)
+    geometry(suite,state,120,20,120)
+    undo_once(suite,state,before,depth)
+    let _=ref.swap(state,fixture(root,zoom,200,100))
+    let tail_before:string=encoded(struct.borrow(state,field=document))
+    let tail_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+    let _=drag(state,140-offset,198-offset,app.drag_trim_end(),suite)
+    geometry(suite,state,100,100,100)
+    undo_once(suite,state,tail_before,tail_depth)
+    z=z+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"Snap off preserves raw delta; own and mate edges cannot pull a move back")
+  var state:app.App=fixture(root,1.0,200,100)
+  let _=app.toggle_snap(state)
+  let _=drag(state,120,218,app.drag_move(),suite)
+  geometry(suite,state,198,40,100)
+  let _=ref.swap(state,fixture(root,1.0,200,100))
+  let _=drag(state,120,121,app.drag_move(),suite)
+  geometry(suite,state,101,40,100)
+  let _=test.done(suite)
+  let _=test.start(suite,"An exact leading edge stays exact when the trailing edge is within snap radius")
+  let _=ref.swap(state,fixture(root,0.5,200,100))
+  let _=drag(state,120,220,app.drag_move(),suite)
+  geometry(suite,state,200,40,100)
+  let _=test.done(suite)
+  let _=test.start(suite,"Closest source-clamped target is skipped for the next legal head boundary")
+  let _=ref.swap(state,fixture(root,1.0,96,0))
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let anchor:editor.Clip=option.unwrap(editor.clip_at(doc,2))
+  let _=editor.place(doc,anchor.track,anchor.source,400,30,101)
+  let _=drag(state,104,100,app.drag_trim_start(),suite)
+  geometry(suite,state,101,39,1)
+  let _=test.done(suite)
+  let _=test.start(suite,"Locked primary or linked lane refuses without touching complete history")
+  var which:u64=0
+  loop {if which>=2 {break}
+    let _=ref.swap(state,fixture(root,1.0,200,100))
+    let id:u64=app.current_clip(state)
+    let doc:ref<editor.Document> =struct.borrow(state,field=document)
+    let primary:editor.Clip=option.unwrap(editor.clip(doc,id))
+    let peer:editor.Clip=option.unwrap(editor.clip(doc,linked.mate(doc,primary.id)))
+    let _=editor.set_track_lock(doc,if which==0 {primary.track}else{peer.track},true)
+    let before:string=stable(state)
+    let message:string=drag(state,120,218,app.drag_move(),suite)
+    let _=test.check(suite,text.contains(message,"GA_EDIT_LOCKED") or text.contains(message,"GA_LINKED_LOCKED"),"Actual pointer release exposes lock refusal")
+    let _=test.eq_str(suite,stable(state),before,"Refusal retains exact graph, selection, dirty/revisions, Undo and Redo")
+    which=which+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"Malformed unrelated edge ranges cannot overflow snap distance")
+  var bad:u64=0
+  loop {if bad>=3 {break}
+    let _=ref.swap(state,fixture(root,1.0,200,100))
+    let doc:ref<editor.Document> =struct.borrow(state,field=document)
+    let anchor:editor.Clip=option.unwrap(editor.clip_at(doc,2))
+    let _=editor.place(doc,anchor.track,anchor.source,400,30,200)
+    struct.set(array.borrow(struct.borrow(doc,field=clips),2),if bad==0 { -9223372036854775807-1 }else if bad==1 {9223372036854775804}else{200},field=start)
+    struct.set(array.borrow(struct.borrow(doc,field=clips),2),if bad==2 { -5 }else{30},field=length)
+    let _=drag(state,120,218,app.drag_move(),suite)
+    geometry(suite,state,200,40,100)
+    bad=bad+1}
+  let _=test.done(suite)
+  let _=test.start(suite,"High zoom never turns an8logical-pixel threshold into a16pixel correction")
+  let _=ref.swap(state,fixture(root,16.0,200,100))
+  let _=app.set_scroll(state,100)
+  let _=drag(state,120,219,app.drag_move(),suite)
+  geometry(suite,state,199,40,100)
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"snap-controls-tests.json"),8)
+}

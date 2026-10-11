@@ -1,0 +1,40 @@
+diff --git a/stdlib/file_publish.ai b/stdlib/file_publish.ai
+new file mode 100644
+--- /dev/null
++++ b/stdlib/file_publish.ai
+@@ -0,0 +1,35 @@
++// Atomic no-replace publication, implemented by the portable native helper.
++// The helper is an explicit trusted executable argument, never a shell command.
++module std.file_publish
++import std.files as files
++import std.process as proc
++
++pub type Outcome = enum { Published, PublishedSourceRetained }
++pub type Error = enum { Conflict, Source, MissingHelper, Failed }
++
++pub fn publish_new(source: str, destination: str, helper: str)
++    -> result<Outcome,Error> effects {alloc,fs.meta,process} {
++  match files.exists(helper) {
++    ok(found)=>{if not found {return result.err(Error.MissingHelper)}},
++    err(_)=>{return result.err(Error.MissingHelper)},
++  }
++  var argv: array<string> = [string.copy(helper),string.copy(source),string.copy(destination)]
++  // Piped native spawning uses CREATE_NO_WINDOW on Windows. The helper writes
++  // no output; wait for its commit result before closing the owned handle.
++  var child: Child = match proc.spawn_piped_merged(argv) {
++    err(_)=>{return result.err(Error.MissingHelper)},ok(value)=>value,
++  }
++  let completed: result<process.status,fs.error> = proc.wait(child,18446744073709551615)
++  let _ = proc.close(child)
++  match completed {
++    err(_)=>result.err(Error.Failed),
++    ok(status)=>{
++      if status.signal != 0 {return result.err(Error.Failed)}
++      if status.exit_code == 0 {return result.ok(Outcome.Published)}
++      if status.exit_code == 6 {return result.ok(Outcome.PublishedSourceRetained)}
++      if status.exit_code == 2 {return result.err(Error.Conflict)}
++      if status.exit_code == 3 {return result.err(Error.Source)}
++      result.err(Error.Failed)
++    },
++  }
++}

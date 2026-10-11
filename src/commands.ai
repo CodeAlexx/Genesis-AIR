@@ -282,6 +282,9 @@ pub fn relink(state: ref<app.App>, source: u64, path: str) -> Result effects {al
   app.mark_media_changed(state)
   var report: provider.Probe = provider.probe(struct.borrow(state, field=provider), str.view(absolute))
   if not report.ok { return refused(str.view(struct.borrow(report, field=detail))) }
+  if not editor.relink_source_possible(struct.borrow(state, field=document), source, report.frames) {
+    return refused("[GA_AUDIO_CONTEXT] Replacement media cannot preserve the retained audio processing span")
+  }
   editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
   let corrected: u64 = editor.relink_source(struct.borrow(state, field=document), source, str.view(absolute),
     report.frames)
@@ -444,6 +447,26 @@ fn linked_document_geometry(before:ref<editor.Document>,after:ref<editor.Documen
     }
     i=i+1}
   true
+}
+// Read-only exact-geometry trial for a candidate pointer snap. The actual edit
+// still uses move_clip/trim_start/trim_end and owns the sole Undo transaction.
+pub fn drag_possible(doc:ref<editor.Document>,id:u64,kind:u32,track:u64,start:i64,length:i64) -> bool effects {alloc} {
+  if start<0 or length<1 or start>9223372036854775807-length {return false}
+  let old:editor.Clip=match editor.clip(doc,id) {none=>{return false},some(value)=>value,}
+  let peer:u64=linked_media.mate(doc,id)
+  var candidate:editor.Document=editor.copy_document(doc)
+  if kind==app.drag_move() {
+    if editor.track_kind(doc,old.track)!=editor.track_kind(doc,track) or not editor.move_clip(candidate,id,track,start) {return false}
+    if peer!=0 and not editor.nudge(candidate,peer,start-old.start) {return false}
+  }else if kind==app.drag_trim_start() {
+    if not editor.trim_start(candidate,id,start) {return false}
+    if peer!=0 and not editor.trim_start(candidate,peer,start) {return false}
+  }else if kind==app.drag_trim_end() {
+    if not editor.trim_end(candidate,id,length) {return false}
+    if peer!=0 and not editor.trim_end(candidate,peer,length) {return false}
+  }else{return false}
+  let actual:editor.Clip=match editor.clip(candidate,id) {none=>{return false},some(value)=>value,}
+  actual.start==start and actual.length==length and linked_geometry(candidate,id,peer) and linked_document_geometry(doc,candidate)
 }
 fn regroup_pair(doc:ref<editor.Document>,a:u64,b:u64) -> unit effects {alloc} {
   if b==0 {return ()}
@@ -1435,6 +1458,88 @@ fn keyframe_document(doc:ref<editor.Document>,clip:u64,domain:u32,target:u64,kin
     return refused("that parameter could not be keyed")
   }
   done("keyframe set", clip)
+}
+
+// Existing-key management shares target validation with the inspector writer.
+// operation: 0 previous, 1 next, 2 delete, 3 interpolation.
+pub fn manage_key(state: ref<app.App>, domain: u32, target: u64, kind: str,
+                  name: str, operation: u32, mode: u32) -> Result effects {alloc} {
+  if operation >= 2 and domain == 1 and fade_field(name) {
+    match fade_problem(state,target,name,0.0,true) {none=>{},some(problem)=>{return refused(problem)},}
+  }
+  let audio: bool = linked_media.is_audio_kind(kind) or (domain == 1 and str.eq(name,"gain"))
+  let clip: u64 = if audio {app.current_audio_clip(state)}else{app.current_clip(state)}
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let selected: editor.Clip = match editor.clip(doc,clip) {
+    none=>{return refused("[GA_KEY_TARGET] No valid clip selected")},some(found)=>found,
+  }
+  if selected.owner != doc.active or (domain != 1 and domain != 2) {
+    return refused("[GA_KEY_TARGET] Key target is outside the active sequence")
+  }
+  if domain == 1 and (target != clip or str.len(kind) != 0) {
+    return refused("[GA_KEY_TARGET] Key target no longer matches the selected clip")
+  }
+  if domain == 2 {
+    let slot: u64 = match editor.filter_slot(doc,target) {
+      none=>{return refused("[GA_KEY_TARGET] That filter no longer exists")},some(value)=>value,
+    }
+    let owner: u64 = struct.get(array.borrow(struct.borrow(doc,field=filters),slot),field=clip)
+    if owner != clip or editor.filter_kind(doc,target) != kind {
+      return refused("[GA_KEY_TARGET] Key target no longer matches the selected filter")
+    }
+  }
+  let canonical: string = if domain == 1 {string.copy(name)}else{filter_keys.legacy(kind,name)}
+  let fade: bool = domain == 1 and fade_field(name)
+  let gain: bool = domain == 1 and str.eq(name,"gain")
+  if not timeline_media.key_supported(str.view(canonical)) or
+      (not fade and not gain and editor.track_kind(doc,selected.track) != editor.track_video()) {
+    return refused("[GA_KEY_UNSUPPORTED] This parameter has no keyframed media behavior yet")
+  }
+  if operation > 3 {return refused("[GA_KEY_ACTION] Unknown keyframe action")}
+  let named: string = filter_keys.curve_name(doc,clip,if domain == 2 {target}else{0},kind,name)
+  let local: i64 = editor.playhead(doc)-selected.start
+  if operation < 2 {
+    let at: i64 = match filter_keys.neighbor(doc,clip,str.view(named),local,selected.length,operation == 1) {
+      none=>{return refused("[GA_KEY_MISSING] No key in that direction")},some(value)=>value,
+    }
+    let _=editor.program_action(doc,editor.pause())
+    let _=editor.monitor_action(doc,editor.pause())
+    let _=editor.seek(doc,selected.start+at)
+    return done("sought keyframe",clip)
+  }
+  if editor.track_locked(doc,selected.track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  if local < 0 or local >= selected.length {return refused("[GA_KEY_RANGE] Playhead is outside the clip")}
+  let point: editor.Key = match filter_keys.exact(doc,clip,str.view(named),local) {
+    none=>{return refused("[GA_KEY_MISSING] There is no key at the playhead")},some(value)=>value,
+  }
+  if point.owner != selected.owner or not math.is_finite(point.value) or point.interp >= curve.interp_count() {
+    return refused("[GA_KEY_VALUE] Existing key is invalid")
+  }
+  if operation == 3 and gain and (point.value < 0.0 or point.value > 3.4028234663852886e38) {
+    return refused("[GA_AUDIO_GAIN_KEYS] Gain must be finite and nonnegative within the supported sample range")
+  }
+  if operation == 3 and (mode >= curve.interp_count() or (canonical == "blend.mode" and mode != curve.hold())) {
+    return refused("[GA_KEY_INTERPOLATION] This interpolation is not supported by the parameter")
+  }
+  if operation == 3 and mode == point.interp {return done("keyframe unchanged",clip)}
+  if (str.eq(kind,"speed") or (domain == 1 and paired_speed_key(doc,clip,name))) and linked_media.mate(doc,clip) != 0 {
+    return refused("[GA_LINKED_SPEED] Linked rate automation cannot be edited independently")
+  }
+  var candidate: editor.Document = editor.copy_document(doc)
+  var edited: string = string.copy(str.view(named))
+  if domain == 2 {
+    if operation == 2 {filter_keys.materialize_family(candidate,clip,kind,name)}
+    else {filter_keys.migrate(candidate,clip,target,kind,name)}
+    let _=ref.swap(edited,filter_keys.name(target,kind,name))
+  }
+  let changed: bool = if operation == 2 {editor.remove_key(candidate,clip,str.view(edited),local)}
+    else {editor.set_key(candidate,clip,str.view(edited),local,point.value,mode)}
+  if not changed {return refused("[GA_KEY_WRITE] The key could not be changed")}
+  if not linked_document_geometry(doc,candidate) {return refused("[GA_LINKED_RANGE] Key edit cannot preserve linked ranges")}
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  done(if operation == 2 {"keyframe deleted"}else{"keyframe interpolation set"},clip)
 }
 
 // ---------------------------------------------------------------------------

@@ -3438,24 +3438,23 @@ index 7bc6fbe..95c07e3 100644
 +    { true }
 +}
 diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
-index c987aa3..72636fc 100644
 --- a/gcompose/src/main.rs
 +++ b/gcompose/src/main.rs
-@@ -22,6 +22,13 @@
+@@ -21,6 +21,13 @@
+ //!     are outside this local translation estimator.
  //!
  //! Serve commands (one per line; reply "DONE..."/"ERR\n", always flushed):
- //!
++//!
 +//!   PREVIEWFIT <width> <height> <same positional fields as PREVIEW>
 +//!     -> compose at the worker canvas size, fit/pack the final displayed pixels on the GPU,
 +//!     and write only width*height*4 RGBA bytes. Nearest sampling, opaque bars and resized
 +//!     alpha match the AIR monitor. Exact canvas-size output preserves alpha. Dimensions
 +//!     must be positive, at most 16384 per axis and at most 16777216 pixels. FLOAT/ENC keep
 +//!     their full composition size/precision; fitted output has no persistent protocol state.
-+//!
+ //!
  //!   Preview frame (PREVIEW keyword + 24 positional fields; a keyword-less line is still
  //!   accepted for back-compat with one-shot/older clients):
- //!     PREVIEW <base> <over|-> <bf> <of> <op> <px> <py> <pw> <ph> <bright> <contrast> <sat>
-@@ -179,11 +186,22 @@ fn dec_path(s: &str) -> String {
+@@ -179,11 +186,22 @@
  }
  
  fn main() {
@@ -3480,7 +3479,7 @@ index c987aa3..72636fc 100644
          return;
      }
  
-@@ -198,7 +216,7 @@ fn main() {
+@@ -198,7 +216,7 @@
      match buf {
          Some(b) => {
              std::fs::write(out, &b).expect("write rgba");
@@ -3489,7 +3488,7 @@ index c987aa3..72636fc 100644
          }
          None => {
              eprintln!("FAIL: could not decode {base}");
-@@ -211,35 +229,34 @@ fn main() {
+@@ -211,35 +229,34 @@
  ///
  /// The authoritative wire protocol (all commands, with the Wave-8 transition fields) is documented
  /// in the module header above; see the `PREVIEW`/`ENC` entries there for the full field list.
@@ -3505,6 +3504,20 @@ index c987aa3..72636fc 100644
 -        None => {
 -            eprintln!("FAIL: fpx_gpu_init failed in --serve (after {GPU_INIT_ATTEMPTS} attempts)");
 -            std::process::exit(4);
+-        }
+-    };
+-
+-    // Hardening (Slice A): verify OpenCL is actually USABLE — not merely init'd — before announcing
+-    // readiness. A tiny end-to-end self-check (upload a black frame + a no-op compose + confirm the
+-    // download round-trips a full-size buffer) catches a compositor that init'd but can't run the
+-    // kernels. On failure, exit non-zero IMMEDIATELY so the client respawns a fresh worker rather
+-    // than us serving a broken one (whose first real PREVIEW/ENC would fail). This converts a SOFT
+-    // broken-init into a fast, clean respawn; it cannot catch the hard mid-run segfault (that is the
+-    // client's render-retry job).
+-    if !gpu.self_check() {
+-        eprintln!("FAIL: OpenCL self-check failed in --serve (init ok but compose round-trip broken)");
+-        std::process::exit(5);
+-    }
 +// CPU/audio commands share the same dispatcher and retained resources. Only
 +// picture requests need OpenCL; unknown lines retain the legacy picture path.
 +fn cpu_command(keyword: &str) -> bool {
@@ -3520,21 +3533,9 @@ index c987aa3..72636fc 100644
 +        if !candidate.self_check() {
 +            eprintln!("[GA_COMPOSE_GPU_CHECK] OpenCL composition self-check failed");
 +            return Err(5); // candidate drops here, releasing its native context.
-         }
--    };
--
--    // Hardening (Slice A): verify OpenCL is actually USABLE — not merely init'd — before announcing
--    // readiness. A tiny end-to-end self-check (upload a black frame + a no-op compose + confirm the
--    // download round-trips a full-size buffer) catches a compositor that init'd but can't run the
--    // kernels. On failure, exit non-zero IMMEDIATELY so the client respawns a fresh worker rather
--    // than us serving a broken one (whose first real PREVIEW/ENC would fail). This converts a SOFT
--    // broken-init into a fast, clean respawn; it cannot catch the hard mid-run segfault (that is the
--    // client's render-retry job).
--    if !gpu.self_check() {
--        eprintln!("FAIL: OpenCL self-check failed in --serve (init ok but compose round-trip broken)");
--        std::process::exit(5);
++        }
 +        *gpu = Some(candidate);
-     }
++    }
 +    Ok(gpu.as_ref().unwrap())
 +}
 +fn serve() -> i32 {
@@ -3548,7 +3549,7 @@ index c987aa3..72636fc 100644
  
      // LUT cache (Slice A — per-clip LOOK / LUT3D): one parsed `.cube` per path, reused across
      // frames so a held playhead / a long render with the same look does NOT reparse the file every
-@@ -259,6 +276,7 @@ fn serve() {
+@@ -259,6 +276,7 @@
  
      // Active render encoder (set by OPEN, fed by ENC, torn down by CLOSE). Holds the fps so
      // ENC can stamp ts = enc_count / fps; enc_count is the running frame counter for the job.
@@ -3556,7 +3557,7 @@ index c987aa3..72636fc 100644
      let mut enc: Option<ffi::Encoder> = None;
      let mut enc_fps: f64 = 30.0;
      let mut enc_count: i64 = 0;
-@@ -273,6 +291,8 @@ fn serve() {
+@@ -273,6 +291,8 @@
      // feeds the whole buffer to the encoder, WAVECLOSE writes it as a PCM WAV. `prog_active`
      // gates AUDIO so a stray AUDIO with no open session replies ERR rather than silently dropping.
      let mut prog: ProgAudio = ProgAudio::default();
@@ -3565,7 +3566,7 @@ index c987aa3..72636fc 100644
  
      let stdin = std::io::stdin();
      let mut stdout = std::io::stdout();
-@@ -290,9 +310,47 @@ fn serve() {
+@@ -290,9 +310,47 @@
  
          // Dispatch on the leading keyword; a line with no keyword is the legacy preview frame.
          let kw = line.split_whitespace().next().unwrap_or("");
@@ -3614,7 +3615,7 @@ index c987aa3..72636fc 100644
                      line,
                      &mut enc,
                      &mut enc_fps,
-@@ -306,8 +364,9 @@ fn serve() {
+@@ -306,8 +364,9 @@
                  }
              }
              "ENC" => {
@@ -3626,7 +3627,7 @@ index c987aa3..72636fc 100644
                      &mut decoders,
                      &mut lut_cache,
                      &mut last_uploaded_lut,
-@@ -323,8 +382,11 @@ fn serve() {
+@@ -323,8 +382,11 @@
              }
              // AUDIO no longer feeds the encoder directly: it MIXES one decoded clip range into the
              // active program-audio accumulator (render or playback) at a destination offset.
@@ -3640,7 +3641,7 @@ index c987aa3..72636fc 100644
                      Reply::Done(None)
                  } else {
                      Reply::Err
-@@ -348,9 +410,21 @@ fn serve() {
+@@ -348,9 +410,21 @@
                      Reply::Err
                  }
              }
@@ -3663,7 +3664,7 @@ index c987aa3..72636fc 100644
                  None => Reply::Err,
              },
              // MEAS begins a MEASUREMENT-only accumulator session (no encoder, no WAV) — the level
-@@ -391,10 +465,9 @@ fn serve() {
+@@ -391,10 +465,9 @@
                  // drain and finishes video-only.
                  let ok = match enc.take() {
                      Some(mut e) => {
@@ -3677,7 +3678,7 @@ index c987aa3..72636fc 100644
                      }
                      None => false,
                  };
-@@ -406,7 +479,7 @@ fn serve() {
+@@ -406,7 +479,7 @@
                      Reply::Err
                  }
              }
@@ -3686,7 +3687,7 @@ index c987aa3..72636fc 100644
                  Some(out) => Reply::Done(Some(out)),
                  None => Reply::Err,
              },
-@@ -429,7 +502,7 @@ fn serve() {
+@@ -429,7 +502,7 @@
              // SCOPE runs a scope kernel on the LAST composed buffer left by the most recent PREVIEW
              // (NOT cleared between requests, NO re-compose here). `last_final_is_look` selects OUTB
              // (look none) vs LOOKB (a look ran) so the scope reads the POST-LOOK frame the UI shows.
@@ -3695,7 +3696,7 @@ index c987aa3..72636fc 100644
                  Some(out) => Reply::Done(Some(out)),
                  None => Reply::Err,
              },
-@@ -445,8 +518,8 @@ fn serve() {
+@@ -445,8 +518,8 @@
              // UI is showing. The only way it changes is another compose (a later PREVIEW/ENC) — which
              // is why the worker.rs `scope()` sends its PREVIEW immediately before SCOPE under one held
              // mutex.
@@ -3706,7 +3707,7 @@ index c987aa3..72636fc 100644
                  &mut decoders,
                  &mut lut_cache,
                  &mut last_uploaded_lut,
-@@ -459,7 +532,7 @@ fn serve() {
+@@ -459,7 +532,7 @@
              // Back-compat: a keyword-less line is still treated as a legacy positional preview
              // request (one-shot tools / older clients). New UI clients always send PREVIEW.
              _ => match handle_request(
@@ -3715,7 +3716,7 @@ index c987aa3..72636fc 100644
                  &mut decoders,
                  &mut lut_cache,
                  &mut last_uploaded_lut,
-@@ -471,6 +544,14 @@ fn serve() {
+@@ -471,6 +544,14 @@
              },
          };
  
@@ -3730,7 +3731,7 @@ index c987aa3..72636fc 100644
          match reply {
              Reply::Done(Some(out)) => {
                  let _ = writeln!(stdout, "DONE {out}");
-@@ -482,9 +563,15 @@ fn serve() {
+@@ -482,9 +563,15 @@
                  let _ = writeln!(stdout, "ERR");
              }
          }
@@ -3746,7 +3747,7 @@ index c987aa3..72636fc 100644
  }
  
  /// A serve reply: DONE (optionally echoing an out path) or ERR.
-@@ -596,8 +683,8 @@ fn open_render(
+@@ -596,8 +683,8 @@
      // OUTPUT (encoded) dims = the requested out_w×out_h. config_video builds the RGBA(in)→pixfmt
      // sws scaler from in_w/in_h to width/height, so the composed GVW×GVH frame is rescaled to the
      // chosen output resolution by the encoder — no change to the OpenCL compose path.
@@ -3757,7 +3758,7 @@ index c987aa3..72636fc 100644
  
      // Drop any previous (unfinished) encoder before starting a new job.
      *enc = None;
-@@ -650,6 +737,7 @@ fn open_render(
+@@ -650,6 +737,7 @@
          return false;
      }
  
@@ -3765,7 +3766,7 @@ index c987aa3..72636fc 100644
      *enc = Some(e);
      // ENC timestamps each supplied timeline frame at enc_count / timeline_fps. Existing clients
      // omit the optional field and retain 30 fps. AIR supplies its sequence rate so the frame and
-@@ -659,7 +747,6 @@ fn open_render(
+@@ -659,7 +747,6 @@
  
      // Allocate the program-audio accumulator for this render's full timeline duration (silence).
      // Each AUDIO line mixes a clip range into it; CLOSE drains it into the encoder.
@@ -3773,7 +3774,7 @@ index c987aa3..72636fc 100644
      true
  }
  
-@@ -819,7 +906,8 @@ fn enc_frame(
+@@ -819,7 +906,8 @@
          Some(v) => v,
          None => return false,
      };
@@ -3783,7 +3784,7 @@ index c987aa3..72636fc 100644
  
      // PER-CLIP GRADE fields (Triad-B P1): cbright/ccontrast/csat, applied BEFORE the program grade.
      let clip_grade = (|| {
-@@ -1133,9 +1221,9 @@ fn enc_frame(
+@@ -1133,9 +1221,9 @@
      // RGBA8 file): read it straight into the slot, SKIPPING decode (see `upload_slot`). A black
      // frame also keeps timing if a real base can't be decoded.
      if base_path == "-" {
@@ -3795,7 +3796,7 @@ index c987aa3..72636fc 100644
      }
  
      // Decode overlay if present and op>0; otherwise disable the composite. A `RAW:<path>` overlay is
-@@ -1144,6 +1232,7 @@ fn enc_frame(
+@@ -1144,6 +1232,7 @@
      let mut eff_op = op;
      if over_path != "-" && op > 0.0 {
          if !upload_slot(gpu, decoders, 1, &over_path, over_frame) {
@@ -3803,16 +3804,16 @@ index c987aa3..72636fc 100644
              eff_op = 0.0;
          }
      } else {
-@@ -1156,6 +1245,8 @@ fn enc_frame(
+@@ -1155,6 +1244,8 @@
+     // partner degrades to no transition (the base still encodes). Mirrors MojoMedia's render loop
      // (~1286-1300): decode the boundary partner, upload slot 2, then track1(tt_id, rtt, tt_p).
      let eff_tt = resolve_trans(gpu, decoders, trans_kind, &trans_path, trans_frame);
- 
-+    if eff_tt<0 && (0..=10).contains(&trans_kind) && trans_path!="-" && (gpu.compound() || group_input(&trans_path)) { return false; }
 +
++    if eff_tt<0 && (0..=10).contains(&trans_kind) && trans_path!="-" && (gpu.compound() || group_input(&trans_path)) { return false; }
+ 
      // Resolve the per-clip LOOK (load + upload the .cube for LUT3D, cached; VHS needs no LUT; a
      // missing/failed LUT degrades to no look). Then run the same transition→composite→look the
-     // preview uses, downloading f32 for the encoder.
-@@ -1164,7 +1255,7 @@ fn enc_frame(
+@@ -1164,7 +1255,7 @@
      // P4: chroma key only matters with an active overlay (it keys the OVER buffer); force ck_on=0 when
      // the overlay is disabled (no over clip / failed decode → eff_op==0) so we never key a stale slot.
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -3821,7 +3822,7 @@ index c987aa3..72636fc 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -1181,6 +1272,7 @@ fn enc_frame(
+@@ -1181,6 +1272,7 @@
          sel_band, sel_hshift, sel_sat,
          sol_thr, temp, fade, spatial_alpha,
      );
@@ -3829,7 +3830,7 @@ index c987aa3..72636fc 100644
      let ts = (*enc_count as f64) / fps;
      if !e.video_frame(&frame, ts) {
          eprintln!("[gcompose] enc video_frame failed @ {}", *enc_count);
-@@ -1290,6 +1382,12 @@ struct ProgAudio {
+@@ -1290,6 +1382,12 @@
      gain_env: Vec<(f64, f32)>, // (sec, gain), sorted ascending by sec
  }
  
@@ -3842,7 +3843,7 @@ index c987aa3..72636fc 100644
  impl Default for ProgAudio {
      fn default() -> Self {
          ProgAudio { buf: Vec::new(), active: false, gain_env: Vec::new() }
-@@ -1300,21 +1398,24 @@ impl ProgAudio {
+@@ -1300,21 +1398,24 @@
      /// (Re)allocate the accumulator to `total_s` seconds of silence and mark it active. A prior
      /// (unconsumed) buffer is dropped. `total_s` is clamped to a sane ceiling so a pathological
      /// duration can't blow up the allocation.
@@ -3881,7 +3882,7 @@ index c987aa3..72636fc 100644
      }
  
      /// Drop the accumulator and mark inactive (after CLOSE/WAVECLOSE consumes it).
-@@ -1326,7 +1427,8 @@ impl ProgAudio {
+@@ -1326,7 +1427,8 @@
      }
  
      /// Mix `samples` (interleaved stereo @ 48000, already gain-applied) into the accumulator at
@@ -3891,7 +3892,7 @@ index c987aa3..72636fc 100644
      /// Samples that would land past the end of the accumulator are dropped (the accumulator is the
      /// authoritative timeline length, so a clip running slightly long is truncated to it).
      ///
-@@ -1350,8 +1452,7 @@ impl ProgAudio {
+@@ -1350,8 +1452,7 @@
          let room = self.buf.len() - start;
          let take = n.min(room);
          for i in 0..take {
@@ -3901,7 +3902,7 @@ index c987aa3..72636fc 100644
          }
      }
  
-@@ -1360,24 +1461,34 @@ impl ProgAudio {
+@@ -1360,24 +1461,34 @@
      /// across calls), so chunking is purely to bound the per-call slice — the muxed result is the
      /// single continuous timeline-length program audio. Best-effort: a rejected chunk is logged and
      /// the drain stops (the already-fed audio still muxes on finish).
@@ -3940,7 +3941,7 @@ index c987aa3..72636fc 100644
      }
  
      /// Per-channel PEAK + RMS of the accumulator, in dBFS (P3 level meter). Returns
-@@ -1397,7 +1508,7 @@ impl ProgAudio {
+@@ -1397,7 +1508,7 @@
          for fr in 0..frames {
              let base = fr * PROG_CH;
              for ch in 0..PROG_CH {
@@ -3949,7 +3950,7 @@ index c987aa3..72636fc 100644
                  let a = s.abs();
                  if a > peak[ch] {
                      peak[ch] = a;
-@@ -1432,8 +1543,8 @@ impl ProgAudio {
+@@ -1432,8 +1543,8 @@
          let mut re = vec![0.0f32; N];
          let mut im = vec![0.0f32; N];
          for i in 0..take {
@@ -3960,7 +3961,7 @@ index c987aa3..72636fc 100644
              let s = 0.5 * (l + r);
              // Hann window
              let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (N as f32 - 1.0)).cos();
-@@ -1460,7 +1571,7 @@ impl ProgAudio {
+@@ -1460,7 +1571,7 @@
          if win == 0 { return out; }
          for k in 0..n {
              let fr = (k * win) / n;            // decimate the window to n points
@@ -3969,7 +3970,7 @@ index c987aa3..72636fc 100644
          }
          out
      }
-@@ -1534,7 +1645,7 @@ fn gainenv_set(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1534,7 +1645,7 @@
  /// Per-clip audio-decode capacity ceiling (in FLOATS), shared by AUDIO mixing. Mirrors MojoMedia's
  /// AUF (180 s stereo 48k + headroom) used as a per-decode cap. Bounds the temp decode buffer and
  /// guarantees the `cap as c_int` narrowing in ffi::decode_audio_range is lossless & positive.
@@ -3978,7 +3979,7 @@ index c987aa3..72636fc 100644
  
  /// `AUDIO <path> <src_in_s> <dur_s> <dst_offset_s> <gain> <fade_in_s> <fade_out_s> <clip_len_s>
  /// <range_local_s> <fx_chain|->` — decode the SOURCE audio range [src_in_s, src_in_s+dur_s) of
-@@ -1546,19 +1657,744 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
+@@ -1546,19 +1657,849 @@
  /// full length is `clip_len_s`. This is the timeline-sync fix plus per-clip volume/fades/FX: the clip
  /// is positioned at its timeline offset, not concatenated.
  ///
@@ -4001,7 +4002,7 @@ index c987aa3..72636fc 100644
  /// continues.
 -fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
 +struct AudioStreamEntry {
-+    decoder: ffi::AudioStream, path: String, chain: String, next_local: f64, touched: bool,
++    decoder: ffi::AudioStream, path: String, chain: String, next_local: f64, touched: bool, context: Option<(u64,u64,usize)>, next_sample: usize,
 +}
 +#[derive(Default)]
 +struct AudioStreams { entries: std::collections::HashMap<u64, AudioStreamEntry> }
@@ -4019,10 +4020,10 @@ index c987aa3..72636fc 100644
 +                None => { eprintln!("[GA_AUDIO_STREAM_FILTER] Cannot open clip decoder/filter graph"); return None; }
 +            };
 +            self.entries.insert(id, AudioStreamEntry { decoder, path: path.to_owned(), chain: chain.to_owned(),
-+                next_local: local, touched: true });
++                next_local: local, touched: true, context: None, next_sample: 0 });
 +        }
 +        let entry = self.entries.get_mut(&id)?;
-+        if entry.path != path || entry.chain != chain || (entry.next_local - local).abs() > 2.0 / 48000.0 {
++        if entry.context.is_some() || entry.path != path || entry.chain != chain || (entry.next_local - local).abs() > 2.0 / 48000.0 {
 +            eprintln!("[GA_AUDIO_STREAM_ORDER] Clip or playback position changed without reset"); return None;
 +        }
 +        let out = entry.decoder.read(frames);
@@ -4031,6 +4032,24 @@ index c987aa3..72636fc 100644
 +        entry.next_local = local + frames as f64 / 48000.0;
 +        out
 +    }
++    fn read_context(&mut self, id: u64, path: &str, chain: &str,
++        context: &NestAudioContext, crop: usize, frames: usize) -> Option<Vec<f32>> {
++        let identity=Some((context.source.to_bits(),context.duration.to_bits(),context.frames));
++        if let Some(entry)=self.entries.get(&id) {
++            if entry.path!=path || entry.chain!=chain || entry.context!=identity || entry.next_sample!=crop {
++                eprintln!("[GA_AUDIO_CONTEXT] Retained DSP identity or sample cursor changed without reset");return None;
++            }
++        } else {
++            let mut decoder=ffi::AudioStream::open(path,context.source,context.duration,chain)?;
++            context_discard(&mut decoder,crop)?;
++            self.entries.insert(id,AudioStreamEntry {decoder,path:path.to_owned(),chain:chain.to_owned(),
++                next_local:0.0,touched:true,context:identity,next_sample:crop});
++        }
++        let entry=self.entries.get_mut(&id)?;
++        let output=context_body_read(&mut entry.decoder,context.frames,crop,frames)?;
++        entry.next_sample=crop+frames;entry.touched=true;Some(output)
++    }
++
 +}
 +
 +// Sample-domain adapter for std.curve clip gain keys. Rounded absolute sample
@@ -4266,15 +4285,69 @@ index c987aa3..72636fc 100644
 +        }
 +    }
 +}
++// The full authored DSP graph is distinct from the visible sample body.  A
++// destructive timeline edit crops AFTER that graph, never restarts its history.
++struct NestAudioContext { source: f64, duration: f64, frames: usize, crop: usize }
++impl NestAudioContext {
++    fn parse(token: &str, body: usize) -> Result<Self, String> {
++        Self::parse_endpoint(token,body,false)
++    }
++    fn parse_endpoint(token: &str, body: usize, endpoint: bool) -> Result<Self, String> {
++        let invalid = || nest_error("GA_AUDIO_CONTEXT", "Invalid full-DSP sample context");
++        let f: Vec<_> = token.split(':').collect();
++        if f.len() != 5 || f[0] != "AUDIOCTX" { return Err(invalid()); }
++        let source = f[1].parse::<f64>().map_err(|_| invalid())?;
++        let duration = f[2].parse::<f64>().map_err(|_| invalid())?;
++        let frames = f[3].parse::<usize>().map_err(|_| invalid())?;
++        let crop = f[4].parse::<usize>().map_err(|_| invalid())?;
++        if !source.is_finite() || source < 0.0 || !duration.is_finite() || duration <= 0.0 ||
++            duration > 21600.0 || !(source+duration).is_finite() || frames == 0 ||
++            frames > NEST_MAX_FRAMES as usize || crop > frames || (crop == frames && !endpoint) ||
++            crop.checked_add(body).is_none_or(|end| end > frames+1) {
++            return Err(invalid());
++        }
++        // At most one zero-padded endpoint sample is allowed when moving an
++        // unchanged body between fractional-FPS placement phases.
++        Ok(Self { source, duration, frames, crop })
++    }
++}
++// Full original graph input is retained, but causal flat output is read only as
++// requested. Prefix discard and transfer remain bounded; no float disk bus.
++fn context_discard(decoder:&mut ffi::AudioStream, frames:usize)->Option<()> {
++    let mut at=0usize;
++    let mut witness=NestFiles {paths:Vec::new()};
++    let trace=std::env::var_os("GENESIS_AUDIO_CONTEXT_TRACE").map(std::path::PathBuf::from);
++    while at<frames {
++        let count=(frames-at).min(NEST_BLOCK);
++        let values=decoder.read(count)?;
++        if values.len()!=count*2 || values.iter().any(|v|!v.is_finite()) {return None;}
++        at+=count;
++        if at==count {
++            if let Some(path)=&trace {
++                let mut file=witness.create(path.clone()).ok()?;
++                writeln!(file,"processed_prefix_frames={at}").and_then(|_|file.flush()).ok()?;
++            }
++        }
++    }
++    Some(())
++}
++fn context_body_read(decoder:&mut ffi::AudioStream,total:usize,crop:usize,frames:usize)->Option<Vec<f32>> {
++    if frames>NEST_BLOCK || crop.checked_add(frames)? > total.checked_add(1)? {return None;}
++    let count=frames.min(total.saturating_sub(crop));
++    let mut values=if count==0 {Vec::new()}else{decoder.read(count)?};
++    if values.len()!=count*2 || values.iter().any(|v|!v.is_finite()) {return None;}
++    values.resize(frames*2,0.0);Some(values)
++}
++
 +enum NestInput { Leaf { path: String, source: f64, duration: f64 }, Bus { begin: i64, end: i64 } }
 +struct NestNode { id: String, parent: String, start: i64, end: i64, input: NestInput,
-+    chain: String, envelope: NestEnvelope }
++    chain: String, envelope: NestEnvelope, context: Option<NestAudioContext> }
 +impl NestNode {
 +    fn parse(line: &str) -> Result<Self, String> {
 +        let f: Vec<_> = line.split_whitespace().collect();
 +        let leaf = f.first() == Some(&"NESTLEAF");
 +        let base = if leaf { 13 } else { 12 };
-+        if f.len() < base || f.len() > base + 2 { return Err(nest_protocol("Invalid nested node field count")); }
++        if f.len() < base || f.len() > base + 3 { return Err(nest_protocol("Invalid nested node field count")); }
 +        if !nest_id(f[1]) || (f[2] != "-" && !nest_id(f[2])) { return Err(nest_protocol("Invalid instance path")); }
 +        let start = nest_sample(f[3])?; let end = nest_sample(f[4])?;
 +        if end <= start { return Err(nest_protocol("Empty or reversed clip interval")); }
@@ -4303,9 +4376,19 @@ index c987aa3..72636fc 100644
 +            return Err(nest_protocol("Nested reverse must appear once at the beginning of the chain"));
 +        }
 +        let mut envelope_fields = vec![f[index], f[index+1], f[index+2], f[index+3]];
-+        envelope_fields.extend_from_slice(&f[base..]);
++        let mut context = None;
++        for token in &f[base..] {
++            if token.starts_with("AUDIOCTX:") {
++                if context.is_some() { return Err(nest_error("GA_AUDIO_CONTEXT", "Duplicate full-DSP sample context")); }
++                context = Some(NestAudioContext::parse(token, frames as usize)?);
++            } else { envelope_fields.push(token); }
++        }
++        if !leaf && context.as_ref().is_some_and(|value| value.source != 0.0 ||
++            !matches!(input, NestInput::Bus { begin, end } if value.duration == (end-begin) as f64 / PROG_SR as f64)) {
++            return Err(nest_error("GA_AUDIO_CONTEXT", "Bus DSP context must use its complete child-sum span"));
++        }
 +        let envelope = NestEnvelope::parse(&envelope_fields, start, frames as usize)?;
-+        Ok(Self { id: f[1].to_owned(), parent: f[2].to_owned(), start, end, input, chain: chain.to_owned(), envelope })
++        Ok(Self { id: f[1].to_owned(), parent: f[2].to_owned(), start, end, input, chain: chain.to_owned(), envelope, context })
 +    }
 +}
 +#[derive(PartialEq)]
@@ -4324,6 +4407,37 @@ index c987aa3..72636fc 100644
 +}
 +struct NestAccepted { identity: NestIdentity, nodes: Vec<NestNode>, paths: Vec<std::path::PathBuf>,
 +    _files: NestFiles, bytes: u64 }
++fn nest_process_body(node: &NestNode, decoder: &mut ffi::AudioStream,
++    mut consume: impl FnMut(&[f32]) -> Result<(), String>) -> Result<usize, String> {
++    let body = (node.end-node.start) as usize;
++    let (total, crop) = node.context.as_ref().map_or((body, 0), |c| (c.frames, c.crop));
++    let finish = crop.checked_add(body).ok_or_else(|| nest_error("GA_AUDIO_CONTEXT", "Body sample interval overflows"))?;
++    let mut at = 0usize; let mut emitted = 0usize; let mut blocks = 0usize;
++    while at < total {
++        let count = (total-at).min(NEST_BLOCK);
++        let mut values = decoder.read(count).ok_or_else(|| nest_render("Cannot read full-DSP filter output"))?;
++        // Validate even discarded prefix/suffix: no failed/nonfinite graph may
++        // publish a seemingly valid body. Full right-edge processing completes
++        // before the caller publishes its file/cache transaction.
++        if values.len() != count*2 || (node.context.is_some() && values.iter().any(|v| !v.is_finite())) {
++            return Err(nest_render("Invalid full-DSP filter sample block"));
++        }
++        let first = at.max(crop); let end = (at+count).min(finish);
++        if end > first {
++            let selected = &mut values[(first-at)*2..(end-at)*2];
++            node.envelope.apply(selected, emitted);
++            consume(selected)?; emitted += end-first;
++        }
++        at += count; blocks += 1;
++    }
++    if emitted < body {
++        // Original sample phase is retained across fractional-FPS Move; only
++        // the authored endpoint may have one additional zero sample.
++        if body-emitted != 1 { return Err(nest_error("GA_AUDIO_CONTEXT", "Unproved endpoint padding")); }
++        consume(&[0.0,0.0])?;
++    }
++    Ok(blocks)
++}
 +#[derive(Default)]
 +struct NestedAudio { pending: Option<NestPending>, accepted: Option<NestAccepted>,
 +    directory: Option<std::path::PathBuf>, serial: u64, warm_builds: u64, cache_hits: u64, mix_frames: u64 }
@@ -4549,17 +4663,12 @@ index c987aa3..72636fc 100644
 +                }
 +            };
 +            let source_path = input.to_str().ok_or_else(|| nest_cache("Nested float cache path is not UTF-8"))?;
++            let (source, duration) = node.context.as_ref().map_or((source,duration), |c| (c.source,c.duration));
 +            let mut decoder = ffi::AudioStream::open(source_path, source, duration, &node.chain)
 +                .ok_or_else(|| nest_render("Cannot open nested source or enclosing filter graph"))?;
 +            let mut writer = files.create(output.clone())?;
 +            let total = node.end-node.start; nest_write_header(&mut writer, total)?;
-+            let mut at = 0i64;
-+            while at < total {
-+                let count = (total-at).min(NEST_BLOCK as i64) as usize;
-+                let mut values = decoder.read(count).ok_or_else(|| nest_render("Cannot read nested filter output"))?;
-+                node.envelope.apply(&mut values, at as usize);
-+                nest_write_samples(&mut writer, &values)?; at += count as i64;
-+            }
++            nest_process_body(node, &mut decoder, |values| nest_write_samples(&mut writer, values))?;
 +            writer.flush().map_err(|_| nest_cache("Cannot flush nested output cache"))?;
 +            paths.push(output);
 +        }
@@ -4631,7 +4740,7 @@ index c987aa3..72636fc 100644
 +            !matches!(bus.input, NestInput::Bus { begin, end } if begin == leaf.start && end == leaf.end) ||
 +            bus.chain != "-" || bus.envelope.gain != 1.0 || bus.envelope.fade_in != 0.0 || bus.envelope.fade_out != 0.0 ||
 +            bus.envelope.length != total as f64 / PROG_SR as f64 ||
-+            bus.envelope.gain_keys.is_some() || bus.envelope.fade_keys.is_some() {
++            bus.envelope.gain_keys.is_some() || bus.envelope.fade_keys.is_some() || bus.context.is_some() {
 +            return Err(invalid("Streamed peak wrapper must preserve the exact direct leaf domain"));
 +        }
 +        // Validate all metadata, output ownership and optional trace path before
@@ -4647,27 +4756,24 @@ index c987aa3..72636fc 100644
 +        } else { None };
 +        let mut peaks = NestPeaks::new(total as u64, buckets)?;
 +        let timer = std::time::Instant::now();
++        let (source, duration) = leaf.context.as_ref().map_or((source,duration), |c| (c.source,c.duration));
 +        let mut decoder = ffi::AudioStream::open(source_path, source, duration, &leaf.chain)
 +            .ok_or_else(|| nest_render("Cannot open streamed source or filter graph"))?;
 +        let mut markers = NestFiles { paths: Vec::new() };
-+        let mut at = 0usize;
-+        let mut blocks = 0usize;
-+        while at < total as usize {
-+            let count = (total as usize-at).min(NEST_BLOCK);
-+            let mut values = decoder.read(count).ok_or_else(|| nest_render("Cannot read streamed filter output"))?;
-+            leaf.envelope.apply(&mut values, at);
-+            peaks.push(&values)?;
-+            at += count; blocks += 1;
++        let mut emitted = 0usize;
++        let blocks = nest_process_body(&leaf, &mut decoder, |values| {
++            peaks.push(values)?; emitted += values.len()/2;
 +            // Opt-in bounded local witness: a completed real DSP block, never a
 +            // synthetic delay. Drop/host hard-kill cleanup removes this marker.
-+            if blocks == 1 {
++            if emitted == values.len()/2 {
 +                if let Some(path) = &trace_path {
 +                    let mut marker = markers.create(path.clone())?;
-+                    writeln!(marker, "processed_frames={at}").and_then(|_| marker.flush())
++                    writeln!(marker, "processed_frames={emitted}").and_then(|_| marker.flush())
 +                        .map_err(|_| nest_cache("Cannot write streamed peak trace"))?;
 +                }
 +            }
-+        }
++            Ok(())
++        })?;
 +        peaks.write(output)?;
 +        let pending = self.pending.take().unwrap();
 +        self.directory = Some(pending.directory);
@@ -4732,7 +4838,7 @@ index c987aa3..72636fc 100644
      // No active accumulator: a stray AUDIO outside an OPEN/WAVE session. ERR (client skips).
      if !prog.active {
          eprintln!("[gcompose] AUDIO with no active accumulator (no OPEN/WAVE)");
-@@ -1572,10 +2408,45 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1572,9 +2513,59 @@
      // the path is a pool media path like ENC/THUMB), so a fixed-arity split is safe. The trailing 4
      // numeric fields carry the per-clip AUDIO FADE envelope (applied per-sample below); the FINAL
      // token is the per-clip libavfilter chain ("-" when the AudioFx is neutral).
@@ -4744,12 +4850,13 @@ index c987aa3..72636fc 100644
 +    if f.len() < base_fields {
          eprintln!("[gcompose] bad AUDIO ({} fields): {line}", f.len());
          return false;
-     }
-+    if f.len() > base_fields + 2 {
++    }
++    if f.len() > base_fields + 3 {
 +        eprintln!("[GA_AUDIO_FADE_KEYS] Too many audio envelope tokens"); return false;
 +    }
 +    let mut clip_keys = None;
 +    let mut fade_keys = None;
++    let mut audio_context=None;
 +    for token in &f[base_fields..] {
 +        if token.starts_with("GAINKEYS:") {
 +            if clip_keys.is_some() {
@@ -4767,6 +4874,20 @@ index c987aa3..72636fc 100644
 +                Some(value) => Some(value),
 +                None => { eprintln!("[GA_AUDIO_FADE_KEYS] Invalid clip fade envelope"); return false; }
 +            };
++        } else if token.starts_with("AUDIOCTX:") {
++            if audio_context.is_some() {eprintln!("[GA_AUDIO_CONTEXT] Duplicate direct DSP context");return false;}
++            let parts:Vec<_>=token.split(':').collect();
++            if parts.len()!=6 && parts.len()!=7 {eprintln!("[GA_AUDIO_CONTEXT] Direct DSP context needs exact request count");return false;}
++            let tail=parts.len()==7;
++            if tail && (streaming || parts[6]!="TAIL") {eprintln!("[GA_AUDIO_CONTEXT] Invalid whole-output tail request");return false;}
++            let Some(count)=parts[5].parse::<usize>().ok().filter(|n|*n>0) else {eprintln!("[GA_AUDIO_CONTEXT] Invalid direct sample count");return false;};
++            let compact=parts[..5].join(":");
++            let context=match NestAudioContext::parse_endpoint(&compact,count,true) {Ok(v)=>v,Err(e)=>{eprintln!("{e}");return false;}};
++            if tail && (context.crop+count < context.frames.saturating_sub(1) ||
++                count.checked_add(NEST_BLOCK).and_then(|n|n.checked_mul(2)).is_none_or(|n|n>AUDIO_CAP_MAX)) {
++                eprintln!("[GA_AUDIO_CONTEXT] Tail requires the original graph endpoint");return false;
++            }
++            audio_context=Some((context,count,tail));
 +        } else {
 +            eprintln!("[GA_AUDIO_FADE_KEYS] Unknown audio envelope token"); return false;
 +        }
@@ -4775,11 +4896,10 @@ index c987aa3..72636fc 100644
 +        if gain.origin != fade.origin {
 +            eprintln!("[GA_AUDIO_FADE_KEYS] Audio envelope origins disagree"); return false;
 +        }
-+    }
+     }
      // WHITESPACE-SAFE WIRE: the UI percent-encodes the media path token (enc_path); decode it here
      // (dec_path) BEFORE opening the decoder. A space-free path decodes to itself (identity).
-     let path = dec_path(f[1]);
-@@ -1628,49 +2499,54 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1628,50 +2619,101 @@
          return false;
      }
  
@@ -4793,33 +4913,18 @@ index c987aa3..72636fc 100644
          .saturating_mul(PROG_CH)
 -        .saturating_add(8192)
 -        .min(AUDIO_CAP_MAX);
-+        .saturating_add(8192);
-+    if cap > AUDIO_CAP_MAX { eprintln!("[GA_AUDIO_CAPACITY] audio range exceeds decoder capacity"); return false; }
- 
+-
 -    let mut samples = match ffi::decode_audio_range(&path, src_in_s, dur_s, sr, ch, cap) {
 -        Some(s) => s,
 -        None => {
 -            eprintln!("[gcompose] AUDIO decode failed: {path} @ {src_in_s}+{dur_s}");
 -            return false; // hard decode error -> ERR (client skips this clip).
-+    let stream_args = if streaming {
-+        let args = f[11].parse::<u64>().ok().zip(f[12].parse::<f64>().ok()).zip(f[13].parse::<usize>().ok());
-+        let Some(((id, duration), frames)) = args else {
-+            eprintln!("[GA_AUDIO_STREAM_RANGE] Invalid stream arguments"); return false;
-+        };
-+        Some((id, duration, frames))
-+    } else { None };
-+    if let Some(keys) = &fade_keys {
-+        // AUDIO can return tempo/filter tails up to the decoder's existing cap.
-+        // Conservatively prove all possible offsets before any decoder mutation.
-+        let bound = stream_args.map_or(AUDIO_CAP_MAX / PROG_CH, |(_, _, frames)| frames);
-+        if !keys.accepts_frames(bound) {
-+            eprintln!("[GA_AUDIO_FADE_KEYS] Fade envelope sample range overflows"); return false;
-         }
+-        }
 -    };
 -    // No audio in the range: nothing to mix. ERR so the client logs it; accumulator is unchanged.
 -    if samples.is_empty() {
 -        return false;
-     }
+-    }
 -
 -    // P3 AUDIO FX: when a real chain is present, run it on the decoded range BEFORE gain/fade/mix and
 -    // REPLACE the decoded buffer with the filtered output. A "-" (or empty) chain skips this entirely,
@@ -4833,6 +4938,63 @@ index c987aa3..72636fc 100644
 -            Some(_) => {
 -                // Filter produced no output (e.g. all-trimmed by a gate at the head): nothing to mix
 -                // for this clip. ERR so the client just skips it; the accumulator is unchanged.
++        .saturating_add(8192);
++    if cap > AUDIO_CAP_MAX { eprintln!("[GA_AUDIO_CAPACITY] audio range exceeds decoder capacity"); return false; }
++
++    let stream_args = if streaming {
++        let args = f[11].parse::<u64>().ok().zip(f[12].parse::<f64>().ok()).zip(f[13].parse::<usize>().ok());
++        let Some(((id, duration), frames)) = args else {
++            eprintln!("[GA_AUDIO_STREAM_RANGE] Invalid stream arguments"); return false;
++        };
++        Some((id, duration, frames))
++    } else { None };
++    if let Some(keys) = &fade_keys {
++        // AUDIO can return tempo/filter tails up to the decoder's existing cap.
++        // Conservatively prove all possible offsets before any decoder mutation.
++        let bound = stream_args.map_or(AUDIO_CAP_MAX / PROG_CH, |(_, _, frames)| frames);
++        if !keys.accepts_frames(bound) {
++            eprintln!("[GA_AUDIO_FADE_KEYS] Fade envelope sample range overflows"); return false;
++        }
++    }
++    if let Some((context,count,tail))=audio_context {
++        let destination=(dst_off_s*PROG_SR as f64).round();
++        if stream_args.is_some_and(|(_,duration,frames)|!duration.is_finite() || duration<=0.0 || frames!=count || frames>48000*30) ||
++            count.checked_mul(2).is_none_or(|n|n>AUDIO_CAP_MAX) || !destination.is_finite() ||
++            (destination as usize).checked_add(count).is_none() {
++            eprintln!("[GA_AUDIO_CONTEXT] Exact direct sample count exceeds request bounds");return false;
++        }
++        let mut fresh=if streaming {None}else{
++            let mut decoder=match ffi::AudioStream::open(&path,context.source,context.duration,fx_chain) {
++                Some(v)=>v,None=>{eprintln!("[GA_AUDIO_RENDER_FILTER] Cannot open original clip graph");return false;}};
++            if context_discard(&mut decoder,context.crop).is_none() {eprintln!("[GA_AUDIO_CONTEXT] Cannot discard original graph prefix");return false;}
++            Some(decoder)
++        };
++        let mut at=0usize;
++        while at<count {
++            let block=(count-at).min(NEST_BLOCK);
++            let values=if let Some((id,_,_))=stream_args {
++                streams.read_context(id,&path,fx_chain,&context,context.crop+at,block)
++            }else {context_body_read(fresh.as_mut().unwrap(),context.frames,context.crop+at,block)};
++            let mut values=match values {Some(v)=>v,None=>{eprintln!("[GA_AUDIO_CONTEXT] Cannot read original graph sample body");return false;}};
++            audio_mix_samples(prog,&mut values,at,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys);
++            at+=block;
++        }
++        if tail {
++            // A moved body may be one authored endpoint sample shorter/longer.
++            // Preserve its declared body length, then emit actual native tail.
++            // A shortened body discards the omitted original body sample; an
++            // extended body keeps its endpoint zero without consuming the tail.
++            let decoder=fresh.as_mut().unwrap();
++            let consumed=(context.crop+count).min(context.frames);
++            if context_discard(decoder,context.frames-consumed).is_none() {eprintln!("[GA_AUDIO_CONTEXT_TAIL] Cannot finish original body");return false;}
++            let mut values=match decoder.read_to_end(NEST_BLOCK) {
++                Some(v) if v.iter().all(|n|n.is_finite())=>v,
++                _=>{eprintln!("[GA_AUDIO_CONTEXT_TAIL] Native tail failed or exceeds five-second total budget");return false;},
++            };
++            audio_mix_samples(prog,&mut values,count,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys);
++        }
++        return true;
++    }
 +    let mut samples = if let Some((id, duration, frames)) = stream_args {
 +        match streams.read(id, &path, src_in_s, duration, fx_chain, range_local_s, frames) {
 +            Some(value) => value, None => return false,
@@ -4851,20 +5013,31 @@ index c987aa3..72636fc 100644
 -            None => {
 -                // Hard filter-graph error: degrade to the UNFILTERED range so audio never drops.
 -                eprintln!("[gcompose] AUDIO fx chain failed (mixing unfiltered): {fx_chain}");
+-            }
+-        }
+-    }
+-
 +        };
 +        match decoder.read_to_end(AUDIO_CAP_MAX / PROG_CH) {
 +            Some(value) if !value.is_empty() => value,
 +            _ => {
 +                eprintln!("[GA_AUDIO_RENDER_DECODE] Empty, failed or oversized clip audio range");
 +                return false;
-             }
-         }
--    }
++            }
++        }
 +    };
- 
++
++    audio_mix_samples(prog,&mut samples,0,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys);
++    true
++}
++
++fn audio_mix_samples(prog:&mut ProgAudio,samples:&mut [f32],offset:usize,
++    gain:f32,fade_in_s:f64,fade_out_s:f64,clip_len_s:f64,range_local_s:f64,dst_off_s:f64,
++    clip_keys:&Option<ClipGainKeys>,fade_keys:&Option<ClipFadeKeys>) {
      // Apply per-clip GAIN + FADE envelope in place (Triad-B P1). The gain is a flat linear multiplier;
      // the fades ramp the gain 0→1 over [0, fade_in_s) and 1→0 over [clip_len_s − fade_out_s,
-@@ -1685,13 +2561,16 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+     // clip_len_s) in CLIP-LOCAL time. Sample k (per channel) of this decoded range is at clip-local
+@@ -1685,13 +2727,16 @@
      // Run the per-sample loop when the per-clip gain isn't unity, OR there's a fade, OR a master
      // envelope is present (the last clause is the GATE case: a flat-gain, fade-less clip still needs
      // the master envelope applied). When all three are absent the loop is skipped — identical to today.
@@ -4876,25 +5049,37 @@ index c987aa3..72636fc 100644
          for fr in 0..frames {
              // Clip-local time of this interleaved frame.
 -            let tl = range_local_s + (fr as f64) / sr_f;
-+            let tl = fade_keys.as_ref().map_or(range_local_s + (fr as f64) / sr_f,
-+                |keys| keys.local_time(fr));
++            let tl = fade_keys.as_ref().map_or(range_local_s + ((offset+fr) as f64) / sr_f,
++                |keys| keys.local_time(offset+fr));
 +            let (fade_in_s, fade_out_s) = fade_keys.as_ref()
-+                .map_or((fade_in_s, fade_out_s), |keys| keys.lengths(fr, fade_in_s, fade_out_s));
++                .map_or((fade_in_s, fade_out_s), |keys| keys.lengths(offset+fr, fade_in_s, fade_out_s));
 +            let fade_out_start = clip_len_s - fade_out_s;
              let mut env = 1.0f64;
              if fade_in_s > 0.0 && tl < fade_in_s {
                  let r = tl / fade_in_s;
-@@ -1705,7 +2584,8 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1704,8 +2749,9 @@
+             // P27: multiply by the MASTER gain envelope at this frame's ABSOLUTE timeline time
              // (dst_off_s = the clip's destination offset in the program; fr/sr = frames into the
              // range). Empty menv → eval_gain_env == 1.0 → unchanged.
-             let abs_t = dst_off_s + (fr as f64) / sr_f;
+-            let abs_t = dst_off_s + (fr as f64) / sr_f;
 -            let g = (gain * env as f32) * eval_gain_env(&menv, abs_t);
-+            let animated = clip_keys.as_ref().map_or(1.0, |keys| keys.at(fr));
++            let abs_t = dst_off_s + ((offset+fr) as f64) / sr_f;
++            let animated = clip_keys.as_ref().map_or(1.0, |keys| keys.at(offset+fr));
 +            let g = ((gain * animated) * env as f32) * eval_gain_env(&menv, abs_t);
              let base = fr * PROG_CH;
              for ch in 0..PROG_CH {
                  samples[base + ch] *= g;
-@@ -1739,8 +2619,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1717,8 +2763,7 @@
+     // anything past the end so an offset at/after the timeline end is a harmless no-op.
+     let dst_frame = (dst_off_s * PROG_SR as f64).round();
+     let dst_frame = if dst_frame.is_finite() && dst_frame >= 0.0 { dst_frame as usize } else { 0 };
+-    prog.mix(&samples, dst_frame);
+-    true
++    prog.mix(samples, dst_frame.saturating_add(offset));
+ }
+ 
+ /// `WAVE <out_wav> <total_s>` — begin a PLAYBACK-ONLY accumulator session (no encoder). Allocates
+@@ -1739,8 +2784,7 @@
      if !total_s.is_finite() || total_s < 0.0 {
          return false;
      }
@@ -4904,7 +5089,7 @@ index c987aa3..72636fc 100644
  }
  
  /// `WAVECLOSE <out_wav>` — write the playback accumulator to `<out_wav>` as a 16-bit PCM stereo @
-@@ -1753,12 +2632,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
+@@ -1753,12 +2797,12 @@
          eprintln!("[gcompose] bad WAVECLOSE ({} fields): {line}", f.len());
          return None;
      }
@@ -4919,7 +5104,7 @@ index c987aa3..72636fc 100644
      prog.clear();
      if ok {
          Some(out.to_string())
-@@ -1788,8 +2667,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1788,8 +2832,7 @@
      if !window_s.is_finite() || window_s < 0.0 {
          return false;
      }
@@ -4929,7 +5114,7 @@ index c987aa3..72636fc 100644
  }
  
  /// `LEVELS <out>` — measure the active accumulator's per-channel PEAK + RMS (dBFS), write the 4
-@@ -1940,8 +2818,8 @@ fn write_wav_pcm16(path: &str, samples: &[f32], sr: u32, ch: u16) -> bool {
+@@ -1940,8 +2983,8 @@
      out.extend_from_slice(b"data");
      out.extend_from_slice(&data_bytes.to_le_bytes());
      for &s in samples {
@@ -4940,7 +5125,7 @@ index c987aa3..72636fc 100644
          out.extend_from_slice(&(v as i16).to_le_bytes());
      }
      std::fs::write(path, &out).is_ok()
-@@ -1974,7 +2852,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
+@@ -1974,7 +3017,8 @@
          decoders.insert(path.clone(), d);
      }
      let dec = decoders.get_mut(&path)?;
@@ -4950,7 +5135,7 @@ index c987aa3..72636fc 100644
      if std::fs::write(&out, &buf).is_err() {
          eprintln!("[gcompose] THUMB write failed: {out}");
          return None;
-@@ -2212,6 +3091,23 @@ fn handle_request(
+@@ -2212,6 +3256,23 @@
      line: &str,
  ) -> Option<String> {
      let mut f: Vec<&str> = line.split_whitespace().collect();
@@ -4974,7 +5159,7 @@ index c987aa3..72636fc 100644
      // Accept both the new explicit form (`PREVIEW` + the positional fields) and the legacy
      // keyword-less form. Strip a leading PREVIEW keyword so the positional indices below are
      // identical for both (finding #3). The fields are the 12 composite fields + the 1 P31 BLEND field
-@@ -2243,7 +3139,8 @@ fn handle_request(
+@@ -2243,7 +3304,8 @@
      // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
      // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
      // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
@@ -4984,7 +5169,7 @@ index c987aa3..72636fc 100644
          f.remove(0);
      }
      if f.len() != 103 && f.len() != 106 && f.len() != 107 && f.len() != 108 && f.len() != 109 {
-@@ -2277,7 +3174,8 @@ fn handle_request(
+@@ -2277,7 +3339,8 @@
      let trans_kind: i32 = f[16].parse().ok()?;
      let trans_prog: f32 = f[17].parse().ok()?;
      let trans_param: f32 = f[18].parse().ok()?;
@@ -4994,7 +5179,7 @@ index c987aa3..72636fc 100644
      let trans_frame: i32 = f[20].parse().ok()?;
      // Triad-B P1 PER-CLIP GRADE fields.
      let cbright: f32 = f[21].parse().ok()?;
-@@ -2469,15 +3367,16 @@ fn handle_request(
+@@ -2469,15 +3532,16 @@
      // identity here, applied for symmetry with the encoded emit side.
      let out_path = dec_path(f[f.len() - 1]);
  
@@ -5013,7 +5198,7 @@ index c987aa3..72636fc 100644
      }
  
      // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
-@@ -2486,6 +3385,7 @@ fn handle_request(
+@@ -2486,6 +3550,7 @@
      let mut eff_op = op;
      if over_path != "-" && op > 0.0 {
          if !upload_slot(gpu, decoders, 1, &over_path, over_frame) {
@@ -5021,7 +5206,7 @@ index c987aa3..72636fc 100644
              eff_op = 0.0;
          }
      } else {
-@@ -2496,6 +3396,7 @@ fn handle_request(
+@@ -2496,6 +3561,7 @@
      // active (kind 0..7 + a real path), else -1 (track1 copies the base). Same side-effecting helper
      // the ENC path uses, so the preview and the export animate the transition identically.
      let eff_tt = resolve_trans(gpu, decoders, trans_kind, &trans_path, trans_frame);
@@ -5029,7 +5214,7 @@ index c987aa3..72636fc 100644
  
      // Resolve the per-clip LOOK (load + upload the .cube for LUT3D, cached; VHS needs no LUT; a
      // missing/failed LUT degrades to no look). Then run the OpenCL pipeline (transition or base-copy
-@@ -2506,7 +3407,8 @@ fn handle_request(
+@@ -2506,7 +3572,8 @@
      // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
      // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -5039,7 +5224,7 @@ index c987aa3..72636fc 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -2526,9 +3428,47 @@ fn handle_request(
+@@ -2526,9 +3593,47 @@
      // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
      *last_final_is_look = fin;
  
@@ -5090,7 +5275,7 @@ index c987aa3..72636fc 100644
      }
      Some(out_path)
  }
-@@ -2539,34 +3479,33 @@ fn decode_cached(
+@@ -2539,34 +3644,33 @@
      decoders: &mut HashMap<String, ffi::Decoder>,
      path: &str,
      frame: i32,
@@ -5134,7 +5319,7 @@ index c987aa3..72636fc 100644
      let mut best = (0, 0);
      let mut lowest = u64::MAX;
      for dy in (-24..=24).step_by(4) {
-@@ -2578,9 +3517,9 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2578,9 +3682,9 @@
                      let b = (((y + dy) * w + x + dx) * 4) as usize;
                      // RGB differences distinguish camera motion on both bright
                      // and low-contrast material without a separate grayscale copy.
@@ -5147,7 +5332,7 @@ index c987aa3..72636fc 100644
                  }
              }
              if error < lowest ||
-@@ -2592,7 +3531,7 @@ fn frame_shift(current: &[u8], neighbor: &[u8]) -> Option<(i32, i32)> {
+@@ -2592,7 +3696,7 @@
      }
      // A scene cut has no defensible motion estimate.
      let samples = ((h - 128 + 15) / 16 * ((w - 128 + 15) / 16)) as u64;
@@ -5156,7 +5341,7 @@ index c987aa3..72636fc 100644
  }
  
  fn stabilized_frame(
-@@ -2600,7 +3539,7 @@ fn stabilized_frame(
+@@ -2600,7 +3704,7 @@
      path: &str,
      frame: i32,
      strength: f32,
@@ -5165,7 +5350,7 @@ index c987aa3..72636fc 100644
      let current = decode_cached(decoders, path, frame)?;
      if strength <= 0.0 { return Some(current); }
      let mut sum_x = 0i32;
-@@ -2629,9 +3568,9 @@ fn stabilized_frame(
+@@ -2629,9 +3733,9 @@
      let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
      let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
      if shift_x == 0 && shift_y == 0 { return Some(current); }
@@ -5178,7 +5363,7 @@ index c987aa3..72636fc 100644
      for y in 0..h {
          let sy = y - shift_y;
          if sy < 0 || sy >= h { continue; }
-@@ -2662,6 +3601,33 @@ fn stabilized_frame(
+@@ -2662,6 +3766,33 @@
  ///
  /// IDENTITY: a project with no titles never sends a `RAW:` path, so this routes every frame through
  /// `decode_cached` exactly as before — byte-identical to the pre-P5 engine.
@@ -5212,7 +5397,7 @@ index c987aa3..72636fc 100644
  fn upload_slot(
      gpu: &ffi::Gpu,
      decoders: &mut HashMap<String, ffi::Decoder>,
-@@ -2669,28 +3635,61 @@ fn upload_slot(
+@@ -2669,28 +3800,61 @@
      path: &str,
      frame: i32,
  ) -> bool {
@@ -5282,7 +5467,7 @@ index c987aa3..72636fc 100644
          let decoded = if let Some(spec) = path.strip_prefix("STAB:") {
              match spec.split_once(':') {
                  Some((amount, source)) => match amount.parse::<f32>() {
-@@ -2703,11 +3702,11 @@ fn upload_slot(
+@@ -2703,11 +3867,11 @@
          } else { decode_cached(decoders, path, frame) };
          match decoded {
              Some(rgba) => {
@@ -5296,7 +5481,7 @@ index c987aa3..72636fc 100644
                  false
              }
          }
-@@ -2718,13 +3717,13 @@ fn upload_slot(
+@@ -2718,13 +3882,13 @@
  fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
      let gpu = ffi::Gpu::init()?;
      let mut b = ffi::Decoder::open(base)?;
@@ -5312,10 +5497,11 @@ index c987aa3..72636fc 100644
                  gpu.upload(1, &ov);
                  has_over = true;
              }
-@@ -2740,5 +3739,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+@@ -2740,5 +3904,5 @@
  /// CPU/FFmpeg-only fallback: just the decoded base frame.
  fn decode_only(base: &str) -> Option<Vec<u8>> {
      let mut b = ffi::Decoder::open(base)?;
 -    b.decode_rgba(60, ffi::GVW, ffi::GVH)
+-}
 +    b.decode_rgba(60, ffi::width(), ffi::height())
- }
++}

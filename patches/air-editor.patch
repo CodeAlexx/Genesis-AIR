@@ -37,17 +37,29 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  
  // Source-bounds policy. `bounds_clamp` keeps every edit inside the source and reports the
  // clamped result; `bounds_reject` refuses the edit and mutates nothing. See `source_limit`.
-@@ -110,7 +132,8 @@
+@@ -93,6 +115,10 @@
+ // A placed clip. Exactly one of `source` and `nested` is non-zero: a clip is either media
+ // from the pool or a nested sequence used as a source. `owner` is the sequence it lives in.
+ // `source_in` and `length` use owner-sequence frames; the source pool retains native frames.
++// The complete DSP window survives body cuts. origin is an owner FRAME, not a sample.
++pub type AudioContext = struct {source_in:i64,length:i64,offset:i64,fps:f64,rate:f64,
++  reverse:bool,origin:i64,crop_start:u64,output_frames:u64}
++
+ pub type Clip = struct {
+   id: u64,
+   owner: u64,
+@@ -110,7 +136,9 @@
    gain: f64,
    pan: f64,
    speed: f64,
 -  reverse: bool
 +  reverse: bool,
-+  streams: u32
++  streams: u32,
++  audio_context: option<AudioContext>
  }
  
  pub type Transition = struct { id: u64, owner: u64, track: u64, center: i64, duration: i64, kind: u64 }
-@@ -128,6 +151,11 @@
+@@ -128,6 +156,11 @@
  pub type Filter = struct { id: u64, clip: u64, kind: string, order: u32, enabled: bool }
  pub type FilterParam = struct { filter: u64, name: string, value: f64 }
  pub type FilterTextParam = struct { filter: u64, name: string, value: string }
@@ -59,43 +71,115 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  
  pub type Sequence = struct { id: u64, name: string, fps: f64, width: u32, height: u32 }
  
-@@ -614,7 +642,7 @@
+@@ -395,6 +428,7 @@
+ // contract: `relink` reports how many clips it had to clamp (bounds_clamp) or how many still
+ // exceed the new source (bounds_reject). A relink never silently leaves an over-long clip.
+ pub fn relink_source(doc: ref<Document>, id: u64, path: str, frames: i64) -> u64 effects {alloc} {
++  if not relink_source_possible(doc,id,frames) {return 0}
+   match source_slot(doc, id) {
+     some(slot) => {
+       let entry: ref<Source> = array.borrow(struct.borrow(doc, field=sources), slot)
+@@ -405,6 +439,20 @@
+     },
+     none => 0,
+   }
++}
++
++// A replacement may still contain the visible cut yet omit the earlier DSP
++// history. Refuse before changing the source path, frame count or any body.
++pub fn relink_source_possible(doc:ref<Document>,id:u64,frames:i64) -> bool effects {alloc} {
++  let slot:u64=match source_slot(doc,id) {none=>{return false},some(found)=>found,}
++  var candidate:Document=copy_document(doc)
++  struct.set(array.borrow(struct.borrow(candidate,field=sources),slot),if frames < 0 {0}else{frames},field=frames)
++  var i:u64=0
++  loop {if i >= clip_count(candidate) {break}
++    let value:Clip=option.unwrap(clip_at(candidate,i))
++    if value.source==id and not audio_context_valid(candidate,value) {return false}
++    i=i+1}
++  true
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -584,7 +632,7 @@
+ // Apply a source range to the clip in `slot` under the document's bounds policy. This is the
+ // ONE place `source_in` and `length` change, so no edit operation can bypass the contract.
+ // Returns false only under `bounds_reject`, and then nothing was mutated.
+-fn set_range(doc: ref<Document>, slot: u64, source_in: i64, length: i64) -> bool effects {} {
++fn range_target(doc: ref<Document>, slot: u64, source_in: i64, length: i64) -> option<Clip> effects {} {
+   let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+   var want_in: i64 = source_in
+   var want_len: i64 = length
+@@ -598,7 +646,7 @@
+     },
+     none => { },
+   }
+-  if not legal and doc.source_bounds == bounds_reject() { return false }
++  if not legal and doc.source_bounds == bounds_reject() { return option.none() }
+   if want_in < 0 { want_in = 0 }
+   match source_limit(doc, old) {
+     some(limit) => {
+@@ -609,12 +657,31 @@
+     },
+     none => { },
+   }
+-  put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source, nested: old.nested,
++  var next:Clip=Clip {id: old.id, owner: old.owner, source: old.source, nested: old.nested,
+     source_in: want_in, length: want_len, start: old.start, track: old.track, group: old.group,
      enabled: old.enabled, selected: old.selected,
      fade_in: if old.fade_in > want_len { want_len } else { old.fade_in },
      fade_out: if old.fade_out > want_len { want_len } else { old.fade_out },
 -    gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
-+    gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
++    gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context}
++  var context:option<AudioContext> =old.audio_context
++  if not option.is_some(context) and audio_context_needed(doc,old) and want_len != old.length {context=option.some(audio_context_for_scalar(doc,old))}
++  match context {none=>{},some(ctx)=>{
++    struct.set(next,option.some(ctx),field=audio_context)
++    if want_len == old.length {
++      next=match audio_context_retime(doc,next,playback_rate_scalar(doc,next)) {none=>{return option.none()},some(found)=>found,}
++    }else{
++    let source_delta:f64=(cast.float(want_in)-cast.float(old.source_in))/ctx.rate
++    let delta:f64=if old.reverse {cast.float(old.length-want_len)-source_delta}else{source_delta}
++    if not math.is_finite(delta) or delta != math.floor(delta) or delta <= -9007199254740992.0 or delta >= 9007199254740992.0 {return option.none()}
++    next=match audio_context_adjust(doc,next,ctx,cast.sat(delta)) {none=>{return option.none()},some(found)=>found,}
++    }
++  },}
++  option.some(next)
++}
++
++fn set_range(doc:ref<Document>,slot:u64,source_in:i64,length:i64) -> bool effects {} {
++  let next:Clip=match range_target(doc,slot,source_in,length) {none=>{return false},some(found)=>found,}
++  put_clip(doc,slot,next)
    true
  }
  
-@@ -993,7 +1021,7 @@
+@@ -993,7 +1060,7 @@
    array.push(struct.borrow(doc, field=clips), Clip {id: id, owner: owner, source: source,
      nested: 0, source_in: want_in, length: want_len, start: if start < 0 { 0 } else { start },
      track: track, group: 0, enabled: true, selected: false, fade_in: 0, fade_out: 0,
 -    gain: 1.0, pan: 0.0, speed: 1.0, reverse: false})
-+    gain: 1.0, pan: 0.0, speed: 1.0, reverse: false, streams:streams_both()})
++    gain: 1.0, pan: 0.0, speed: 1.0, reverse: false, streams:streams_both(),audio_context:option.none()})
    option.some(id)
  }
  
-@@ -1024,7 +1052,7 @@
+@@ -1024,7 +1091,7 @@
    array.push(struct.borrow(doc, field=clips), Clip {id: id, owner: owner, source: 0,
      nested: sequence, source_in: want_in, length: want_len,
      start: if start < 0 { 0 } else { start }, track: track, group: 0, enabled: true,
 -    selected: false, fade_in: 0, fade_out: 0, gain: 1.0, pan: 0.0, speed: 1.0, reverse: false})
-+    selected: false, fade_in: 0, fade_out: 0, gain: 1.0, pan: 0.0, speed: 1.0, reverse: false, streams:streams_both()})
++    selected: false, fade_in: 0, fade_out: 0, gain: 1.0, pan: 0.0, speed: 1.0, reverse: false, streams:streams_both(),audio_context:option.none()})
    option.some(id)
  }
  
-@@ -1060,7 +1088,7 @@
+@@ -1060,7 +1127,7 @@
          start: if moved < 0 { 0 } else { moved }, track: value.track, group: value.group,
          enabled: value.enabled, selected: value.selected, fade_in: value.fade_in,
          fade_out: value.fade_out, gain: value.gain, pan: value.pan, speed: value.speed,
 -        reverse: value.reverse})
-+        reverse: value.reverse, streams:value.streams})
++        reverse: value.reverse, streams:value.streams,audio_context:value.audio_context})
      }
      index = index + 1
    }
-@@ -1097,7 +1125,9 @@
+@@ -1097,7 +1164,9 @@
    if track_locked(doc, track) { return option.none() }
    let start: i64 = if at < 0 { 0 } else { at }
    match clip_spanning(doc, track, start) {
@@ -106,7 +190,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
      none => { },
    }
    let want: i64 = if length < 1 { 1 } else { length }
-@@ -1117,8 +1147,116 @@
+@@ -1117,8 +1186,118 @@
    if track_locked(doc, track) { return option.none() }
    let start: i64 = if at < 0 { 0 } else { at }
    let want: i64 = if length < 1 { 1 } else { length }
@@ -125,6 +209,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  match track_slot(doc,value.track) {none=>{return option.none()},some(_)=>{},}
 +  if value.source != 0 {match source_slot(doc,value.source) {none=>{return option.none()},some(_)=>{},}}
 +  if value.nested != 0 {match sequence_slot(doc,value.nested) {none=>{return option.none()},some(_)=>{},}}
++  if not audio_context_valid(doc,value) {return option.none()}
 +  var out: ClipSnapshot = ClipSnapshot {clip:value,fps:sequence_fps(doc,value.owner),track_kind:track_kind(doc,value.track),
 +    filters:array.new(),numeric:array.new(),textual:array.new(),keys:array.new()}
 +  var i:u64=0
@@ -215,15 +300,16 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  let id:u64=fresh_id(candidate)
 +  array.push(struct.borrow(candidate,field=clips),Clip {id:id,owner:owner,source:old.source,nested:old.nested,
 +    source_in:old.source_in,length:old.length,start:at,track:track,group:0,enabled:old.enabled,selected:false,
-+    fade_in:old.fade_in,fade_out:old.fade_out,gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams})
++    fade_in:old.fade_in,fade_out:old.fade_out,gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams,audio_context:old.audio_context})
 +  if not snapshot_content(candidate,id,saved) {return result.err("clipboard automation is invalid")}
++  if not audio_context_valid(candidate,option.unwrap(clip(candidate,id))) {return result.err("clipboard audio processing context is invalid")}
 +  let _=select_only(candidate,id)
 +  let _=ref.swap(doc,candidate)
 +  result.ok(id)
  }
  
  // ---------------------------------------------------------------------------
-@@ -1129,28 +1267,149 @@
+@@ -1129,28 +1308,350 @@
  // / `ripple_trim_end` / `ripple_delete`, whose ripple-current-track-only rule is Shotcut's
  // default and is kept here.
  
@@ -235,22 +321,207 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +// The static source-time protocol is shared by editing and rendering. Speed filters
 +// multiply the clip rate in stack order; animated rates need integrated source-time
 +// metadata and are deliberately outside this fixed-rate representation.
-+pub fn playback_rate(doc: ref<Document>, value: Clip) -> f64 effects {alloc} {
-+  var rate: f64 = value.speed
-+  var i: u32 = 0
-+  loop {
-+    let id: u64 = match filter_at(doc,value.id,i) {none=>{break},some(found)=>found,}
-+    let kind: string = filter_kind(doc,id)
-+    if filter_enabled(doc,id) and str.eq(str.view(kind),"speed") {rate=rate*filter_param(doc,id,"rate",1.0)}
++fn playback_rate_scalar(doc:ref<Document>,value:Clip) -> f64 effects {} {
++  var rate:f64=value.speed
++  var i:u32=0
++  loop {let id:u64=match filter_at(doc,value.id,i) {none=>{break},some(found)=>found,}
++    let slot:u64=option.unwrap(filter_slot(doc,id))
++    let entry:ref<Filter> =array.borrow(struct.borrow(doc,field=filters),slot)
++    if entry.enabled and str.eq(struct.borrow(entry,field=kind),"speed") {rate=rate*filter_param(doc,id,"rate",1.0)}
 +    i=i+1}
 +  rate
 +}
++pub fn playback_rate(doc:ref<Document>,value:Clip) -> f64 effects {alloc} {playback_rate_scalar(doc,value)}
 +
++pub fn audio_context(value:Clip) -> option<AudioContext> effects {} {value.audio_context}
++// All 48 kHz endpoints use the original owner-frame phase, even after a move.
++fn audio_sample(frame:i64,fps:f64) -> option<u64> effects {} {
++  if frame < 0 or frame > 9007199254740991 or not math.is_finite(fps) or fps <= 0.0 {return option.none()}
++  let sample:f64=math.floor(cast.float(frame)*48000.0/fps+0.5)
++  if not math.is_finite(sample) or sample < 0.0 or sample > 9007199254740991.0 {return option.none()}
++  option.some(cast.sat(sample))
++}
++fn audio_context_for_scalar(doc:ref<Document>,value:Clip) -> AudioContext effects {} {
++  match value.audio_context {some(saved)=>{return saved},none=>{},}
++  let fps:f64=sequence_fps(doc,value.owner)
++  let first:u64=match audio_sample(value.start,fps) {some(n)=>n,none=>0,}
++  let last:u64=match audio_sample(add.sat(value.start,value.length),fps) {some(n)=>n,none=>first,}
++  AudioContext {source_in:value.source_in,length:value.length,offset:0,fps:fps,
++    rate:playback_rate_scalar(doc,value),reverse:value.reverse,origin:value.start,
++    crop_start:0,output_frames:last-first}
++}
++pub fn audio_context_for(doc:ref<Document>,value:Clip) -> AudioContext effects {alloc} {audio_context_for_scalar(doc,value)}
++pub fn audio_context_valid(doc:ref<Document>,value:Clip) -> bool effects {alloc} {audio_context_valid_scalar(doc,value)}
++fn audio_context_geometry(doc:ref<Document>,value:Clip,ctx:AudioContext) -> bool effects {} {
++  if ctx.source_in < 0 or ctx.source_in > 9007199254740991 or ctx.length <= 0 or
++      ctx.length > 9007199254740991 or ctx.offset < 0 or ctx.offset > ctx.length or
++      value.length <= 0 or value.length > ctx.length-ctx.offset or ctx.origin < 0 or
++      ctx.origin > 9007199254740991-ctx.length or not math.is_finite(ctx.fps) or ctx.fps <= 0.0 or
++      ctx.fps != sequence_fps(doc,value.owner) or not math.is_finite(ctx.rate) or ctx.rate <= 0.0 {return false}
++  let first:u64=match audio_sample(ctx.origin,ctx.fps) {none=>{return false},some(n)=>n,}
++  let crop:u64=match audio_sample(ctx.origin+ctx.offset,ctx.fps) {none=>{return false},some(n)=>n,}
++  let end:u64=match audio_sample(ctx.origin+ctx.length,ctx.fps) {none=>{return false},some(n)=>n,}
++  let body:u64=match audio_sample(ctx.origin+ctx.offset+value.length,ctx.fps) {none=>{return false},some(n)=>n,}
++  if ctx.crop_start != crop-first or ctx.output_frames != end-first or body > end {return false}
++  if (value.source == 0 and value.nested == 0) or (value.source != 0 and value.nested != 0) {return false}
++  if value.source != 0 {match source_slot(doc,value.source) {none=>{return false},some(_)=>{},}}
++  if value.nested != 0 {match sequence_slot(doc,value.nested) {none=>{return false},some(_)=>{},}}
++  let last:f64=cast.float(ctx.source_in)+cast.float(ctx.length-1)*ctx.rate
++  // Descendant edits can shorten a retained compound analysis window. The audio
++  // planner pads that missing child span before parent DSP; direct media handles
++  // remain strict. Never discard/reanchor the stored window to fit the new child.
++  if not math.is_finite(last) or last > 9007199254740991.0 or
++      (value.nested == 0 and not trim_sample_valid(doc,value,last)) {return false}
++  true
++}
++fn audio_context_valid_scalar(doc:ref<Document>,value:Clip) -> bool effects {} {
++  let ctx:AudioContext=match value.audio_context {none=>{return true},some(saved)=>saved,}
++  if not audio_context_geometry(doc,value,ctx) {return false}
++  let rate:f64=playback_rate_scalar(doc,value)
++  // A held clip retains its context as dormant metadata; resuming transforms it.
++  if rate == 0.0 {return true}
++  if not math.is_finite(rate) or rate != ctx.rate or value.reverse != ctx.reverse {return false}
++  let steps:i64=if ctx.reverse {ctx.length-ctx.offset-value.length}else{ctx.offset}
++  let body_anchor:f64=cast.float(value.source_in)
++  body_anchor == cast.float(ctx.source_in)+cast.float(steps)*ctx.rate
++}
++// Potential audio is independent of current mute/solo/enable state: later edits
++// may restore those descendants. Stream masks and source capabilities are durable.
++// Unknown/cyclic/over-budget graphs conservatively keep the processing context.
++fn audio_context_picture_filter(kind:str) -> bool effects {} {
++  str.eq(kind,"speed") or
++  str.eq(kind,"brightness") or
++  str.eq(kind,"contrast") or
++  str.eq(kind,"saturation") or
++  str.eq(kind,"gamma") or
++  str.eq(kind,"hue") or
++  str.eq(kind,"white_balance") or
++  str.eq(kind,"sharpen") or
++  str.eq(kind,"blur") or
++  str.eq(kind,"glow") or
++  str.eq(kind,"vignette") or
++  str.eq(kind,"grain") or
++  str.eq(kind,"sepia") or
++  str.eq(kind,"mono") or
++  str.eq(kind,"invert") or
++  str.eq(kind,"levels") or
++  str.eq(kind,"lift_gamma_gain") or
++  str.eq(kind,"crop") or
++  str.eq(kind,"size_position") or
++  str.eq(kind,"rotate") or
++  str.eq(kind,"flip") or
++  str.eq(kind,"mirror") or
++  str.eq(kind,"chroma_key") or
++  str.eq(kind,"mask") or
++  str.eq(kind,"opacity") or
++  str.eq(kind,"blend") or
++  str.eq(kind,"text") or
++  str.eq(kind,"timer") or
++  str.eq(kind,"denoise") or
++  str.eq(kind,"stabilize") or
++  str.eq(kind,"lut3d")
++}
++type AudioContextWalk = struct {scans:u64}
++fn audio_context_descendant(doc:ref<Document>,value:Clip,depth:u64,budget:ref<AudioContextWalk>) -> bool effects {} {
++  if not clip_has_audio(value) {return false}
++  if value.source != 0 {
++    if value.nested != 0 {return true}
++    return match source_slot(doc,value.source) {none=>true,some(slot)=>struct.get(array.borrow(struct.borrow(doc,field=sources),slot),field=has_audio),}
++  }
++  if value.nested == 0 or depth >= 16 {return true}
++  match sequence_slot(doc,value.nested) {none=>{return true},some(_)=>{},}
++  var f:u64=0
++  loop {if f >= array.len(struct.borrow(doc,field=filters)) {break}
++    if struct.get(budget,field=scans) >= 65536 {return true}
++    struct.set(budget,struct.get(budget,field=scans)+1,field=scans)
++    let filter:ref<Filter> =array.borrow(struct.borrow(doc,field=filters),f)
++    if filter.clip == value.id and not audio_context_picture_filter(str.view(struct.borrow(filter,field=kind))) {return true}
++    f=f+1}
++  var i:u64=0
++  loop {if i >= array.len(struct.borrow(doc,field=clips)) {break}
++    if struct.get(budget,field=scans) >= 65536 {return true}
++    struct.set(budget,struct.get(budget,field=scans)+1,field=scans)
++    let child:Clip=array.get(struct.borrow(doc,field=clips),i)
++    if child.owner == value.nested and audio_context_descendant(doc,child,depth+1,budget) {return true}
++    i=i+1}
++  false
++}
++fn audio_context_needed(doc:ref<Document>,value:Clip) -> bool effects {} {
++  if not clip_has_audio(value) or playback_rate_scalar(doc,value) <= 0.0 {return false}
++  var budget:AudioContextWalk=AudioContextWalk {scans:0}
++  audio_context_descendant(doc,value,0,budget)
++}
++// Preserve/extend a full processing window explicitly. Inward edits only change
++// body offset/crop; outward edits declare a larger history window and source anchor.
++fn audio_context_cut(doc:ref<Document>,old:Clip,next:Clip,delta:i64) -> option<Clip> effects {} {
++  var answer:Clip=next
++  if old.source_in == next.source_in and old.length == next.length and delta == 0 {return option.some(answer)}
++  if not audio_context_needed(doc,old) and not option.is_some(old.audio_context) {return option.some(answer)}
++  if not audio_context_valid_scalar(doc,old) {return option.none()}
++  audio_context_adjust(doc,next,audio_context_for_scalar(doc,old),delta)
++}
++fn audio_context_adjust(doc:ref<Document>,next:Clip,original:AudioContext,delta:i64) -> option<Clip> effects {} {
++  var answer:Clip=next
++  var ctx:AudioContext=original
++  let shifted:i64=add.sat(ctx.offset,delta)
++  if shifted < 0 {
++    let extra:i64=-shifted
++    let anchor:f64=cast.float(ctx.source_in)-if ctx.reverse {0.0}else{cast.float(extra)*ctx.rate}
++    if ctx.length > 9007199254740991-extra or anchor < 0.0 or anchor != math.floor(anchor) {return option.none()}
++    struct.set(ctx,cast.sat(anchor),field=source_in)
++    // Extending past a moved original origin explicitly adopts the current phase.
++    struct.set(ctx,if ctx.origin >= extra {ctx.origin-extra}else{next.start},field=origin)
++    struct.set(ctx,ctx.length+extra,field=length)
++    struct.set(ctx,0,field=offset)
++  }else{struct.set(ctx,shifted,field=offset)}
++  if next.length > ctx.length-ctx.offset {
++    let extra:i64=next.length-(ctx.length-ctx.offset)
++    let anchor:f64=cast.float(ctx.source_in)-if ctx.reverse {cast.float(extra)*ctx.rate}else{0.0}
++    if ctx.length > 9007199254740991-extra or anchor < 0.0 or anchor != math.floor(anchor) {return option.none()}
++    struct.set(ctx,cast.sat(anchor),field=source_in)
++    struct.set(ctx,ctx.length+extra,field=length)
++  }
++  let first:u64=match audio_sample(ctx.origin,ctx.fps) {none=>{return option.none()},some(n)=>n,}
++  let crop:u64=match audio_sample(add.sat(ctx.origin,ctx.offset),ctx.fps) {none=>{return option.none()},some(n)=>n,}
++  let end:u64=match audio_sample(add.sat(ctx.origin,ctx.length),ctx.fps) {none=>{return option.none()},some(n)=>n,}
++  struct.set(ctx,crop-first,field=crop_start)
++  struct.set(ctx,end-first,field=output_frames)
++  struct.set(answer,option.some(ctx),field=audio_context)
++  if not audio_context_geometry(doc,answer,ctx) {return option.none()}
++  option.some(answer)
++}
++// Explicit retime/slip preserves the complete span and its original sample phase.
++fn audio_context_retime(doc:ref<Document>,next:Clip,rate:f64) -> option<Clip> effects {} {
++  var answer:Clip=next
++  var ctx:AudioContext=match next.audio_context {none=>{return option.some(answer)},some(saved)=>saved,}
++  if not math.is_finite(rate) or rate < 0.0 {return option.none()}
++  if rate == 0.0 {return option.some(answer)}
++  let steps:i64=if next.reverse {ctx.length-ctx.offset-next.length}else{ctx.offset}
++  let anchor:f64=cast.float(next.source_in)-cast.float(steps)*rate
++  if not math.is_finite(anchor) or anchor < 0.0 or anchor > 9007199254740991.0 or anchor != math.floor(anchor) {return option.none()}
++  struct.set(ctx,cast.sat(anchor),field=source_in)
++  struct.set(ctx,rate,field=rate)
++  struct.set(ctx,next.reverse,field=reverse)
++  struct.set(answer,option.some(ctx),field=audio_context)
++  if not audio_context_geometry(doc,answer,ctx) {return option.none()}
++  option.some(answer)
++}
++
++fn audio_context_reconcile(doc:ref<Document>) -> bool effects {} {
++  var i:u64=0
++  loop {if i >= clip_count(doc) {break}
++    let old:Clip=option.unwrap(clip_at(doc,i))
++    let next:Clip=match audio_context_retime(doc,old,playback_rate_scalar(doc,old)) {none=>{return false},some(found)=>found,}
++    put_clip(doc,i,next)
++    i=i+1}
++  true
++}
 +// A preflight must not intern names, allocate IDs, or change any document field.
 +// source_in stores an integral LOWER source bound, including for reversed clips.
 +// Reject cuts whose fractional phase or active fade cannot be represented by Clip.
 +pub fn split_possible(doc: ref<Document>, id: u64, frame: i64) -> bool effects {alloc} {
 +  let old: Clip = match clip(doc,id) {none=>{return false},some(value)=>value,}
++  if not audio_context_valid(doc,old) {return false}
 +  let offset: i64 = frame-old.start
 +  if offset <= 0 or offset >= old.length or track_locked(doc,old.track) {return false}
 +  if old.source_in < 0 or old.fade_in < 0 or old.fade_out < 0 {return false}
@@ -267,7 +538,8 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +      let kind: ref<string> = struct.borrow(filter,field=kind)
 +      // A cloned timer restarts local time; echo graphs lose the original delay
 +      // history. Refuse until a preserved time/state context is represented.
-+      if str.eq(kind,"timer") or str.eq(kind,"delay") or str.eq(kind,"reverb") {return false}
++      if (str.eq(kind,"timer") and clip_has_video(old)) or
++          ((str.eq(kind,"delay") or str.eq(kind,"reverb")) and clip_has_audio(old)) {return false}
 +    }
 +    i=i+1}
 +  i=0
@@ -288,8 +560,16 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +    length:if old.reverse {offset}else{old.length-offset},
 +    start:if old.reverse {old.start}else{frame},track:old.track,group:old.group,
 +    enabled:old.enabled,selected:old.selected,fade_in:old.fade_in,fade_out:old.fade_out,
-+    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams}
-+  trim_same_samples(doc,old,moved,rate)
++    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams,audio_context:old.audio_context}
++  if not trim_same_samples(doc,old,moved,rate) {return false}
++  var left:Clip=old
++  struct.set(left,offset,field=length)
++  if old.reverse {struct.set(left,add.sat(old.source_in,advance),field=source_in)}
++  var right:Clip=old
++  struct.set(right,old.length-offset,field=length)
++  struct.set(right,frame,field=start)
++  if not old.reverse {struct.set(right,add.sat(old.source_in,advance),field=source_in)}
++  option.is_some(audio_context_cut(doc,old,left,0)) and option.is_some(audio_context_cut(doc,old,right,offset))
 +}
 +
 +// Preserve every control point, including context outside the new body. Truncating
@@ -362,15 +642,23 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
        let offset: i64 = frame - old.start
 -      if offset <= 0 or offset >= old.length { return option.none() }
+-      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
+-        nested: old.nested, source_in: old.source_in, length: offset, start: old.start,
 +      let phase: f64 = cast.float(if old.reverse {old.length-offset} else {offset})*playback_rate(doc,old)
 +      let advance: i64 = cast.sat(phase)
-       put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
--        nested: old.nested, source_in: old.source_in, length: offset, start: old.start,
++      let left_body:Clip=Clip {id: old.id, owner: old.owner, source: old.source,
 +        nested: old.nested, source_in: if old.reverse {add.sat(old.source_in,advance)} else {old.source_in}, length: offset, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: if old.fade_in > offset { offset } else { old.fade_in }, fade_out: 0,
 -        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
-+        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
++        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context}
++      let left:Clip=match audio_context_cut(doc,old,left_body,0) {none=>{return option.none()},some(found)=>found,}
++      var right_body:Clip=old
++      struct.set(right_body,old.length-offset,field=length)
++      struct.set(right_body,frame,field=start)
++      struct.set(right_body,if old.reverse {old.source_in}else{add.sat(old.source_in,advance)},field=source_in)
++      let right_context:Clip=match audio_context_cut(doc,old,right_body,offset) {none=>{return option.none()},some(found)=>found,}
++      put_clip(doc,slot,left)
        let right: u64 = fresh_id(doc)
        array.push(struct.borrow(doc, field=clips), Clip {id: right, owner: old.owner,
 -        source: old.source, nested: old.nested, source_in: add.sat(old.source_in, offset),
@@ -378,12 +666,12 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
          length: old.length - offset, start: frame, track: old.track, group: old.group,
          enabled: old.enabled, selected: false, fade_in: 0, fade_out: old.fade_out,
 -        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
-+        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
++        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:right_context.audio_context})
 +      split_content(doc,old.id,right,offset)
        option.some(right)
      },
      none => option.none(),
-@@ -1165,7 +1424,8 @@
+@@ -1165,7 +1666,8 @@
    loop {
      if index >= array.len(struct.borrow(doc, field=clips)) { break }
      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
@@ -393,7 +681,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        array.push(targets, value.id)
      }
      index = index + 1
-@@ -1180,56 +1440,254 @@
+@@ -1180,56 +1682,261 @@
    cuts
  }
  
@@ -464,7 +752,8 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +    let filter: ref<Filter> = array.borrow(struct.borrow(doc,field=filters),i)
 +    if delta != 0 and filter.clip == old.id and filter.enabled {
 +      let kind: ref<string> = struct.borrow(filter,field=kind)
-+      if str.eq(kind,"timer") or str.eq(kind,"delay") or str.eq(kind,"reverb") {return false}
++      if (str.eq(kind,"timer") and clip_has_video(old)) or
++          ((str.eq(kind,"delay") or str.eq(kind,"reverb")) and clip_has_audio(old)) {return false}
 +    }
 +    i=i+1}
 +  i=0
@@ -551,8 +840,14 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  } else {length=if request < floor_length {floor_length} else {request}}
 +  let rate: f64 = playback_rate(doc,old)
 +  if not math.is_finite(rate) or rate < 0.0 {return option.none()}
++  // A descendant may have shortened after a compound retained its full DSP window.
++  // Inward cuts still select an existing body subset; missing child time is padded
++  // inside that retained window. New/outward history and direct media stay bounded.
++  let retained_nested:bool=old.nested != 0 and option.is_some(old.audio_context) and
++    audio_context_valid_scalar(doc,old) and start >= old.start and length > 0 and
++    start <= finish and length <= finish-start
 +  // Clamp availability along the edited edge only: never change retained sample time.
-+  if rate > 0.0 {
++  if rate > 0.0 and not retained_nested {
 +    if (head and not old.reverse) or (not head and old.reverse) {
 +      let extent: f64 = math.floor(cast.float(old.source_in)/rate)
 +      let available: i64 = cast.sat(extent)
@@ -617,7 +912,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  if source_in < 0 or source_in >= 9007199254740992 {return option.none()}
 +  let last: f64 = cast.float(source_in)+cast.float(length-1)*rate
 +  if not math.is_finite(last) {return option.none()}
-+  if not trim_sample_valid(doc,old,last) {return option.none()}
++  if not retained_nested and not trim_sample_valid(doc,old,last) {return option.none()}
 +  if not trim_context(doc,old,delta,length) {return option.none()}
 +  var fade_in: i64 = old.fade_in
 +  var fade_out: i64 = old.fade_out
@@ -632,9 +927,9 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  let next: Clip = Clip {id:old.id,owner:old.owner,source:old.source,nested:old.nested,
 +    source_in:source_in,length:length,start:start,track:old.track,group:old.group,
 +    enabled:old.enabled,selected:old.selected,fade_in:fade_in,fade_out:fade_out,
-+    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams}
++    gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams,audio_context:old.audio_context}
 +  if not trim_same_samples(doc,old,next,rate) {return option.none()}
-+  option.some(next)
++  audio_context_cut(doc,old,next,delta)
 +}
 +
 +// TRIM the head holding the right edge, and rebase the complete curve context.
@@ -686,16 +981,16 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        if not trim_start(doc, id, new_start) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1239,7 +1697,7 @@
+@@ -1239,7 +1946,7 @@
              nested: moved.nested, source_in: moved.source_in, length: moved.length,
              start: was_start, track: moved.track, group: moved.group, enabled: moved.enabled,
              selected: moved.selected, fade_in: moved.fade_in, fade_out: moved.fade_out,
 -            gain: moved.gain, pan: moved.pan, speed: moved.speed, reverse: moved.reverse})
-+            gain: moved.gain, pan: moved.pan, speed: moved.speed, reverse: moved.reverse, streams:moved.streams})
++            gain: moved.gain, pan: moved.pan, speed: moved.speed, reverse: moved.reverse, streams:moved.streams,audio_context:moved.audio_context})
            shift_after(doc, track, was_end, 0 - delta, id)
            true
          },
-@@ -1252,13 +1710,15 @@
+@@ -1252,13 +1959,15 @@
  
  // RIPPLE TRIM the tail: trim, then shift the later same-track clips by the length actually
  // applied, so shortening closes the gap and lengthening opens one. Genesis `ripple_trim_end`.
@@ -712,7 +1007,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        if not trim_end(doc, id, new_length) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1276,7 +1736,10 @@
+@@ -1276,7 +1985,10 @@
  // LIFT: remove the clip and leave the hole. Genesis `delete_clip`.
  pub fn lift(doc: ref<Document>, id: u64) -> bool effects {alloc} {
    match clip_slot(doc, id) {
@@ -724,7 +1019,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true },
      none => false,
    }
-@@ -1288,6 +1751,7 @@
+@@ -1288,6 +2000,7 @@
      some(slot) => {
        let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
        let track: u64 = old.track
@@ -732,7 +1027,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        let finish: i64 = clip_end(old)
        let length: i64 = old.length
        remove_clip_slot(doc, slot)
-@@ -1303,56 +1767,62 @@
+@@ -1303,56 +2016,62 @@
  // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
  // up, because a clamped remnant would spill back into the range and never clear.
  // Genesis `lift_range`.
@@ -834,7 +1129,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +        source:old.source,nested:old.nested,source_in:planned_right.source_in,
 +        length:planned_right.length,start:planned_right.start,track:old.track,group:old.group,
 +        enabled:old.enabled,selected:false,fade_in:planned_right.fade_in,fade_out:planned_right.fade_out,
-+        gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams})
++        gain:old.gain,pan:old.pan,speed:old.speed,reverse:old.reverse, streams:old.streams,audio_context:planned_right.audio_context})
 +      split_content(doc,id,right,to-old.start)
 +    } else if left_length >= min_clip() {let _ = trim_end(doc,id,left_length)}
 +      else if right_length >= min_clip() {let _ = trim_start(doc,id,to)}
@@ -843,106 +1138,181 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    ()
  }
  
-@@ -1389,7 +1859,7 @@
+@@ -1389,7 +2108,7 @@
          start: if moved < 0 { 0 } else { moved }, track: old.track, group: old.group,
          enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
          fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
 -        reverse: old.reverse})
-+        reverse: old.reverse, streams:old.streams})
++        reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -1416,7 +1886,7 @@
+@@ -1411,12 +2130,13 @@
+       // A move across sequences would need to rescale the clip's in-point, length,
+       // fades and local keyframes. Keep a drag within one frame unit system.
+       if owner != old.owner { return false }
++      match old.audio_context {none=>{},some(ctx)=>{if ctx.fps != sequence_fps(doc,owner) {return false}},}
+       put_clip(doc, slot, Clip {id: old.id, owner: owner, source: old.source,
+         nested: old.nested, source_in: old.source_in, length: old.length,
          start: if start < 0 { 0 } else { start }, track: track, group: old.group,
          enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
          fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
 -        reverse: old.reverse})
-+        reverse: old.reverse, streams:old.streams})
++        reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -1453,7 +1923,7 @@
-     start: right.start + d, track: current.track, group: current.group,
-     enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
-     fade_out: current.fade_out, gain: current.gain, pan: current.pan, speed: current.speed,
+@@ -1428,7 +2148,7 @@
+ // seam stays a single cut. The effective delta is the most both sides can take under the
+ // `min_clip` floors and the right clip's source floor. Returns the delta actually applied.
+ // Genesis `roll_edit`.
+-pub fn roll(doc: ref<Document>, left_id: u64, right_id: u64, delta: i64) -> i64 effects {} {
++pub fn roll(doc: ref<Document>, left_id: u64, right_id: u64, delta: i64) -> i64 effects {alloc} {
+   if left_id == right_id { return 0 }
+   let left: Clip = match clip(doc, left_id) { some(found) => found, none => { return 0 }, }
+   let right: Clip = match clip(doc, right_id) { some(found) => found, none => { return 0 }, }
+@@ -1444,23 +2164,20 @@
+     none => { },
+   }
+   if d == 0 { return 0 }
+-  let left_slot: u64 = match clip_slot(doc, left_id) { some(found) => found, none => { return 0 }, }
+-  if not set_range(doc, left_slot, left.source_in, left.length + d) { return 0 }
+-  let right_slot: u64 = match clip_slot(doc, right_id) { some(found) => found, none => { return 0 }, }
+-  let current: Clip = array.get(struct.borrow(doc, field=clips), right_slot)
+-  put_clip(doc, right_slot, Clip {id: current.id, owner: current.owner, source: current.source,
+-    nested: current.nested, source_in: current.source_in, length: current.length,
+-    start: right.start + d, track: current.track, group: current.group,
+-    enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
+-    fade_out: current.fade_out, gain: current.gain, pan: current.pan, speed: current.speed,
 -    reverse: current.reverse})
-+    reverse: current.reverse, streams:current.streams})
-   if not set_range(doc, right_slot, add.sat(right.source_in, d), right.length - d) { return 0 }
+-  if not set_range(doc, right_slot, add.sat(right.source_in, d), right.length - d) { return 0 }
++  let left_slot:u64=option.unwrap(clip_slot(doc,left_id))
++  let right_slot:u64=option.unwrap(clip_slot(doc,right_id))
++  let left_next:Clip=match trim_target(doc,left,left.length+d,false) {none=>{return 0},some(found)=>found,}
++  var right_next:Clip=match trim_target(doc,right,right.start+d,true) {none=>{return 0},some(found)=>found,}
++  if left_next.length != left.length+d or right_next.start != right.start+d {return 0}
++  put_clip(doc,left_slot,left_next)
++  put_clip(doc,right_slot,right_next)
++  trim_keys(doc,right_id,d)
    d
  }
-@@ -1520,7 +1990,7 @@
-     nested: value.nested, source_in: value.source_in, length: value.length,
-     start: start + delta, track: value.track, group: value.group, enabled: value.enabled,
-     selected: value.selected, fade_in: value.fade_in, fade_out: value.fade_out,
+ 
+ // ROLL addressed by the boundary frame: find the abutting pair whose shared cut sits exactly
+ // at `boundary` on `track` and roll it. Genesis `roll`.
+-pub fn roll_at(doc: ref<Document>, track: u64, boundary: i64, delta: i64) -> i64 effects {} {
++pub fn roll_at(doc: ref<Document>, track: u64, boundary: i64, delta: i64) -> i64 effects {alloc} {
+   var left: u64 = 0
+   var right: u64 = 0
+   var index: u64 = 0
+@@ -1482,7 +2199,7 @@
+ // follows its right edge, so the track's total length is invariant. All-or-nothing: a missing
+ // or non-abutting neighbour, or a move that would collapse one, mutates nothing.
+ // Genesis `slide`.
+-pub fn slide(doc: ref<Document>, id: u64, delta: i64) -> bool effects {} {
++pub fn slide(doc: ref<Document>, id: u64, delta: i64) -> bool effects {alloc} {
+   let value: Clip = match clip(doc, id) { some(found) => found, none => { return false }, }
+   if delta == 0 { return true }
+   let start: i64 = value.start
+@@ -1515,23 +2232,20 @@
+     some(limit) => { if after_in + after_length > limit { return false } },
+     none => { },
+   }
+-  let slot: u64 = match clip_slot(doc, id) { some(found) => found, none => { return false }, }
+-  put_clip(doc, slot, Clip {id: value.id, owner: value.owner, source: value.source,
+-    nested: value.nested, source_in: value.source_in, length: value.length,
+-    start: start + delta, track: value.track, group: value.group, enabled: value.enabled,
+-    selected: value.selected, fade_in: value.fade_in, fade_out: value.fade_out,
 -    gain: value.gain, pan: value.pan, speed: value.speed, reverse: value.reverse})
-+    gain: value.gain, pan: value.pan, speed: value.speed, reverse: value.reverse, streams:value.streams})
-   let before_slot: u64 = match clip_slot(doc, previous) { some(found) => found, none => { return false }, }
-   let _ = set_range(doc, before_slot, before.source_in, before_length)
-   let after_slot: u64 = match clip_slot(doc, next) { some(found) => found, none => { return false }, }
-@@ -1530,7 +2000,7 @@
-     start: after.start + delta, track: current.track, group: current.group,
-     enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
-     fade_out: current.fade_out, gain: current.gain, pan: current.pan, speed: current.speed,
+-  let before_slot: u64 = match clip_slot(doc, previous) { some(found) => found, none => { return false }, }
+-  let _ = set_range(doc, before_slot, before.source_in, before_length)
+-  let after_slot: u64 = match clip_slot(doc, next) { some(found) => found, none => { return false }, }
+-  let current: Clip = array.get(struct.borrow(doc, field=clips), after_slot)
+-  put_clip(doc, after_slot, Clip {id: current.id, owner: current.owner, source: current.source,
+-    nested: current.nested, source_in: current.source_in, length: current.length,
+-    start: after.start + delta, track: current.track, group: current.group,
+-    enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
+-    fade_out: current.fade_out, gain: current.gain, pan: current.pan, speed: current.speed,
 -    reverse: current.reverse})
-+    reverse: current.reverse, streams:current.streams})
-   set_range(doc, after_slot, after_in, after_length)
+-  set_range(doc, after_slot, after_in, after_length)
++  let slot:u64=option.unwrap(clip_slot(doc,id))
++  let before_slot:u64=option.unwrap(clip_slot(doc,previous))
++  let after_slot:u64=option.unwrap(clip_slot(doc,next))
++  let before_next:Clip=match trim_target(doc,before,before_length,false) {none=>{return false},some(found)=>found,}
++  var after_next:Clip=match trim_target(doc,after,after.start+delta,true) {none=>{return false},some(found)=>found,}
++  if before_next.length != before_length or after_next.start != after.start+delta {return false}
++  var middle:Clip=value
++  struct.set(middle,start+delta,field=start)
++  struct.set(after_next,after.start+delta,field=start)
++  put_clip(doc,before_slot,before_next)
++  put_clip(doc,slot,middle)
++  put_clip(doc,after_slot,after_next)
++  trim_keys(doc,next,delta)
++  true
  }
  
-@@ -1545,7 +2015,7 @@
+ // ---------------------------------------------------------------------------
+@@ -1545,7 +2259,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: value,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: old.reverse})
-+        speed: old.speed, reverse: old.reverse, streams:old.streams})
++        speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -1562,7 +2032,7 @@
+@@ -1562,7 +2276,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: false,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: old.reverse})
-+        speed: old.speed, reverse: old.reverse, streams:old.streams})
++        speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
      }
      index = index + 1
    }
-@@ -1645,7 +2115,7 @@
+@@ -1645,7 +2359,7 @@
            nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
            track: old.track, group: id, enabled: old.enabled, selected: old.selected,
            fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -          speed: old.speed, reverse: old.reverse})
-+          speed: old.speed, reverse: old.reverse, streams:old.streams})
++          speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        },
        none => { },
      }
-@@ -1667,7 +2137,7 @@
+@@ -1667,7 +2381,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: 0, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: old.reverse})
-+        speed: old.speed, reverse: old.reverse, streams:old.streams})
++        speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
      }
      index = index + 1
    }
-@@ -1717,7 +2187,7 @@
+@@ -1717,7 +2431,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length,
          start: old.start + d, track: old.track, group: old.group, enabled: old.enabled,
          selected: old.selected, fade_in: old.fade_in, fade_out: old.fade_out,
 -        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse})
-+        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
++        gain: old.gain, pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
      }
      index = index + 1
    }
-@@ -1744,7 +2214,7 @@
+@@ -1740,11 +2454,13 @@
+       if frames > 0 and old.source_in + old.length > frames {
+         if doc.source_bounds == bounds_reject() { return false }
+       }
+-      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: source, nested: 0,
++      let next:Clip=Clip {id: old.id, owner: old.owner, source: source, nested: 0,
          source_in: old.source_in, length: old.length, start: old.start, track: old.track,
          group: old.group, enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
          fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
 -        reverse: old.reverse})
-+        reverse: old.reverse, streams:old.streams})
++        reverse: old.reverse, streams:old.streams,audio_context:old.audio_context}
++      match next.audio_context {none=>{},some(ctx)=>{if not audio_context_geometry(doc,next,ctx) {return false}},}
++      put_clip(doc,slot,next)
        let _ = set_range(doc, slot, old.source_in, old.length)
        true
      },
-@@ -1754,7 +2224,7 @@
+@@ -1754,7 +2470,7 @@
  
  // DETACH AUDIO: clone the clip onto an audio track at the same place and silence the
  // original's audio, so its video is unchanged and its sound now plays from the clone.
@@ -951,7 +1321,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  pub fn detach_audio(doc: ref<Document>, id: u64) -> option<u64> effects {alloc} {
    let old: Clip = match clip(doc, id) { some(found) => found, none => { return option.none() }, }
    var target: u64 = 0
-@@ -1772,9 +2242,9 @@
+@@ -1772,9 +2488,9 @@
    let clone: u64 = fresh_id(doc)
    array.push(struct.borrow(doc, field=clips), Clip {id: clone, owner: old.owner,
      source: old.source, nested: old.nested, source_in: old.source_in, length: old.length,
@@ -959,83 +1329,102 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +    start: old.start, track: target, group: 0, enabled: old.enabled, selected: false,
      fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -    speed: old.speed, reverse: old.reverse})
-+    speed: old.speed, reverse: old.reverse, streams:streams_audio()})
++    speed: old.speed, reverse: old.reverse, streams:streams_audio(),audio_context:old.audio_context})
    match clip_slot(doc, id) {
      some(slot) => {
        let current: Clip = array.get(struct.borrow(doc, field=clips), slot)
-@@ -1783,7 +2253,7 @@
+@@ -1783,7 +2499,7 @@
          start: current.start, track: current.track, group: current.group,
          enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
          fade_out: current.fade_out, gain: 0.0, pan: current.pan, speed: current.speed,
 -        reverse: current.reverse})
-+        reverse: current.reverse, streams:streams_video()})
++        reverse: current.reverse, streams:streams_video(),audio_context:current.audio_context})
      },
      none => { },
    }
-@@ -1803,7 +2273,7 @@
+@@ -1803,7 +2519,7 @@
    array.push(struct.borrow(doc, field=clips), Clip {id: still, owner: old.owner,
      source: old.source, nested: old.nested, source_in: held, length: length, start: frame,
      track: old.track, group: 0, enabled: true, selected: false, fade_in: 0, fade_out: 0,
 -    gain: 0.0, pan: old.pan, speed: 0.0, reverse: false})
-+    gain: 0.0, pan: old.pan, speed: 0.0, reverse: false, streams:old.streams})
++    gain: 0.0, pan: old.pan, speed: 0.0, reverse: false, streams:old.streams,audio_context:option.none()})
    option.some(still)
  }
  
-@@ -1819,7 +2289,7 @@
+@@ -1819,7 +2535,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: want, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: old.reverse})
-+        speed: old.speed, reverse: old.reverse, streams:old.streams})
++        speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -1834,7 +2304,7 @@
+@@ -1834,7 +2550,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: want, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: old.reverse})
-+        speed: old.speed, reverse: old.reverse, streams:old.streams})
++        speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -1848,7 +2318,7 @@
+@@ -1848,7 +2564,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: math.max(0.0, value),
 -        pan: old.pan, speed: old.speed, reverse: old.reverse})
-+        pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams})
++        pan: old.pan, speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -1882,7 +2352,7 @@
+@@ -1874,15 +2590,17 @@
+ // Negative rates are refused rather than clamped — `reverse` is the separate flag that says
+ // which way a clip runs, and a negative rate would be a second, disagreeing way to say it.
+ pub fn set_clip_speed(doc: ref<Document>, id: u64, value: f64) -> bool effects {} {
+-  if value < 0.0 { return false }
++  if not math.is_finite(value) or value < 0.0 { return false }
+   match clip_slot(doc, id) {
+     some(slot) => {
+       let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+-      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
++      let body:Clip=Clip {id: old.id, owner: old.owner, source: old.source,
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: value, reverse: old.reverse})
-+        speed: value, reverse: old.reverse, streams:old.streams})
++        speed: value, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context}
++      let next:Clip=match audio_context_retime(doc,body,playback_rate_scalar(doc,body)) {none=>{return false},some(found)=>found,}
++      put_clip(doc,slot,next)
        true
      },
      none => false,
-@@ -1897,7 +2367,7 @@
+@@ -1893,11 +2611,13 @@
+   match clip_slot(doc, id) {
+     some(slot) => {
+       let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
+-      put_clip(doc, slot, Clip {id: old.id, owner: old.owner, source: old.source,
++      let body:Clip=Clip {id: old.id, owner: old.owner, source: old.source,
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: value})
-+        speed: old.speed, reverse: value, streams:old.streams})
++        speed: old.speed, reverse: value, streams:old.streams,audio_context:old.audio_context}
++      let next:Clip=match audio_context_retime(doc,body,playback_rate_scalar(doc,body)) {none=>{return false},some(found)=>found,}
++      put_clip(doc,slot,next)
        true
      },
      none => false,
-@@ -1912,7 +2382,7 @@
+@@ -1912,7 +2632,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: value, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
 -        speed: old.speed, reverse: old.reverse})
-+        speed: old.speed, reverse: old.reverse, streams:old.streams})
++        speed: old.speed, reverse: old.reverse, streams:old.streams,audio_context:old.audio_context})
        true
      },
      none => false,
-@@ -2131,9 +2601,8 @@
+@@ -2131,9 +2851,8 @@
  // Keyframes
  //
  // One flat, sorted store animates every parameter of every clip, plus the sequence-wide ones
@@ -1047,3 +1436,116 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  //
  // Parameters are named by the application and interned, so this module carries no registry of
  // what may be animated. The curve shapes come from `std.curve`, which holds the MLT-parity
+@@ -2537,12 +3256,21 @@
+     none => false,
+   }
+ }
+-pub fn set_filter_enabled(doc: ref<Document>, id: u64, value: bool) -> bool effects {} {
+-  match filter_slot(doc, id) {
+-    some(slot) => { struct.set(array.borrow(struct.borrow(doc, field=filters), slot), value, field=enabled)
+-      true },
+-    none => false,
+-  }
++pub fn set_filter_enabled(doc:ref<Document>,id:u64,value:bool) -> bool effects {} {
++  let slot:u64=match filter_slot(doc,id) {none=>{return false},some(found)=>found,}
++  let clip_id:u64=struct.get(array.borrow(struct.borrow(doc,field=filters),slot),field=clip)
++  let old:Clip=match clip(doc,clip_id) {none=>{return false},some(found)=>found,}
++  var rate:f64=old.speed
++  var i:u32=0
++  loop {let found:u64=match filter_at(doc,clip_id,i) {none=>{break},some(n)=>n,}
++    let slot_value:u64=option.unwrap(filter_slot(doc,found))
++    let f:ref<Filter> =array.borrow(struct.borrow(doc,field=filters),slot_value)
++    if (if found == id {value}else{f.enabled}) and str.eq(struct.borrow(f,field=kind),"speed") {rate=rate*filter_param(doc,found,"rate",1.0)}
++    i=i+1}
++  let next:Clip=match audio_context_retime(doc,old,rate) {none=>{return false},some(found)=>found,}
++  struct.set(array.borrow(struct.borrow(doc,field=filters),slot),value,field=enabled)
++  put_clip(doc,option.unwrap(clip_slot(doc,clip_id)),next)
++  true
+ }
+ pub fn filter_order(doc: ref<Document>, id: u64) -> u32 effects {} {
+   match filter_slot(doc, id) {
+@@ -2553,7 +3281,7 @@
+ 
+ // Move a filter to a new position in its clip's stack, renumbering the rest so the stack
+ // stays a dense 0..n-1 sequence.
+-pub fn reorder_filter(doc: ref<Document>, id: u64, position: u32) -> bool effects {alloc} {
++fn reorder_filter_raw(doc: ref<Document>, id: u64, position: u32) -> bool effects {alloc} {
+   let slot: u64 = match filter_slot(doc, id) { some(found) => found, none => { return false }, }
+   let clip_id: u64 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=clip)
+   let count: u32 = cast.sat(filter_count(doc, clip_id))
+@@ -2579,7 +3307,7 @@
+   true
+ }
+ 
+-pub fn remove_filter(doc: ref<Document>, id: u64) -> bool effects {alloc} {
++fn remove_filter_raw(doc: ref<Document>, id: u64) -> bool effects {alloc} {
+   let slot: u64 = match filter_slot(doc, id) { some(found) => found, none => { return false }, }
+   let clip_id: u64 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=clip)
+   let gone: u32 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=order)
+@@ -2606,13 +3334,13 @@
+ }
+ 
+ // Remove every filter from a clip: the stack RESET.
+-pub fn clear_filters(doc: ref<Document>, clip_id: u64) -> u64 effects {alloc} {
++fn clear_filters_raw(doc: ref<Document>, clip_id: u64) -> u64 effects {alloc} {
+   let before: u64 = filter_count(doc, clip_id)
+   drop_clip_filters(doc, clip_id)
+   before
+ }
+ 
+-pub fn set_filter_param(doc: ref<Document>, filter: u64, name: str, value: f64) -> bool effects {alloc} {
++fn set_filter_param_raw(doc: ref<Document>, filter: u64, name: str, value: f64) -> bool effects {alloc} {
+   match filter_slot(doc, filter) { some(found) => { }, none => { return false }, }
+   var index: u64 = 0
+   loop {
+@@ -3143,3 +3871,50 @@
+     none => false,
+   }
+ }
++
++pub fn set_filter_param(doc:ref<Document>,filter:u64,name:str,value:f64) -> bool effects {alloc} {
++  let filter_index:u64=match filter_slot(doc,filter) {none=>{return false},some(slot)=>slot,}
++  let clip_id_value:u64=struct.get(array.borrow(struct.borrow(doc,field=filters),filter_index),field=clip)
++  let old:Clip=match clip(doc,clip_id_value) {none=>{return false},some(found)=>found,}
++  if not option.is_some(old.audio_context) {return set_filter_param_raw(doc,filter,name,value)}
++  var candidate:Document=copy_document(doc)
++  let answer:bool=set_filter_param_raw(candidate,filter,name,value)
++  if not audio_context_reconcile(candidate) {return false}
++  let _=ref.swap(doc,candidate)
++  answer
++}
++
++pub fn remove_filter(doc:ref<Document>,id:u64) -> bool effects {alloc} {
++  let filter_index:u64=match filter_slot(doc,id) {none=>{return false},some(slot)=>slot,}
++  let clip_id_value:u64=struct.get(array.borrow(struct.borrow(doc,field=filters),filter_index),field=clip)
++  let old:Clip=match clip(doc,clip_id_value) {none=>{return false},some(found)=>found,}
++  if not option.is_some(old.audio_context) {return remove_filter_raw(doc,id)}
++  var candidate:Document=copy_document(doc)
++  let answer:bool=remove_filter_raw(candidate,id)
++  if not audio_context_reconcile(candidate) {return false}
++  let _=ref.swap(doc,candidate)
++  answer
++}
++
++pub fn reorder_filter(doc:ref<Document>,id:u64,position:u32) -> bool effects {alloc} {
++  let filter_index:u64=match filter_slot(doc,id) {none=>{return false},some(slot)=>slot,}
++  let clip_id_value:u64=struct.get(array.borrow(struct.borrow(doc,field=filters),filter_index),field=clip)
++  let old:Clip=match clip(doc,clip_id_value) {none=>{return false},some(found)=>found,}
++  if not option.is_some(old.audio_context) {return reorder_filter_raw(doc,id,position)}
++  var candidate:Document=copy_document(doc)
++  let answer:bool=reorder_filter_raw(candidate,id,position)
++  if not audio_context_reconcile(candidate) {return false}
++  let _=ref.swap(doc,candidate)
++  answer
++}
++
++pub fn clear_filters(doc:ref<Document>,clip_id:u64) -> u64 effects {alloc} {
++  let clip_id_value:u64=clip_id
++  let old:Clip=match clip(doc,clip_id_value) {none=>{return 0},some(found)=>found,}
++  if not option.is_some(old.audio_context) {return clear_filters_raw(doc,clip_id)}
++  var candidate:Document=copy_document(doc)
++  let answer:u64=clear_filters_raw(candidate,clip_id)
++  if not audio_context_reconcile(candidate) {return 0}
++  let _=ref.swap(doc,candidate)
++  answer
++}

@@ -48,7 +48,8 @@ def main():
             work = root / phase
             work.mkdir()
             movie = work / "retry 日本語.mp4"
-            partial = Path(str(movie) + ".genesis-air-part.mp4")
+            reservation = Path(str(movie) + ".genesis-air-owner")
+            partial = reservation / "export.mp4"
             marker = work / "blocked.pid"
             starts = work / "starts.log"
             scratch = work / "scratch"

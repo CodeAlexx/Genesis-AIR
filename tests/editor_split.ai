@@ -191,6 +191,8 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
     let _ = editor.set_fade_out(struct.borrow(state,field=document),placed.value,if variant == 3 {54} else {0})
     if variant == 4 {let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"fade_in",0,0.0,curve.linear())}
     if variant == 5 {let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"speed.rate",0,1.0,curve.linear())}
+    let original_streams:u32=editor.clip_streams(struct.borrow(state,field=document),placed.value)
+    if variant >= 7 {let _=editor.set_clip_streams(struct.borrow(state,field=document),placed.value,editor.streams_both())}
     var temporal: u64 = 0
     if variant >= 6 {
       let kind: string = if variant == 6 {string.copy("timer")} else if variant == 7 {string.copy("delay")} else {string.copy("reverb")}
@@ -227,7 +229,7 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
       let _ = test.eq_str(suite,encoded(probe),before,"Destructive lift-range caller fails safely before unsupported context")
     }
     let result: commands.Result = commands.split_at_playhead(state)
-    let _ = test.check(suite,not result.ok,"Unsupported phase fade rate timer or temporal-history cut is refused")
+    let _ = test.check(suite,not result.ok,"Unsupported phase fades rates picture timer or audible delay-tail cut is refused")
     let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Refusal does not cut the other eligible audio clip")
     let _ = test.eq_str(suite,history_bytes(struct.borrow(state,field=history)),history,"Refusal preserves every undo and redo snapshot")
     let _ = test.eq_u64(suite,state.document_revision,revision,"Refused Split preserves document revision")
@@ -240,6 +242,7 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
     if variant == 4 {let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"fade_in",0)}
     if variant == 5 {let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"speed.rate",0)}
     if temporal != 0 {let _ = editor.remove_filter(struct.borrow(state,field=document),temporal)}
+    let _=editor.set_clip_streams(struct.borrow(state,field=document),placed.value,original_streams)
     variant=variant+1}
   let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"speed.rate",0)
   let _ = editor.set_clip_speed(struct.borrow(state,field=document),placed.value,1.0)

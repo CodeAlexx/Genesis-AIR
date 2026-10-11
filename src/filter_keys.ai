@@ -31,6 +31,45 @@ pub fn has(doc: ref<editor.Document>, clip: u64, param: str) -> bool effects {} 
   }
   false
 }
+
+pub fn curve_name(doc: ref<editor.Document>, clip: u64, id: u64, kind: str,
+                  param: str) -> string effects {alloc} {
+  if id == 0 {return string.copy(param)}
+  let scoped: string = name(id,kind,param)
+  if has(doc,clip,str.view(scoped)) {return scoped}
+  legacy(kind,param)
+}
+
+// Read without interning names: UI inspection/navigation never edits a project.
+pub fn exact(doc: ref<editor.Document>, clip: u64, param: str, frame: i64)
+    -> option<editor.Key> effects {alloc} {
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == clip and key.frame == frame and editor.name_text(doc,key.param) == param {
+      return option.some(key)
+    }
+    i=i+1
+  }
+  option.none()
+}
+pub fn neighbor(doc: ref<editor.Document>, clip: u64, param: str, frame: i64,
+                length: i64, forward: bool) -> option<i64> effects {alloc} {
+  var found: bool = false
+  var at: i64 = 0
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == clip and key.frame >= 0 and key.frame < length and
+        editor.name_text(doc,key.param) == param and
+        (if forward {key.frame > frame}else{key.frame < frame}) {
+      if not found or (if forward {key.frame < at}else{key.frame > at}) {found=true
+        at=key.frame}
+    }
+    i=i+1
+  }
+  if found {option.some(at)}else{option.none()}
+}
 pub fn value(doc: ref<editor.Document>, clip: u64, id: u64, kind: str,
              param: str, frame: i64, fallback: f64) -> f64 effects {alloc} {
   let scoped: string = name(id,kind,param)
@@ -79,6 +118,35 @@ pub fn migrate(doc: ref<editor.Document>, clip: u64, id: u64, kind: str,
     let key: editor.Key = array.get(copied,i)
     let _ = editor.set_key(doc,clip,str.view(scoped),key.frame,key.value,key.interp)
     i=i+1
+  }
+  ()
+}
+
+// Removing the last scoped key must not resurrect an inherited legacy curve.
+// Preserve every sibling's inherited curve before retiring the shared name.
+pub fn materialize_family(doc: ref<editor.Document>, clip: u64, kind: str,
+                          param: str) -> unit effects {alloc} {
+  let old: string = legacy(kind,param)
+  if not has(doc,clip,str.view(old)) {return ()}
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=filters)) {break}
+    let id: u64 = struct.get(array.borrow(struct.borrow(doc,field=filters),i),field=id)
+    let owner: u64 = struct.get(array.borrow(struct.borrow(doc,field=filters),i),field=clip)
+    if owner == clip and editor.filter_kind(doc,id) == kind {
+      migrate(doc,clip,id,kind,param)
+    }
+    i=i+1
+  }
+  loop {
+    var at: option<i64> = option.none()
+    i=0
+    loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+      let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+      if key.clip == clip and editor.name_text(doc,key.param) == old {at=option.some(key.frame)
+        break}
+      i=i+1
+    }
+    match at {none=>{break},some(frame)=>{let _=editor.remove_key(doc,clip,str.view(old),frame)},}
   }
   ()
 }

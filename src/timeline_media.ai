@@ -6,11 +6,13 @@ import std.editor as editor
 import std.editor_view as editor_view
 import std.draw as draw
 import std.files as files
+import std.file_publish as file_publish
 import std.math as math
 import std.path as path
 import std.process as proc
 import std.tasks as tasks
 import std.text as text
+import std.system as system
 import std.timeline as timeline
 import std.font as font
 import "chrome.ai" as chrome
@@ -2582,6 +2584,69 @@ fn audio_automation_preflight(doc: ref<editor.Document>, clip: editor.Clip, held
   result.ok(())
 }
 
+// Context-bearing clips need a full original DSP graph followed by an exact
+// sample crop. Legacy AUDIO/AUDIOSTREAM remains unchanged for context-free clips.
+fn audio_context_graph(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {alloc} {
+  let context: editor.AudioContext = match editor.audio_context(clip) {none=>{
+    // These verified same-length graphs need their full authored history even
+    // before the first cut. Unknown/tail-producing legacy chains keep their
+    // existing whole-AUDIO behavior; no blanket tail-policy conversion.
+    var temporal: bool = false
+    var filter_at: u32 = 0
+    loop {match editor.filter_at(doc,clip.id,filter_at) {none=>{break},some(filter)=>{
+      if editor.filter_enabled(doc,filter) {
+        let kind: string = editor.filter_kind(doc,filter)
+        if chrome.is_audio_kind(kind) {
+          if str.eq(kind,"compressor") or str.eq(kind,"gate") or str.eq(kind,"limiter") or
+              str.eq(kind,"eq_3band") or str.eq(kind,"eq_10band") or str.eq(kind,"normalize") {
+            temporal=true
+          }else if not str.eq(kind,"volume") and not str.eq(kind,"mute") and not str.eq(kind,"pan") {
+            return false
+          }
+        }
+      }
+    },}
+      filter_at=filter_at+1
+    }
+    return temporal
+  },some(value)=>value,}
+  if not editor.audio_context_valid(doc,clip) {return true}
+  if clip.nested != 0 or context.reverse or context.rate != 1.0 {return true}
+  let samples: f64 = 48000.0/context.fps
+  if not math.is_finite(samples) or samples != math.floor(samples) {return true}
+  let slot: u64 = match editor.source_slot(doc,clip.source) {none=>{return true},some(value)=>value,}
+  if struct.get(array.borrow(struct.borrow(doc,field=sources),slot),field=audio_rate) != 48000 {return true}
+  var at: u32 = 0
+  loop {match editor.filter_at(doc,clip.id,at) {none=>{break},some(filter)=>{
+    if editor.filter_enabled(doc,filter) and chrome.is_audio_kind(editor.filter_kind(doc,filter)) {return true}
+  },}
+    at=at+1
+  }
+  // Origin decoding already preserves compressed codec state. At native 48k,
+  // unit forward rate and integral frame/sample phase, a trim is an exact native
+  // sample selection; pan/gain/fades are memoryless. No float body cache needed.
+  false
+}
+
+// Whole-input/unknown tail policies retain the owned full bus. Proven causal
+// flat graphs use a retained original decoder and exact bounded output pulls.
+fn audio_context_disk(doc:ref<editor.Document>,clip:editor.Clip)->bool effects {alloc} {
+  if clip.nested!=0 {return true}
+  if not audio_context_graph(doc,clip) {return false}
+  var at:u32=0
+  loop {match editor.filter_at(doc,clip.id,at) {none=>{break},some(filter)=>{
+    if editor.filter_enabled(doc,filter) {
+      let kind:string=editor.filter_kind(doc,filter)
+      if chrome.is_audio_kind(kind) and not str.eq(kind,"compressor") and not str.eq(kind,"gate") and
+          not str.eq(kind,"limiter") and not str.eq(kind,"eq_3band") and not str.eq(kind,"eq_10band") and
+          not str.eq(kind,"volume") and not str.eq(kind,"mute") and not str.eq(kind,"pan") {return true}
+    }
+  },}
+    at=at+1
+  }
+  false
+}
+
 fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
                -> result<array<string>, string> effects {alloc} {
   var lines: array<string> = array.new()
@@ -2595,6 +2660,11 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
     at = at + 1
     if clip.owner != doc.active or not clip.enabled or not editor.clip_has_audio(clip) or
        not editor.track_audible(doc, clip.track) { continue }
+    // Preserve context-free complete whole-output EOF/tail behavior. Device
+    // pulls and fresh subranges retain the original graph for causal history.
+    let legacy_original:bool=not streaming and not option.is_some(editor.audio_context(clip)) and start<=clip.start
+    if audio_context_disk(doc,clip) and not legacy_original {continue}
+    let context_requested:bool=not legacy_original and audio_context_graph(doc,clip)
     let source_slot: u64 = match editor.source_slot(doc, clip.source) {
       none => { continue },
       some(slot) => slot,
@@ -2672,7 +2742,7 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
     let fade_keys: string = match audio_fade_keys(doc, clip, begin, end, fps, streaming) {
       err(problem) => {return result.err(problem)},ok(value)=>value,
     }
-    let destination_s: f64 = if str.len(str.view(fade_keys)) != 0 {
+    let destination_s: f64 = if context_requested or str.len(str.view(fade_keys)) != 0 {
       cast.float(audio_sample_frame(begin,fps)-audio_sample_frame(start,fps))/48000.0
     }else{legacy_destination_s}
     var fields: array<string> = [
@@ -2686,7 +2756,7 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
       string.from_float(cast.float(clip.fade_in) / fps),
       string.from_float(cast.float(clip.fade_out) / fps),
       string.from_float(cast.float(clip.length) / fps),
-      string.from_float(cast.float(begin - clip.start) / fps),
+      string.from_float(if context_requested {cast.float(audio_sample_frame(begin,fps)-audio_sample_frame(clip.start,fps))/48000.0}else{cast.float(begin - clip.start) / fps}),
       chain
     ]
     if streaming {
@@ -2698,6 +2768,24 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
       array.push(fields, string.from_int(clip.id))
       array.push(fields, string.from_float(remaining_source))
       array.push(fields, string.from_int(audio_sample_frame(end, fps) - audio_sample_frame(begin, fps)))
+    }
+    if context_requested {
+      if not editor.audio_context_valid(doc,clip) {return result.err("[GA_AUDIO_CONTEXT] Invalid original audio processing window")}
+      let context:editor.AudioContext=editor.audio_context_for(doc,clip)
+      let original_source:f64=cast.float(context.source_in)/context.fps
+      var original_duration:f64=cast.float(context.length)*context.rate/context.fps
+      if source.frames>0 and source.fps>0.0 {
+        let available:f64=cast.float(source.frames)/source.fps-original_source
+        if original_duration>available {original_duration=available}
+      }
+      let request_crop:u64=context.crop_start+cast.sat(audio_sample_frame(begin,fps)-audio_sample_frame(clip.start,fps))
+      var context_fields:array<string> = ["AUDIOCTX",string.from_float(original_source),string.from_float(original_duration),
+        string.from_int(context.output_frames),string.from_int(request_crop),
+        string.from_int(audio_sample_frame(end,fps)-audio_sample_frame(begin,fps))]
+      if not streaming and end==editor.clip_end(clip) and context.offset+clip.length==context.length {
+        array.push(context_fields,"TAIL")
+      }
+      array.push(fields,text.join(context_fields,":"))
     }
     if str.len(str.view(gain_keys)) != 0 { array.push(fields, gain_keys) }
     if str.len(str.view(fade_keys)) != 0 { array.push(fields, fade_keys) }
@@ -2836,6 +2924,16 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
     return result.err("[GA_AUDIO_NESTED_CAPACITY] Nested audio exceeds depth or instance path limits")
   }
   let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
+  if not editor.audio_context_valid(doc,clip) {
+    return result.err("[GA_AUDIO_CONTEXT] Invalid preserved audio processing window")
+  }
+  var processing: editor.Clip = clip
+  let context: editor.AudioContext = editor.audio_context_for(doc,clip)
+  let has_context: bool = option.is_some(editor.audio_context(clip))
+  if has_context {
+    struct.set(processing,context.source_in,field=source_in)
+    struct.set(processing,context.length,field=length)
+  }
   if clip.nested == 0 {
     let slot: u64 = match editor.source_slot(doc,clip.source) {
       some(value)=>value,none=>{return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf source is missing")},
@@ -2858,15 +2956,17 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
     return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested gain or scalar fade")
   }
   var fields: array<string> = array.new()
+  var context_source: f64 = 0.0
+  var context_duration: f64 = 0.0
   var disk_bytes: f64 = cast.float(bounds.last-bounds.first)*8.0+128.0
   if clip.nested == 0 {
     let source_slot: u64 = match editor.source_slot(doc,clip.source) {
       some(slot)=>slot,none=>{return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf source is missing")},
     }
     var source: SourceInfo = source_info(doc,source_slot)
-    if not source_range_ok(doc,clip) {return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf exceeds its source frames")}
-    let source_s: f64 = cast.float(clip.source_in)/bounds.fps
-    var duration_s: f64 = cast.float(clip.length)*bounds.speed/bounds.fps
+    if not source_range_ok(doc,processing) {return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf exceeds its source frames")}
+    let source_s: f64 = cast.float(processing.source_in)/bounds.fps
+    var duration_s: f64 = cast.float(processing.length)*bounds.speed/bounds.fps
     if source.frames > 0 and source.fps > 0.0 {
       let remaining: f64 = cast.float(source.frames)/source.fps-source_s
       if duration_s > remaining {duration_s=remaining}
@@ -2878,6 +2978,8 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
     fields=[string.copy("NESTLEAF"),string.copy(instance),string.copy(parent),
       string.from_int(bounds.first),string.from_int(bounds.last),provider.wire_path(source.path),
       string.from_float(source_s),string.from_float(duration_s)]
+    context_source=source_s
+    context_duration=duration_s
   }else{
     if clip.source != 0 {return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested clip also references a media source")}
     match editor.sequence_slot(doc,clip.nested) {
@@ -2898,18 +3000,20 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
     }
     let child_length: i64 = editor.sequence_duration(doc,clip.nested)
     let child_limit: f64 = math.floor(cast.float(child_length)*48000.0/child_fps+0.5)
-    let selected_first: f64 = math.floor(cast.float(clip.source_in)*48000.0/bounds.fps+0.5)
-    let logical_last: f64 = math.floor((cast.float(clip.source_in)+cast.float(clip.length-1)*bounds.speed)*child_fps/bounds.fps)
-    let selected_end: f64 = math.floor((cast.float(clip.source_in)+cast.float(clip.length)*bounds.speed)*48000.0/bounds.fps+0.5)
+    let selected_first: f64 = math.floor(cast.float(processing.source_in)*48000.0/bounds.fps+0.5)
+    let logical_last: f64 = math.floor((cast.float(processing.source_in)+cast.float(processing.length-1)*bounds.speed)*child_fps/bounds.fps)
+    let selected_end: f64 = math.floor((cast.float(processing.source_in)+cast.float(processing.length)*bounds.speed)*48000.0/bounds.fps+0.5)
     // An empty sequence is a valid source in the SDK. Materialize its requested
     // span as silence so an enclosing filter can still operate on that sum.
-    let selected_last: f64 = if child_length == 0 {selected_end}
+    // A retained parent window also stays full when descendants are shortened;
+    // zero-fill the removed child suffix BEFORE the original parent DSP/crop.
+    let selected_last: f64 = if child_length == 0 or has_context {selected_end}
       else if selected_end > child_limit {child_limit}else{selected_end}
     if not math.is_finite(child_limit) or child_limit > 9007199254740991.0 or
         not math.is_finite(selected_first) or not math.is_finite(selected_last) or
         selected_first > 9007199254740991.0 or selected_last > 9007199254740991.0 or
         selected_first < 0.0 or selected_last <= selected_first or selected_last-selected_first > 1036800000.0 or
-        not math.is_finite(logical_last) or (child_length != 0 and logical_last >= cast.float(child_length)) {
+        not math.is_finite(logical_last) or (not has_context and child_length != 0 and logical_last >= cast.float(child_length)) {
       return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested source span exceeds its sequence")
     }
     let child_first: i64 = cast.sat(selected_first)
@@ -2935,6 +3039,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
     disk_bytes=disk_bytes+cast.float(child_last-child_first)*8.0+128.0
     fields=[string.copy("NESTBUS"),string.copy(instance),string.copy(parent),
       string.from_int(bounds.first),string.from_int(bounds.last),string.from_int(child_first),string.from_int(child_last)]
+    context_duration=cast.float(child_last-child_first)/48000.0
   }
   array.push(fields,string.from_float(gain))
   array.push(fields,string.from_float(cast.float(clip.fade_in)/bounds.fps))
@@ -2943,7 +3048,23 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   array.push(fields,chain)
   if str.len(gain_keys) != 0 {array.push(fields,gain_keys)}
   if str.len(fade_keys) != 0 {array.push(fields,fade_keys)}
+  if has_context {
+    var ctx_fields: array<string> = ["AUDIOCTX",string.from_float(context_source),string.from_float(context_duration),
+      string.from_int(context.output_frames),string.from_int(context.crop_start)]
+    array.push(fields,text.join(ctx_fields,":"))
+  }
   nested_audio_append(tree,fields,disk_bytes)
+}
+
+fn direct_audio_define(doc: ref<editor.Document>,clip: editor.Clip,instance: str,
+    ancestors: ref<array<u64>>,tree: ref<NestedAudioTree>) -> result<unit,string> effects {alloc} {
+  let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
+  let leaf: string = text.concat(instance,text.concat(".l",string.from_int(clip.id)))
+  try nested_audio_define(doc,clip,leaf,instance,ancestors,tree)
+  var neutral: array<string> = ["NESTBUS",string.copy(instance),"-",string.from_int(bounds.first),string.from_int(bounds.last),
+    string.from_int(bounds.first),string.from_int(bounds.last),"1","0","0",
+    string.from_float(cast.float(bounds.last-bounds.first)/48000.0),"-"]
+  nested_audio_append(tree,neutral,cast.float(bounds.last-bounds.first)*16.0+256.0)
 }
 
 fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
@@ -2957,8 +3078,10 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
   loop {if at >= editor.clip_count(doc) {break}
     let clip: editor.Clip = match editor.clip_at(doc,at) {none=>{break},some(value)=>value,}
     at=at+1
-    if clip.owner != doc.active or not clip.enabled or clip.nested == 0 or not editor.clip_has_audio(clip) or
+    if clip.owner != doc.active or not clip.enabled or not editor.clip_has_audio(clip) or
         not editor.track_audible(doc,clip.track) {continue}
+    if clip.nested == 0 and (not audio_context_disk(doc,clip) or
+        (not streaming and not option.is_some(editor.audio_context(clip)) and start<=clip.start)) {continue}
     if editor.clip_end(clip) <= start or clip.start >= finish {continue}
     let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
     if bounds.last <= origin or bounds.first >= finish_sample {continue}
@@ -2967,7 +3090,12 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
       continue
     }
     let instance: string = text.concat("n",string.from_int(clip.id))
-    try nested_audio_define(doc,clip,instance,"-",ancestors,tree)
+    if clip.nested == 0 {
+      let slot: u64 = match editor.source_slot(doc,clip.source) {none=>{continue},some(value)=>value,}
+      let source: SourceInfo = source_info(doc,slot)
+      if not source.audio {continue}
+      let _ = try direct_audio_define(doc,clip,instance,ancestors,tree)
+    }else{let _ = try nested_audio_define(doc,clip,instance,"-",ancestors,tree)}
     let begin: i64 = if bounds.first > origin {bounds.first}else{origin}
     let end: i64 = if bounds.last < finish_sample {bounds.last}else{finish_sample}
     var fields: array<string> = [string.copy("NESTMIX"),instance,string.from_int(begin),string.from_int(end),string.from_int(begin-origin)]
@@ -3024,12 +3152,7 @@ pub fn clip_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buckets:
   var tree: NestedAudioTree = NestedAudioTree {lines:array.new(),nodes:0,disk_bytes:0.0,descriptor_bytes:0}
   var ancestors: array<u64> = [clip.owner]
   let instance: string = text.concat("n",string.from_int(clip.id))
-  let leaf: string = text.concat(instance,text.concat(".l",string.from_int(clip.id)))
-  try nested_audio_define(doc,clip,leaf,instance,ancestors,tree)
-  var neutral: array<string> = ["NESTBUS",string.copy(instance),"-",string.from_int(bounds.first),string.from_int(bounds.last),
-    string.from_int(bounds.first),string.from_int(bounds.last),"1","0","0",
-    string.from_float(cast.float(bounds.last-bounds.first)/48000.0),"-"]
-  try nested_audio_append(tree,neutral,cast.float(bounds.last-bounds.first)*16.0+256.0)
+  try direct_audio_define(doc,clip,instance,ancestors,tree)
   envelope_tree_lines(tree,instance,buckets,output)
 }
 
@@ -3540,9 +3663,50 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
   result.ok(())
 }
 
-pub fn render_profile(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
+pub type ExportPublication = struct {cleanup_pending: bool, detail: string}
+
+// This directory was created exclusively by this export. Only known plan
+// sidecars and its exclusively created partial may be removed, after joining
+// the worker. An unexpected entry leaves the reservation intact for diagnosis.
+fn export_release(reservation: str, partial: str, owns_partial: bool)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write} {
+  let info: fs.meta = match files.symlink_metadata(reservation) {
+    ok(value)=>value,err(_)=>{return result.err("[GA_EXPORT_CLEANUP] Cannot inspect owned export reservation")},
+  }
+  if not info.is_dir or info.is_symlink {
+    return result.err("[GA_EXPORT_CLEANUP] Owned export reservation is no longer a directory")
+  }
+  if owns_partial {
+    cleanup_plan(partial)
+    match files.remove(partial) {
+      ok(_)=>{},err(problem)=>{if problem.code != 1 {
+        return result.err("[GA_EXPORT_CLEANUP] Cannot remove owned export partial")
+      }},
+    }
+  }
+  match files.remove(reservation) {
+    ok(_)=>result.ok(()),err(_)=>result.err("[GA_EXPORT_CLEANUP] Cannot remove owned export reservation"),
+  }
+}
+fn export_failure(primary: str, cleanup: result<unit,string> own) -> string effects {alloc} {
+  match cleanup {ok(_)=>string.copy(primary),err(problem)=>text.concat(primary,text.concat("\n",problem)),}
+}
+fn export_publish_helper() -> result<string,string> effects {alloc,fs.meta,fs.read} {
+  let executable: string = match system.executable_path() {
+    ok(value)=>value,err(_)=>{return result.err("[GA_EXPORT_HELPER] Cannot locate file publication helper")},
+  }
+  let helper: string = path.join(path.dirname(executable),
+    if text.ends_with(executable,".exe") {"air-file-publish.exe"}else{"air-file-publish"})
+  match files.exists(helper) {
+    ok(found)=>{if not found {return result.err("[GA_EXPORT_HELPER] File publication helper is missing")}},
+    err(_)=>{return result.err("[GA_EXPORT_HELPER] Cannot inspect file publication helper")},
+  }
+  result.ok(helper)
+}
+
+pub fn render_profile_detailed(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
               cancel: str, progress: str, profile: u32)
-              -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+              -> result<ExportPublication, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if not text.ends_with(output, if profile == 3 or profile == 5 { ".mkv" } else if profile == 2 { ".mov" } else { ".mp4" }) {
     return result.err("[GA_EXPORT_EXTENSION] Use .mkv for the 16-bit lossless master, .mov for ProRes or .mp4 for H.264/HEVC")
   }
@@ -3550,8 +3714,8 @@ pub fn render_profile(doc: ref<editor.Document>, worker: str, output: str, fonts
     ok(found) => { if found { return result.err("[GA_EXPORT_EXISTS] the output file already exists") } },
     err(problem) => { return result.err(text.concat("[GA_EXPORT_PATH] ",fs.error.message(problem))) },
   }
-  var partial: string = text.concat(output, if profile == 3 or profile == 5 { ".genesis-air-part.mkv" } else if profile == 2 { ".genesis-air-part.mov" } else { ".genesis-air-part.mp4" })
-  match files.exists(str.view(partial)) {
+  let legacy_partial: string = text.concat(output, if profile == 3 or profile == 5 { ".genesis-air-part.mkv" } else if profile == 2 { ".genesis-air-part.mov" } else { ".genesis-air-part.mp4" })
+  match files.exists(str.view(legacy_partial)) {
     ok(found) => { if found { return result.err("[GA_EXPORT_PARTIAL_EXISTS] an unfinished output already exists") } },
     err(problem) => { return result.err(text.concat("[GA_EXPORT_PATH] ",fs.error.message(problem))) },
   }
@@ -3566,31 +3730,67 @@ pub fn render_profile(doc: ref<editor.Document>, worker: str, output: str, fonts
   let fps: f64 = editor.sequence_fps(doc,doc.active)
   if not (fps > 0.0) {return result.err("[GA_EXPORT_FPS] the sequence frame rate is invalid")}
   var sounds: array<string> = try audio_lines(doc,range.mark_in,range.mark_out,fps,false)
+  let helper: string = try export_publish_helper()
+  let reservation: string = text.concat(output,".genesis-air-owner")
+  // mkdir without recursive semantics is atomic on POSIX and Windows. A
+  // competitor owns nothing and must not inspect/remove its owner's partial.
+  match files.create_dir(reservation) {
+    ok(_)=>{},err(problem)=>{return result.err(if problem.code == 3 {
+      "[GA_EXPORT_BUSY] Another export owns this target (or its reservation requires cleanup)"
+    }else{text.concat("[GA_EXPORT_PATH] Cannot reserve export target: ",fs.error.message(problem))})},
+  }
+  let partial: string = path.join(reservation,
+    if profile == 3 or profile == 5 {"export.mkv"}else if profile == 2 {"export.mov"}else{"export.mp4"})
+  // Claim the partial before the worker can truncate it. Never remove a path
+  // whose exclusive creation failed, even within the reserved directory.
+  match files.write_new_text(partial,"") {
+    ok(_)=>{},err(problem)=>{return result.err(export_failure(
+      text.concat("[GA_EXPORT_PARTIAL] Cannot claim private partial: ",fs.error.message(problem)),
+      export_release(reservation,partial,false)))},
+  }
   match render_into(doc, worker, str.view(partial), fonts, cancel, progress, profile,sounds) {
     err(problem) => {
-      cleanup_plan(str.view(partial))
-      let _ = files.remove(str.view(partial))
-      result.err(problem)
+      result.err(export_failure(problem,export_release(reservation,partial,true)))
     },
     ok(_) => {
-      cleanup_plan(str.view(partial))
       match export_current(cancel) {
         err(problem)=>{
-          let _ = files.remove(str.view(partial))
-          return result.err(problem)
+          return result.err(export_failure(problem,export_release(reservation,partial,true)))
         },
         ok(_)=>{},
       }
-      match files.rename(str.view(partial), output) {
-        ok(_) => result.ok(()),
+      match file_publish.publish_new(partial,output,helper) {
+        ok(_) => {
+          match export_release(reservation,partial,true) {
+            ok(_)=>result.ok(ExportPublication {cleanup_pending:false,detail:string.new()}),
+            err(problem)=>{
+              let detail: string = text.concat("[GA_EXPORT_PUBLISHED_CLEANUP] Output was published successfully; ",problem)
+              let _ = files.write_new_text(path.join(reservation,"cleanup.error"),detail)
+              result.ok(ExportPublication {cleanup_pending:true,detail:detail})
+            },
+          }
+        },
         err(problem) => {
-          let detail: string = text.concat("[GA_EXPORT_PUBLISH] ",fs.error.message(problem))
-          let _ = files.remove(str.view(partial))
-          result.err(detail)
+          let detail: string = match problem {
+            Conflict=>string.copy("[GA_EXPORT_EXISTS] The output appeared during rendering; it was preserved"),
+            MissingHelper=>string.copy("[GA_EXPORT_HELPER] File publication helper could not be started"),
+            Source=>string.copy("[GA_EXPORT_PUBLISH] Private output is not a complete regular file"),
+            Failed=>string.copy("[GA_EXPORT_PUBLISH] Atomic no-replace publication failed"),
+          }
+          result.err(export_failure(detail,export_release(reservation,partial,true)))
         },
       }
     },
   }
+}
+
+// Compatibility for existing synchronous component callers. Detailed native
+// UI/CLI callers retain the committed-success warning instead of retrying it.
+pub fn render_profile(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
+    cancel: str, progress: str, profile: u32) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _ = try render_profile_detailed(doc,worker,output,fonts,cancel,progress,profile)
+  result.ok(())
 }
 
 pub fn render(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
@@ -3656,7 +3856,7 @@ pub fn export_output(job: ref<ExportJob>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(job, field=output)))
 }
 
-pub fn run_export(job: ExportJob own) -> result<unit, string>
+pub fn run_export_detailed(job: ExportJob own) -> result<ExportPublication, string>
                   effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   var owned: ExportJob = job
   let worker: string = string.copy(str.view(struct.borrow(owned, field=worker)))
@@ -3665,8 +3865,14 @@ pub fn run_export(job: ExportJob own) -> result<unit, string>
   let progress: string = string.copy(str.view(struct.borrow(owned, field=progress)))
   var fonts: array<string> = struct.replace(owned, array.new(), field=fonts)
   let profile: u32 = owned.profile
-  let outcome: result<unit, string> = render_profile(struct.borrow(owned, field=document),
+  let outcome: result<ExportPublication, string> = render_profile_detailed(struct.borrow(owned, field=document),
     str.view(worker), str.view(output), fonts, str.view(cancel), str.view(progress), profile)
   clear_export_signals(str.view(cancel), str.view(progress))
   outcome
+}
+
+pub fn run_export(job: ExportJob own) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _ = try run_export_detailed(job)
+  result.ok(())
 }

@@ -3,6 +3,7 @@
 # preview consumer. The SDK default remains refresh-waiting for other products.
 cmake_language(DEFER CALL target_compile_definitions air_rt PRIVATE AIR_WIN32_CANVAS_PRESENT_IMMEDIATE=1)
 cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/audio.cmake")
+cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/file_publish.cmake")
 if(GENESIS_TESTS)
   cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/targets.cmake")
 endif()

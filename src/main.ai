@@ -265,9 +265,9 @@ fn begin_export(state: ref<app.App>, busy: bool) -> option<timeline_media.Export
     str.view(where), struct.borrow(state, field=fonts), str.view(cancel), str.view(progress), state.export_profile))
 }
 
-fn run_export(job: timeline_media.ExportJob own) -> result<unit, string>
+fn run_export(job: timeline_media.ExportJob own) -> result<timeline_media.ExportPublication, string>
               effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  timeline_media.run_export(job)
+  timeline_media.run_export_detailed(job)
 }
 
 fn pause_transport(state: ref<app.App>, source: bool) -> unit effects {alloc} {
@@ -483,7 +483,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var preview_channel_error: string = string.new()
   var source_image: draw.Surface = draw.empty_surface()
   var program_image: draw.Surface = draw.empty_surface()
-  var export_jobs: array<task<result<unit, string>>> = array.new()
+  var export_jobs: array<task<result<timeline_media.ExportPublication, string>>> = array.new()
   var export_target: string = string.new()
   var export_percent: u64 = 0
   let export_cancel: string = provider.export_cancel_path(struct.borrow(state, field=provider))
@@ -562,16 +562,21 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let frame_now: i64 = if source_playing { struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=frame) }
       else { editor.playhead(struct.borrow(state, field=document)) }
     if array.len(export_jobs) > 0 {
-      match tasks.join_next<result<unit, string>>(export_jobs, tasks.now()) {
+      match tasks.join_next<result<timeline_media.ExportPublication, string>>(export_jobs, tasks.now()) {
         some(outcome) => {
           match outcome {
-            ok(_) => {
+            ok(publication) => {
+              var completed: timeline_media.ExportPublication = publication
               var said: string = string.copy("wrote video ")
               string.append(said, str.view(export_target))
+              if completed.cleanup_pending {
+                string.append(said, "; ")
+                string.append(said, str.view(struct.borrow(completed,field=detail)))
+              }
               app.set_status(state, str.view(said))
             },
             err(problem) => {
-              if str.starts_with(str.view(problem),"[GA_EXPORT_CANCELLED]") { app.set_status(state,"export cancelled") }
+              if str.eq(str.view(problem),"[GA_EXPORT_CANCELLED] export cancelled") { app.set_status(state,"export cancelled") }
               else { app.set_status(state,str.view(problem)) }
             },
           }
@@ -1227,6 +1232,11 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       let event: ui.event = preview_link.wait(window,preview_transport,if drained == 0 {event_wait}else{0})
       struct.set(window_row,window_row.wait+window_profile.stamp(window_measure)-wait_begin,field=wait)
       if event.kind == 0 or event.kind == 14 { break }
+      if event.kind == 15 and app.prompt_dragging(state) {
+        app.prompt_release(state)
+        repaint_all = true
+        dirty = true
+      }
       if event.kind == 1 {
         let note: string = input.close_request(state)
         app.set_status(state, str.view(note))
@@ -1262,11 +1272,15 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
                 repaint_all = true
                 dirty = true
               }
-              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) {
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) or app.prompt_dragging(state) {
                 var moving: string = input.pointer_move(state, logical_width, logical_height,
                   pointer_x, pointer_y)
                 if str.len(str.view(moving)) != 0 {
                   app.set_status(state, str.view(moving))
+                  repaint_all = true
+                  dirty = true
+                }
+                if app.prompt_dragging(state) {
                   repaint_all = true
                   dirty = true
                 }
@@ -1311,7 +1325,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               let uy: u64 = cast.wrap(at.y)
               pointer_x = cast.float(ux) / ui_scale
               pointer_y = cast.float(uy) / ui_scale
-              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) {
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) or app.prompt_dragging(state) {
                 var released: string = input.pointer_up(state, logical_width, logical_height,
                   pointer_x, pointer_y)
                 if str.len(str.view(released)) != 0 {
@@ -1630,8 +1644,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
         let hevc: bool = view.len(args) > 4 and str.eq(view.get(args, 4), "--hevc")
         if view.len(args) > 4 and str.eq(view.get(args, 4), "--hdr") { 4 } else if hevc { 1 } else { 0 }
       })
-    match timeline_media.run_export(job) {
-      ok(_) => { say("Genesis AIR video written")
+    match timeline_media.run_export_detailed(job) {
+      ok(publication) => { say("Genesis AIR video written")
+        var completed: timeline_media.ExportPublication = publication
+        if completed.cleanup_pending {say(str.view(struct.borrow(completed,field=detail)))}
         return 0 },
       err(problem) => { say(str.view(problem))
         return 1 },

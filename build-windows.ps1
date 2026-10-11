@@ -21,6 +21,19 @@ if (-not $AirSdk) {
 }
 if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
 $sdk = (Resolve-Path -LiteralPath $AirSdk).Path
+$publishPatch = Join-Path $here 'patches/air-file-publish.patch'
+if (-not (Test-Path -LiteralPath $publishPatch)) { throw '[GA_SDK_PUBLISH_PATCH_MISSING] The portable file publication overlay is missing.' }
+$publishNativePreference = $PSNativeCommandUseErrorActionPreference
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $publishPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $publishPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PUBLISH_PATCH_BASE] File publication overlay does not match SDK; existing changes preserved.' }
+    & git -C $sdk apply $publishPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PUBLISH_PATCH_APPLY] Could not apply file publication overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $publishNativePreference }
 $editorPatch = Join-Path $here 'patches/air-editor.patch'
 if (-not (Test-Path -LiteralPath $editorPatch)) { throw '[GA_SDK_PATCH_MISSING] The shared editor overlay is missing.' }
 $previousNativePreference = $PSNativeCommandUseErrorActionPreference
@@ -102,6 +115,18 @@ try {
 } finally {
   $PSNativeCommandUseErrorActionPreference = $previousNativePreference
 }
+$capturePatch = Join-Path $here 'patches/air-ui-capture-windows.patch'
+if (-not (Test-Path -LiteralPath $capturePatch)) { throw '[GA_SDK_CAPTURE_PATCH_MISSING] The Windows capture overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $capturePatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $capturePatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CAPTURE_PATCH_BASE] The capture overlay does not match this AIR SDK; existing changes were preserved.' }
+    & git -C $sdk apply $capturePatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CAPTURE_PATCH_APPLY] Could not apply the Windows capture overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
 $buildRoot = Join-Path $here 'build-windows'
 $presentPatch = Join-Path $here 'patches/air-ui-present-immediate-windows.patch'
 if (-not (Test-Path -LiteralPath $presentPatch)) { throw '[GA_SDK_PRESENT_PATCH_MISSING] The Windows presenter overlay is missing.' }
@@ -143,6 +168,11 @@ if ($RunTests) { $sources += @(@('editing-safety', 'tests/editing_safety.ai'), @
 if ($RunTests) { $sources += @(@('preview-batch', 'tests/preview_batch.ai'), @('preview-fifo', 'tests/preview_fifo.ai')) }
 if ($RunTests) { $sources += ,@('audio-plan-preflight', 'tests/audio_plan_preflight.ai') }
 if ($RunTests) { $sources += ,@('linked-media', 'tests/linked_media.ai') }
+if ($RunTests) { $sources += ,@('audio-context', 'tests/audio_context.ai') }
+if ($RunTests) { $sources += ,@('audio-edit-context', 'tests/audio_edit_context.ai') }
+if ($RunTests) { $sources += ,@('audio-nested-edit-context', 'tests/audio_nested_edit_context.ai') }
+if ($RunTests) { $sources += ,@('keyframe-controls', 'tests/keyframe_controls.ai') }
+if ($RunTests) { $sources += ,@('snap-controls', 'tests/snap_controls.ai') }
 if ($RunTests) { $sources += ,@('channel-deadlines', 'tests/channel_deadlines.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
@@ -168,12 +198,12 @@ $includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
   "-DAIR_WINDOWS_APP_C=$generatedCmake/main.c" -DAIR_WINDOWS_APP_NAME=Genesis-AIR `
   -DAIR_DESKTOP=OFF -DAIR_SAM3=OFF -DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE
 if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
-$targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio')
+$targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio', 'air_file_publish')
 if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-audio-clock', 'genesis-audio-playback', 'genesis-audio-cancel', 'genesis-preview-async', 'genesis-preview-stream', 'genesis-preview-input', 'genesis-inspector', 'genesis-ui-pixels', 'genesis-live-paint', 'genesis-project-safety', 'genesis-picture-queue') }
 if ($RunTests) { $targets += @('genesis-keyed-video', 'genesis-window-cache', 'genesis-editor-trim', 'genesis-trim-history', 'genesis-recovery-ownership', 'genesis-media-session', 'genesis-spatial-canvas') }
 if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys', 'genesis-audio-nested', 'genesis-audio-nested-cancel', 'genesis-nested-audio-controls') }
 if ($RunTests) { $targets += @('genesis-process-wait') }
-if ($RunTests) { $targets += @('genesis-ui-clipboard') }
+if ($RunTests) { $targets += @('genesis-ui-clipboard', 'genesis-ui-capture') }
 if ($RunTests) { $targets += @('genesis-nested-timeline-bitmaps') }
 if ($RunTests) { $targets += @('genesis-nested-picture-plan', 'genesis-compound-canvas') }
 if ($RunTests) { $targets += @('genesis-picture-memory', 'genesis-picture-memory-lifecycle') }
@@ -193,10 +223,16 @@ if ($RunTests) { $targets += @('genesis-net-loopback-classifier', 'genesis-net-l
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }
+if ($RunTests) { $targets += @('genesis-export-ownership-worker') }
+if ($RunTests) { $targets += @('genesis-audio-context') }
+if ($RunTests) { $targets += @('genesis-audio-edit-context') }
+if ($RunTests) { $targets += @('genesis-audio-nested-edit-context') }
+if ($RunTests) { $targets += @('genesis-keyframe-controls') }
+if ($RunTests) { $targets += @('genesis-snap-controls') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'
-foreach ($name in @('Genesis-AIR.exe', 'air-native-shell.dll', 'air-native-dialogs.dll', 'air-ui-host.dll', 'genesis-native-audio.dll')) {
+foreach ($name in @('Genesis-AIR.exe', 'air-native-shell.dll', 'air-native-dialogs.dll', 'air-ui-host.dll', 'genesis-native-audio.dll', 'air-file-publish.exe')) {
   $sourceFile = Join-Path $bin $name
   $targetFile = Join-Path $Destination $name
   if ((Test-Path -LiteralPath $targetFile) -and

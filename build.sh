@@ -79,7 +79,22 @@ else
   exit 1
 fi
 
+publish_patch="$here/patches/air-file-publish.patch"
+if [ ! -f "$publish_patch" ]; then
+  echo 'genesis-air: [GA_SDK_PUBLISH_PATCH_MISSING] file publication overlay is missing' >&2
+  exit 1
+fi
+if git -C "$AIR_HOME" apply --reverse --check "$publish_patch" >/dev/null 2>&1; then
+  :
+elif git -C "$AIR_HOME" apply --check "$publish_patch" >/dev/null 2>&1; then
+  git -C "$AIR_HOME" apply "$publish_patch"
+else
+  echo 'genesis-air: [GA_SDK_PUBLISH_PATCH_BASE] file publication overlay does not match SDK' >&2
+  exit 1
+fi
+
 mkdir -p "$here/build"
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror "$here/native/file_publish.c" -o "$here/build/air-file-publish"
 mode=${MODE:-release}
 echo "genesis-air: building against AIR $AIR_SDK_COMMIT ($mode)"
 # Capture the report even when the compile fails: the diagnostics live inside it, and

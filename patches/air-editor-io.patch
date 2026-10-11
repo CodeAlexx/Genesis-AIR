@@ -1,7 +1,8 @@
 diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
+index 25f4555..b6f8a0b 100644
 --- a/stdlib/editor_io.ai
 +++ b/stdlib/editor_io.ai
-@@ -15,6 +15,7 @@
+@@ -15,10 +15,11 @@ module std.editor_io
  import std.codec as codec
  import std.editor as editor
  import std.json as json
@@ -9,18 +10,38 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
  
  // The document format this build writes and the only revision it reads.
  pub fn schema_name() -> string effects {alloc} { string.copy("air.editor.project") }
-@@ -58,6 +59,7 @@
+-pub fn schema_revision() -> u64 effects {} { 2 }
++pub fn schema_revision() -> u64 effects {} { 3 }
+ 
+ fn write_source(w: ref<codec.Writer>, entry: ref<editor.Source>) -> unit effects {alloc} {
+   codec.begin_object(w)
+@@ -58,6 +59,21 @@ fn write_clip(w: ref<codec.Writer>, value: editor.Clip) -> unit effects {alloc}
    codec.field_f64(w, "pan", value.pan)
    codec.field_f64(w, "speed", value.speed)
    codec.field_bool(w, "reverse", value.reverse)
 +  if value.streams != editor.streams_both() {codec.field_u64(w,"streams",cast.wrap(value.streams))}
++  match value.audio_context {none=>{},some(ctx)=>{
++    codec.key(w,"audio_context")
++    codec.begin_object(w)
++    codec.field_i64(w,"source_in",ctx.source_in)
++    codec.field_i64(w,"length",ctx.length)
++    codec.field_i64(w,"offset",ctx.offset)
++    codec.field_f64(w,"fps",ctx.fps)
++    codec.field_f64(w,"rate",ctx.rate)
++    codec.field_bool(w,"reverse",ctx.reverse)
++    codec.field_i64(w,"origin",ctx.origin)
++    codec.field_u64(w,"crop_start",ctx.crop_start)
++    codec.field_u64(w,"output_frames",ctx.output_frames)
++    codec.end_object(w)
++  },}
    codec.end_object(w)
    ()
  }
-@@ -79,6 +81,15 @@
+@@ -79,10 +95,25 @@ fn write_transport(w: ref<codec.Writer>, name: str, value: editor.Transport) ->
  // writer's own state machine, so a structural mistake is an error here rather than text that
  // fails to parse later.
  pub fn encode(doc: ref<editor.Document>) -> result<string, codec.Error> effects {alloc} {
++  var revision:u64=2
 +  var stream_at: u64 = 0
 +  loop {if stream_at >= array.len(struct.borrow(doc,field=clips)) {break}
 +    let value: editor.Clip = array.get(struct.borrow(doc,field=clips),stream_at)
@@ -28,12 +49,31 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
 +      let at: string = text.concat("/clips/",text.concat(string.from_int(stream_at),"/streams"))
 +      return result.err(codec.error(codec.Code.Range,at,"stream mask 1..3",string.from_int(value.streams)))
 +    }
++    if option.is_some(value.audio_context) {
++      if not editor.audio_context_valid(doc,value) {return result.err(codec.error(codec.Code.Range,
++        text.concat("/clips/",text.concat(string.from_int(stream_at),"/audio_context")),"valid complete audio processing context","invalid geometry or sample phase"))}
++      revision=3
++    }
 +    stream_at=stream_at+1
 +  }
    var w: codec.Writer = codec.writer()
    codec.begin_object(w)
    codec.field_text(w, "schema", str.view(schema_name()))
-@@ -449,12 +460,17 @@
+-  codec.field_u64(w, "revision", schema_revision())
++  codec.field_u64(w, "revision", revision)
+   codec.field_u64(w, "active", doc.active)
+   codec.field_u64(w, "source_bounds", cast.wrap(doc.source_bounds))
+   codec.field_u64(w, "monitor_source", doc.monitor_source)
+@@ -327,7 +358,7 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
+     return result.err(codec.error(codec.Code.Invalid, "/schema", str.view(schema_name()), str.view(schema)))
+   }
+   let revision: u64 = try codec.u64_field(document, root, "revision")
+-  if revision != 1 and revision != schema_revision() {
++  if revision != 1 and revision != 2 and revision != schema_revision() {
+     let want: i64 = cast.sat(schema_revision())
+     let got: i64 = cast.sat(revision)
+     return result.err(codec.error(codec.Code.Invalid, "/revision",
+@@ -449,12 +480,35 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
          let pan: f64 = try codec.f64_field(document, entry, "pan")
          let speed: f64 = try codec.f64_field(document, entry, "speed")
          let reverse: bool = try codec.bool_field(document, entry, "reverse")
@@ -42,13 +82,43 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
 +          let at: string = text.concat(codec.reader_path(entry),"/streams")
 +          return result.err(codec.error(codec.Code.Range,at,"stream mask 1..3",string.from_int(streams)))
 +        }
++        var context:option<editor.AudioContext> =option.none()
++        if revision >= 3 {
++          match try codec.optional_object_field(document,entry,"audio_context",codec.strict()) {
++            none=>{},some(found_context)=>{var c:codec.Reader=found_context
++              let ctx:editor.AudioContext=editor.AudioContext {
++                source_in:try codec.i64_field(document,c,"source_in"),
++                length:try codec.i64_field(document,c,"length"),
++                offset:try codec.i64_field(document,c,"offset"),
++                fps:try codec.f64_field(document,c,"fps"),
++                rate:try codec.f64_field(document,c,"rate"),
++                reverse:try codec.bool_field(document,c,"reverse"),
++                origin:try codec.i64_field(document,c,"origin"),
++                crop_start:try codec.u64_field(document,c,"crop_start"),
++                output_frames:try codec.u64_field(document,c,"output_frames")}
++              let _=try codec.reader_finish(document,c)
++              context=option.some(ctx)
++            },}
++        }
          let _ = try codec.reader_finish(document, entry)
          array.push(struct.borrow(doc, field=clips), editor.Clip {id: id, owner: owner,
            source: source_id, nested: nested, source_in: source_in, length: length,
            start: start, track: track, group: group, enabled: enabled, selected: selected,
            fade_in: fade_in, fade_out: fade_out, gain: gain, pan: pan, speed: speed,
 -          reverse: reverse}) },
-+          reverse: reverse, streams: cast.sat(streams)}) },
++          reverse: reverse, streams: cast.sat(streams),audio_context:context}) },
      }
    }
  
+@@ -582,5 +636,11 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
+   }
+ 
+   let _ = try codec.reader_finish(document, root)
++  var context_at:u64=0
++  loop {if context_at >= editor.clip_count(doc) {break}
++    let value:editor.Clip=option.unwrap(editor.clip_at(doc,context_at))
++    if not editor.audio_context_valid(doc,value) {return result.err(codec.error(codec.Code.Range,
++      text.concat("/clips/",text.concat(string.from_int(context_at),"/audio_context")),"valid complete audio processing context","invalid geometry or sample phase"))}
++    context_at=context_at+1}
+   result.ok(doc)
+ }

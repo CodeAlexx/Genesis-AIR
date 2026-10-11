@@ -59,6 +59,18 @@ pub fn width(book: ref<Typography>, line: str, size: f64) -> f64 effects {alloc}
   font.measure(array.borrow(struct.borrow(book, field=faces), font_slot(size)), line) / book.scale
 }
 
+// Prompt editing uses the same face and physical/logical scale as its paint.
+pub fn caret_x(book: ref<Typography>, line: str, size: f64, offset: u64) -> f64 effects {alloc} {
+  let at:u64=font.cluster_start(line,offset)
+  if not available(book) {return cast.float(at)*size*0.58}
+  font.caret_x(array.borrow(struct.borrow(book,field=faces),font_slot(size)),line,at)/book.scale
+}
+pub fn offset_at_x(book: ref<Typography>, line: str, size: f64, x: f64) -> u64 effects {alloc} {
+  if not math.is_finite(x) or x<=0.0 {return 0}
+  if not available(book) {return font.cluster_start(line,cast.sat(math.min(cast.float(str.len(line)),math.floor(x/(size*0.58)+0.5))))}
+  font.cluster_start(line,font.offset_at_x(array.borrow(struct.borrow(book,field=faces),font_slot(size)),line,x*book.scale))
+}
+
 pub fn fit(book: ref<Typography>, line: str, size: f64, limit: f64) -> string effects {alloc} {
   if not available(book) { return string.copy(line) }
   font.fit_text(array.borrow(struct.borrow(book, field=faces), font_slot(size)), line,

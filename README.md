@@ -93,6 +93,68 @@ separate full retry retained 64 fresh reports without replacing that failure.
 The SDK presentation default remains
 refresh-wait; software submission does not prove every-frame physical scanout.
 
+The unpublished `pro-native-edit-export-r4-2026-10-11` candidate passes its
+coherent build, full background suite with 72 fresh reports, exact audio-device
+gate and native editing workflow. Native title pointer/Unicode editing,
+Cancel/Undo/Redo, gain-key navigation/interpolation/deletion and idempotent
+Save/Open are verified. A long native export cancels and cleans up; a fresh short
+export after reopening passes independent picture/title/audio checks. This does
+not establish same-target native retry. Durable audio processing contexts and
+compound child padding pass independent PCM and model checks. Both r4 cadence
+attempts fail the unchanged 120-second minimum: the 50,000-row trace cap leaves
+105.1847 and 108.6679 steady seconds. The captured steady intervals have no
+omissions/repeats/backward/early/late-over-two-frame pictures or audio-queue drains;
+they remain too short for acceptance. Existing per-loop trace sensitivity and
+unchanged playback source hashes do not establish a new scheduler defect.
+The recorder-only r5 repair passes its qualification gates and its exact root
+products are now installed as B079/75F9/A8E; publication and fresh root-ready
+pass. The accompanying source and evidence archive identifies this installed
+checkpoint; `690aa8b` is the prior committed checkpoint.
+The r5 recorder/test source is now frozen and passes 12 cases and 2,641 checks
+on both Windows and Linux; the baseline retains a duplicate-poll failure.
+It preserves every presentation, actual device sample, input batch and semantic
+change, while retaining identical poll-only state at a 16 ms threshold on the
+next available loop. A zero-count sampled-clock marker is internal; the 46-column
+trace and 50,000-row cap are unchanged. Only the recorder and its fixture differ
+from r4; scheduler, parser, SDK, worker and shared runtime remain identical.
+The coherent r5 build passes all 69 targets. Its first full background attempt
+refuses an exclusive existing r4 nested-edit-context report before running those
+cases; this is a report collision, not a nested PCM failure. The failed log and
+47 fresh partial reports remain preserved, and the immutable r4 proof is unchanged.
+A fresh full repeat passes with 72 fresh reports, the same script and unchanged
+source/thresholds under exclusive alternate receipts. The original failure
+remains preserved. The exact r5 device gate passes with −0.320 ms interval drift,
+0.430 ms phase range and no drain/resume shortfalls; this is not a physical
+speaker/display alignment measurement. Its completed native workflow covers
+linked-lane migration, Play/mute/unmute/Stop/nonblank rewind, scrub/scopes and
+zoom, idempotent two-clip Save/Open and pointer/Unicode title editing with
+Cancel and one Undo/Redo. Active full-range export cancellation cleans up;
+reopening the saved short range and exporting to a fresh different destination
+succeeds. Same-target native retry and new keyframe GUI checks were not exercised
+on r5. Independent inspection of its 178-frame export passes at three picture
+positions, with over 99.9% title-interior coverage, 142,400 AAC sample frames
+and worker PCM within one code. R5's first 1080p cadence interval passes:
+10,085 consecutive pictures over 168.069 seconds at 59.999314 pictures/s,
+with no steady omissions, repeats, early/backward or late presentations, queue
+drains or overwrites. Its fitted 4K/59.94 interval also passes: 11,953 consecutive
+pictures over 199.402 seconds at 59.939363 pictures/s, with the same zero steady
+faults and maximum gap 24.9929 ms. Both use the ordinary editor's 480×270 monitor,
+fixed parser exclusions and preserved raw traces; they do not establish physical
+scanout, fullscreen 4K, compound 4K60 or whole-source playback. Publication binds
+the accepted full background repeat and preserves the original failed attempt.
+Fresh root-ready verifies the actually loaded B079 application and 75F9 audio
+DLL: the private saved 1080p project has two linked clips, V1 filmstrip only and
+A1 waveform only, populated Source/Program monitors, active Program playback
+and stereo meters, Stop retaining the picture with cleared meters, and nonblank
+Start at zero. The root editor is left open paused. The accompanying
+[source and evidence archive](archive/pro-native-edit-export-r5-2026-10-11.tar.gz)
+and [archive receipt](archive/pro-native-edit-export-r5-2026-10-11.json) bind the
+tested source and installed payload; the publication commit is identifiable
+through Git history.
+The [professional editing acceptance ledger](docs/PRO_EDITING_ACCEPTANCE_WINDOWS.md)
+binds the exact r4/r5 receipts, retained failures and remaining Delay/Reverb,
+full-history retime and transition-control limitations. The broader goal remains active.
+
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
 tracks every exposed control and its remaining media gate.
@@ -135,12 +197,17 @@ The right-hand dock has four tabs:
 - **Filters** — the stack on the selected clip (enable, reorder, remove, and the selected
   filter's own parameters) above a library of **51 filter kinds**, 31 video and 20 audio.
   Text has an editable content field and LUT3D has a `.cube` path field. These strings
-  persist in revision 2 projects; revision 1 projects still load.
+  persist in revision 2 projects. Projects with retained audio processing context
+  use revision 3; the current reader accepts revisions 1, 2 and 3. Earlier Genesis
+  versions refuse revision 3 rather than silently losing that context.
 - **Scopes** — histogram, RGB parade and luma waveform, read off the program frame that was
   already fetched for the monitor.
 - **Audio** — live stereo output meters in dBFS after the complete mix. Tracks with sound,
   including embedded audio on video tracks, expose gain, pan, mute and solo. Selected clips
-  expose their own gain, pan, EQ and audio effects. Waveforms also cover embedded video audio.
+  expose their own gain, pan, EQ and audio effects. Native import and normal Open separate
+  linked video and audio: V1 shows frame thumbnails and A1 shows the audio waveform.
+  Waveforms are drawn only on audio tracks, including when older recovery data retains
+  embedded sound on a video track.
   Clip gain supports K keyframes on both audio and video lanes. After the first gain key,
   editing the fader writes a key at the playhead; its reading follows the curve when seeking.
   Fade in/out also support K on audio and video lanes. Their readings follow the curve;
@@ -152,6 +219,14 @@ Video-filter faders also show evaluated keys and edit the envelope after the fir
 K key. A drag creates or updates one clip-local key in one undo step. Unsupported
 fields/layers and stale selections report coded errors. New Blend Mode keys use
 Hold interpolation so their integer mode identifiers switch at exact key frames.
+
+Keyed parameters show **Previous key**, **Next key** and **Delete key** controls.
+Navigation pauses playback and seeks to that parameter's nearest key inside the
+clip. Delete and the separate interpolation row act on the exact key at the
+playhead and form one Undo step. The interpolation row shows the full shared
+curve name and cycles through its 38 modes; Blend Mode keeps Hold. Removing the
+last key restores the parameter's static value without changing another filter
+instance's curve.
 
 Mouse gestures on the timeline: click a clip to select it, drag a clip to move it between
 lanes or along time, and drag within seven pixels of a clip edge to trim it. Each monitor has Start, Previous frame, Play/Pause, Stop, Next frame and End buttons,
@@ -235,7 +310,7 @@ executable, and its redirected media subprocesses do not open console windows.
 ```
 
 Both setup and build default to the repository root. The output includes
-`Genesis-AIR.exe`, the native host/audio DLLs, `genesis-gcompose.exe`,
+`Genesis-AIR.exe`, the native host/audio DLLs, `genesis-gcompose.exe`, `air-file-publish.exe`,
 `genesis-media-runtime.txt`, `OpenCL.dll`, `fonts/` and dependency `licenses/`.
 Keep these together. MM-AIR supplies the shared media libraries and existing
 FFmpeg/ffprobe tools; use setup's `-MmAirRoot` for an installation outside `C:\MM-Air`.
@@ -404,6 +479,17 @@ waiting for the encoder to exit. Cancellation is checked in 50 ms I/O steps;
 the export owner stops its worker before removing incomplete output. A final
 cancellation check precedes publication. Worker, cancellation, path and publication
 failures have `GA_EXPORT_*` codes; ordinary UI cancellation shows `export cancelled`.
+Each job claims an exclusive `.genesis-air-owner` directory beside its target,
+writes its private partial there, and publishes the completed file atomically
+without replacing a destination created during rendering. The portable
+`air-file-publish` helper performs that final filesystem operation and has no media
+dependencies. Competing jobs report `GA_EXPORT_BUSY`; a late destination is
+preserved with `GA_EXPORT_EXISTS`. A missing helper reports `GA_EXPORT_HELPER`
+before creating output. Cancellation removes the job's known partial and sidecars
+after joining its worker; unexpected files remain untouched. If publication
+succeeds but reservation cleanup fails, the export remains successful and reports
+`GA_EXPORT_PUBLISHED_CLEANUP`, with `cleanup.error` retained in the reservation.
+Cancellation with an additional cleanup error retains that diagnostic in the UI.
 `export.progress` and `export.cancel` in the private media directory reported by
 `GENESIS_SESSION_REPORT` expose the same scriptable
 progress and cancellation path.
@@ -477,7 +563,13 @@ The `audio` command writes the program mix from the current playhead for inspect
 Text values and the file chooser fallback use a centered prompt: type the value,
 **Enter** accepts and **Escape** cancels. In a title-content draft, **Shift+Enter**
 adds a line; **Ctrl+A** selects the draft text rather than running the editor's
-razor shortcut. The draft is modal: timeline, inspector and transport shortcuts
+razor shortcut. **Left/Right** move by the font's supported Unicode clusters;
+**Shift** extends the selection. **Home/End** move to the line edges and
+**Ctrl+Home/End** to the draft edges. **Up/Down** retain the measured horizontal
+caret position. Clicking positions the caret, dragging selects text, and typing,
+**Delete** or **Backspace** replaces/removes the selection. The visible caret and
+selection scroll with long lines and multiline drafts; authored lines keep their
+explicit breaks. The draft is modal: timeline, inspector and transport shortcuts
 stay behind it until accept or cancel. Accept edits the original title filter as
 one undo step; it cannot apply the text to a different selected clip. If the
 original project, sequence, clip, filter or content no longer matches, acceptance
@@ -1423,7 +1515,9 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   preserve representable forward/reverse source samples and complete clip-local
   automation curves. An unsupported phase, partial edited fade or temporal effect
   context refuses with `GA_TRIM_CONTEXT`; refusals and clamped no-ops preserve redo.
-  General temporal DSP history preservation remains unfinished.
+  The r5 processing context repair is now published after its combined and
+  independent PCM gates, while Delay/Reverb
+  tails and unavailable full-history retime handles remain bounded limitations.
 - Source boundaries now count native decoded samples before resampling and preserve
   the first decoded timestamp, including AAC skip/edit handling. The missing-timestamp
   refusal path is not independently fixture-proved, later PTS discontinuities are not

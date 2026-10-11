@@ -1,0 +1,76 @@
+// Independent real SDK edits: preserve parent DSP120 while shortening child to90.
+module genesis.tests.audio_nested_edit_context
+import std.editor as editor
+import std.editor_io as store
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/timeline_media.ai" as media
+
+fn render(doc:ref<editor.Document>,worker:str,root:str,label:str)->result<unit,string>
+ effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+ let prefix:string=path.join(root,label)
+ let encoded:string=match store.encode(doc) {ok(v)=>v,err(_)=>{return result.err("encode refused")},}
+ let _=match files.write_text(text.concat(prefix,".air"),encoded) {ok(_)=>(),err(_)=>{return result.err("save failed")},}
+ let _=try media.prepare_audio(doc,worker,0,text.concat(prefix,".wav"))
+ let _=try media.prepare_audio(doc,worker,editor.duration(doc)-15,text.concat(prefix,"-fresh.wav"))
+ var held:option<media.AudioSession> = option.none()
+ var cursor:i64=0
+ var index:u64=0
+ var manifest:string=string.new()
+ loop {if cursor>=editor.duration(doc) {break}
+  let width:i64=if index%3==0 {13}else if index%3==1 {17}else{19}
+  let end:i64=if cursor+width<editor.duration(doc) {cursor+width}else{editor.duration(doc)}
+  let out:string=text.concat(prefix,text.concat("-pull-",text.concat(string.from_int(index),".wav")))
+  let plan:media.AudioPlan=try media.audio_plan_range(doc,worker,cursor,end,out)
+  var job:media.AudioJob=media.audio_job(plan,ref.swap(held,option.none()))
+  let session:media.AudioSession=try media.execute_playback_audio(job,"",0)
+  let _=ref.swap(held,option.some(session))
+  string.append(manifest,out)
+  string.append(manifest,"\n")
+  cursor=end
+  index=index+1
+ }
+ match held {none=>{},some(session)=>{let _=try media.shutdown_audio_checked(session)},}
+ let _=match files.write_text(text.concat(prefix,"-pulls.txt"),manifest) {ok(_)=>(),err(_)=>{return result.err("pull manifest failed")},}
+ let parent:editor.Clip=option.unwrap(editor.clip(doc,20))
+ let envelope:array<f64> =try media.clip_envelope(doc,parent,600,worker,prefix,"",0)
+ var values:array<string> = array.new()
+ var n:u64=0
+ loop {if n>=array.len(envelope) {break}
+  array.push(values,string.from_float(array.get(envelope,n)))
+  n=n+1
+ }
+ let _=match files.write_text(text.concat(prefix,"-peaks.txt"),text.join(values,"\n")) {ok(_)=>(),err(_)=>{return result.err("peaks failed")},}
+ result.ok(())
+}
+pub fn main(args:view<str>)->i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+ if view.len(args)!=3 {return 2}
+ let worker:str=view.get(args,1)
+ let root:str=view.get(args,2)
+ let manifest:string=match files.read_text(path.join(root,"cases.tsv")) {ok(v)=>v,err(_)=>{return 2},}
+ var names:array<string> =text.split(manifest,"\n")
+ var i:u64=0
+ loop {if i>=array.len(names) {break}
+  let name:str=text.trim(array.borrow(names,i))
+  i=i+1
+  if str.len(name)==0 {continue}
+  let raw:string=match files.read_text(path.join(root,text.concat(name,".air"))) {ok(v)=>v,err(_)=>{return 2},}
+  var document:editor.Document=match store.decode(raw) {ok(v)=>v,err(_)=>{return 3},}
+  if not editor.trim_end(document,20,60) {return 4}
+  match render(document,worker,root,text.concat(name,"-before")) {err(v)=>{io.write(v)
+   return 5},ok(_)=>{},}
+  if not editor.trim_end(document,30,90) or not editor.trim_end(document,31,90) {return 6}
+  if not editor.audio_context_valid(document,option.unwrap(editor.clip(document,20))) {return 7}
+  match render(document,worker,root,text.concat(name,"-after")) {err(v)=>{io.write(v)
+   return 8},ok(_)=>{},}
+  if not editor.trim_start(document,20,30) {return 9}
+  match render(document,worker,root,text.concat(name,"-head")) {err(v)=>{io.write(v)
+   return 10},ok(_)=>{},}
+  if not editor.trim_end(document,20,15) {return 11}
+  match render(document,worker,root,text.concat(name,"-tail")) {err(v)=>{io.write(v)
+   return 12},ok(_)=>{},}
+ }
+ io.write("nested descendant-shortening native client passed\n")
+ 0
+}

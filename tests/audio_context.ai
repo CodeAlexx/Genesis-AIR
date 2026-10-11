@@ -1,0 +1,392 @@
+// Independent model/codec oracle: expected full spans and sample phases are
+// calculated from authored constants, not from the context resolver under test.
+module genesis.tests.audio_context
+import std.editor as editor
+import std.editor_io as store
+import std.testing as test
+import std.math as math
+import std.text as text
+import std.path as path
+import std.files as files
+
+fn bytes(doc:ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(value)=>value,err(_)=>string.copy("invalid"),}
+}
+fn sample(frame:i64,fps:f64) -> u64 effects {} {cast.sat(math.floor(cast.float(frame)*48000.0/fps+0.5))}
+fn context_check(s:ref<test.Suite>,doc:ref<editor.Document>,id:u64,source:i64,length:i64,offset:i64,origin:i64,fps:f64,rate:f64,reverse:bool) -> unit effects {alloc} {
+  let clip:editor.Clip=option.unwrap(editor.clip(doc,id))
+  let present:bool=option.is_some(clip.audio_context)
+  let _=test.check(s,present,"Edited audible clip retains a processing context")
+  if not present {return ()}
+  let ctx:editor.AudioContext=option.unwrap(clip.audio_context)
+  let _=test.eq_i64(s,ctx.source_in,source,"Original complete source lower bound is explicit")
+  let _=test.eq_i64(s,ctx.length,length,"Complete analysis span survives body edits")
+  let _=test.eq_i64(s,ctx.offset,offset,"Body offset accumulates exact cuts")
+  let _=test.eq_i64(s,ctx.origin,origin,"Original OWNER frame phase survives placement edits")
+  let _=test.check(s,ctx.fps==fps and ctx.rate==rate and ctx.reverse==reverse,"Original owner FPS and effective rate/direction are exact")
+  let _=test.eq_u64(s,ctx.crop_start,sample(origin+offset,fps)-sample(origin,fps),"Crop uses independently rounded original-phase endpoints")
+  let _=test.eq_u64(s,ctx.output_frames,sample(origin+length,fps)-sample(origin,fps),"Full output count survives every subsequent cut")
+  let _=test.check(s,editor.audio_context_valid(doc,clip),"Stored body/source and processing geometry agree")
+  ()
+}
+fn cuts(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Repeated split and inward trims preserve full DSP span at mixed FPS/rates/directions")
+  var variant:u64=0
+  loop {if variant>=12 {break}
+    let fps:f64=if variant%3==0 {24.0}else if variant%3==1 {30.0}else{59.94}
+    let rate:f64=if variant%2==0 {1.0}else{2.0}
+    let reverse:bool=variant>=6
+    var doc:editor.Document=editor.document(fps,64,36)
+    let src:u64=editor.add_source(doc,"sample.wav","Sample",100000,48.0)
+    let tr:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+    let id:u64=option.unwrap(editor.place(doc,tr,src,2000,180,11))
+    let _=editor.set_clip_speed(doc,id,rate)
+    let _=editor.set_clip_reverse(doc,id,reverse)
+    let filter:u64=option.unwrap(editor.add_filter(doc,id,if variant%2==0 {"compressor"}else{"phaser"}))
+    let _=editor.set_filter_param(doc,filter,"amount",0.5)
+    let _=test.check(s,editor.split_possible(doc,id,71),"Stateful DSP cut retains its complete analysis window")
+    let right:u64=match editor.split(doc,id,71) {none=>{let _=test.check(s,false,"First split succeeds")
+ break},some(n)=>n,}
+    context_check(s,doc,id,2000,180,0,11,fps,rate,reverse)
+    context_check(s,doc,right,2000,180,60,11,fps,rate,reverse)
+    let tail:u64=option.unwrap(editor.split(doc,right,111))
+    context_check(s,doc,tail,2000,180,100,11,fps,rate,reverse)
+    let _=test.check(s,editor.trim_start(doc,tail,131),"Repeated head trim succeeds")
+    let _=test.check(s,editor.trim_end(doc,tail,40),"Inward tail succeeds")
+    context_check(s,doc,tail,2000,180,120,11,fps,rate,reverse)
+    let _=editor.nudge(doc,tail,7)
+    context_check(s,doc,tail,2000,180,120,11,fps,rate,reverse)
+    let retained_steps:i64=if reverse {20}else{120}
+    let retained_advance:f64=cast.float(retained_steps)*rate
+    let expected_lower:i64=2000+cast.sat(retained_advance)
+    let _=test.eq_i64(s,option.unwrap(editor.clip(doc,tail)).source_in,expected_lower,"Picture lower source bound remains independent of full DSP source")
+    variant=variant+1}
+  let _=test.done(s)
+  ()
+}
+fn persistence(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Revision3 Save/Open snapshots and Undo preserve every durable field while legacy bytes remain revision2")
+  var doc:editor.Document=editor.document(59.94,64,36)
+  let src:u64=editor.add_source(doc,"sample.wav","Sample",100000,59.94)
+  let tr:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id:u64=option.unwrap(editor.place(doc,tr,src,300,180,7))
+  let legacy:string=bytes(doc)
+  let _=test.check(s,option.is_some(str.find(legacy,"\"revision\":2")) and not option.is_some(str.find(legacy,"audio_context")),"Unedited legacy projects keep exact revision2 shape")
+  var history:editor.History=editor.history(8)
+  editor.capture(history,doc)
+  let right:u64=option.unwrap(editor.split(doc,id,67))
+  let saved:string=bytes(doc)
+  let _=test.check(s,option.is_some(str.find(saved,"\"revision\":3")),"Authored durable context upgrades project schema explicitly")
+  var loaded:editor.Document=match store.decode(saved) {err(_)=>{let _=test.check(s,false,"Revision3 reads")
+ return ()},ok(found)=>found,}
+  let _=test.eq_str(s,bytes(loaded),saved,"Save/Open preserves complete raw document byte-for-byte")
+  let _=test.check(s,editor.undo(history,doc),"Cut has one Undo")
+  let _=test.eq_str(s,bytes(doc),legacy,"Undo restores old schema/content without synthetic context")
+  let _=test.check(s,editor.redo(history,doc),"Cut has one Redo")
+  let _=test.eq_str(s,bytes(doc),saved,"Redo restores all full-span/crop fields")
+  var snapshot:editor.ClipSnapshot=option.unwrap(editor.clip_snapshot(doc,right))
+  let pasted:u64=match editor.paste_clip_snapshot(doc,snapshot,tr,400) {err(_)=>{let _=test.check(s,false,"Paste context succeeds")
+ return ()},ok(n)=>n,}
+  context_check(s,doc,pasted,300,180,60,7,59.94,1.0,false)
+  let _=test.eq_i64(s,option.unwrap(editor.clip(doc,pasted)).start,400,"Paste changes body placement without changing source phase")
+  let bad:string=text.replace(saved,"\"crop_start\":48048","\"crop_start\":48049")
+  let _=test.check(s,bad!=saved,"Malformed fixture changes exactly the authored crop field")
+  let _=test.check(s,match store.decode(bad) {err(_)=>true,ok(_)=>false,},"Decoder refuses inconsistent crop rather than silently repairing it")
+  let downgraded:string=text.replace(saved,"\"revision\":3","\"revision\":2")
+  let _=test.check(s,match store.decode(downgraded) {err(_)=>true,ok(_)=>false,},"Old revision cannot silently ignore a declared processing context")
+  let _=test.done(s)
+  ()
+}
+fn transformations(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Slip retime reverse and speed-filter lifecycle explicitly transform complete source windows")
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let src:u64=editor.add_source(doc,"sample.wav","Sample",100000,30.0)
+  let tr:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id:u64=option.unwrap(editor.place(doc,tr,src,2000,180,10))
+  let right:u64=option.unwrap(editor.split(doc,id,70))
+  let _=test.check(s,editor.slip(doc,right,30),"Slip succeeds with complete available source handles")
+  context_check(s,doc,right,2030,180,60,10,30.0,1.0,false)
+  let _=test.check(s,editor.set_clip_speed(doc,right,2.0),"Rate edit transforms anchor")
+  context_check(s,doc,right,1970,180,60,10,30.0,2.0,false)
+  let _=test.check(s,editor.set_clip_reverse(doc,right,true),"Direction edit transforms full lower anchor")
+  context_check(s,doc,right,2090,180,60,10,30.0,2.0,true)
+  let held:string=bytes(doc)
+  let _=test.check(s,editor.set_clip_speed(doc,right,0.0),"Hold retains dormant context")
+  context_check(s,doc,right,2090,180,60,10,30.0,2.0,true)
+  let _=test.check(s,editor.set_clip_speed(doc,right,2.0),"Resume transforms dormant context")
+  let _=test.eq_str(s,bytes(doc),held,"Hold/resume roundtrip restores exact document")
+  let f:u64=option.unwrap(editor.add_filter(doc,right,"speed"))
+  let _=test.check(s,editor.set_filter_param(doc,f,"rate",2.0),"Effective speed-filter rate transforms context")
+  context_check(s,doc,right,2090,180,60,10,30.0,4.0,true)
+  let _=test.check(s,editor.set_filter_enabled(doc,f,false),"Disabling speed filter transforms context")
+  context_check(s,doc,right,2090,180,60,10,30.0,2.0,true)
+  let _=test.check(s,editor.set_filter_enabled(doc,f,true),"Enabling speed filter transforms context")
+  let _=test.check(s,editor.remove_filter(doc,f),"Removing speed filter transforms context")
+  context_check(s,doc,right,2090,180,60,10,30.0,2.0,true)
+  let _=test.done(s)
+  ()
+}
+fn extensions(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Extensions within retained history preserve it and outward handles explicitly extend the analysis window")
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let src:u64=editor.add_source(doc,"sample.wav","Sample",100000,30.0)
+  let tr:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id:u64=option.unwrap(editor.place(doc,tr,src,300,180,0))
+  let _=test.check(s,editor.trim_end(doc,id,120),"Tail shortening creates durable context")
+  context_check(s,doc,id,300,180,0,0,30.0,1.0,false)
+  let _=test.check(s,editor.trim_end(doc,id,150),"Extension inside original window retains history")
+  context_check(s,doc,id,300,180,0,0,30.0,1.0,false)
+  let _=editor.nudge(doc,id,100)
+  let _=test.check(s,editor.trim_start(doc,id,80),"Moved origin-zero clip can extend left using available handles")
+  context_check(s,doc,id,280,200,0,80,30.0,1.0,false)
+  let _=test.check(s,editor.trim_end(doc,id,240),"Outward tail declares expanded full window")
+  context_check(s,doc,id,280,240,0,80,30.0,1.0,false)
+  let _=test.done(s)
+  ()
+}
+fn refusals(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Unrepresentable anchors malformed phases missing full handles and cross-FPS copies refuse atomically")
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let src:u64=editor.add_source(doc,"sample.wav","Sample",1000,30.0)
+  let tr:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id:u64=option.unwrap(editor.place(doc,tr,src,0,120,0))
+  let right:u64=option.unwrap(editor.split(doc,id,60))
+  let before:string=bytes(doc)
+  let _=test.check(s,not editor.set_clip_speed(doc,right,2.0),"Unavailable original pre-roll anchor refuses rate edit")
+  let _=test.eq_str(s,bytes(doc),before,"Rate refusal changes no field IDs/filter content")
+  let f:u64=option.unwrap(editor.add_filter(doc,right,"speed"))
+  let after_add:string=bytes(doc)
+  let _=test.check(s,not editor.set_filter_param(doc,f,"rate",2.0),"Unavailable effective-rate anchor refuses before changing parameter")
+  let _=test.eq_str(s,bytes(doc),after_add,"Speed filter refusal is complete document byte identity")
+  let short:u64=editor.add_source(doc,"short.wav","Short",30,30.0)
+  let short_before:string=bytes(doc)
+  let _=test.check(s,not editor.replace_source(doc,right,short),"New source cannot omit the retained full processing window")
+  let _=test.eq_str(s,bytes(doc),short_before,"Source replacement refusal leaves the old media reference")
+  let _=test.check(s,not editor.relink_source_possible(doc,src,90),"Relink preflight sees missing full history even when a shorter visible piece fits")
+  let _=editor.relink_source(doc,src,"new-short.wav",90)
+  let _=test.eq_str(s,bytes(doc),short_before,"Refused relink does not change original path metadata or any neighbouring clip")
+  let _=test.check(s,editor.relink_source_possible(doc,src,1000),"Relink with complete original handles is allowed")
+  let slot:u64=option.unwrap(editor.clip_slot(doc,right))
+  var value:editor.Clip=option.unwrap(editor.clip(doc,right))
+  var ctx:editor.AudioContext=option.unwrap(value.audio_context)
+  struct.set(ctx,ctx.crop_start+1,field=crop_start)
+  struct.set(value,option.some(ctx),field=audio_context)
+  array.set(struct.borrow(doc,field=clips),slot,value)
+  let _=test.check(s,not editor.audio_context_valid(doc,value),"One-sample corrupted crop is invalid")
+  let _=test.check(s,match store.encode(doc) {err(_)=>true,ok(_)=>false,},"Encoder refuses corrupted processing context")
+  let count:u64=editor.clip_count(doc)
+  let next:u64=doc.next_id
+  // A valid earlier overlapping clip must not be cut before a bad later one.
+  var first:editor.Clip=option.unwrap(editor.clip(doc,id))
+  struct.set(first,120,field=length)
+  let first_slot:u64=option.unwrap(editor.clip_slot(doc,id))
+  array.set(struct.borrow(doc,field=clips),first_slot,first)
+  let _=test.check(s,editor.split_all(doc,doc.active,90)==0 and editor.clip_count(doc)==count and doc.next_id==next,"All-track preflight refuses bad context before IDs or any partial cut")
+  let _=test.eq_i64(s,option.unwrap(editor.clip(doc,id)).length,120,"Eligible earlier body was not partially split")
+  let _=test.done(s)
+  ()
+}
+fn range_and_nested(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Atomic roll/slide and nested snapshots retain per-instance windows and cross-FPS refusal")
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let src:u64=editor.add_source(doc,"sample.wav","Sample",10000,30.0)
+  let tr:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let left:u64=option.unwrap(editor.place(doc,tr,src,300,60,10))
+  let middle:u64=option.unwrap(editor.place(doc,tr,src,600,60,70))
+  let after:u64=option.unwrap(editor.place(doc,tr,src,900,90,130))
+  let _=test.eq_i64(s,editor.roll(doc,left,middle,10),10,"Roll changes both edges as one represented operation")
+  context_check(s,doc,left,300,70,0,10,30.0,1.0,false)
+  context_check(s,doc,middle,600,60,10,70,30.0,1.0,false)
+  let _=test.check(s,editor.slide(doc,middle,10),"Slide preserves moving body DSP and plans both neighbour cuts")
+  context_check(s,doc,left,300,80,0,10,30.0,1.0,false)
+  context_check(s,doc,middle,600,60,10,70,30.0,1.0,false)
+  context_check(s,doc,after,900,90,10,130,30.0,1.0,false)
+  let _=test.eq_i64(s,option.unwrap(editor.clip(doc,middle)).start,90,"Slide changes placement without resetting original phase")
+  let child:u64=editor.add_sequence(doc,"Audible child",24.0,64,36)
+  let child_track:u64=editor.add_track(doc,child,editor.track_audio(),"Child A1")
+  let _=editor.append(doc,child_track,src,0,120)
+  let compound:u64=option.unwrap(editor.place_nested(doc,tr,child,0,120,400))
+  let child_right:u64=option.unwrap(editor.split(doc,compound,460))
+  context_check(s,doc,child_right,0,120,60,400,30.0,1.0,false)
+  var snapshot:editor.ClipSnapshot=option.unwrap(editor.clip_snapshot(doc,child_right))
+  let second:u64=editor.add_sequence(doc,"Different FPS",24.0,64,36)
+  let second_track:u64=editor.add_track(doc,second,editor.track_audio(),"A1")
+  struct.set(doc,second,field=active)
+  let unchanged:string=bytes(doc)
+  let _=test.check(s,match editor.paste_clip_snapshot(doc,snapshot,second_track,0) {err(_)=>true,ok(_)=>false,},"Cross-FPS paste refuses before silently changing body units or DSP phase")
+  let _=test.eq_str(s,bytes(doc),unchanged,"Cross-FPS refusal preserves complete destination graph")
+  struct.set(doc,option.unwrap(editor.clip(doc,left)).owner,field=active)
+  var last:editor.Clip=option.unwrap(editor.clip(doc,after))
+  var ctx:editor.AudioContext=option.unwrap(last.audio_context)
+  struct.set(ctx,ctx.output_frames+1,field=output_frames)
+  struct.set(last,option.some(ctx),field=audio_context)
+  let after_slot:u64=option.unwrap(editor.clip_slot(doc,after))
+  array.set(struct.borrow(doc,field=clips),after_slot,last)
+  let first_length:i64=option.unwrap(editor.clip(doc,left)).length
+  let middle_start:i64=option.unwrap(editor.clip(doc,middle)).start
+  let _=test.check(s,not editor.slide(doc,middle,10),"Invalid later-neighbour context refuses the entire Slide")
+  let _=test.check(s,option.unwrap(editor.clip(doc,left)).length==first_length and option.unwrap(editor.clip(doc,middle)).start==middle_start,"Failed Slide leaves already eligible neighbours/body untouched")
+  let _=test.done(s)
+  ()
+}
+fn compound_audio_necessity(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Compound cuts capture only potential audio and preserve unknown or retained contexts")
+  var mode:u64=0
+  loop {if mode >= 13 {break}
+    var doc:editor.Document=editor.document(30000.0/1001.0,320,180)
+    let src:u64=editor.add_source(doc,"coded.mp4","Frame coded",96,24000.0/1001.0)
+    let audible:bool=mode == 1 or mode == 2 or mode == 3 or mode == 4 or mode == 5 or mode == 10
+    let _=editor.describe_source(doc,src,320,180,true,audible,48000,2)
+    let child:u64=editor.add_sequence(doc,"Child",24000.0/1001.0,320,180)
+    let child_track:u64=editor.add_track(doc,child,editor.track_video(),"Child V1")
+    let leaf:u64=option.unwrap(editor.append(doc,child_track,src,0,96))
+    let track:u64=editor.add_track(doc,doc.active,editor.track_video(),"V1")
+    let parent:u64=option.unwrap(editor.place_nested(doc,track,child,0,100,7))
+    if mode == 2 {let _=editor.set_clip_enabled(doc,leaf,false)}
+    if mode == 3 {let _=editor.set_track_muted(doc,child_track,true)}
+    if mode == 4 {let _=editor.set_clip_streams(doc,leaf,editor.streams_video())}
+    if mode == 5 {let _=editor.set_clip_streams(doc,parent,editor.streams_video())}
+    if mode == 6 {let _=editor.lift(doc,leaf)}
+    if mode == 7 {let _=editor.add_filter(doc,parent,"brightness")}
+    if mode == 8 {let _=editor.add_filter(doc,parent,"unknown_audio_generator")}
+    if mode == 9 {
+      let slot:u64=option.unwrap(editor.clip_slot(doc,leaf))
+      var altered:editor.Clip=option.unwrap(editor.clip(doc,leaf))
+      struct.set(altered,0,field=source)
+      struct.set(altered,child,field=nested)
+      array.set(struct.borrow(doc,field=clips),slot,altered)
+    }
+    if mode == 11 {
+      let slot:u64=option.unwrap(editor.clip_slot(doc,leaf))
+      var altered:editor.Clip=option.unwrap(editor.clip(doc,leaf))
+      struct.set(altered,99999,field=source)
+      array.set(struct.borrow(doc,field=clips),slot,altered)
+    }
+    if mode == 12 {
+      let slot:u64=option.unwrap(editor.source_slot(doc,src))
+      struct.set(array.borrow(struct.borrow(doc,field=sources),slot),false,field=online)
+      let _=editor.describe_source(doc,src,320,180,true,true,48000,2)
+    }
+    if mode == 6 {
+      let right:u64=option.unwrap(editor.split(doc,parent,19))
+      let _=test.check(s,not option.is_some(option.unwrap(editor.clip(doc,right)).audio_context),"Valid empty-child split has no fictitious audio context")
+      let _=test.check(s,editor.set_clip_speed(doc,right,1.25),"Silent empty bus Rate remains editable")
+      let _=test.check(s,not option.is_some(option.unwrap(editor.clip(doc,right)).audio_context),"Empty-bus rate change does not synthesize history")
+      mode=mode+1
+      continue
+    }
+    let should_capture:bool=mode == 1 or mode == 2 or mode == 3 or mode == 8 or mode == 9 or mode == 10 or mode == 11 or mode == 12
+    let _=test.check(s,editor.trim_start(doc,parent,19),"Authored compound head trim succeeds")
+    let _=test.check(s,editor.trim_end(doc,parent,80),"Authored compound tail trim succeeds")
+    let body:editor.Clip=option.unwrap(editor.clip(doc,parent))
+    let _=test.check(s,option.is_some(body.audio_context)==should_capture,"Potential audio follows descendants/masks, ignores transient silence, and treats unknown graph conservatively")
+    let _=test.check(s,body.start==19 and body.source_in==12 and body.length==80,"Exact authored picture body survives both cuts")
+    if mode == 10 {let _=editor.describe_source(doc,src,320,180,true,false,0,0)}
+    let before:string=bytes(doc)
+    let accepted:bool=editor.set_clip_speed(doc,parent,1.25)
+    let _=test.check(s,accepted==not should_capture,"Silent compound Rate remains editable; preserved full audio anchors refuse unrepresentable retime")
+    if should_capture {
+      let _=test.eq_str(s,bytes(doc),before,"Rejected audio retime preserves full document and retained context")
+    }else{
+      let fast:editor.Clip=option.unwrap(editor.clip(doc,parent))
+      let _=test.check(s,fast.speed==1.25 and not option.is_some(fast.audio_context),"Silent picture-only change stores real rate without fictitious history")
+    }
+    mode=mode+1}
+  let _=test.done(s)
+  ()
+}
+fn descendant_shortening(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Child shortening preserves complete compound DSP history while flat source handles remain strict")
+  var doc:editor.Document=editor.document(30.0,64,36)
+  let src:u64=editor.add_source(doc,"sample.wav","Audible",120,30.0)
+  let child:u64=editor.add_sequence(doc,"Child",30.0,64,36)
+  let child_track:u64=editor.add_track(doc,child,editor.track_audio(),"A1")
+  let leaf:u64=option.unwrap(editor.append(doc,child_track,src,0,120))
+  let parent_track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"Parent A1")
+  let parent:u64=option.unwrap(editor.place_nested(doc,parent_track,child,0,120,0))
+  let _=test.check(s,editor.trim_end(doc,parent,60),"Parent body cuts to60 while120full history retained")
+  context_check(s,doc,parent,0,120,0,0,30.0,1.0,false)
+  let _=test.check(s,editor.trim_end(doc,leaf,90),"Descendant body shortens independently")
+  context_check(s,doc,parent,0,120,0,0,30.0,1.0,false)
+  let encoded:string=bytes(doc)
+  let _=test.check(s,not str.eq(encoded,"invalid"),"Shortened-child graph remains Save-able without dropping processing history")
+  var decoded:editor.Document=match store.decode(encoded) {err(_)=>{let _=test.check(s,false,"Shortened-child graph Open succeeds")
+ return ()},ok(found)=>found,}
+  let _=test.eq_str(s,bytes(decoded),encoded,"Save/Open preserves original analysis120 and current child90 exactly")
+  let flat:u64=option.unwrap(editor.place(doc,parent_track,src,0,120,200))
+  let _=test.check(s,editor.trim_end(doc,flat,60),"Flat source also captures complete history")
+  let slot:u64=option.unwrap(editor.source_slot(doc,src))
+  struct.set(array.borrow(struct.borrow(doc,field=sources),slot),90,field=frames)
+  let _=test.check(s,not editor.audio_context_valid(doc,option.unwrap(editor.clip(doc,flat))),"Missing original direct source handles stay refused")
+  let _=test.check(s,editor.audio_context_valid(doc,option.unwrap(editor.clip(doc,parent))),"Compound original span remains explicit even when descendant graph is shorter")
+  let _=test.done(s)
+  ()
+}
+fn retained_nested_inward(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Inward edits retain 2x/reverse compound history after descendant shortening")
+  var reverse_variant:u64=0
+  loop {if reverse_variant>=2 {break}
+    var doc:editor.Document=editor.document(30.0,64,36)
+    let src:u64=editor.add_source(doc,"sample.wav","Full history",240,30.0)
+    let child:u64=editor.add_sequence(doc,"Audible child",30.0,64,36)
+    let child_track:u64=editor.add_track(doc,child,editor.track_audio(),"Child A1")
+    let leaf:u64=option.unwrap(editor.append(doc,child_track,src,0,240))
+    let track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+    let parent:u64=option.unwrap(editor.place_nested(doc,track,child,0,120,0))
+    let _=test.check(s,editor.set_clip_speed(doc,parent,2.0),"Parent2x rate initially has complete240source frames")
+    let _=test.check(s,editor.set_clip_reverse(doc,parent,reverse_variant==1),"Parent direction authored beforecut")
+    let _=test.check(s,editor.trim_end(doc,parent,60),"Initial parent60body retains original120DSP context")
+    let _=test.check(s,editor.trim_end(doc,leaf,90),"Child shortens240to90 independently")
+    context_check(s,doc,parent,0,120,0,0,30.0,2.0,reverse_variant==1)
+    var history:editor.History=editor.history(8)
+    let before:string=bytes(doc)
+    editor.capture(history,doc)
+    let _=test.check(s,editor.trim_start(doc,parent,30),"Parent inward head30 selects original retained body despite shorter child")
+    let body:editor.Clip=option.unwrap(editor.clip(doc,parent))
+    let _=test.check(s,body.start==30 and body.length==30 and body.source_in==if reverse_variant==0 {60}else{120},"Head geometry/source phase is authored exact2x")
+    context_check(s,doc,parent,0,120,30,0,30.0,2.0,reverse_variant==1)
+    let after:string=bytes(doc)
+    let _=test.check(s,not str.eq(after,"invalid"),"Edited compound saves complete original DSP span")
+    var loaded:editor.Document=match store.decode(after) {err(_)=>{let _=test.check(s,false,"Inward compound Open succeeds")
+ return ()},ok(found)=>found,}
+    let _=test.eq_str(s,bytes(loaded),after,"Inward compound Save/Open keeps exactfullwindow/body")
+    let _=test.check(s,editor.undo(history,doc),"Head edit has one Undo")
+    let _=test.eq_str(s,bytes(doc),before,"Undo restores exactshortenedchild/originalparentbody graph")
+    let _=test.check(s,editor.redo(history,doc),"Head edit has one Redo")
+    let _=test.eq_str(s,bytes(doc),after,"Redo restores originalcontext/crop rather than reanchoring")
+    let _=test.check(s,editor.trim_end(doc,parent,20),"Inward tail20 does not clamp against shortened child")
+    let tail:editor.Clip=option.unwrap(editor.clip(doc,parent))
+    let _=test.check(s,tail.length==20 and tail.source_in==if reverse_variant==0 {60}else{140},"Tail source lower anchor keeps exactreverse/forward phase")
+    context_check(s,doc,parent,0,120,30,0,30.0,2.0,reverse_variant==1)
+    reverse_variant=reverse_variant+1}
+  // No exception for direct-media missing handles, malformed full windows or new history.
+  var direct:editor.Document=editor.document(30.0,64,36)
+  let source:u64=editor.add_source(direct,"sample.wav","Physical source",240,30.0)
+  let tr:u64=editor.add_track(direct,direct.active,editor.track_audio(),"A1")
+  let id:u64=option.unwrap(editor.append(direct,tr,source,0,120))
+  let _=editor.set_clip_speed(direct,id,2.0)
+  let _=test.check(s,editor.trim_end(direct,id,60),"Direct context initially valid")
+  let slot:u64=option.unwrap(editor.source_slot(direct,source))
+  struct.set(array.borrow(struct.borrow(direct,field=sources),slot),90,field=frames)
+  let before:string=bytes(direct)
+  let _=test.check(s,not editor.trim_start(direct,id,30),"Direct physical handles never become compound padding")
+  let _=test.eq_str(s,bytes(direct),before,"Direct source refusal remains atomic")
+  let _=test.done(s)
+  ()
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,time,io.write} {
+  if view.len(args)<2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Durable audio processing context",false)
+  cuts(suite)
+  persistence(suite)
+  transformations(suite)
+  extensions(suite)
+  refusals(suite)
+  range_and_nested(suite)
+  compound_audio_necessity(suite)
+  descendant_shortening(suite)
+  retained_nested_inward(suite)
+  test.conclude(suite,path.join(root,"audio-context-tests.json"),9)
+}

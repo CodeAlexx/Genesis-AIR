@@ -6,25 +6,25 @@ import std.text as text
 import "native_audio.ai" as audio
 import "transport_clock.ai" as transport_clock
 
-pub type Profile = struct {enabled: bool, path: string, pending: string, rows: u64, buffered: u64, previous_ns: u64}
 pub type Row = struct {
   begin: u64, present_begin: u64, present_end: u64, end: u64,
   signature: u64, paint: u64, present: u64, wait: u64,
   program: i64, source: i64, heard_before: i64, heard_after: i64,
   samples_before: u64, samples_after: u64, queued_before: u64, queued_after: u64,
   origin: i64, fps: f64, last: i64, source_mode: bool, playing: bool,
-  clock_ok: bool, present_ok: bool, revision: u64, media_revision: u64,
+  clock_ok: bool, clock_sampled: bool, present_ok: bool, revision: u64, media_revision: u64,
   width: u32, height: u32, prepared: u64, snapshot: u64, rebuilds: u64, strips: u64, inputs: u64,
   prepared_first: i64, prepared_last: i64, requested_frame: i64, in_flight: u64,
   received: u64, completed: u64, overwritten: u64,
   window_first_id:u64,window_last_id:u64,window_first_frame:i64,window_last_frame:i64,
   window_count:u64,owned_credit:u64,reserved_credit:u64
 }
+pub type Profile = struct {enabled: bool, path: string, pending: string, rows: u64, buffered: u64, previous_ns: u64, retained: bool, last: Row}
 pub fn row() -> Row effects {} {
   Row {begin:0,present_begin:0,present_end:0,end:0,signature:0,paint:0,present:0,wait:0,
     program:-1,source:-1,heard_before:-1,heard_after:-1,samples_before:0,samples_after:0,
     queued_before:0,queued_after:0,origin:0,fps:0.0,last:0,source_mode:false,playing:false,
-    clock_ok:false,present_ok:false,revision:0,media_revision:0,width:0,height:0,
+    clock_ok:false,clock_sampled:false,present_ok:false,revision:0,media_revision:0,width:0,height:0,
     prepared:0,snapshot:0,rebuilds:0,strips:0,inputs:0,
     prepared_first:-1,prepared_last:-1,requested_frame:-1,in_flight:0,received:0,completed:0,overwritten:0,window_first_id:0,window_last_id:0,window_first_frame:-1,
     window_last_frame:-1,window_count:0,owned_credit:0,reserved_credit:0}
@@ -43,7 +43,7 @@ pub fn context(row: ref<Row>, source_mode: bool, playing: bool, origin: i64,
   ()
 }
 pub fn idle() -> Profile effects {alloc} {
-  Profile {enabled:false,path:string.new(),pending:string.new(),rows:0,buffered:0,previous_ns:0}
+  Profile {enabled:false,path:string.new(),pending:string.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()}
 }
 pub fn header() -> str effects {} { "loop_begin_ns\tpresent_begin_ns\tpresent_end_ns\tloop_end_ns\tsignature_ns\tpaint_ns\tpresent_ns\twait_ns\tprogram_shown\tsource_shown\theard_before\theard_after\tsamples_before\tsamples_after\tqueued_before\tqueued_after\taudio_origin\tfps\tsource_mode\tplaying\tclock_ok\tpresent_ok\tdocument_revision\tmedia_revision\twidth\theight\tprepared_frames\tsnapshot_generation\taudio_cache_rebuilds\tstrip_requests\tinput_events\tdiagnostic_previous_ns\tprepared_first_frame\tprepared_last_frame\tlast_requested_frame\tin_flight_request\treceived_request\tcompleted_packets\toverwritten_packets\twindow_first_id\twindow_last_id\twindow_first_frame\twindow_last_frame\twindow_count\towned_picture_credit\treserved_picture_credit\n" }
 // Startup targets retain their historical replace behavior; menu traces always
@@ -60,7 +60,7 @@ pub fn start_at(target:str,exclusive:bool) -> result<Profile,string> effects {al
     match files.write_text(target,header()) {ok(_)=>{},err(_)=>{
       return result.err(text.concat("[GA_WINDOW_PROFILE_WRITE] Cannot write timing header: ",target))},}
   }
-  result.ok(Profile {enabled:true,path:string.copy(target),pending:string.new(),rows:0,buffered:0,previous_ns:0})
+  result.ok(Profile {enabled:true,path:string.copy(target),pending:string.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()})
 }
 pub fn startup() -> result<Profile,string> effects {alloc,env,fs.write} {
   let target:string=match env.get("GENESIS_WINDOW_PROFILE") {some(value)=>value,none=>string.new(),}
@@ -87,7 +87,7 @@ pub fn start_local(root:str) -> result<Profile,string> effects {alloc,fs.meta,fs
       return result.err(text.concat("[GA_WINDOW_PROFILE_CREATE] Cannot reserve timing trace: ",target))},}
     match fs.write_all(output,str.bytes(header())) {ok(_)=>{},err(_)=>{
       return result.err(text.concat("[GA_WINDOW_PROFILE_WRITE] Cannot write timing header: ",target))},}
-    return result.ok(Profile {enabled:true,path:target,pending:string.new(),rows:0,buffered:0,previous_ns:0})
+    return result.ok(Profile {enabled:true,path:target,pending:string.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()})
   }
   result.err(text.concat("[GA_WINDOW_PROFILE_CREATE] Timing name collision limit: ",directory))
 }
@@ -97,6 +97,7 @@ pub fn stamp(profile: ref<Profile>) -> u64 effects {time} {
 pub fn sample(library: ref<option<CAbiLibrary>>, row: ref<Row>, after: bool) -> unit effects {alloc,ffi} {
   match ref.swap(library,option.none()) {none=>{},some(opened)=>{
     var device: CAbiLibrary = opened
+    struct.set(row,true,field=clock_sampled)
     let clock: audio.Clock = audio.clock(device)
     if after {
       struct.set(row,row.clock_ok and clock.ok,field=clock_ok)
@@ -143,8 +144,114 @@ pub fn stop(profile:ref<Profile>) -> result<unit,string> effects {alloc,fs.write
   struct.set(profile,false,field=enabled)
   outcome
 }
+fn retained_row(value:ref<Row>) -> Row effects {} {
+  Row {begin:value.begin,
+    present_begin:value.present_begin,
+    present_end:value.present_end,
+    end:value.end,
+    signature:value.signature,
+    paint:value.paint,
+    present:value.present,
+    wait:value.wait,
+    program:value.program,
+    source:value.source,
+    heard_before:value.heard_before,
+    heard_after:value.heard_after,
+    samples_before:value.samples_before,
+    samples_after:value.samples_after,
+    queued_before:value.queued_before,
+    queued_after:value.queued_after,
+    origin:value.origin,
+    fps:value.fps,
+    last:value.last,
+    source_mode:value.source_mode,
+    playing:value.playing,
+    clock_ok:value.clock_ok,
+    clock_sampled:value.clock_sampled,
+    present_ok:value.present_ok,
+    revision:value.revision,
+    media_revision:value.media_revision,
+    width:value.width,
+    height:value.height,
+    prepared:value.prepared,
+    snapshot:value.snapshot,
+    rebuilds:value.rebuilds,
+    strips:value.strips,
+    inputs:value.inputs,
+    prepared_first:value.prepared_first,
+    prepared_last:value.prepared_last,
+    requested_frame:value.requested_frame,
+    in_flight:value.in_flight,
+    received:value.received,
+    completed:value.completed,
+    overwritten:value.overwritten,
+    window_first_id:value.window_first_id,
+    window_last_id:value.window_last_id,
+    window_first_frame:value.window_first_frame,
+    window_last_frame:value.window_last_frame,
+    window_count:value.window_count,
+    owned_credit:value.owned_credit,
+    reserved_credit:value.reserved_credit}
+}
+fn same_observation(left:ref<Row>,right:ref<Row>) -> bool effects {} {
+  left.program==right.program and
+    left.source==right.source and
+    left.heard_before==right.heard_before and
+    left.heard_after==right.heard_after and
+    left.samples_before==right.samples_before and
+    left.samples_after==right.samples_after and
+    left.queued_before==right.queued_before and
+    left.queued_after==right.queued_after and
+    left.origin==right.origin and
+    left.fps==right.fps and
+    left.last==right.last and
+    left.source_mode==right.source_mode and
+    left.playing==right.playing and
+    left.clock_ok==right.clock_ok and
+    left.clock_sampled==right.clock_sampled and
+    left.present_ok==right.present_ok and
+    left.revision==right.revision and
+    left.media_revision==right.media_revision and
+    left.width==right.width and
+    left.height==right.height and
+    left.prepared==right.prepared and
+    left.snapshot==right.snapshot and
+    left.rebuilds==right.rebuilds and
+    left.strips==right.strips and
+    left.inputs==right.inputs and
+    left.prepared_first==right.prepared_first and
+    left.prepared_last==right.prepared_last and
+    left.requested_frame==right.requested_frame and
+    left.in_flight==right.in_flight and
+    left.received==right.received and
+    left.completed==right.completed and
+    left.overwritten==right.overwritten and
+    left.window_first_id==right.window_first_id and
+    left.window_last_id==right.window_last_id and
+    left.window_first_frame==right.window_first_frame and
+    left.window_last_frame==right.window_last_frame and
+    left.window_count==right.window_count and
+    left.owned_credit==right.owned_credit and
+    left.reserved_credit==right.reserved_credit
+}
+// Preserve every native present attempt, sampled device observation and input
+// batch. Only repeated poll-only semantic state may wait for its 16ms threshold on the next loop;
+// no presenter/clock/queue deadline is changed and the wire remains 46 columns.
+fn retain(profile:ref<Profile>,value:ref<Row>) -> bool effects {} {
+  if not profile.retained or value.present_begin!=0 or value.present_end!=0 or
+      value.present!=0 or value.paint!=0 or value.present_ok or value.clock_ok or value.clock_sampled or
+      value.heard_before>=0 or value.heard_after>=0 or value.samples_before!=0 or
+      value.samples_after!=0 or value.queued_before!=0 or value.queued_after!=0 or
+      value.inputs!=0 {return true}
+  let prior:ref<Row> =struct.borrow(profile,field=last)
+  if not same_observation(prior,value) {return true}
+  // Bad/equal timestamps remain observable. Subtract only after proving order.
+  if value.end<=prior.end {return true}
+  value.end-prior.end>=16000000
+}
 pub fn record_buffered_checked(profile: ref<Profile>, row: ref<Row>) -> result<unit,string> effects {alloc,fs.write,time} {
   if not profile.enabled or profile.rows >= 50000 {return result.ok(())}
+  if not retain(profile,row) {return result.ok(())}
   let began: u64 = time.monotonic_ns()
   let out: ref<string> = struct.borrow(profile,field=pending)
   var values: array<i64> = [cast.wrap(row.begin),cast.wrap(row.present_begin),cast.wrap(row.present_end),cast.wrap(row.end),
@@ -175,6 +282,8 @@ pub fn record_buffered_checked(profile: ref<Profile>, row: ref<Row>) -> result<u
     string.append(out,string.from_int(array.get(queue,i)))
     i=i+1}
   string.append(out,"\n")
+  struct.set(profile,retained_row(row),field=last)
+  struct.set(profile,true,field=retained)
   struct.set(profile,profile.rows+1,field=rows)
   struct.set(profile,profile.buffered+1,field=buffered)
   struct.set(profile,time.monotonic_ns()-began,field=previous_ns)
