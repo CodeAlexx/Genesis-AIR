@@ -3979,7 +3979,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  
  /// `AUDIO <path> <src_in_s> <dur_s> <dst_offset_s> <gain> <fade_in_s> <fade_out_s> <clip_len_s>
  /// <range_local_s> <fx_chain|->` — decode the SOURCE audio range [src_in_s, src_in_s+dur_s) of
-@@ -1546,19 +1657,849 @@
+@@ -1546,19 +1657,862 @@
  /// full length is `clip_len_s`. This is the timeline-sync fix plus per-clip volume/fades/FX: the clip
  /// is positioned at its timeline offset, not concatenated.
  ///
@@ -4002,7 +4002,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  /// continues.
 -fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
 +struct AudioStreamEntry {
-+    decoder: ffi::AudioStream, path: String, chain: String, next_local: f64, touched: bool, context: Option<(u64,u64,usize)>, next_sample: usize,
++    decoder: ffi::AudioStream, path: String, chain: String, next_local: f64, touched: bool, context: Option<(u64,u64,usize,usize)>, next_sample: usize,
 +}
 +#[derive(Default)]
 +struct AudioStreams { entries: std::collections::HashMap<u64, AudioStreamEntry> }
@@ -4034,7 +4034,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +    }
 +    fn read_context(&mut self, id: u64, path: &str, chain: &str,
 +        context: &NestAudioContext, crop: usize, frames: usize) -> Option<Vec<f32>> {
-+        let identity=Some((context.source.to_bits(),context.duration.to_bits(),context.frames));
++        let identity=Some((context.source.to_bits(),context.duration.to_bits(),context.frames,context.processing));
 +        if let Some(entry)=self.entries.get(&id) {
 +            if entry.path!=path || entry.chain!=chain || entry.context!=identity || entry.next_sample!=crop {
 +                eprintln!("[GA_AUDIO_CONTEXT] Retained DSP identity or sample cursor changed without reset");return None;
@@ -4046,7 +4046,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +                next_local:0.0,touched:true,context:identity,next_sample:crop});
 +        }
 +        let entry=self.entries.get_mut(&id)?;
-+        let output=context_body_read(&mut entry.decoder,context.frames,crop,frames)?;
++        let output=context_body_read(&mut entry.decoder,context.processing,crop,frames)?;
 +        entry.next_sample=crop+frames;entry.touched=true;Some(output)
 +    }
 +
@@ -4287,8 +4287,21 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +}
 +// The full authored DSP graph is distinct from the visible sample body.  A
 +// destructive timeline edit crops AFTER that graph, never restarts its history.
-+struct NestAudioContext { source: f64, duration: f64, frames: usize, crop: usize }
++struct NestAudioContext { source: f64, duration: f64, frames: usize, crop: usize, processing: usize }
 +impl NestAudioContext {
++    // Direct explicit extents keep the durable virtual span; NEST retains v1.
++    fn parse2(token: &str, body: usize) -> Result<Self, String> {
++        let invalid=||nest_error("GA_AUDIO_CONTEXT", "Invalid explicit direct processing extent");
++        let f:Vec<_>=token.split(':').collect();
++        if f.len()!=6 || f[0]!="AUDIOCTX2" {return Err(invalid());}
++        let processing=f[4].parse::<usize>().map_err(|_|invalid())?;
++        let compact=format!("AUDIOCTX:{}:{}:{}:{}",f[1],f[2],f[3],f[5]);
++        let mut context=Self::parse_endpoint(&compact,body,true)?;
++        if processing==0 || processing>context.frames || context.crop>processing ||
++            context.crop.checked_add(body).is_none_or(|end|end>processing+1) {return Err(invalid());}
++        context.processing=processing;
++        Ok(context)
++    }
 +    fn parse(token: &str, body: usize) -> Result<Self, String> {
 +        Self::parse_endpoint(token,body,false)
 +    }
@@ -4308,7 +4321,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +        }
 +        // At most one zero-padded endpoint sample is allowed when moving an
 +        // unchanged body between fractional-FPS placement phases.
-+        Ok(Self { source, duration, frames, crop })
++        Ok(Self { source, duration, frames, crop, processing: frames })
 +    }
 +}
 +// Full original graph input is retained, but causal flat output is read only as
@@ -4838,7 +4851,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      // No active accumulator: a stray AUDIO outside an OPEN/WAVE session. ERR (client skips).
      if !prog.active {
          eprintln!("[gcompose] AUDIO with no active accumulator (no OPEN/WAVE)");
-@@ -1572,9 +2513,59 @@
+@@ -1572,9 +2526,61 @@
      // the path is a pool media path like ENC/THUMB), so a fixed-arity split is safe. The trailing 4
      // numeric fields carry the per-clip AUDIO FADE envelope (applied per-sample below); the FINAL
      // token is the per-clip libavfilter chain ("-" when the AudioFx is neutral).
@@ -4874,16 +4887,18 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +                Some(value) => Some(value),
 +                None => { eprintln!("[GA_AUDIO_FADE_KEYS] Invalid clip fade envelope"); return false; }
 +            };
-+        } else if token.starts_with("AUDIOCTX:") {
++        } else if token.starts_with("AUDIOCTX:") || token.starts_with("AUDIOCTX2:") {
 +            if audio_context.is_some() {eprintln!("[GA_AUDIO_CONTEXT] Duplicate direct DSP context");return false;}
 +            let parts:Vec<_>=token.split(':').collect();
-+            if parts.len()!=6 && parts.len()!=7 {eprintln!("[GA_AUDIO_CONTEXT] Direct DSP context needs exact request count");return false;}
-+            let tail=parts.len()==7;
-+            if tail && (streaming || parts[6]!="TAIL") {eprintln!("[GA_AUDIO_CONTEXT] Invalid whole-output tail request");return false;}
-+            let Some(count)=parts[5].parse::<usize>().ok().filter(|n|*n>0) else {eprintln!("[GA_AUDIO_CONTEXT] Invalid direct sample count");return false;};
-+            let compact=parts[..5].join(":");
-+            let context=match NestAudioContext::parse_endpoint(&compact,count,true) {Ok(v)=>v,Err(e)=>{eprintln!("{e}");return false;}};
-+            if tail && (context.crop+count < context.frames.saturating_sub(1) ||
++            let base=if parts[0]=="AUDIOCTX2" {7}else{6};
++            if parts.len()!=base && parts.len()!=base+1 {eprintln!("[GA_AUDIO_CONTEXT] Direct DSP context needs exact request count");return false;}
++            let tail=parts.len()==base+1;
++            if tail && (streaming || parts[base]!="TAIL") {eprintln!("[GA_AUDIO_CONTEXT] Invalid whole-output tail request");return false;}
++            let Some(count)=parts[base-1].parse::<usize>().ok().filter(|n|*n>0) else {eprintln!("[GA_AUDIO_CONTEXT] Invalid direct sample count");return false;};
++            let compact=parts[..base-1].join(":");
++            let parsed=if base==7 {NestAudioContext::parse2(&compact,count)}else{NestAudioContext::parse_endpoint(&compact,count,true)};
++            let context=match parsed {Ok(v)=>v,Err(e)=>{eprintln!("{e}");return false;}};
++            if tail && (context.crop+count < context.processing.saturating_sub(1) ||
 +                count.checked_add(NEST_BLOCK).and_then(|n|n.checked_mul(2)).is_none_or(|n|n>AUDIO_CAP_MAX)) {
 +                eprintln!("[GA_AUDIO_CONTEXT] Tail requires the original graph endpoint");return false;
 +            }
@@ -4899,7 +4914,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      }
      // WHITESPACE-SAFE WIRE: the UI percent-encodes the media path token (enc_path); decode it here
      // (dec_path) BEFORE opening the decoder. A space-free path decodes to itself (identity).
-@@ -1628,50 +2619,101 @@
+@@ -1628,50 +2634,101 @@
          return false;
      }
  
@@ -4974,7 +4989,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +            let block=(count-at).min(NEST_BLOCK);
 +            let values=if let Some((id,_,_))=stream_args {
 +                streams.read_context(id,&path,fx_chain,&context,context.crop+at,block)
-+            }else {context_body_read(fresh.as_mut().unwrap(),context.frames,context.crop+at,block)};
++            }else {context_body_read(fresh.as_mut().unwrap(),context.processing,context.crop+at,block)};
 +            let mut values=match values {Some(v)=>v,None=>{eprintln!("[GA_AUDIO_CONTEXT] Cannot read original graph sample body");return false;}};
 +            audio_mix_samples(prog,&mut values,at,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys);
 +            at+=block;
@@ -4985,8 +5000,8 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
 +            // A shortened body discards the omitted original body sample; an
 +            // extended body keeps its endpoint zero without consuming the tail.
 +            let decoder=fresh.as_mut().unwrap();
-+            let consumed=(context.crop+count).min(context.frames);
-+            if context_discard(decoder,context.frames-consumed).is_none() {eprintln!("[GA_AUDIO_CONTEXT_TAIL] Cannot finish original body");return false;}
++            let consumed=(context.crop+count).min(context.processing);
++            if context_discard(decoder,context.processing-consumed).is_none() {eprintln!("[GA_AUDIO_CONTEXT_TAIL] Cannot finish original body");return false;}
 +            let mut values=match decoder.read_to_end(NEST_BLOCK) {
 +                Some(v) if v.iter().all(|n|n.is_finite())=>v,
 +                _=>{eprintln!("[GA_AUDIO_CONTEXT_TAIL] Native tail failed or exceeds five-second total budget");return false;},
@@ -5037,7 +5052,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      // Apply per-clip GAIN + FADE envelope in place (Triad-B P1). The gain is a flat linear multiplier;
      // the fades ramp the gain 0→1 over [0, fade_in_s) and 1→0 over [clip_len_s − fade_out_s,
      // clip_len_s) in CLIP-LOCAL time. Sample k (per channel) of this decoded range is at clip-local
-@@ -1685,13 +2727,16 @@
+@@ -1685,13 +2742,16 @@
      // Run the per-sample loop when the per-clip gain isn't unity, OR there's a fade, OR a master
      // envelope is present (the last clause is the GATE case: a flat-gain, fade-less clip still needs
      // the master envelope applied). When all three are absent the loop is skipped — identical to today.
@@ -5057,7 +5072,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
              let mut env = 1.0f64;
              if fade_in_s > 0.0 && tl < fade_in_s {
                  let r = tl / fade_in_s;
-@@ -1704,8 +2749,9 @@
+@@ -1704,8 +2764,9 @@
              // P27: multiply by the MASTER gain envelope at this frame's ABSOLUTE timeline time
              // (dst_off_s = the clip's destination offset in the program; fr/sr = frames into the
              // range). Empty menv → eval_gain_env == 1.0 → unchanged.
@@ -5069,7 +5084,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
              let base = fr * PROG_CH;
              for ch in 0..PROG_CH {
                  samples[base + ch] *= g;
-@@ -1717,8 +2763,7 @@
+@@ -1717,8 +2778,7 @@
      // anything past the end so an offset at/after the timeline end is a harmless no-op.
      let dst_frame = (dst_off_s * PROG_SR as f64).round();
      let dst_frame = if dst_frame.is_finite() && dst_frame >= 0.0 { dst_frame as usize } else { 0 };
@@ -5079,7 +5094,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  }
  
  /// `WAVE <out_wav> <total_s>` — begin a PLAYBACK-ONLY accumulator session (no encoder). Allocates
-@@ -1739,8 +2784,7 @@
+@@ -1739,8 +2799,7 @@
      if !total_s.is_finite() || total_s < 0.0 {
          return false;
      }
@@ -5089,7 +5104,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  }
  
  /// `WAVECLOSE <out_wav>` — write the playback accumulator to `<out_wav>` as a 16-bit PCM stereo @
-@@ -1753,12 +2797,12 @@
+@@ -1753,12 +2812,12 @@
          eprintln!("[gcompose] bad WAVECLOSE ({} fields): {line}", f.len());
          return None;
      }
@@ -5104,7 +5119,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      prog.clear();
      if ok {
          Some(out.to_string())
-@@ -1788,8 +2832,7 @@
+@@ -1788,8 +2847,7 @@
      if !window_s.is_finite() || window_s < 0.0 {
          return false;
      }
@@ -5114,7 +5129,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  }
  
  /// `LEVELS <out>` — measure the active accumulator's per-channel PEAK + RMS (dBFS), write the 4
-@@ -1940,8 +2983,8 @@
+@@ -1940,8 +2998,8 @@
      out.extend_from_slice(b"data");
      out.extend_from_slice(&data_bytes.to_le_bytes());
      for &s in samples {
@@ -5125,7 +5140,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
          out.extend_from_slice(&(v as i16).to_le_bytes());
      }
      std::fs::write(path, &out).is_ok()
-@@ -1974,7 +3017,8 @@
+@@ -1974,7 +3032,8 @@
          decoders.insert(path.clone(), d);
      }
      let dec = decoders.get_mut(&path)?;
@@ -5135,7 +5150,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      if std::fs::write(&out, &buf).is_err() {
          eprintln!("[gcompose] THUMB write failed: {out}");
          return None;
-@@ -2212,6 +3256,23 @@
+@@ -2212,6 +3271,23 @@
      line: &str,
  ) -> Option<String> {
      let mut f: Vec<&str> = line.split_whitespace().collect();
@@ -5159,7 +5174,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      // Accept both the new explicit form (`PREVIEW` + the positional fields) and the legacy
      // keyword-less form. Strip a leading PREVIEW keyword so the positional indices below are
      // identical for both (finding #3). The fields are the 12 composite fields + the 1 P31 BLEND field
-@@ -2243,7 +3304,8 @@
+@@ -2243,7 +3319,8 @@
      // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
      // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
      // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
@@ -5169,7 +5184,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
          f.remove(0);
      }
      if f.len() != 103 && f.len() != 106 && f.len() != 107 && f.len() != 108 && f.len() != 109 {
-@@ -2277,7 +3339,8 @@
+@@ -2277,7 +3354,8 @@
      let trans_kind: i32 = f[16].parse().ok()?;
      let trans_prog: f32 = f[17].parse().ok()?;
      let trans_param: f32 = f[18].parse().ok()?;
@@ -5179,7 +5194,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      let trans_frame: i32 = f[20].parse().ok()?;
      // Triad-B P1 PER-CLIP GRADE fields.
      let cbright: f32 = f[21].parse().ok()?;
-@@ -2469,15 +3532,16 @@
+@@ -2469,15 +3547,16 @@
      // identity here, applied for symmetry with the encoded emit side.
      let out_path = dec_path(f[f.len() - 1]);
  
@@ -5198,7 +5213,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      }
  
      // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
-@@ -2486,6 +3550,7 @@
+@@ -2486,6 +3565,7 @@
      let mut eff_op = op;
      if over_path != "-" && op > 0.0 {
          if !upload_slot(gpu, decoders, 1, &over_path, over_frame) {
@@ -5206,7 +5221,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
              eff_op = 0.0;
          }
      } else {
-@@ -2496,6 +3561,7 @@
+@@ -2496,6 +3576,7 @@
      // active (kind 0..7 + a real path), else -1 (track1 copies the base). Same side-effecting helper
      // the ENC path uses, so the preview and the export animate the transition identically.
      let eff_tt = resolve_trans(gpu, decoders, trans_kind, &trans_path, trans_frame);
@@ -5214,7 +5229,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  
      // Resolve the per-clip LOOK (load + upload the .cube for LUT3D, cached; VHS needs no LUT; a
      // missing/failed LUT degrades to no look). Then run the OpenCL pipeline (transition or base-copy
-@@ -2506,7 +3572,8 @@
+@@ -2506,7 +3587,8 @@
      // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
      // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -5224,7 +5239,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -2526,9 +3593,47 @@
+@@ -2526,9 +3608,47 @@
      // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
      *last_final_is_look = fin;
  
@@ -5275,7 +5290,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      }
      Some(out_path)
  }
-@@ -2539,34 +3644,33 @@
+@@ -2539,34 +3659,33 @@
      decoders: &mut HashMap<String, ffi::Decoder>,
      path: &str,
      frame: i32,
@@ -5319,7 +5334,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      let mut best = (0, 0);
      let mut lowest = u64::MAX;
      for dy in (-24..=24).step_by(4) {
-@@ -2578,9 +3682,9 @@
+@@ -2578,9 +3697,9 @@
                      let b = (((y + dy) * w + x + dx) * 4) as usize;
                      // RGB differences distinguish camera motion on both bright
                      // and low-contrast material without a separate grayscale copy.
@@ -5332,7 +5347,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
                  }
              }
              if error < lowest ||
-@@ -2592,7 +3696,7 @@
+@@ -2592,7 +3711,7 @@
      }
      // A scene cut has no defensible motion estimate.
      let samples = ((h - 128 + 15) / 16 * ((w - 128 + 15) / 16)) as u64;
@@ -5341,7 +5356,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  }
  
  fn stabilized_frame(
-@@ -2600,7 +3704,7 @@
+@@ -2600,7 +3719,7 @@
      path: &str,
      frame: i32,
      strength: f32,
@@ -5350,7 +5365,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      let current = decode_cached(decoders, path, frame)?;
      if strength <= 0.0 { return Some(current); }
      let mut sum_x = 0i32;
-@@ -2629,9 +3733,9 @@
+@@ -2629,9 +3748,9 @@
      let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
      let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
      if shift_x == 0 && shift_y == 0 { return Some(current); }
@@ -5363,7 +5378,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
      for y in 0..h {
          let sy = y - shift_y;
          if sy < 0 || sy >= h { continue; }
-@@ -2662,6 +3766,33 @@
+@@ -2662,6 +3781,33 @@
  ///
  /// IDENTITY: a project with no titles never sends a `RAW:` path, so this routes every frame through
  /// `decode_cached` exactly as before — byte-identical to the pre-P5 engine.
@@ -5397,7 +5412,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
  fn upload_slot(
      gpu: &ffi::Gpu,
      decoders: &mut HashMap<String, ffi::Decoder>,
-@@ -2669,28 +3800,61 @@
+@@ -2669,28 +3815,61 @@
      path: &str,
      frame: i32,
  ) -> bool {
@@ -5467,7 +5482,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
          let decoded = if let Some(spec) = path.strip_prefix("STAB:") {
              match spec.split_once(':') {
                  Some((amount, source)) => match amount.parse::<f32>() {
-@@ -2703,11 +3867,11 @@
+@@ -2703,11 +3882,11 @@
          } else { decode_cached(decoders, path, frame) };
          match decoded {
              Some(rgba) => {
@@ -5481,7 +5496,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
                  false
              }
          }
-@@ -2718,13 +3882,13 @@
+@@ -2718,13 +3897,13 @@
  fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
      let gpu = ffi::Gpu::init()?;
      let mut b = ffi::Decoder::open(base)?;
@@ -5497,7 +5512,7 @@ diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
                  gpu.upload(1, &ov);
                  has_over = true;
              }
-@@ -2740,5 +3904,5 @@
+@@ -2740,5 +3919,5 @@
  /// CPU/FFmpeg-only fallback: just the decoded base frame.
  fn decode_only(base: &str) -> Option<Vec<u8>> {
      let mut b = ffi::Decoder::open(base)?;

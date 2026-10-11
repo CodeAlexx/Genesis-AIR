@@ -325,6 +325,21 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   }
   if action == chrome.act_transition() {
     var landed: commands.Result = commands.transition_at_playhead(state, 24)
+    if landed.ok {app.set_dock_tab(state,chrome.tab_properties())
+      let _=app.set_dock_scroll(state,0.0)}
+    return commands.message(landed)
+  }
+  if action==chrome.act_transition_kind() {
+    var landed:commands.Result=commands.set_transition_kind(state,target,str.view(kind))
+    return commands.message(landed)
+  }
+  if action==chrome.act_transition_duration() {
+    if target!=app.current_transition(state) {return note("[GA_TRANSITION_TARGET] Select the transition again")}
+    if not app.begin_transition_prompt(state,action,target) {return note("[GA_TRANSITION_TARGET] Transition no longer exists")}
+    return note("Enter an exact duration of at least two frames; Escape cancels")
+  }
+  if action==chrome.act_transition_remove() {
+    var landed:commands.Result=commands.remove_transition(state,target)
     return commands.message(landed)
   }
   if action == chrome.act_group() {
@@ -773,6 +788,14 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
   }
 
   if layout.contains(frame.timeline, x, y) {
+    match painter.transition_hit(state,frame.timeline,x,y) {
+      none=>{},some(id)=>{
+        app.set_selected_transition(state,id)
+        app.set_dock_tab(state,chrome.tab_properties())
+        let _=app.set_dock_scroll(state,0.0)
+        return note("Transition selected; edit type, duration or Remove in Properties")
+      },
+    }
     // The painted playhead is a seek handle above the clips, throughout the lane area.
     let head: f64 = timeline.frame_to_x(model, editor.playhead(struct.borrow(state, field=document)))
     if math.abs(x - head) <= 6.0 {
@@ -1018,10 +1041,24 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
 // cannot be routed to a different command than the one that opened it.
 
 pub fn commit_prompt(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let result:string=commit_prompt_value(state)
+  // A refused draft remains active. Its feedback belongs to that draft even
+  // when background transport/autosave messages replace the global status.
+  if app.prompt_active(state) {app.set_prompt_feedback(state,str.view(result))}
+  result
+}
+fn commit_prompt_value(state: ref<app.App>) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if not app.prompt_active(state) { return note("") }
   let action: u32 = app.prompt_action(state)
   let typed: string = app.prompt_text(state)
   let filter:u64=app.prompt_filter(state)
+  if action==chrome.act_transition_duration() {
+    if not app.prompt_transition_valid(state) {return note("[GA_TRANSITION_TARGET] The opening transition changed; cancel and reopen")}
+    let duration:i64=match text.parse_i64(str.view(typed)) {none=>{return note("[GA_TRANSITION_DURATION] Enter a whole number of frames")},some(value)=>value,}
+    var changed:commands.Result=commands.set_transition_duration(state,app.prompt_transition(state),duration)
+    if changed.ok {app.end_prompt(state)}
+    return commands.message(changed)
+  }
   if action==chrome.act_filter_value() and not app.prompt_target_valid(state) {
     return note("[GA_PROMPT_TARGET] The opening filter or clip changed; cancel and reopen this draft")
   }
@@ -1227,6 +1264,14 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     return commands.message(landed)
   }
   if code == widgets.key_delete() {
+    let seam:u64=app.current_transition(state)
+    if seam!=0 {
+      var landed:commands.Result=commands.remove_transition(state,seam)
+      return commands.message(landed)
+    }
+    if state.selected_transition!=0 and state.selected_transition_epoch==state.project_epoch {
+      return note("[GA_TRANSITION_TARGET] Selected transition no longer exists")
+    }
     let clip: u64 = app.current_clip(state)
     if clip == 0 { return note("Nothing selected") }
     var landed: commands.Result = if shift { commands.ripple_delete(state, clip) }
@@ -1282,6 +1327,8 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
   }
   if code == 116 {
     var landed: commands.Result = commands.transition_at_playhead(state, 24)
+    if landed.ok {app.set_dock_tab(state,chrome.tab_properties())
+      let _=app.set_dock_scroll(state,0.0)}
     return commands.message(landed)
   }
   if code == 110 {

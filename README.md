@@ -107,7 +107,7 @@ omissions/repeats/backward/early/late-over-two-frame pictures or audio-queue dra
 they remain too short for acceptance. Existing per-loop trace sensitivity and
 unchanged playback source hashes do not establish a new scheduler defect.
 The recorder-only r5 repair passes its qualification gates and its exact root
-products are now installed as B079/75F9/A8E; publication and fresh root-ready
+products were installed at that checkpoint as B079/75F9/A8E; publication and fresh root-ready
 pass. The accompanying source and evidence archive identifies this installed
 checkpoint; `690aa8b` is the prior committed checkpoint.
 The r5 recorder/test source is now frozen and passes 12 cases and 2,641 checks
@@ -146,14 +146,50 @@ Fresh root-ready verifies the actually loaded B079 application and 75F9 audio
 DLL: the private saved 1080p project has two linked clips, V1 filmstrip only and
 A1 waveform only, populated Source/Program monitors, active Program playback
 and stereo meters, Stop retaining the picture with cleared meters, and nonblank
-Start at zero. The root editor is left open paused. The accompanying
+Start at zero. That root-ready check left the editor open paused. The accompanying
 [source and evidence archive](archive/pro-native-edit-export-r5-2026-10-11.tar.gz)
 and [archive receipt](archive/pro-native-edit-export-r5-2026-10-11.json) bind the
 tested source and installed payload; the publication commit is identifiable
 through Git history.
 The [professional editing acceptance ledger](docs/PRO_EDITING_ACCEPTANCE_WINDOWS.md)
-binds the exact r4/r5 receipts, retained failures and remaining Delay/Reverb,
-full-history retime and transition-control limitations. The broader goal remains active.
+binds the exact r4/r5 receipts and retained failures. R8 is now installed as
+5B80/B556/A5B0, with publication and fresh root-ready passed. Its coherent build passes,
+and a quick native prompt check verifies visible duration refusal, correction
+and Undo/Redo. The unchanged full background suite passes with 76 fresh reports
+and exit zero. Its isolated device and recorded linked native workflow pass:
+Clock31 transition editing/removal/Undo and Save/Open preserve the full A1 graph,
+and transport, meters, scrub and histogram respond. Native audio editing also
+verifies tail trim 60→30, exact Rate2.00 with a revision-4 extent, and a refused
+Delay edit preserving both the saved graph and a pending Gain Redo. Active native
+export cancellation cleans up, and a fresh short Unicode title export passes
+independent picture/audio checks. The first 1080p cadence epoch passes with 9,078
+consecutive pictures over 151.285 native seconds at 59.999197 pictures/s and zero
+steady omissions, repeats, backward/early/late-over-two-frame pictures, queue
+drains or overwrites. Fitted 4K/59.94 also passes: 8,984 consecutive pictures over
+149.869 native seconds at 59.939125 pictures/s, with the same zero steady faults,
+zero lag and maximum gap 24.5614 ms. Both use the ordinary editor's fitted
+480×270 monitor and unchanged parser exclusions; raw startup repeats/drains remain
+retained. Actual installed-root playback, Stop/nonblank rewind and scrub/scopes
+pass; the owned root check closes normally. Accompanying source/evidence bundle
+paths: `archive/pro-native-edit-export-r8-2026-10-11.tar.gz` and
+`archive/pro-native-edit-export-r8-2026-10-11.json` (archive SHA and evidence receipt).
+Device/GUI observations and software presentations do not establish
+physical hearing, speaker/display alignment, fullscreen 4K, compound 4K60 or
+whole-source playback.
+
+The candidate adds selectable `T` transition badges, all eleven supported types,
+exact frame duration and removal, with validation before Undo/Redo history changes.
+Shared modal refusals remain visible in the draft and status until the text changes:
+the Windows/Linux component passes 12 cases and 232 checks on each OS. Direct
+integral forward audio retiming uses an explicit available-input extent,
+`AUDIOCTX2` and project revision 4; incompatible filter edits are guarded before
+history capture (seven cases and 84 checks on each OS). These are component
+results with their own scope; the later R8 gates above provide separate native
+and combined acceptance. R7's full background repeat passed
+76 fresh reports, but its native hidden-refusal failure prevented publication;
+the earlier r6/r7 failures remain preserved in the ledger. Delay/Reverb tails,
+unavailable source prefix/body, reverse/fractional extent creation and new nested
+processing endpoints remain limited. The broader goal remains active.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -198,8 +234,10 @@ The right-hand dock has four tabs:
   filter's own parameters) above a library of **51 filter kinds**, 31 video and 20 audio.
   Text has an editable content field and LUT3D has a `.cube` path field. These strings
   persist in revision 2 projects. Projects with retained audio processing context
-  use revision 3; the current reader accepts revisions 1, 2 and 3. Earlier Genesis
-  versions refuse revision 3 rather than silently losing that context.
+  use revision 3. In the installed r8 checkpoint, direct forward retimes that
+  retain an explicit available-input extent use revision 4; its reader accepts
+  revisions 1 through 4. Older readers
+  refuse newer revisions rather than silently losing processing history.
 - **Scopes** — histogram, RGB parade and luma waveform, read off the program frame that was
   already fetched for the monitor.
 - **Audio** — live stereo output meters in dBFS after the complete mix. Tracks with sound,
@@ -446,12 +484,29 @@ values around buffer boundaries, plus AAC stream durations. The encoder submits
 a short final frame when the selected codec supports it.
 
 Transitions prepare each side's picture effects, fade and opacity separately.
+In the installed r8 checkpoint, use **Transition** (or `t`) to choose the nearest
+supported cut to the playhead
+on the selected video track. Click its `T` badge to select the seam. Properties
+then exposes its type, exact duration in frames and **Remove**; Delete removes
+the selected seam. Each accepted edit forms one undo step. Locked, unsupported
+or overlapping windows produce a coded error before changing the project or
+its redo history. Picture transitions preserve the separate audio track.
 An outgoing contrast edit preserves the incoming clip's colors; incoming opacity
 keys and fades now render through the transition. Fifty-one native preview/master
 comparisons cover all eleven transition kinds, keyed opacity, fades, separate
 grades, overlap, a short gap, titles and an upper layer, with audible audio of the
 exact master length. Incoming Blend/PiP/Chroma key and transitions above the base
 lane remain unsupported.
+
+In the installed r8 checkpoint, an inward trim of direct audio followed by a
+forward rate change can retain
+the original effect history while declaring the available source input and the
+new processing endpoint. Subsequent cuts, seeks, waveform generation, Save/Open
+and export use that same extent. This path requires integral source and owner
+frame endpoints. Delay/Reverb cuts, reverse extents and nested endpoint
+extensions remain guarded. Normalize keeps its existing authored-body cap.
+Adding or enabling an incompatible filter is refused before changing the
+project or its redo history.
 
 Spatial transition windows compose at sequence resolution before fitting the
 ordinary monitor, preserving wipe softness and source/mask integer sampling.
@@ -555,7 +610,7 @@ The `audio` command writes the program mix from the current playhead for inspect
 | `+` / `-`, Ctrl+wheel | zoom |
 | Ctrl+C / Ctrl+X / Ctrl+V | copy / cut / paste |
 | Ctrl+A | razor every track at the playhead |
-| `t` | transition at the selected clip's cut |
+| `t` | transition at the nearest supported cut on the selected video track |
 | `n` | snapping on / off |
 | Tab | next inspector tab |
 | Page Up / Page Down, wheel over the dock | scroll the inspector |
@@ -1063,6 +1118,12 @@ python tests/video_transfer.py --worker .\genesis-gcompose.exe
 python tests/video_transfer.py --worker .\genesis-gcompose.exe --reference-worker C:\path\to\previous\genesis-gcompose.exe --source 'C:\path\to\clip.mp4' --last-frame 18807
 .\tests\windows.ps1 -Bin .\build-windows\native-pro\bin\Release -Worker C:\path\to\candidate\genesis-gcompose.exe
 ```
+
+The Windows test runner prints its report directory and preserves each run under
+`build-windows/reports-<id>`. Use `-ReportDirectory C:\path\to\new-report-folder`
+to choose an explicit destination. It must be a new folder; an existing folder
+is refused with `[GA_TEST_REPORT_EXISTS]`, so repeating a gate keeps previous
+receipts intact. Temporary media and scratch files are cleaned up separately.
 
 Three alternating twenty-second native-device playback pairs on the supplied
 4K/59.94 AV1/PQ clip change only the worker's color-graph thread limit. Delivery

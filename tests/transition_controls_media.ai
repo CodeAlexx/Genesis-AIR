@@ -1,0 +1,136 @@
+// Python authors source pixels/PCM and expected transition equations. This
+// fixture exercises application commands and the retained production provider.
+module genesis.tests.transition_controls_media
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+
+fn encoded(state:ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  if view.len(args)!=4 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  let manifest:string=match files.read_text(view.get(args,3)) {ok(value)=>value,err(_)=>{return 2},}
+  var rows:array<string> = text.split(manifest,"\n")
+  var suite:test.Suite=test.suite("Transition commands and actual retained preview",false)
+  var row:u64=0
+  var cases:u64=0
+  loop {if row>=array.len(rows) {break}
+    let line:string=text.trim(array.borrow(rows,row))
+    row=row+1
+    if str.len(line)==0 {continue}
+    var fields:array<string> = text.split(line,"\t")
+    if array.len(fields)!=6 {return 2}
+    let name:str=str.view(array.borrow(fields,0))
+    let lane:u64=match text.parse_u64(str.view(array.borrow(fields,2))) {some(value)=>value,none=>{return 2},}
+    let center:i64=match text.parse_i64(str.view(array.borrow(fields,3))) {some(value)=>value,none=>{return 2},}
+    let duration:i64=match text.parse_i64(str.view(array.borrow(fields,4))) {some(value)=>value,none=>{return 2},}
+    let kind:str=str.view(array.borrow(fields,5))
+    let directory:string=path.join(root,name)
+    let _=files.mkdirs(directory)
+    var state:app.App=app.app(provider.gcompose(view.get(args,2),directory))
+    let _=test.start(suite,name)
+    var opened:commands.Result=commands.open_project(state,str.view(array.borrow(fields,1)))
+    let _=test.check(suite,opened.ok,"Open independently authored V/A project")
+    if not opened.ok {provider.shutdown(struct.borrow(state,field=provider))
+      let _=test.done(suite)
+      continue}
+    let _=commands.select_only(state,20)
+    let original:string=encoded(state)
+    // Create, change kind, resize and restore through the real controller. A
+    // different initial kind ensures each requested type exercises a mutation.
+    var created:commands.Result=commands.add_transition(state,lane,center,2,
+      if kind=="crossfade" {"wipe_lr"} else {"crossfade"})
+    let _=test.check(suite,created.ok,"Add transition at the actual SDK boundary")
+    if not created.ok {let _=files.write_text(path.join(directory,"command-error.txt"),commands.message(created))
+      provider.shutdown(struct.borrow(state,field=provider))
+      let _=test.done(suite)
+      continue}
+    var typed:commands.Result=commands.set_transition_kind(state,created.value,kind)
+    let before_size:string=encoded(state)
+    var resized:commands.Result=commands.set_transition_duration(state,created.value,duration)
+    let chosen:string=encoded(state)
+    var undo:commands.Result=commands.undo(state)
+    let _=test.check(suite,typed.ok and resized.ok and undo.ok and encoded(state)==before_size,
+      "Kind and duration are actual edits; one Undo restores previous duration")
+    var redo:commands.Result=commands.redo(state)
+    let _=test.check(suite,redo.ok and encoded(state)==chosen,"Redo restores exact transition graph")
+    var cache:media.RenderCache=media.render_cache(struct.borrow(state,field=fonts))
+    media.configure_preview(struct.borrow(state,field=document),cache)
+    var removed:commands.Result=commands.remove_transition(state,created.value)
+    let _=test.check(suite,removed.ok and editor.transition_count(struct.borrow(state,field=document))==0,
+      "Remove returns to a hard cut")
+    let removed_prefix:string=path.join(directory,"removed")
+    var removed_lines:array<string> = match media.frame_plan(struct.borrow(state,field=document),center,"PREVIEW",
+        text.concat(removed_prefix,".worker.rgba"),removed_prefix,cache) {
+      ok(value)=>value,err(_)=>array.new(),
+    }
+    let _=files.write_text(path.join(directory,"removed-plan.txt"),text.join(removed_lines,"\n"))
+    var removed_frame:provider.Frame=provider.program_plan(struct.borrow(state,field=provider),removed_lines,
+      cache.width,cache.height,cache.width,cache.height)
+    var removed_ok:bool=provider.frame_ok(removed_frame)
+    if removed_ok {
+      var hard_cut:draw.Surface=provider.take_pixels(removed_frame)
+      var hard_pixels:bytes=draw.surface_rgba(hard_cut)
+      removed_ok=match files.write_bytes(path.join(directory,"removed.rgba"),bytes.view(hard_pixels)) {ok(_)=>true,err(_)=>false,}
+    }
+    media.cleanup_plan(removed_prefix)
+    let _=test.check(suite,removed_ok,"Removed transition renders a real hard cut or authored gap")
+    var undo_remove:commands.Result=commands.undo(state)
+    let _=test.check(suite,undo_remove.ok and encoded(state)==chosen,"Undo Remove restores transition")
+    let destination:string=path.join(directory,"selected.air")
+    var saved:commands.Result=commands.save_project(state,destination)
+    let stored:string=encoded(state)
+    var reopened:commands.Result=commands.open_project(state,destination)
+    let _=test.check(suite,saved.ok and reopened.ok and encoded(state)==stored,
+      "Save/Open retains transition, separate A1 sound and exact export interval")
+    let _=test.check(suite,original!=chosen,"Transition operation really changed the authored graph")
+    let span:editor.Transport=editor.export_range(struct.borrow(state,field=document))
+    var plans:string=string.new()
+    var frame:i64=span.mark_in
+    var good:bool=true
+    loop {if frame>span.mark_out {break}
+      // The last request deliberately rewinds the same retained worker.
+      let at:i64=if frame==span.mark_out {span.mark_in} else {frame}
+      let prefix:string=path.join(directory,text.concat("frame-",string.from_int(frame)))
+      var lines:array<string> = match media.frame_plan(struct.borrow(state,field=document),at,"PREVIEW",
+          text.concat(prefix,".worker.rgba"),prefix,cache) {
+        ok(value)=>value,err(problem)=>{let _=files.write_text(path.join(directory,"plan-error.txt"),problem)
+          good=false
+          break},
+      }
+      string.append(plans,str.view(text.concat("FRAME\t",string.from_int(at))))
+      string.append(plans,"\n")
+      string.append(plans,str.view(text.join(lines,"\n")))
+      string.append(plans,"\n")
+      var rendered:provider.Frame=provider.program_plan(struct.borrow(state,field=provider),lines,
+          cache.width,cache.height,cache.width,cache.height)
+      if not provider.frame_ok(rendered) {let _=files.write_text(path.join(directory,"preview-error.txt"),provider.frame_detail(rendered))
+        good=false
+        break}
+      var surface:draw.Surface=provider.take_pixels(rendered)
+      var pixels:bytes=draw.surface_rgba(surface)
+      good=match files.write_bytes(text.concat(prefix,".rgba"),bytes.view(pixels)) {ok(_)=>true,err(_)=>false,} and good
+      media.cleanup_plan(prefix)
+      frame=frame+1
+    }
+    let _=test.check(suite,good and frame==span.mark_out+1,"Every window endpoint and retained rewind decoded successfully")
+    let _=files.write_text(path.join(directory,"plans.txt"),plans)
+    provider.shutdown(struct.borrow(state,field=provider))
+    let _=test.done(suite)
+    cases=cases+1
+  }
+  if cases==0 {return 1}
+  test.conclude(suite,path.join(root,"transition-controls-media-tests.json"),cases)
+}

@@ -1,0 +1,238 @@
+module genesis.tests.filter_transactions
+import std.editor as editor
+import std.editor_io as store
+import std.testing as test
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/chrome.ai" as chrome
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(value)=>value,err(_)=>string.copy("invalid document"),}
+}
+fn ledger(state:ref<app.App>) -> string effects {alloc} {
+  var out:string=encoded(struct.borrow(state,field=document))
+  string.append(out,str.view(string.from_int(state.document_revision)))
+  string.append(out,if state.dirty {"dirty"}else{"clean"})
+  string.append(out,str.view(string.from_int(app.selected_filter(state))))
+  string.append(out,str.view(string.from_int(state.selected_transition)))
+  string.append(out,str.view(string.from_int(state.selected_transition_epoch)))
+  let history:ref<editor.History> =struct.borrow(state,field=history)
+  var i:u64=0
+  loop {if i>=editor.undo_depth(history) {break}
+    string.append(out,"undo")
+    string.append(out,str.view(encoded(array.borrow(struct.borrow(history,field=undo),i))))
+    i=i+1}
+  i=0
+  loop {if i>=editor.redo_depth(history) {break}
+    string.append(out,"redo")
+    string.append(out,str.view(encoded(array.borrow(struct.borrow(history,field=redo),i))))
+    i=i+1}
+  out
+}
+fn filter(state:ref<app.App>,kind:str) -> u64 effects {alloc} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(doc,field=filters)) {break}
+    let item:ref<editor.Filter> =array.borrow(struct.borrow(doc,field=filters),i)
+    if str.eq(struct.borrow(item,field=kind),kind) {return item.id}
+    i=i+1}
+  0
+}
+fn fixture(root:str) -> app.App effects {alloc} {
+  var state:app.App=app.app(provider.fake(root))
+  let track:u64=app.default_audio_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let source:u64=editor.add_source(doc,"fixture.wav","Audio",60,30.0)
+  let _=editor.describe_source(doc,source,16,16,false,true,48000,2)
+  let clip:u64=option.unwrap(editor.place(doc,track,source,0,60,0))
+  let _=editor.set_clip_streams(doc,clip,editor.streams_audio())
+  let _=editor.select_only(doc,clip)
+  let delay:u64=option.unwrap(editor.add_filter(doc,clip,"delay"))
+  let reverb:u64=option.unwrap(editor.add_filter(doc,clip,"reverb"))
+  let _=editor.set_filter_enabled(doc,delay,false)
+  let _=editor.set_filter_enabled(doc,reverb,false)
+  let speed:u64=option.unwrap(editor.add_filter(doc,clip,"speed"))
+  let _=editor.set_filter_param(doc,speed,"rate",1.0)
+  let eq:u64=option.unwrap(editor.add_filter(doc,clip,"eq_3band"))
+  let _=editor.trim_end(doc,clip,30)
+  let _=editor.set_filter_param(doc,speed,"rate",2.0)
+  app.set_selected_filter(state,eq)
+  let _=commands.set_clip_field(state,clip,"gain",1.25)
+  let _=commands.undo(state)
+  app.mark_dirty(state,false)
+  state
+}
+fn refused(suite:ref<test.Suite>,state:ref<app.App>,before:str,outcome:commands.Result own) -> unit effects {alloc} {
+  var held:commands.Result=outcome
+  let _=test.check(suite,not held.ok,"Guarded change is refused")
+  let _=test.check(suite,str.starts_with(str.view(struct.borrow(held,field=message)),"[GA_AUDIO_CONTEXT]"),"Refusal identifies incompatible retained audio history")
+  let _=test.eq_str(suite,ledger(state),before,"Raw graph IDs/context, all Undo/Redo, revision, dirty and selections stay exact")
+}
+fn click_tail(state:ref<app.App>,kind:str) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  app.set_dock_tab(state,chrome.tab_properties())
+  let _=app.set_dock_scroll(state,0.0)
+  let frame:layout.Frame=layout.frame(1600.0,1400.0)
+  var controls:array<chrome.Control> =chrome.properties_panel(frame,state)
+  var i:u64=0
+  loop {if i>=array.len(controls) {break}
+    let item:ref<chrome.Control> =array.borrow(controls,i)
+    if str.eq(struct.borrow(item,field=kind),kind) and (item.action==chrome.act_filter_toggle() or item.action==chrome.act_filter_add()) {
+      let _=app.set_dock_scroll(state,item.area.top-frame.dock_body.top-40.0)
+      break}
+    i=i+1}
+  controls=chrome.properties_panel(frame,state)
+  i=0
+  loop {if i>=array.len(controls) {break}
+    let item:ref<chrome.Control> =array.borrow(controls,i)
+    if str.eq(struct.borrow(item,field=kind),kind) and (item.action==chrome.act_filter_toggle() or item.action==chrome.act_filter_add()) {
+      return input.pointer_down(state,1600.0,1400.0,(item.area.left+item.area.right)*0.5,(item.area.top+item.area.bottom)*0.5)}
+    i=i+1}
+  string.copy("missing control")
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Filter transactions",false)
+  var state:app.App=fixture(root)
+  let clip:u64=app.current_clip(state)
+  let _=test.start(suite,"Actual extent refuses new incompatible filters and auto-created inspector effects")
+  let ctx:editor.AudioContext=option.unwrap(editor.audio_context(option.unwrap(editor.clip(struct.borrow(state,field=document),clip))))
+  let _=test.check(suite,option.is_some(ctx.extent) and ctx.length==60 and option.unwrap(ctx.extent).processing_length==30,"Real trim plus rate edit creates retained60/body30 extent")
+  let _=test.eq_u64(suite,editor.redo_depth(struct.borrow(state,field=history)),1,"Preexisting Redo is exercised")
+  let before:string=ledger(state)
+  refused(suite,state,before,commands.add_filter(state,clip,"delay"))
+  refused(suite,state,before,commands.add_filter(state,clip,"reverb"))
+  refused(suite,state,before,commands.add_filter(state,clip,"unknown_audio"))
+  refused(suite,state,before,commands.set_parameter(state,2,0,"pitch","shift",1.0))
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Disabled Delay/Reverb stay dormant; real Properties toggles refuse before capture")
+  let before:string=ledger(state)
+  refused(suite,state,before,commands.toggle_filter(state,filter(state,"delay")))
+  refused(suite,state,before,commands.toggle_filter(state,filter(state,"reverb")))
+  let note:string=click_tail(state,"delay")
+  let _=test.check(suite,str.starts_with(note,"[GA_AUDIO_CONTEXT]"),"Actual Properties Delay switch reports the guard")
+  let _=test.eq_str(suite,ledger(state),before,"Actual pointer refusal retains history/document/selection")
+  let note:string=click_tail(state,"reverb")
+  let _=test.check(suite,str.starts_with(note,"[GA_AUDIO_CONTEXT]"),"Actual Properties Reverb switch reports the guard")
+  let _=test.eq_str(suite,ledger(state),before,"Second actual pointer refusal retains all authored state")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Numeric refusal and missing targets preserve Redo; successful identity writes do too")
+  let speed:u64=filter(state,"speed")
+  let before:string=ledger(state)
+  refused(suite,state,before,commands.set_filter_param(state,speed,"rate",4.0))
+  let _=test.check(suite,not commands.remove_filter(state,999999).ok,"Missing Remove refuses")
+  let _=test.check(suite,not commands.toggle_filter(state,999999).ok,"Missing Toggle refuses")
+  let _=test.check(suite,not commands.reorder_filter(state,999999,0).ok,"Missing Reorder refuses")
+  let _=test.check(suite,not commands.set_filter_param(state,999999,"gain",1.0).ok,"Missing numeric target refuses")
+  let _=test.check(suite,not commands.set_filter_text_param(state,999999,"content","é").ok,"Missing text target refuses")
+  let _=test.eq_str(suite,ledger(state),before,"All missing-target paths leave every snapshot intact")
+  let _=test.check(suite,commands.set_filter_param(state,speed,"rate",2.0).ok,"Identity rate succeeds")
+  let _=test.check(suite,commands.reorder_filter(state,speed,editor.filter_order(struct.borrow(state,field=document),speed)).ok,"Identity order succeeds")
+  let _=test.eq_str(suite,ledger(state),before,"Successful identities add no Undo or revision and retain Redo")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Supported filter mutation has one Undo; Save/Open preserves durable extent")
+  let before:string=encoded(struct.borrow(state,field=document))
+  let count:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let eq:u64=filter(state,"eq_3band")
+  let _=test.check(suite,commands.set_filter_param(state,eq,"low",2.5).ok,"Supported EQ change succeeds")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),count+1,"Single Undo snapshot")
+  let changed:string=encoded(struct.borrow(state,field=document))
+  let _=test.check(suite,commands.undo(state).ok,"Undo accepted change")
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo restores complete prior authored graph/context")
+  let _=test.check(suite,commands.redo(state).ok,"Redo accepted change")
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),changed,"Redo restores exact changed graph")
+  let saved:string=path.join(root,"filters.air")
+  let _=test.check(suite,commands.save_project(state,saved).ok,"Save actual extent-bearing document")
+  var reopened:app.App=app.app(provider.fake(root))
+  let _=test.check(suite,commands.open_project(reopened,saved).ok,"Open saved document")
+  let _=test.eq_str(suite,encoded(struct.borrow(reopened,field=document)),changed,"Save/Open preserves full graph and extent")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Auto-create Delay/Reverb and actual missing-effect Properties actions are transactional")
+  state=fixture(root)
+  let delay:u64=filter(state,"delay")
+  let reverb:u64=filter(state,"reverb")
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let _=test.check(suite,editor.remove_filter(doc,delay) and editor.remove_filter(doc,reverb),"Remove dormant tails to exercise auto-create routes")
+  let before:string=ledger(state)
+  refused(suite,state,before,commands.set_parameter(state,2,0,"delay","time",0.5))
+  refused(suite,state,before,commands.set_parameter(state,2,0,"reverb","room",0.5))
+  let note:string=click_tail(state,"delay")
+  let _=test.check(suite,str.starts_with(note,"delay: [GA_AUDIO_CONTEXT]"),"Actual missing Delay Properties action reports retained-history refusal")
+  let _=test.eq_str(suite,ledger(state),before,"Missing Delay action preserves full state")
+  let note:string=click_tail(state,"reverb")
+  let _=test.check(suite,str.starts_with(note,"reverb: [GA_AUDIO_CONTEXT]"),"Actual missing Reverb Properties action reports retained-history refusal")
+  let _=test.eq_str(suite,ledger(state),before,"Missing Reverb action preserves full state")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Disabling/removing a rate filter refuses when the retained body would exceed source")
+  state=fixture(root)
+  let speed:u64=filter(state,"speed")
+  let clip:u64=app.current_clip(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let _=test.check(suite,editor.set_filter_param(doc,speed,"rate",0.5) and editor.set_clip_speed(doc,clip,4.0),"Build supported effective2x from clip4x/filter0.5")
+  let _=test.check(suite,editor.audio_context_valid(doc,option.unwrap(editor.clip(doc,clip))),"Prepared retained extent is valid")
+  let before:string=ledger(state)
+  refused(suite,state,before,commands.remove_filter(state,speed))
+  refused(suite,state,before,commands.toggle_filter(state,speed))
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Supported Add/Toggle/Reorder/Text/Remove each remain a single reversible mutation")
+  state=fixture(root)
+  let clip:u64=app.current_clip(state)
+  let before:string=encoded(struct.borrow(state,field=document))
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  var outcome:commands.Result=commands.add_filter(state,clip,"text")
+  let title:u64=outcome.value
+  let _=test.check(suite,outcome.ok,"Add supported text filter succeeds")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Add captures once")
+  let added:string=encoded(struct.borrow(state,field=document))
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo Add exact graph")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),added,"Redo Add exact graph")
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.check(suite,commands.set_filter_text_param(state,title,"content","é\n日本").ok,"Unicode multiline text write succeeds")
+  let text_graph:string=encoded(struct.borrow(state,field=document))
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Text captures once")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),added,"Undo Text exact graph")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),text_graph,"Redo Text exact graph")
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.check(suite,commands.toggle_filter(state,title).ok,"Disable supported filter succeeds")
+  let toggled:string=encoded(struct.borrow(state,field=document))
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Toggle captures once")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),text_graph,"Undo Toggle exact graph")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),toggled,"Redo Toggle exact graph")
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.check(suite,commands.reorder_filter(state,title,0).ok,"Reorder supported filter succeeds")
+  let reordered:string=encoded(struct.borrow(state,field=document))
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Reorder captures once")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),toggled,"Undo Reorder exact graph")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),reordered,"Redo Reorder exact graph")
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.check(suite,commands.remove_filter(state,title).ok,"Remove supported filter succeeds")
+  let removed:string=encoded(struct.borrow(state,field=document))
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"Remove captures once")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),reordered,"Undo Remove exact graph")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),removed,"Redo Remove exact graph")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"filter-transactions-tests.json"),7)
+}

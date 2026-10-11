@@ -259,10 +259,19 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.check(suite,not pixel(image,frame.timeline.left+96.0,y+23.0,draw.rgb(150,224,196)),"Legacy V-lane waveform cache never overlays frame strips")
   let audio_y: f64=timeline.track_top(model,22)
   let _=test.check(suite,pixel(image,frame.timeline.left+96.0,audio_y+23.0,draw.rgb(150,224,196)),"Cached stereo peaks paint on the independently authored A lane")
-  let _=test.check(suite,pixel(image,timeline.frame_to_x(model,60),y+10.0,draw.rgb(206,122,74)),"Transition seam paints over its authored lane")
+  let _=test.check(suite,pixel(image,timeline.frame_to_x(model,60),y+23.0,draw.rgb(206,122,74)),"Transition seam paints over its authored lane")
   let header_body: f64=frame.timeline.bottom
   let colors: painter.Theme = painter.theme(state)
   let _=test.check(suite,pixel(image,frame.timeline.left+30.0,header_body+10.0,colors.background),"Clipped lane pixels do not paint into footer space")
+  let seam: editor.Transition=array.get(struct.borrow(struct.borrow(state,field=document),field=transitions),0)
+  let badge: layout.Rect=option.unwrap(painter.transition_bounds(state,frame.timeline,seam.id))
+  let _=test.check(suite,seam.track==4 and badge.top==y+4.0 and badge.bottom==y+18.0 and badge.top>=frame.timeline.top and badge.bottom<=frame.timeline.bottom,"Scrolled transition badge stays in the reached video lane")
+  let badge_x: f64=badge.right-3.0
+  let badge_y: f64=badge.bottom-3.0
+  let _=test.check(suite,pixel(image,badge_x,badge_y,colors.panel_head),"Scrolled unselected badge paints inside its non-label hit region")
+  let _=test.eq_u64(suite,option.unwrap(painter.transition_hit(state,frame.timeline,badge_x,badge_y)),seam.id,"Scrolled badge hit resolves the same authored seam")
+  let _=input.pointer_down(state,1600.0,980.0,badge_x,badge_y)
+  let _=test.eq_u64(suite,app.current_transition(state),seam.id,"Actual scrolled badge click selects its stable transition ID")
   let _=test.done(suite)
 
   let _=test.start(suite,"Resize, sequence switch, hidden tracks and removal derive live clamped bounds")

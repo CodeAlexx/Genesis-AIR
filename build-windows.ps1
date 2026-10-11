@@ -169,10 +169,14 @@ if ($RunTests) { $sources += @(@('preview-batch', 'tests/preview_batch.ai'), @('
 if ($RunTests) { $sources += ,@('audio-plan-preflight', 'tests/audio_plan_preflight.ai') }
 if ($RunTests) { $sources += ,@('linked-media', 'tests/linked_media.ai') }
 if ($RunTests) { $sources += ,@('audio-context', 'tests/audio_context.ai') }
+if ($RunTests) { $sources += ,@('audio-context-retime', 'tests/audio_context_retime.ai') }
 if ($RunTests) { $sources += ,@('audio-edit-context', 'tests/audio_edit_context.ai') }
 if ($RunTests) { $sources += ,@('audio-nested-edit-context', 'tests/audio_nested_edit_context.ai') }
 if ($RunTests) { $sources += ,@('keyframe-controls', 'tests/keyframe_controls.ai') }
 if ($RunTests) { $sources += ,@('snap-controls', 'tests/snap_controls.ai') }
+if ($RunTests) { $sources += ,@('transition-controls', 'tests/transition_controls.ai') }
+if ($RunTests) { $sources += ,@('transition-controls-media', 'tests/transition_controls_media.ai') }
+if ($RunTests) { $sources += ,@('filter-transactions', 'tests/filter_transactions.ai') }
 if ($RunTests) { $sources += ,@('channel-deadlines', 'tests/channel_deadlines.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
@@ -225,10 +229,14 @@ if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }
 if ($RunTests) { $targets += @('genesis-export-ownership-worker') }
 if ($RunTests) { $targets += @('genesis-audio-context') }
+if ($RunTests) { $targets += @('genesis-audio-context-retime') }
 if ($RunTests) { $targets += @('genesis-audio-edit-context') }
 if ($RunTests) { $targets += @('genesis-audio-nested-edit-context') }
 if ($RunTests) { $targets += @('genesis-keyframe-controls') }
 if ($RunTests) { $targets += @('genesis-snap-controls') }
+if ($RunTests) { $targets += @('genesis-transition-controls') }
+if ($RunTests) { $targets += @('genesis-transition-controls-media') }
+if ($RunTests) { $targets += @('genesis-filter-transactions') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'

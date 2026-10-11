@@ -145,6 +145,9 @@ pub fn act_key_next() -> u32 effects {} { 101 }
 pub fn act_key_delete() -> u32 effects {} { 102 }
 pub fn act_key_interp_previous() -> u32 effects {} { 103 }
 pub fn act_key_interp_next() -> u32 effects {} { 104 }
+pub fn act_transition_kind() -> u32 effects {} {105}
+pub fn act_transition_duration() -> u32 effects {} {106}
+pub fn act_transition_remove() -> u32 effects {} {107}
 
 pub fn act_menu() -> u32 effects {} { 90 }
 pub fn act_about() -> u32 effects {} { 91 }
@@ -1123,7 +1126,64 @@ fn drop_button(area: layout.Rect, top: f64, id: u64, kind: str) -> Control effec
 // ---------------------------------------------------------------------------
 // Properties: everything about the selected clip, in one scrolling column.
 
+pub fn transition_kind(index:u64) -> string effects {alloc} {
+  var kinds:array<string> =["crossfade","wipe_lr","wipe_rl","wipe_up","wipe_down",
+    "slide_lr","zoom","dissolve","iris","clock","barn_door"]
+  if index>=array.len(kinds) {return string.new()}
+  string.copy(str.view(array.borrow(kinds,index)))
+}
+pub fn transition_label(index:u64) -> string effects {alloc} {
+  var names:array<string> =["Crossfade","Wipe left to right","Wipe right to left",
+    "Wipe upward","Wipe downward","Slide left to right","Zoom","Dissolve",
+    "Iris","Clock","Barn door"]
+  if index>=array.len(names) {return string.new()}
+  string.copy(str.view(array.borrow(names,index)))
+}
+pub fn transition_properties(frame:layout.Frame,state:ref<app.App>) -> array<Control> effects {alloc} {
+  var out:array<Control> =array.new()
+  let area:layout.Rect=frame.dock_body
+  var cursor:f64=area.top+6.0-app.dock_scroll(state)
+  let selected_id:u64=app.current_transition(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let value:editor.Transition=match editor.transition(doc,selected_id) {
+    none=>{return out},some(value)=>value,
+  }
+  let editable:bool=not editor.track_locked(doc,value.track)
+  cursor=heading(out,area,cursor,"TRANSITION")
+  cursor=text_row(out,area,cursor,"Track",str.view(editor.track_name(doc,value.track)))
+  cursor=text_row(out,area,cursor,"Boundary frame",str.view(string.from_int(value.center)))
+  var duration:string=string.copy("Duration: ")
+  string.append(duration,str.view(string.from_int(value.duration)))
+  string.append(duration," frames (edit)")
+  var edit:Control=button(act_transition_duration(),str.view(duration),
+    layout.rect(area.left+6.0,cursor,area.right-6.0,cursor+row_height()-2.0),false)
+  struct.set(edit,value.id,field=target)
+  struct.set(edit,editable,field=enabled)
+  array.push(out,edit)
+  cursor=cursor+row_height()
+  cursor=heading(out,area,cursor,"TYPE")
+  let selected:string=editor.name_text(doc,value.kind)
+  var i:u64=0
+  loop {if i>=11 {break}
+    let kind:string=transition_kind(i)
+    var item:Control=button(act_transition_kind(),str.view(transition_label(i)),
+      layout.rect(area.left+6.0,cursor,area.right-6.0,cursor+row_height()-2.0),str.eq(str.view(selected),str.view(kind)))
+    struct.set(item,value.id,field=target)
+    struct.set(item,editable,field=enabled)
+    let _=ref.swap(struct.borrow(item,field=kind),kind)
+    array.push(out,item)
+    cursor=cursor+row_height()
+    i=i+1}
+  cursor=cursor+6.0
+  var remove:Control=button(act_transition_remove(),"Remove transition",
+    layout.rect(area.left+6.0,cursor,area.right-6.0,cursor+row_height()),false)
+  struct.set(remove,value.id,field=target)
+  struct.set(remove,editable,field=enabled)
+  array.push(out,remove)
+  out
+}
 pub fn properties_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> effects {alloc} {
+  if app.current_transition(state)!=0 {return transition_properties(frame,state)}
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.dock_body
   let clip: u64 = app.current_clip(state)

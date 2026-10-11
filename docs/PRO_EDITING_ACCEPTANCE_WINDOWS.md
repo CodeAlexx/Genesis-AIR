@@ -8,7 +8,15 @@ one bounded playback interval does not establish the whole goal.
 
 ## Current evidence and remaining work
 
-The r5 root products are now published: application
+The r8 root products are now published: application
+`5b80ef6af200fd82c54c69a5b0902f6dc3a1ba416ada4a32d165ffb7d818ac96`,
+audio DLL `b556e3c2da15f2a2ab4554e247ff5f27e002e145221a94b0f549ce943c814d3a`
+and worker `a5b0ac7393ab1a3344a44197e48167bc9fb12223c3dfc4c89b8d8bc316f009b6`.
+Publication and fresh root-ready pass, alongside the 76-report background suite,
+device, recorded native controls, independent export inspection and both bounded
+cadence intervals below. Accompanying source/evidence bundle paths are
+`archive/pro-native-edit-export-r8-2026-10-11.tar.gz` and `.json` (archive SHA and evidence receipt).
+The previous installed r5 checkpoint was application
 `b07975912822d2d8a19fbcc4ac89ec21f4a7e7f797f041ad94b66e25173b4b74`,
 audio DLL `75f931f6313ffab3fa10d1b5bb49a68c7d643b2126094fd6131dd555e9d7d4ba`
 and unchanged A8E worker. Publication and fresh root-ready pass. The
@@ -21,6 +29,15 @@ The [native workflow](NATIVE_WORKFLOW_WINDOWS_2026-10-11.md) and
 identify each measured binary, source, test and limitation. Later candidates must
 qualify their changed behavior and bind their own build and runtime identities.
 
+The frozen `pro-native-edit-export-r8-2026-10-11` checkpoint is installed.
+R8's coherent build passes, and a quick native prompt check
+passes with the scope below. Its unchanged full background suite passes with 76
+fresh reports and exit zero. The isolated device gate and separately recorded
+linked native and audio-retime workflows pass. Native cancellation/export and
+independent output inspection pass, as does the first 1080p cadence epoch.
+Fitted 4K cadence, publication and fresh root-ready also pass. Component and quick prompt results retain their own scope;
+the subsequent native receipts below bind actual R8 observations.
+
 | Requirement | Authoritative evidence | Completion assessment |
 |---|---|---|
 | Native Windows application and root products | Root publication and live loaded-module records; shared application/controller source, Win32/Direct2D and Windows audio adapters; GTK forbidden by build configuration | Verified for the installed checkpoint. Any new helper must be part of the root product and exact build receipts. |
@@ -30,9 +47,9 @@ qualify their changed behavior and bind their own build and runtime identities.
 | Dependable timeline editing with authored processing | Shared editor/linked-lane model checks, independent trim/copy/cut media gates and continuous-audio comparisons | The prior installed dynamics-cut defect is reproduced. Durable processing contexts, compound child padding and inward-edit repair pass r4/r5 combined suites and independent model/PCM checks below; r5 is now published. Delay/Reverb tail limitations remain explicit. |
 | Save/open, undo, recovery and cancellation preserve authored work | Native private Save/Open plus shared project-safety, atomic-save, recovery and ownership gates | The r4 native workflow verifies idempotent Save/Open, title Cancel and one Undo/Redo; combined transaction and ownership gates pass. This is scoped to the tested workflows. |
 | Titles can be corrected and rendered | Earlier 056E evidence plus separately bound r4/r5 native editing and independent glyph/source-picture/audio export checks | Shared caret/selection passes focused Windows/Linux checks. Both native workflows verify pointer editing, Unicode, Cancel and Undo/Redo; each 178-frame export passes independent checks at three authored picture positions. |
-| Effects and automation are usable through exposed controls | [Control acceptance ledger](CONTROL_COVERAGE.md), per-effect worker mappings, parameter, ordering, precision, transition and export gates | The r4 native workflow verifies gain keys, Ease interpolation, Previous/Next and exact-key Delete; independent saved/reloaded preview/master comparisons also pass. Transition management is still missing. Unsupported animated audio parameters and complex-script text retain explicit limits. |
+| Effects and automation are usable through exposed controls | [Control acceptance ledger](CONTROL_COVERAGE.md), per-effect worker mappings, parameter, ordering, precision, transition and export gates | The r4 native workflow verifies gain keys, Ease interpolation, Previous/Next and exact-key Delete; independent saved/reloaded preview/master comparisons also pass. Installed R8 component checks cover all eleven transition types; actual R8 native observations verify Clock31, Remove/Undo and saved/reopened IDs, plus visible invalid-duration feedback. Unsupported animated audio parameters and complex-script text retain explicit limits. |
 | Export is cancellable, preserves other files and can retry | Controlled ownership/publication regressions, background cancellation cases and r4 native output inspection | Exclusive ownership, no-replace publication and long-path checks pass. A long native export cancels and cleans up; reloading the saved short project and starting a fresh export succeeds. This does not prove same-target native retry. |
-| Documentation, source and installed binaries agree | Exact r5 frozen source/build/publication/root-ready identities and accompanying archive's Git-index equality | R5 is installed after qualification and fresh root-ready passes. The publication commit is identifiable through Git history; the archive records the exact tested source. |
+| Documentation, source and installed binaries agree | Exact R8 frozen source/build/publication/root-ready identities; previous R5 archive retained | R8 is installed after qualification and fresh root-ready passes. Accompanying source/evidence bundle paths are identified above; publication commit identity belongs to Git history. |
 
 ## Confirmed baseline defects and qualification work
 
@@ -49,16 +66,202 @@ keyframe and export changes. Independent PCM comparisons cover durable audio
 history, including child shortening and subsequent inward 2x edits. The failures
 that motivated those changes remain preserved below.
 
-1. Implement transition selection, type, duration and removal through supported
-   video-boundary controls, with transaction and independent pixel checks.
-2. Resolve the remaining Delay/Reverb tail and unavailable full-history retime
-   workflows without silently discarding authored processing history.
+R8 qualifies transition controls, visible modal refusals and bounded forward
+retiming through its scoped component, combined and native evidence. Remaining
+work includes Delay/Reverb tails and unavailable full-history retime workflows
+without silently discarding authored processing history.
 
 These are remaining parts of the original goal, not a smaller substitute goal.
 The broader professional editing objective remains active until its requirements
 are supported by current, appropriately scoped evidence.
 
 ## Candidate qualification and retained history
+
+### R6–R8 transition and forward-retime qualification
+
+The candidate uses stable transition IDs and shared seam geometry. **Transition**
+or `t` chooses the nearest supported video boundary to the playhead on the selected
+track, with deterministic ties. Clicking a `T` badge selects its seam; Properties
+offers all eleven supported types, exact duration in frames and **Remove**.
+Delete removes only the selected transition. Changed requests form one Undo/Redo
+step, and Save/Open preserves IDs. Locked, stale, overlapping, overflowing and
+unsupported requests are validated before history capture; refusal and no-op
+preserve the raw document, IDs, revision, selection and Redo. No audio fades or
+DSP changes are synthesized on the linked A1 clip. Creation and renderable edits
+remain limited to the supported visible base-video window and incoming picture
+edits; unsupported legacy seams can still be selected and removed for repair.
+
+The original transition component passes 11 cases and 205 checks on each of
+Windows and Linux. Independent media evidence covers 33 authored cases across
+24/30/59.94 fps, all eleven types, 330 master frames, 363 retained preview requests
+and unchanged audio. That component uses its recorded client and R5 media runtime;
+it is not a new R8 native-window proof. R8 extends the controller/raster fixture
+to 12 cases and 232 checks per OS. A retained invalid duration now shows its coded
+refusal in both the modal footer and status, independently of background status.
+Caret/selection movement, filtered Return text and byte-identical replacement
+preserve feedback; actual text changes clear it. Fresh drafts, cancellation and
+success clear old feedback, preserving Unicode multiline title behavior and
+transaction/Redo invariants. The same final fixture against frozen R7 source
+passes eleven cases and fails the new rendered-refusal case on both OSes.
+
+Direct forward retiming can now keep retained processing history while declaring
+the available source input separately from the new processing endpoint and body
+crop. `AudioExtent` records that extent, the worker consumes `AUDIOCTX2`, and
+extent-bearing projects require revision 4. Revision 3 retains its original
+meaning; the candidate reader accepts revisions 1–4 and older readers refuse
+newer revisions. Component evidence passes 56 cases, 59,988,992 PCM values with
+zero PCM-code error and seven lossless masters, plus the existing 9-case/980-check
+Windows/Linux context fixture. Command filter transactions pass seven cases and
+84 checks per OS: incompatible add/enable and Properties auto-create requests
+return `GA_AUDIO_CONTEXT` before history capture, preserving document, IDs,
+revision, selection and Redo; supported changes remain one Undo/Redo.
+
+This extent creation is bounded to direct, forward clips with representable
+integral source anchors and owner-frame processing endpoints. Unavailable source
+prefix/body, reverse or fractional new extents, capacity violations, unknown or
+tail-producing new processing graphs, and new nested processing endpoints remain
+guarded. Existing retained nested histories are not discarded. Delay/Reverb
+tail-preserving cuts remain unavailable, and Normalize retains its authored-body
+cap; no post-body tail or broader retime completion is claimed.
+
+The R6 background run stopped at an orange seam raster assertion whose sample
+was covered by the new badge. The R7 fixture preserves the original color and
+center x, samples below the badge, and adds four scrolled lane/badge/hit checks;
+Windows/Linux each pass eight cases and 87 checks. The original R6 failure remains
+retained. R7's first background attempt later hit the fixture's Windows path
+limit when creating `retained-child` under the long report directory, after 49
+ownership checks passed. The same frozen binary passes all 70 checks with the
+existing short `--work-root`; no source or assertion change was needed. R7's full
+repeat then passes 76 fresh reports. Its native duration-1 draft correctly refuses
+the edit but hides the refusal, so **R7 was not published**. R8 addresses that
+feedback defect. Its coherent build passes with receipt
+`build-windows/pro-native-edit-export-r8-2026-10-11-build-receipt.json`
+(`ea21bdd60c9f6a99863cf1ca01a2b96ccdfbb676a02b85cee54c6491b74a45d2`),
+binding application `5b80ef6af200fd82c54c69a5b0902f6dc3a1ba416ada4a32d165ffb7d818ac96`.
+
+The quick native prompt check records draft `1` retained with
+`GA_TRANSITION_DURATION` visible in the modal footer and status. Editing to `31`
+clears feedback; commit shows 31 frames, Undo returns to 24, and Redo returns to
+31. Native Save as preserves the private `Prompt correction.air`; the owned
+application closes normally and process absence is confirmed. Observations are
+at `build-windows/pro-native-edit-export-r8-2026-10-11/native-workflow/prompt-quick-observations.json`.
+This verifies prompt correction only, not the full native workflow, device or
+cadence. The unchanged full background suite passes with 76 fresh reports and
+exit zero, bound by receipt
+`7db1320dad57943d23c92923365e5fc971936648572566785179c1bddadbee45`.
+Subsequent separately bound device, native workflow, export and 1080p cadence
+results follow, including fitted 4K cadence, publication and fresh root-ready.
+
+The isolated R8 device receipt at `device/receipt.json`
+(`4b929e014891007ca59edecf7ce2b3000a1220699d3bc08badf9b339cc54c961`)
+binds the 5B80 application and actually loaded B556 audio DLL. Its requested
+20-second run measures 18.993 seconds, 2,381 polls and 24 completed buffers,
+−0.314 ms interval drift and 0.449 ms phase range. Drain/resume shortfalls are
+zero; restart at zero and resume within one millisecond pass. This isolated
+waveOut clock/meters/Stop result does not measure physical hearing or A/V alignment.
+
+The R8 linked native workflow at `native-workflow/receipt.json`
+(`afacbc00ee40285b69a334dc388f4e67e646836495a58230c01d4e3e9f71e620`)
+records Clock type with exact duration31, Remove and Undo, native Save/Open and
+the complete unchanged audio-lane graph. V1 filmstrip and A1 waveform remain
+separate. Continuing Program playback has active L/R meters; A1 mute/unmute,
+Stop retaining the picture, nonblank Start, scrub/time and histogram/RGB/luma
+updates are observed. The owned process closes normally with absence confirmed.
+
+The separate audio-retime workflow at `native-audio-retime/receipt.json`
+(`4adf8bfa4e16d1ade77d1c8350bf51064e2c7cea8e34917ea29f96fc13f4016e`)
+records actual tail drags 60→31→30, then exact Rate2.00 accepted with revision4
+and the expected extent. Nearby nonintegral rate detents are refused; they do not
+demonstrate an exact-2x failure. Gain1.05 followed by Undo leaves a pending Redo;
+adding Delay refuses with `GA_AUDIO_CONTEXT`, and Redo still restores Gain1.05.
+A final Undo returns to Gain1.00. Saved graphs before refusal, after refusal and
+after the final Undo are byte-identical
+(`8b888046aca5b452f1c9dfa187603081060039c75dfd261ed956ab3cf357010f`).
+The original Compressor remains enabled with unchanged parameters and no Delay.
+This seed declares 60 source frames but physically contains 90; it is not a true
+physical-EOF60 test. PCM correctness retains the independent 56-case background
+scope, not a physical-hearing claim from GUI actions. This owned process also
+closes normally. These three receipt paths are inside
+`build-windows/pro-native-edit-export-r8-2026-10-11`.
+
+Actual native export controls pass with
+`native-title-export/attempt1/native-control-receipt.json`
+(`b7e9dac509fc8758b1a83b1835043c18bf1f1f541dd8167b0e26a0741b1c23fd`).
+Escape cancels an active full-range export and removes its owned output/sidecars;
+preview remains nonblank. Opening the saved short Unicode multiline title project
+and exporting to a fresh different destination succeeds, followed by normal owned
+process closure. This does not establish same-target native retry.
+Independent inspection at `native-title-export/attempt1/receipt.json`
+(`843617c17348bbdd69783632a37c6f7432fdb799da4d13869cddf06d3d89b0c2`)
+passes the 178-frame H264/AAC export at picture positions 0, 89 and 177. Minimum
+expected title-interior coverage is 0.9992912828; decoded AAC has exactly 142,400
+sample frames and zero-shift correlation 0.9999744232, with worker PCM within one
+code. Source and project identities are preserved. This is bounded lossy-output
+inspection, not bit-exact glyph anti-aliasing, whole-source or physical hearing proof.
+
+R8's first 1080p cadence epoch passes the unchanged strict gate at
+`cadence-1080/attempt1/accepted-summary.json`
+(`73eb23f0ec6352793e63c5a417661f7013f487032973169c55ce4a5afe62fec8`).
+It records 151.2853569 steady native seconds and 151.2828125 device seconds,
+9,078 consecutive pictures (frames 60–9137) at 59.9991974504 pictures/s, with
+maximum gap 19.7354 ms and zero post-present lag. Steady omissions, repeats,
+backward/early or more-than-two-frame late presentations, empty audio queues and
+packet overwrites are zero. Fixed first-second/final-half-second exclusions and
+the complete raw trace remain unchanged. The raw selected epoch separately retains
+one repeated presentation, two empty-queue rows and a 140.4032 ms maximum gap.
+This ordinary-editor fitted-monitor result does not establish physical scanout,
+fullscreen, compound 4K60 or whole-source playback. All these R8 receipt paths are
+inside `build-windows/pro-native-edit-export-r8-2026-10-11`.
+
+R8's first fitted 4K/59.94 epoch passes the same strict gate at
+`cadence-4k/attempt1/accepted-summary.json`
+(`c7ae11a6b764223548b28840aaa24ce3e01593f11e610acd1fd74e62c14bfc3f`),
+binding raw trace `8362994cb1daf84f198189ea1ce004923b37b944527870a668c63acba1c211c1`.
+It records 149.8687204 steady native seconds and 149.866208333 device seconds,
+8,984 consecutive pictures (frames 60–9043) at 59.9391252292 pictures/s,
+maximum gap 24.5614 ms and zero lag. All steady omissions, repeats,
+backward/early/stale presentations, empty queues and overwrites are zero;
+maximum frame jump is one. The raw selected epoch separately retains two
+repeats, two empty-queue rows, maximum lag one and a 235.301 ms maximum gap.
+The same fixed exclusions and fitted 480×270 monitor scope apply; no physical
+scanout, fullscreen, compound 4K60 or whole-source claim follows.
+
+Root publication passes at
+`build-windows/pro-native-edit-export-r8-2026-10-11-publication.json`
+(`606d89eab9650433ec0e3208d75ffbe6124df911ac320735afddbdc571e7e045`),
+binding the exact 5B80/B556/A5B0 products and accepted 76-report background gate.
+Protected assets remain unchanged, with the shared MM-AIR runtime and no separate
+FFmpeg bundle. Fresh root-ready passes at
+`build-windows/pro-native-edit-export-r8-2026-10-11-root-ready.json`
+(`602d8b79706ca846f4f2c26a46a76568919a73ba6fb7de3f35eb79808ddf35db`).
+Actual loaded-module records confirm the installed application and audio DLL.
+The private linked 1080p project shows V1 filmstrip only and A1 waveform only;
+Program Play changes picture/time to 07:45 with active green L/R meters while
+Source remains at zero. Stop at 14:18 retains the picture with empty meters;
+Start returns to nonblank zero. Scrub time updates immediately and settled
+Program03:55 matches the changed picture and histogram/RGB/luma. The initial
+Windows chooser forward-slash path refusal remains in the observations; opening
+the corrected displayed filename succeeds. The owned root check closes normally.
+Accompanying bundle paths are `archive/pro-native-edit-export-r8-2026-10-11.tar.gz`
+and `archive/pro-native-edit-export-r8-2026-10-11.json` (archive SHA and evidence receipt).
+This checkpoint does not complete the broader goal.
+
+| Retained component/history receipt | SHA-256 |
+|---|---|
+| `agent-prompt-feedback/receipt.json`, Windows/Linux before/after raster and transaction proof | `eeca6d13644e97010b7f086f8ad9ebbdeb2e86a80b347a19c2ad6df6c3c6d8f6` |
+| `agent-filter-transactions/receipt.json`, seven cases/84 checks per OS | `c714cc5ca4f0bb8512eb4d9a4f504c1530c09b78975a1e46debc0cabf86f0d75` |
+| `agent-audio-context-retime/filter-freeze.json`, bounded extent and guarded filter proof | `510669a73370445969dc38a8d3a8bcf7e1c56eca9f6f5f4b83fbbc611069762e` |
+| `agent-transition-track-scroll-r7/receipt.json`, unchanged seam color plus four badge checks | `498a5f705258e558c1c3f0279650dac4bb0d7ef150a83d6e7c6775ce99385fff` |
+| R7 repeat1 background receipt, 76 fresh reports | `20b3bbff3a08be0f9bc2c83b9b7b15260fb65ba3bf363d865b60e68dd3140ada` |
+| R7 `native-workflow/feedback-failure-receipt.json`, rejected native feedback characterization | `e3d2ec2c7031ec0a02fa4337a0b47c8cd6b966ee10fe16f585ba44babca365f8` |
+
+These paths are under `build-windows`; the native failure is inside
+`pro-native-edit-export-r7-2026-10-11`. The accepted R7 background receipt is
+`build-windows/pro-native-edit-export-r7-2026-10-11-repeat1-background-receipt.json`.
+All earlier R1–R5 histories and separately scoped native proofs below remain valid
+for their recorded identities, not as substituted R8 evidence.
+
+### Installed R5 and earlier qualification history
 
 The completed unpublished candidate is `pro-native-edit-export-r4-2026-10-11`. Its
 coherent build, full background suite, exact audio-device gate and native workflow
@@ -248,7 +451,7 @@ V1 filmstrip only and A1 waveform only, with both monitors populated at zero.
 Program Play changes the picture and advances time/status/playhead together
 to 6:12 with active stereo meters while Source stays paused at zero. Stop
 at 13:46 retains the picture and clears meters; Start returns to a nonblank
-paused first frame. The root editor is left open paused on that project.
+paused first frame. That R5 root-ready check left the editor open paused on that project.
 The accompanying archive records source and evidence; the publication commit is identifiable
 through Git history. Passing these bounded checkpoints does not complete
 the broader professional editing goal; the r4 keyframe GUI observations
@@ -339,13 +542,12 @@ body. Normalize and nested processing retain the full float cache. Those
 remaining workflows are explicitly scoped and not qualified by the direct
 causal-stream checks.
 
-## Next exposed editing gap
+## Remaining qualification and editing limits
 
-The transition action currently authors a 24-frame dissolve at the selected
-clip's end. There is no seam selection or exposed type, duration or removal
-control. The next slice should reuse the SDK boundary lookup and stable
-transition IDs, validate supported video boundaries before capturing history,
-and expose the supported types, duration and Remove in Properties. Refused or
-unchanged requests must preserve Redo. Native dispatch, persistence and
-independent transition pixels still need qualification; existing upper-lane and
-incoming-effect renderer limits must remain explicit.
+R8 implements transition management and visible draft refusals; its recorded
+native workflows, persistence, isolated device, export, both bounded cadence gates,
+publication and root-ready pass. Transitions above the rendered base lane and unsupported
+incoming Blend/PiP/Chroma-key edits remain renderer limits. Direct forward
+AudioExtent does not supply unavailable source handles, reverse/fractional new
+extents, nested endpoint extension or Delay/Reverb tail-preserving cuts. Those
+supported-workflow gaps remain part of the active professional editing goal.

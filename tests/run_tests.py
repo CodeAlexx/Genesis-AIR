@@ -424,6 +424,20 @@ def main():
         report = json.loads((Path(temporary) / "snap-controls-tests.json").read_text())["payload"]
         assert report["status"] == "pass", report
         print(f"  snap controls: {report['checks']} shared pointer/transaction checks")
+    with TemporaryDirectory(prefix="genesis-transition-controls-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "transition_controls.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "transition-controls-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  transition controls: {report['checks']} shared pointer/transaction checks")
+    with TemporaryDirectory(prefix="genesis-filter-transactions-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "filter_transactions.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "filter-transactions-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  filter transactions: {report['checks']} actual command/history checks")
     headless(airc, stdlib)
     controls(airc, stdlib)
 
@@ -458,6 +472,28 @@ def main():
                         "--report", Path(temporary) / "audio-nested-edit-context.json"], env)
             assert done.returncode == 0, done.stdout + done.stderr
             print("  nested edit context: 16 PCM and waveform cases")
+        with TemporaryDirectory(prefix="genesis-context-retime-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib))
+            client = Path(temporary) / "genesis-audio-context-retime"
+            done = run([airc, "build", HERE / "audio_context_retime.ai",
+                        "--mode", "release", "-o", client], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            done = run([sys.executable, HERE / "audio_context_retime.py",
+                        "--client", client, "--worker", worker.resolve(),
+                        "--report", Path(temporary) / "audio-context-retime.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  forward audio retime: independent original-origin PCM, peaks and export")
+        with TemporaryDirectory(prefix="genesis-transition-media-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib))
+            client = Path(temporary) / "genesis-transition-controls-media"
+            done = run([airc, "build", HERE / "transition_controls_media.ai",
+                        "--mode", "release", "-o", client], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            done = run([sys.executable, HERE / "transition_controls_media.py",
+                        "--client", client, "--binary", binary.resolve(), "--worker", worker.resolve(),
+                        "--report", Path(temporary) / "transition-controls-media-tests.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  transition media: independent preview/master pixels and unchanged audio")
 
     print("genesis-air: tests complete")
     return 1 if args.media and real_blocked else 0

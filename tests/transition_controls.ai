@@ -1,0 +1,511 @@
+module genesis.tests.transition_controls
+import std.editor as editor
+import std.editor_io as store
+import std.testing as test
+import std.files as files
+import std.path as path
+import std.text as text
+import std.widgets as widgets
+import std.draw as draw
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/view.ai" as painter
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+import "../src/ui_text.ai" as ui_text
+import "../src/typeface.ai" as typeface
+
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn transaction(state:ref<app.App>) -> string effects {alloc} {
+  var result:string=encoded(struct.borrow(state,field=document))
+  string.append(result,str.view(string.from_int(state.document_revision)))
+  string.append(result,if state.dirty {"dirty"}else{"clean"})
+  string.append(result,str.view(string.from_int(state.selected_transition)))
+  string.append(result,str.view(string.from_int(state.selected_transition_epoch)))
+  let history:ref<editor.History> =struct.borrow(state,field=history)
+  var i:u64=0
+  loop {if i>=editor.undo_depth(history) {break}
+    string.append(result,"undo")
+    string.append(result,str.view(encoded(array.borrow(struct.borrow(history,field=undo),i))))
+    i=i+1}
+  i=0
+  loop {if i>=editor.redo_depth(history) {break}
+    string.append(result,"redo")
+    string.append(result,str.view(encoded(array.borrow(struct.borrow(history,field=redo),i))))
+    i=i+1}
+  result
+}
+fn fixture(root:str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state:app.App=app.app(provider.fake(root))
+  let track:u64=app.default_video_track(state)
+  let audio_track:u64=app.default_audio_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let source:u64=editor.add_source(doc,"transition.mov","Picture",180,30.0)
+  let _=editor.describe_source(doc,source,64,36,true,true,48000,2)
+  var i:i64=0
+  loop {if i>=3 {break}
+    let clip:u64=option.unwrap(editor.place(doc,track,source,0,60,i*60))
+    let _=editor.set_clip_streams(doc,clip,editor.streams_video())
+    i=i+1}
+  let audio:u64=option.unwrap(editor.place(doc,audio_track,source,0,180,0))
+  let _=editor.set_clip_streams(doc,audio,editor.streams_audio())
+  let _=editor.set_clip_gain(doc,audio,0.6)
+  let _=editor.set_key(doc,audio,"gain",0,0.6,1)
+  let _=editor.set_key(doc,audio,"gain",179,0.4,1)
+  let _=commands.select_only(state,array.get(struct.borrow(doc,field=clips),1).id)
+  let _=commands.seek(state,61)
+  app.mark_dirty(state,false)
+  state
+}
+fn selected(state:ref<app.App>) -> editor.Transition effects {} {
+  let id:u64=app.current_transition(state)
+  option.unwrap(editor.transition(struct.borrow(state,field=document),id))
+}
+fn click_property(state:ref<app.App>,action:u32,kind:str) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var list:array<chrome.Control> =chrome.properties_panel(layout.frame(1600.0,1400.0),state)
+  var i:u64=0
+  loop {if i>=array.len(list) {break}
+    let control:ref<chrome.Control> =array.borrow(list,i)
+    if control.action==action and (str.len(kind)==0 or str.eq(str.view(struct.borrow(control,field=kind)),kind)) {
+      return input.pointer_down(state,1600.0,1400.0,(control.area.left+control.area.right)*0.5,(control.area.top+control.area.bottom)*0.5)
+    }
+    i=i+1}
+  string.copy("missing")
+}
+fn edit_duration(state:ref<app.App>,value:str) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  let _=input.key(state,widgets.key_a(),true,false)
+  app.prompt_push(state,value)
+  input.key(state,widgets.key_return(),false,false)
+}
+fn toolbar_transition(state:ref<app.App>) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var controls:array<chrome.Control> =chrome.timeline_bar(layout.frame(1600.0,1400.0),state)
+  var i:u64=0
+  loop {if i>=array.len(controls) {break}
+    let value:ref<chrome.Control> =array.borrow(controls,i)
+    if value.action==chrome.act_transition() {return input.pointer_down(state,1600.0,1400.0,(value.area.left+value.area.right)*0.5,(value.area.top+value.area.bottom)*0.5)}
+    i=i+1}
+  string.copy("missing")
+}
+// Inspect warning ink only inside the shared modal footer or status rectangle.
+// The assertion does not use the new feedback model: it also compiles against
+// the preserved R7 source and exposes the original invisible-refusal defect.
+fn warning_ink(state:ref<app.App>,area:layout.Rect) -> u64 effects {alloc} {
+  var source:draw.Surface=draw.empty_surface()
+  var program:draw.Surface=draw.empty_surface()
+  var canvas:draw.Canvas=draw.canvas(option.unwrap(draw.surface(1600,1400)))
+  painter.paint(state,canvas,1600.0,1400.0,source,program)
+  var image:draw.Surface=draw.finish(canvas)
+  let wanted:draw.Color=painter.theme(state).warn
+  var count:u64=0
+  var y:f64=area.top
+  loop {if y>=area.bottom {break}
+    var x:f64=area.left
+    loop {if x>=area.right {break}
+      match draw.surface_pixel(image,cast.sat(x),cast.sat(y)) {none=>{},some(pixel)=>{
+        if pixel.r==wanted.r and pixel.g==wanted.g and pixel.b==wanted.b {count=count+1}
+      },}
+      x=x+1.0}
+    y=y+1.0}
+  count
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  if view.len(args)<2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Transition controls",false)
+  var state:app.App=fixture(root)
+  let track:u64=app.default_video_track(state)
+  let audio_before:string=media.audio_signature(struct.borrow(state,field=document))
+  let _=test.start(suite,"Actual Add chooses nearest playhead boundary; stable IDs and ties")
+  let _=test.eq_str(suite,toolbar_transition(state),"transition added","Actual toolbar dispatch adds seam")
+  let seam:u64=app.current_transition(state)
+  let _=test.eq_i64(suite,selected(state).center,60,"Playhead61 chooses60, not selected middle clip end120")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),1,"Exactly one Undo for Add")
+  let saved:string=encoded(struct.borrow(state,field=document))
+  let _=commands.undo(state)
+  let _=test.eq_u64(suite,editor.transition_count(struct.borrow(state,field=document)),0,"Undo removes seam")
+  let _=test.eq_u64(suite,state.selected_transition,0,"Successful Undo clears stale seam selection")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),saved,"Redo restores full document and seam ID")
+  app.set_selected_transition(state,seam)
+  let _=commands.seek(state,90)
+  let _=test.eq_str(suite,toolbar_transition(state),"transition selected","Tie selects existing earliest seam without replacing type")
+  let _=test.eq_u64(suite,app.current_transition(state),seam,"Stable seam identity")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Shared timeline badge selects; actual11type Properties controls save/open and Undo")
+  app.set_selected_transition(state,0)
+  let frame:layout.Frame=layout.frame(1600.0,1400.0)
+  let box:layout.Rect=option.unwrap(painter.transition_bounds(state,frame.timeline,seam))
+  let _=input.pointer_down(state,1600.0,1400.0,(box.left+box.right)*0.5,(box.top+box.bottom)*0.5)
+  let _=test.eq_u64(suite,app.current_transition(state),seam,"Actual badge hit uses painted geometry")
+  let _=test.eq_u64(suite,cast.wrap(app.dock_tab(state)),cast.wrap(chrome.tab_properties()),"Seam click opens Properties")
+  var mode:u64=0
+  loop {if mode>=11 {break}
+    let kind:string=chrome.transition_kind(mode)
+    let baseline:string=encoded(struct.borrow(state,field=document))
+    let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+    let before_kind:u64=selected(state).kind
+    let old_kind:string=editor.name_text(struct.borrow(state,field=document),before_kind)
+    let _=click_property(state,chrome.act_transition_kind(),str.view(kind))
+    let after_kind:u64=selected(state).kind
+    let _=test.eq_str(suite,editor.name_text(struct.borrow(state,field=document),after_kind),kind,"Actual type button stores readable wire name")
+    let _=test.eq_u64(suite,selected(state).id,seam,"Type changes preserve exact stable ID")
+    let encoded_graph:string=encoded(struct.borrow(state,field=document))
+    var loaded:editor.Document=match store.decode(str.view(encoded_graph)) {err(_)=>{return 3},ok(value)=>value,}
+    let value:editor.Transition=option.unwrap(editor.transition(loaded,seam))
+    let _=test.eq_str(suite,editor.name_text(loaded,value.kind),kind,"Save/Open retains each type")
+    if not str.eq(str.view(kind),str.view(old_kind)) {
+      let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"One Undo for type")
+      let _=commands.undo(state)
+      let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),baseline,"Undo restores exact full graph")
+      let _=commands.redo(state)
+    }
+    mode=mode+1}
+  let _=test.eq_str(suite,media.audio_signature(struct.borrow(state,field=document)),audio_before,"Picture-only transitions never change authored audio plan")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Exactduration modal binds target and isolates background editing")
+  let baseline:string=encoded(struct.borrow(state,field=document))
+  let depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.eq_str(suite,edit_duration(state,"31"),"transition resized","Exact odd duration via shared prompt")
+  let _=test.eq_i64(suite,selected(state).duration,31,"No float rounding or floor substitution")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),depth+1,"One Undo for duration")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),baseline,"Undo duration restores document")
+  let _=commands.redo(state)
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  let before:string=transaction(state)
+  let _=input.pointer_down(state,1600.0,1400.0,frame.timeline.left+5.0,frame.timeline.bottom-3.0)
+  let _=input.key(state,widgets.key_z(),true,false)
+  let _=test.eq_str(suite,transaction(state),before,"Outside pointer/shortcut cannot edit background while modal active")
+  let _=test.check(suite,app.prompt_active(state),"Draft stays active")
+  let _=input.key(state,widgets.key_escape(),false,false)
+  let _=test.eq_str(suite,transaction(state),before,"Escape only dismisses draft")
+  let _=test.eq_str(suite,edit_duration(state,"1.5"),"[GA_TRANSITION_DURATION] Enter a whole number of frames","Fractional duration refused")
+  let _=test.check(suite,app.prompt_active(state),"Refused draft can be corrected")
+  let _=input.key(state,widgets.key_escape(),false,false)
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  let _=editor.remove_transition(struct.borrow(state,field=document),seam)
+  let stale:string=transaction(state)
+  let _=test.check(suite,text.contains(str.view(input.key(state,widgets.key_return(),false,false)),"GA_TRANSITION_TARGET"),"Removed opening target refuses")
+  let _=test.eq_str(suite,transaction(state),stale,"Stale modal refusal preserves every ledger/ID/selection")
+  let _=input.key(state,widgets.key_escape(),false,false)
+  let _=input.key(state,widgets.key_delete(),false,false)
+  let _=test.eq_str(suite,transaction(state),stale,"Stale seam Delete cannot accidentally lift previously selected clip")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Noop locked stale overflow and overlap refusals preserve Redo/all bytes")
+  state=fixture(root)
+  let value:commands.Result=commands.add_transition(state,app.default_video_track(state),60,24,"crossfade")
+  let id:u64=value.value
+  let _=commands.set_transition_duration(state,id,30)
+  let _=commands.undo(state)
+  app.set_selected_transition(state,id)
+  let unchanged:string=transaction(state)
+  let nochange:commands.Result=commands.set_transition_duration(state,id,24)
+  let _=test.check(suite,nochange.ok,"Identity edit succeeds without mutation")
+  let _=test.eq_str(suite,transaction(state),unchanged,"Noop preserves existing Redo and IDs")
+  let _=test.check(suite,not commands.set_transition_duration(state,id,1).ok,"Duration below2 refused")
+  let _=test.check(suite,not commands.set_transition_duration(state,id,9223372036854775807).ok,"Overflowing window refused before arithmetic")
+  let _=test.check(suite,not commands.set_transition_kind(state,id,"unknown").ok,"Unknown kind refused")
+  let _=test.check(suite,not commands.set_transition_duration(state,999999,24).ok,"Stale ID refused")
+  let _=test.check(suite,not commands.remove_transition(state,999999).ok,"Stale removal refused")
+  let _=test.eq_str(suite,transaction(state),unchanged,"Every refusal preserves exact transaction")
+  let locked_track:u64=app.default_video_track(state)
+  let _=editor.set_track_lock(struct.borrow(state,field=document),locked_track,true)
+  let locked:string=transaction(state)
+  let _=test.check(suite,not commands.set_transition_kind(state,id,"wipe_lr").ok,"Locked type refused")
+  let _=test.check(suite,not commands.remove_transition(state,id).ok,"Locked deletion refused")
+  let _=input.key(state,widgets.key_delete(),false,false)
+  let _=test.eq_str(suite,transaction(state),locked,"Actual Delete lock refusal preserves clips and full history")
+  let _=editor.set_track_lock(struct.borrow(state,field=document),locked_track,false)
+  let other:commands.Result=commands.add_transition(state,app.default_video_track(state),120,24,"crossfade")
+  let _=test.check(suite,other.ok,"Separate valid seam added")
+  let overlapping:string=transaction(state)
+  let _=test.check(suite,not commands.set_transition_duration(state,id,100).ok,"Window overlapping next seam refused")
+  let _=test.eq_str(suite,transaction(state),overlapping,"Overlap refusal preserves every authored/history byte")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Delete selected seam only, repair unsupported legacy, epoch retirement")
+  app.set_selected_transition(state,id)
+  let before_delete:string=encoded(struct.borrow(state,field=document))
+  let clips:u64=editor.clip_count(struct.borrow(state,field=document))
+  let _=test.eq_str(suite,input.key(state,widgets.key_delete(),false,true),"transition removed","ShiftDelete also removes only selected seam")
+  let _=test.eq_u64(suite,editor.clip_count(struct.borrow(state,field=document)),clips,"No clip lifted/rippled")
+  let _=test.eq_u64(suite,app.current_transition(state),0,"Selection cleared after removal")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before_delete,"Undo seam removal restores exact graph")
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let upper:u64=editor.add_track(doc,doc.active,editor.track_video(),"Upper")
+  let legacy:u64=editor.add_transition(doc,upper,60,24,"unsupported_legacy")
+  app.set_selected_transition(state,legacy)
+  let _=test.eq_str(suite,click_property(state,chrome.act_transition_remove(),""),"transition removed","Unsupported legacy upper seam can be repaired through actual Remove")
+  app.set_selected_transition(state,id)
+  struct.set(state,state.project_epoch+1,field=project_epoch)
+  let _=test.eq_u64(suite,app.current_transition(state),0,"Project replacement cannot relabel reused transition ID")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Base support spans full window; hidden/away lower video does not obstruct")
+  state=fixture(root)
+  let lower_track:u64=app.default_video_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let source:u64=array.borrow(struct.borrow(doc,field=sources),0).id
+  let upper:u64=editor.add_track(doc,doc.active,editor.track_video(),"Upper")
+  let a:u64=option.unwrap(editor.place(doc,upper,source,0,60,0))
+  let b:u64=option.unwrap(editor.place(doc,upper,source,60,60,60))
+  let _=editor.set_clip_streams(doc,a,editor.streams_video())
+  let _=editor.set_clip_streams(doc,b,editor.streams_video())
+  let before:string=transaction(state)
+  let _=test.check(suite,not commands.add_transition(state,upper,60,24,"crossfade").ok,"Actual visible lower video refuses unsupported upper transition")
+  let _=test.eq_str(suite,transaction(state),before,"Unsupported renderer context refuses atomically")
+  let _=editor.set_track_hidden(struct.borrow(state,field=document),lower_track,true)
+  let _=test.check(suite,commands.add_transition(state,upper,60,24,"crossfade").ok,"Hidden lower lane allows currently base transition")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Incoming renderer policy refuses before history but preserves supported grades")
+  state=fixture(root)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let incoming:u64=array.get(struct.borrow(doc,field=clips),1).id
+  let incoming_track:u64=array.get(struct.borrow(doc,field=clips),1).track
+  let overlay:u64=option.unwrap(editor.add_filter(doc,incoming,"size_position"))
+  let original:string=transaction(state)
+  var blocked:commands.Result=commands.add_transition(state,incoming_track,60,24,"crossfade")
+  let _=test.check(suite,not blocked.ok and text.contains(str.view(struct.borrow(blocked,field=message)),"GA_TRANSITION_INCOMING"),"Unsupported incoming composition is coded")
+  let _=test.eq_str(suite,transaction(state),original,"Known renderer refusal preserves full transaction")
+  let _=editor.set_filter_enabled(struct.borrow(state,field=document),overlay,false)
+  let _=test.check(suite,commands.add_transition(state,incoming_track,60,24,"crossfade").ok,"Disabled overlay is dormant, not a refusal")
+  let visible_id:u64=app.current_transition(state)
+  let _=editor.set_key(struct.borrow(state,field=document),incoming,"unknown.animation",0,1.0,1)
+  let keyed:string=transaction(state)
+  let _=test.check(suite,not commands.set_transition_kind(state,visible_id,"wipe_lr").ok,"Unsupported stored incoming animation refused")
+  let _=test.eq_str(suite,transaction(state),keyed,"Stored-key refusal preserves Redo/history/IDs")
+  let _=editor.remove_key(struct.borrow(state,field=document),incoming,"unknown.animation",0)
+  let grade:u64=option.unwrap(editor.add_filter(struct.borrow(state,field=document),incoming,"brightness"))
+  let _=editor.set_filter_param(struct.borrow(state,field=document),grade,"level",1.2)
+  let _=test.check(suite,commands.set_transition_kind(state,visible_id,"wipe_lr").ok,"Renderable incoming grade stays supported")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Readable all-type controls and selected badge use actual font/painter bounds")
+  state=fixture(root)
+  let selected_track:u64=app.default_video_track(state)
+  let result:commands.Result=commands.add_transition(state,selected_track,60,24,"crossfade")
+  let selected_id:u64=result.value
+  app.set_dock_tab(state,chrome.tab_properties())
+  app.set_fonts(state,typeface.search_paths())
+  let _=test.check(suite,ui_text.available(struct.borrow(state,field=typography)),"Actual TrueType metrics available")
+  let scales:array<f64> =[1.0,1.5,2.0]
+  var si:u64=0
+  loop {if si>=array.len(scales) {break}
+    ui_text.set_scale(struct.borrow(state,field=typography),array.get(scales,si))
+    var controls:array<chrome.Control> =chrome.properties_panel(layout.frame(1600.0,1400.0),state)
+    var ci:u64=0
+    var types:u64=0
+    loop {if ci>=array.len(controls) {break}
+      let control:ref<chrome.Control> =array.borrow(controls,ci)
+      if control.action==chrome.act_transition_kind() {
+        let box:layout.Rect=control.area
+        let size:f64=control.size
+        let label:string=chrome.label_of(control)
+        let _=test.check(suite,ui_text.width(struct.borrow(state,field=typography),str.view(label),size)+12.0<=layout.width_of(box),"Full type label fits its own button at supported scale")
+        let _=test.check(suite,box.left>=frame.dock_body.left and box.right<=frame.dock_body.right,"Type button remains within dock")
+        types=types+1
+      }
+      ci=ci+1}
+    let _=test.eq_u64(suite,types,11,"All11 full type names exposed without cycling ambiguity")
+    si=si+1}
+  var source:draw.Surface=draw.empty_surface()
+  var program:draw.Surface=draw.empty_surface()
+  var raster:painter.Renderer=painter.renderer()
+  let box:layout.Rect=option.unwrap(painter.transition_bounds(state,frame.timeline,selected_id))
+  let _=test.check(suite,painter.render(state,raster,1600,1400,true,source,program),"Selected seam paint succeeds")
+  let chosen:draw.Color=option.unwrap(draw.surface_pixel(struct.borrow(raster,field=surface),cast.sat(box.right-3.0),cast.sat(box.bottom-3.0)))
+  let colors:painter.Theme=painter.theme(state)
+  let _=test.check(suite,chosen.r==colors.focus.r and chosen.g==colors.focus.g and chosen.b==colors.focus.b,"Painted selected badge has focus color inside exact hit rectangle")
+  app.set_selected_transition(state,0)
+  let _=test.check(suite,painter.render(state,raster,1600,1400,true,source,program),"Unselected seam paint succeeds")
+  let plain:draw.Color=option.unwrap(draw.surface_pixel(struct.borrow(raster,field=surface),cast.sat(box.right-3.0),cast.sat(box.bottom-3.0)))
+  let _=test.check(suite,plain.r==colors.panel_head.r and plain.g==colors.panel_head.g and plain.b==colors.panel_head.b,"Selection is visibly distinct, not only model state")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Modal epoch/selection identity and malformed/ID-capacity refusals")
+  state=fixture(root)
+  let modal_track:u64=app.default_video_track(state)
+  let added:commands.Result=commands.add_transition(state,modal_track,60,24,"crossfade")
+  let modal_id:u64=added.value
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  app.set_selected_transition(state,0)
+  let _=input.key(state,widgets.key_a(),true,false)
+  app.prompt_push(state,"26")
+  let _=test.eq_str(suite,input.key(state,widgets.key_return(),false,false),"transition resized","Harmless selection change retains bound draft target")
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  struct.set(state,state.project_epoch+1,field=project_epoch)
+  let replaced:string=transaction(state)
+  let _=test.check(suite,text.contains(str.view(input.key(state,widgets.key_return(),false,false)),"GA_TRANSITION_TARGET"),"Replacement epoch refuses draft")
+  let _=test.eq_str(suite,transaction(state),replaced,"Epoch refusal does not edit or capture")
+  let _=input.key(state,widgets.key_escape(),false,false)
+  state=fixture(root)
+  let finite_track:u64=app.default_video_track(state)
+  struct.set(struct.borrow(state,field=document),18446744073709551615,field=next_id)
+  let full:string=transaction(state)
+  let _=test.check(suite,not commands.add_transition(state,finite_track,60,24,"crossfade").ok,"Exhausted IDs refuse before interning/capture")
+  let _=test.eq_str(suite,transaction(state),full,"Capacity refusal preserves every byte")
+  var malformed:editor.Clip=array.get(struct.borrow(struct.borrow(state,field=document),field=clips),0)
+  struct.set(malformed,9223372036854775807,field=start)
+  array.set(struct.borrow(struct.borrow(state,field=document),field=clips),0,malformed)
+  let invalid:string=transaction(state)
+  let _=test.check(suite,not commands.add_transition(state,finite_track,60,24,"crossfade").ok,"Malformed overflowing clip endpoint refuses safely")
+  let _=test.eq_str(suite,transaction(state),invalid,"Invalid geometry refusal does not normalize or mutate graph")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Lower transition fills gap; away lanes and SDK gap/overlap boundaries remain exact")
+  state=fixture(root)
+  let lower_track:u64=app.default_video_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let first_clip:u64=array.get(struct.borrow(doc,field=clips),0).id
+  let source_id:u64=array.get(struct.borrow(doc,field=clips),0).source
+  let _=editor.trim_end(doc,first_clip,40)
+  let lower_seam:u64=editor.add_transition(doc,lower_track,40,40,"crossfade")
+  let top_track:u64=editor.add_track(doc,doc.active,editor.track_video(),"Upper gap")
+  let left:u64=option.unwrap(editor.place(doc,top_track,source_id,0,50,0))
+  let right:u64=option.unwrap(editor.place(doc,top_track,source_id,0,50,50))
+  let _=editor.set_clip_streams(doc,left,editor.streams_video())
+  let _=editor.set_clip_streams(doc,right,editor.streams_video())
+  let untouched:string=transaction(state)
+  var gap_blocked:commands.Result=commands.add_transition(state,top_track,50,8,"crossfade")
+  let _=test.check(suite,not gap_blocked.ok and text.contains(str.view(struct.borrow(gap_blocked,field=message)),"GA_TRANSITION_BASE"),"Lower prepared transition supplies base picture through physical gap")
+  let _=test.eq_str(suite,transaction(state),untouched,"Gap base refusal preserves all bytes/history")
+  let _=editor.remove_transition(struct.borrow(state,field=document),lower_seam)
+  let _=test.check(suite,commands.add_transition(state,top_track,50,8,"crossfade").ok,"Without lower seam, gap is transparent and upper is base")
+  let upper_seam:u64=app.current_transition(state)
+  let _=commands.remove_transition(state,upper_seam)
+  let document:ref<editor.Document> =struct.borrow(state,field=document)
+  var i:u64=0
+  loop {if i>=editor.clip_count(document) {break}
+    let value:editor.Clip=array.get(struct.borrow(document,field=clips),i)
+    if value.track==lower_track {let _=editor.move_clip(document,value.id,lower_track,value.start+240)}
+    i=i+1}
+  let _=test.check(suite,commands.add_transition(state,top_track,50,8,"crossfade").ok,"Enabled lower clips entirely away do not obstruct")
+  let _=commands.remove_transition(state,app.current_transition(state))
+  let _=editor.move_clip(struct.borrow(state,field=document),right,top_track,60)
+  let _=commands.select_only(state,left)
+  let _=commands.seek(state,52)
+  let _=test.check(suite,commands.transition_at_playhead(state,8).ok,"SDK short-gap boundary is selectable")
+  let _=test.eq_i64(suite,selected(state).center,50,"Short-gap seam is outgoing end, not visual midpoint55")
+  let _=commands.remove_transition(state,app.current_transition(state))
+  let _=editor.move_clip(struct.borrow(state,field=document),right,top_track,40)
+  let _=test.check(suite,commands.transition_at_playhead(state,8).ok,"SDK overlap boundary is selectable")
+  let _=test.eq_i64(suite,selected(state).center,45,"Overlap seam uses exact SDK midpoint")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Nearest selection keeps valid short window and skips unsupported legacy kind")
+  state=fixture(root)
+  let track:u64=app.default_video_track(state)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let original:editor.Clip=array.get(struct.borrow(doc,field=clips),0)
+  let second:u64=array.get(struct.borrow(doc,field=clips),1).id
+  let _=test.check(suite,editor.lift(doc,original.id) and editor.lift(doc,second),"Remove ordinary clips before authoring short imported bodies")
+  let first:u64=option.unwrap(editor.place(doc,track,original.source,0,3,0))
+  let incoming:u64=option.unwrap(editor.place(doc,track,original.source,0,3,3))
+  let _=test.check(suite,editor.set_clip_streams(doc,first,editor.streams_video()) and editor.set_clip_streams(doc,incoming,editor.streams_video()),"Short bodies have explicit video-only intent")
+  let _=commands.select_only(state,first)
+  let tiny:commands.Result=commands.add_transition(state,track,3,2,"crossfade")
+  let _=test.check(suite,tiny.ok,"Two-frame seam is valid at narrow authored clips")
+  let _=commands.seek(state,3)
+  let stable:string=transaction(state)
+  let _=test.eq_str(suite,toolbar_transition(state),"transition selected","Add selects valid two-frame seam despite default24 window not fitting")
+  let _=test.eq_str(suite,transaction(state),stable,"Selecting existing short seam doesn't rewrite its duration/history")
+  state=fixture(root)
+  let track:u64=app.default_video_track(state)
+  let legacy:u64=editor.add_transition(struct.borrow(state,field=document),track,60,24,"legacy_unknown")
+  let _=commands.seek(state,61)
+  let _=test.eq_str(suite,toolbar_transition(state),"transition added","Nearest unsupported legacy seam is skipped in favor of supported boundary")
+  let _=test.eq_i64(suite,selected(state).center,120,"Next supported seam chosen rather than unrenderable60")
+  let box:layout.Rect=option.unwrap(painter.transition_bounds(state,frame.timeline,legacy))
+  let _=input.pointer_down(state,1600.0,1400.0,(box.left+box.right)*0.5,(box.top+box.bottom)*0.5)
+  let _=test.eq_u64(suite,app.current_transition(state),legacy,"Legacy badge remains selectable for repair")
+  let _=test.eq_str(suite,click_property(state,chrome.act_transition_remove(),""),"transition removed","Legacy Remove remains available")
+  let _=test.done(suite)
+  let _=test.start(suite,"Retained modal refusals paint; edits clear feedback without losing Unicode or history")
+  state=fixture(root)
+  app.set_fonts(state,typeface.search_paths())
+  let _=test.check(suite,ui_text.available(struct.borrow(state,field=typography)),"Modal refusal raster uses actual loaded font")
+  let added:commands.Result=commands.add_transition(state,app.default_video_track(state),60,24,"crossfade")
+  let _=commands.set_transition_duration(state,added.value,28)
+  let _=commands.undo(state)
+  app.set_selected_transition(state,added.value)
+  let before_feedback:string=transaction(state)
+  let feedback_document:string=encoded(struct.borrow(state,field=document))
+  let feedback_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  let _=test.eq_u64(suite,editor.redo_depth(struct.borrow(state,field=history)),1,"Refusal fixture starts with real Redo")
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  let _=input.key(state,widgets.key_a(),true,false)
+  let _=input.text(state,49)
+  let refused:string=input.key(state,widgets.key_return(),false,false)
+  let _=test.eq_str(suite,refused,"[GA_TRANSITION_DURATION] Duration must be at least two frames with a representable window","Actual Enter returns exact coded refusal")
+  let _=test.check(suite,app.prompt_active(state) and str.eq(str.view(app.prompt_text(state)),"1"),"Invalid duration keeps editable draft")
+  let _=test.eq_str(suite,transaction(state),before_feedback,"Refusal preserves complete document, IDs, revision, dirty, selection and Undo/Redo")
+  let panel:layout.Rect=painter.prompt_bounds(state,1600.0,1400.0)
+  let footer:layout.Rect=layout.rect(panel.left+18.0,panel.bottom-32.0,panel.right-18.0,panel.bottom-8.0)
+  let feedback_frame:layout.Frame=layout.frame(1600.0,1400.0)
+  let status:layout.Rect=feedback_frame.status
+  let _=test.check(suite,warning_ink(state,footer)>0,"Refusal is visible as warning text inside modal footer")
+  let _=test.check(suite,warning_ink(state,status)>0,"Retained refusal is also visible in status instead of draft mirror")
+  app.set_status(state,"background status replaced")
+  let _=test.check(suite,warning_ink(state,footer)>0 and warning_ink(state,status)>0,"Background status updates cannot erase draft-local refusal")
+  let _=input.key(state,widgets.key_left(),false,false)
+  let _=input.text(state,13)
+  let _=test.check(suite,warning_ink(state,footer)>0,"Caret movement and Return WM_CHAR preserve refusal")
+  let _=input.key(state,widgets.key_a(),true,false)
+  let _=input.text(state,49)
+  let _=test.check(suite,warning_ink(state,footer)>0,"Replacing invalid text with identical bytes preserves its refusal")
+  let _=input.key(state,widgets.key_a(),true,false)
+  let _=input.text(state,51)
+  let _=test.check(suite,warning_ink(state,footer)==0 and warning_ink(state,status)==0,"Actual buffer editing clears old refusal in both views")
+  let _=input.text(state,49)
+  let _=test.eq_str(suite,input.key(state,widgets.key_return(),false,false),"transition resized","Corrected31-frame duration commits")
+  let _=test.check(suite,not app.prompt_active(state) and selected(state).duration==31,"Success closes draft and applies exact duration")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),feedback_depth+1,"Correction has exactly one Undo")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),feedback_document,"Correction Undo restores original authored graph")
+  let _=commands.redo(state)
+  let _=test.eq_i64(suite,selected(state).duration,31,"Correction Redo restores duration")
+  let _=test.eq_str(suite,edit_duration(state,"1.5"),"[GA_TRANSITION_DURATION] Enter a whole number of frames","Parse refusal uses same draft feedback path")
+  let _=test.check(suite,warning_ink(state,footer)>0,"Parse refusal paints before correction")
+  let cancelled:string=transaction(state)
+  let _=input.key(state,widgets.key_escape(),false,false)
+  let _=test.check(suite,not app.prompt_active(state),"Escape dismisses refused draft")
+  let _=test.eq_str(suite,transaction(state),cancelled,"Cancellation never edits history")
+  let _=click_property(state,chrome.act_transition_duration(),"")
+  let _=test.check(suite,warning_ink(state,footer)==0 and warning_ink(state,status)==0,"New duration draft has no stale feedback")
+  let _=input.key(state,widgets.key_escape(),false,false)
+  let title:commands.Result=commands.add_filter(state,app.current_clip(state),"text")
+  let _=commands.set_filter_text_param(state,title.value,"content","é")
+  let title_before:string=encoded(struct.borrow(state,field=document))
+  let title_depth:u64=editor.undo_depth(struct.borrow(state,field=history))
+  app.set_status(state,str.view(refused))
+  app.begin_filter_prompt(state,chrome.act_filter_value(),"Title text","é",title.value)
+  let title_panel:layout.Rect=painter.prompt_bounds(state,1600.0,1400.0)
+  let title_footer:layout.Rect=layout.rect(title_panel.left+18.0,title_panel.bottom-32.0,title_panel.right-18.0,title_panel.bottom-8.0)
+  let _=test.check(suite,warning_ink(state,title_footer)==0 and warning_ink(state,status)==0,"Fresh Unicode title does not inherit global or prior draft error")
+  let _=input.key(state,widgets.key_return(),false,true)
+  let _=input.text(state,13)
+  let _=input.text(state,26481)
+  let _=input.text(state,20140)
+  let _=test.eq_str(suite,app.prompt_text(state),"é\n東京","Unicode and ShiftEnter/WM_CHAR semantics remain exact")
+  let _=test.eq_str(suite,input.key(state,widgets.key_return(),false,false),"text parameter set","Unicode title commits normally")
+  let _=test.eq_u64(suite,editor.undo_depth(struct.borrow(state,field=history)),title_depth+1,"Unicode title still has one Undo")
+  let title_after:string=encoded(struct.borrow(state,field=document))
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),title_before,"Unicode title Undo restores original text")
+  let _=commands.redo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),title_after,"Unicode title Redo restores authored multiline content")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"transition-controls-tests.json"),12)
+}

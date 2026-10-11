@@ -464,6 +464,52 @@ fn paint_thumbnails(canvas: ref<draw.Canvas>, state: ref<app.App>, model: ref<ti
   ()
 }
 
+fn transition_box(state:ref<app.App>,area:layout.Rect,model:ref<timeline.Timeline>,id:u64) -> option<layout.Rect> effects {} {
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let value:editor.Transition=match editor.transition(doc,id) {none=>{return option.none()},some(value)=>value,}
+  if value.owner!=doc.active or value.duration<2 or value.center<value.duration/2 or
+      value.center>9223372036854775807-(value.duration-value.duration/2) {return option.none()}
+  var lane:u64=0
+  loop {if lane>=array.len(struct.borrow(model,field=tracks)) {return option.none()}
+    if struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=id)==value.track {break}
+    lane=lane+1}
+  let center:f64=timeline.frame_to_x(model,value.center)
+  let left:f64=math.max(area.left,math.min(timeline.frame_to_x(model,editor.transition_start(value)),center-7.0))
+  let right:f64=math.min(area.right,math.max(timeline.frame_to_x(model,editor.transition_end(value)),center+7.0))
+  let top:f64=math.max(area.top,timeline.track_top(model,lane)+4.0)
+  let bottom:f64=math.min(area.bottom,timeline.track_top(model,lane)+18.0)
+  if right<=left or bottom<=top {return option.none()}
+  option.some(layout.rect(left,top,right,bottom))
+}
+pub fn transition_bounds(state:ref<app.App>,area:layout.Rect,id:u64) -> option<layout.Rect> effects {alloc} {
+  var model:timeline.Timeline=timeline_model(state,area)
+  transition_box(state,area,model,id)
+}
+pub fn transition_hit(state:ref<app.App>,area:layout.Rect,x:f64,y:f64) -> option<u64> effects {alloc} {
+  var model:timeline.Timeline=timeline_model(state,area)
+  var i:u64=0
+  loop {if i>=editor.transition_count(struct.borrow(state,field=document)) {break}
+    let value:editor.Transition=array.get(struct.borrow(struct.borrow(state,field=document),field=transitions),i)
+    match transition_box(state,area,model,value.id) {
+      none=>{},some(box)=>if layout.contains(box,x,y) {return option.some(value.id)},
+    }
+    i=i+1}
+  option.none()
+}
+fn paint_transition_badges(canvas:ref<draw.Canvas>,colors:Theme,state:ref<app.App>,area:layout.Rect,model:ref<timeline.Timeline>) -> unit effects {alloc} {
+  var i:u64=0
+  loop {if i>=editor.transition_count(struct.borrow(state,field=document)) {break}
+    let value:editor.Transition=array.get(struct.borrow(struct.borrow(state,field=document),field=transitions),i)
+    match transition_box(state,area,model,value.id) {
+      none=>{},some(box)=>{
+        fill(canvas,box,if app.current_transition(state)==value.id {colors.focus}else{colors.panel_head})
+        outline(canvas,box,colors.focus)
+        if layout.width_of(box)>=14.0 {label(canvas,struct.borrow(state,field=typography),box.left+3.0,box.top+1.0,"T",10.0,colors.text)}
+      },
+    }
+    i=i+1}
+  ()
+}
 fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                   area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
   fill(canvas, area, colors.timeline)
@@ -482,6 +528,7 @@ fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   let document: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = document.active
   editor_view.paint_transitions(document, canvas, colours, model, sequence)
+  paint_transition_badges(canvas,colors,state,area,model)
   draw.restore(canvas, saved)
   outline(canvas, area, colors.edge)
   ()
@@ -493,6 +540,14 @@ fn paint_status(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   // Mirror the centered prompt in the status line so its current value stays visible.
   if app.prompt_active(state) {
     fill(canvas, area, colors.prompt)
+    let feedback:string=app.prompt_feedback(state)
+    if str.len(str.view(feedback))!=0 {
+      let saved:draw.State=draw.state(canvas)
+      match geometry.rect(area.left+8.0,area.top,area.right-8.0,area.bottom) {none=>{},some(box)=>{let _=draw.clip_rect(canvas,box)},}
+      label(canvas,struct.borrow(state,field=typography),area.left+8.0,area.top+6.0,str.view(feedback),type_title(),colors.warn)
+      draw.restore(canvas,saved)
+      return ()
+    }
     var asking: string = app.prompt_label(state)
     string.append(asking, ":  ")
     string.append(asking, str.view(app.prompt_text(state)))
@@ -607,6 +662,14 @@ fn paint_prompt(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     row=row+1
   }
   draw.restore(canvas,saved)
+  let feedback:string=app.prompt_feedback(state)
+  if str.len(str.view(feedback))!=0 {
+    let footer_saved:draw.State=draw.state(canvas)
+    match geometry.rect(box.left+18.0,box.bottom-32.0,box.right-18.0,box.bottom-8.0) {none=>{},some(area)=>{let _=draw.clip_rect(canvas,area)},}
+    label(canvas,struct.borrow(state,field=typography),box.left+18.0,box.bottom-28.0,str.view(feedback),type_small(),colors.warn)
+    draw.restore(canvas,footer_saved)
+    return ()
+  }
   label(canvas, struct.borrow(state, field=typography), box.left + 18.0, box.bottom - 28.0,
     if multiline {"Shift+Enter: new line    Enter: accept    Escape: cancel"}else{"Enter to accept    Escape to cancel"}, type_small(), colors.dim)
   ()

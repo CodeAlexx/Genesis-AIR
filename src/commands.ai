@@ -62,6 +62,7 @@ pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> un
   struct.set(state, app.viewport(), field=viewport)
   app.set_pool_row(state, 0)
   app.set_selected_filter(state, 0)
+  app.set_selected_transition(state,0)
   let _ = app.set_dock_scroll(state, 0.0)
   app.end_parameter_drag(state)
   app.end_gesture(state)
@@ -738,6 +739,7 @@ pub fn select_only(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
   if not editor.select_only(struct.borrow(state, field=document), clip) {
     return refused("no such clip")
   }
+  app.set_selected_transition(state,0)
   done("selected", clip)
 }
 pub fn add_to_selection(state: ref<app.App>, clip: u64) -> Result effects {alloc} {
@@ -748,6 +750,7 @@ pub fn add_to_selection(state: ref<app.App>, clip: u64) -> Result effects {alloc
 }
 pub fn clear_selection(state: ref<app.App>) -> Result effects {alloc} {
   editor.clear_selection(struct.borrow(state, field=document))
+  app.set_selected_transition(state,0)
   done("selection cleared", 0)
 }
 
@@ -815,27 +818,158 @@ pub fn move_group(state: ref<app.App>, group: u64, delta: i64) -> Result effects
 // ---------------------------------------------------------------------------
 // Transitions, fades, keyframes, markers, subtitles
 
+pub fn transition_kind_supported(kind:str) -> bool effects {} {
+  str.eq(kind,"crossfade") or str.eq(kind,"wipe_lr") or str.eq(kind,"wipe_rl") or
+    str.eq(kind,"wipe_up") or str.eq(kind,"wipe_down") or str.eq(kind,"slide_lr") or
+    str.eq(kind,"zoom") or str.eq(kind,"dissolve") or str.eq(kind,"iris") or
+    str.eq(kind,"clock") or str.eq(kind,"barn_door")
+}
+fn transition_track_problem(doc:ref<editor.Document>,track:u64) -> string effects {alloc} {
+  let slot:u64=match editor.track_slot(doc,track) {none=>{return string.copy("[GA_TRANSITION_TARGET] Transition track is missing")},some(value)=>value,}
+  let value:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),slot)
+  if value.owner!=doc.active or value.kind!=editor.track_video() {return string.copy("[GA_TRANSITION_TARGET] Select a video boundary in the active sequence")}
+  if value.locked {return string.copy("[GA_TRANSITION_LOCKED] Transition track is locked")}
+  string.new()
+}
+// Model boundaries are authoritative. Geometry is checked before invoking their
+// unchecked integer helpers, and supported base-lane rendering is checked over
+// the entire authored window rather than just its center.
+pub fn transition_problem(doc:ref<editor.Document>,track:u64,center:i64,duration:i64,kind:str,ignore:u64) -> string effects {alloc} {
+  let track_problem:string=transition_track_problem(doc,track)
+  if str.len(str.view(track_problem))!=0 {return track_problem}
+  if not editor.track_visible(doc,track) {return string.copy("[GA_TRANSITION_TARGET] Transition track is hidden")}
+  if not transition_kind_supported(kind) {return string.copy("[GA_TRANSITION_KIND] Unsupported transition type")}
+  if duration<2 or center<0 or center<duration/2 or center>9223372036854775807-(duration-duration/2) {
+    return string.copy("[GA_TRANSITION_DURATION] Duration must be at least two frames with a representable window")
+  }
+  var i:u64=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let value:editor.Clip=array.get(struct.borrow(doc,field=clips),i)
+    if (value.owner==doc.active or value.track==track) and (value.start<0 or value.length<1 or value.start>9223372036854775807-value.length) {
+      return string.copy("[GA_TRANSITION_RANGE] A timeline clip has invalid geometry")
+    }
+    i=i+1}
+  let pair:editor.Boundary=match editor.boundary_at(doc,track,center) {
+    none=>{return string.copy("[GA_TRANSITION_BOUNDARY] No adjacent video boundary exists here")},some(value)=>value,
+  }
+  let a:editor.Clip=option.unwrap(editor.clip(doc,pair.outgoing))
+  let b:editor.Clip=option.unwrap(editor.clip(doc,pair.incoming))
+  if a.owner!=doc.active or b.owner!=doc.active or not a.enabled or not b.enabled or not editor.clip_has_video(a) or not editor.clip_has_video(b) {
+    return string.copy("[GA_TRANSITION_BOUNDARY] Both boundary clips must have enabled video")
+  }
+  if not timeline_media.transition_incoming_edits_supported(doc,b) {
+    return string.copy("[GA_TRANSITION_INCOMING] The incoming clip uses an unsupported transition edit")
+  }
+  let start:i64=center-duration/2
+  let end:i64=start+duration
+  if start<a.start or end>editor.clip_end(b) {return string.copy("[GA_TRANSITION_DURATION] Transition window extends outside its adjacent clips")}
+  let chosen_slot:u64=option.unwrap(editor.track_slot(doc,track))
+  let chosen:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),chosen_slot)
+  let chosen_order:u32=chosen.order
+  let chosen_id:u64=chosen.id
+  i=0
+  loop {if i>=editor.clip_count(doc) {break}
+    let value:editor.Clip=array.get(struct.borrow(doc,field=clips),i)
+    i=i+1
+    if value.owner!=doc.active or value.track==track or not value.enabled or not editor.clip_has_video(value) {continue}
+    let slot:u64=match editor.track_slot(doc,value.track) {none=>{continue},some(value)=>value,}
+    let lane:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),slot)
+    let lane_kind:u32=lane.kind
+    let lane_order:u32=lane.order
+    let lane_id:u64=lane.id
+    if lane_kind==editor.track_video() and editor.track_visible(doc,lane_id) and
+        (lane_order<chosen_order or (lane_order==chosen_order and lane_id<chosen_id)) and
+        value.start<end and editor.clip_end(value)>start {
+      return string.copy("[GA_TRANSITION_BASE] A visible lower video clip overlaps this transition window")
+    }
+  }
+  i=0
+  loop {if i>=editor.transition_count(doc) {break}
+    let value:editor.Transition=array.get(struct.borrow(doc,field=transitions),i)
+    i=i+1
+    if value.id==ignore or value.owner!=doc.active {continue}
+    if value.duration<2 or value.center<value.duration/2 or value.center>9223372036854775807-(value.duration-value.duration/2) {
+      return string.copy("[GA_TRANSITION_RANGE] An existing transition window is invalid")
+    }
+    if value.track!=track {
+      let slot:u64=match editor.track_slot(doc,value.track) {none=>{continue},some(value)=>value,}
+      let lower:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),slot)
+      let lower_id:u64=lower.id
+      let lower_order:u32=lower.order
+      let lower_kind:u32=lower.kind
+      if lower_kind!=editor.track_video() or not editor.track_visible(doc,lower_id) or
+          not (lower_order<chosen_order or (lower_order==chosen_order and lower_id<chosen_id)) or
+          editor.transition_start(value)>=end or editor.transition_end(value)<=start {continue}
+      match editor.boundary_at(doc,lower_id,value.center) {
+        none=>{},some(boundary)=>{
+          let outgoing:editor.Clip=option.unwrap(editor.clip(doc,boundary.outgoing))
+          let incoming:editor.Clip=option.unwrap(editor.clip(doc,boundary.incoming))
+          if outgoing.owner==doc.active and incoming.owner==doc.active and outgoing.enabled and incoming.enabled and
+              editor.clip_has_video(outgoing) and editor.clip_has_video(incoming) {
+            return string.copy("[GA_TRANSITION_BASE] A visible lower transition overlaps this transition window")
+          }
+        },
+      }
+      continue
+    }
+    if editor.transition_start(value)<end and editor.transition_end(value)>start {
+      return string.copy("[GA_TRANSITION_OVERLAP] Transition windows may not overlap on one track")
+    }
+  }
+  string.new()
+}
 pub fn add_transition(state: ref<app.App>, track: u64, centre: i64, duration: i64,
                       kind: str) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  let id: u64 = editor.add_transition(struct.borrow(state, field=document), track, centre,
-    duration, kind)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  var existing:u64=0
+  var i:u64=0
+  loop {if i>=editor.transition_count(doc) {break}
+    let value:editor.Transition=array.get(struct.borrow(doc,field=transitions),i)
+    if value.track==track and value.center==centre {existing=value.id
+      break}
+    i=i+1}
+  let problem:string=transition_problem(doc,track,centre,duration,kind,existing)
+  if str.len(str.view(problem))!=0 {return refused(str.view(problem))}
+  if existing!=0 {
+    let value:editor.Transition=option.unwrap(editor.transition(doc,existing))
+    if value.owner!=doc.active {return refused("[GA_TRANSITION_TARGET] Transition is outside the active sequence")}
+    if value.duration==duration and str.eq(str.view(editor.name_text(doc,value.kind)),kind) {
+      return done("[GA_TRANSITION_NO_CHANGE] Transition unchanged",existing)
+    }
+  } else if doc.next_id==18446744073709551615 {return refused("[GA_TRANSITION_CAPACITY] Transition identity space is exhausted")}
+  var candidate:editor.Document=editor.copy_document(doc)
+  let id:u64=editor.add_transition(candidate,track,centre,duration,kind)
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
+  app.set_selected_transition(state,id)
   app.document_changed(state)
   done("transition added", id)
 }
 pub fn set_transition_duration(state: ref<app.App>, transition: u64, duration: i64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.set_transition_duration(struct.borrow(state, field=document), transition, duration) {
-    return refused("no such transition")
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let value:editor.Transition=match editor.transition(doc,transition) {none=>{return refused("[GA_TRANSITION_TARGET] Transition no longer exists")},some(value)=>value,}
+  let kind:string=editor.name_text(doc,value.kind)
+  var changed:Result=add_transition(state,value.track,value.center,duration,str.view(kind))
+  if changed.ok and not str.eq(str.view(struct.borrow(changed,field=message)),"[GA_TRANSITION_NO_CHANGE] Transition unchanged") {
+    let _=ref.swap(struct.borrow(changed,field=message),string.copy("transition resized"))
   }
-  app.document_changed(state)
-  done("transition resized", transition)
+  changed
+}
+pub fn set_transition_kind(state:ref<app.App>,transition:u64,kind:str) -> Result effects {alloc} {
+  let value:editor.Transition=match editor.transition(struct.borrow(state,field=document),transition) {none=>{return refused("[GA_TRANSITION_TARGET] Transition no longer exists")},some(value)=>value,}
+  add_transition(state,value.track,value.center,value.duration,kind)
 }
 pub fn remove_transition(state: ref<app.App>, transition: u64) -> Result effects {alloc} {
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.remove_transition(struct.borrow(state, field=document), transition) {
-    return refused("no such transition")
-  }
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let value:editor.Transition=match editor.transition(doc,transition) {none=>{return refused("[GA_TRANSITION_TARGET] Transition no longer exists")},some(value)=>value,}
+  let problem:string=transition_track_problem(doc,value.track)
+  if value.owner!=doc.active {return refused("[GA_TRANSITION_TARGET] Transition is outside the active sequence")}
+  if str.len(str.view(problem))!=0 {return refused(str.view(problem))}
+  var candidate:editor.Document=editor.copy_document(doc)
+  let _=editor.remove_transition(candidate,transition)
+  editor.capture(struct.borrow(state,field=history),doc)
+  let _=struct.replace(state,candidate,field=document)
+  if state.selected_transition==transition {app.set_selected_transition(state,0)}
   app.document_changed(state)
   done("transition removed", transition)
 }
@@ -896,60 +1030,71 @@ fn paired_speed_key(doc:ref<editor.Document>,clip:u64,param:str) -> bool effects
 }
 pub fn add_filter(state: ref<app.App>, clip: u64, kind: str) -> Result effects {alloc} {
   if str.eq(kind,"speed") and linked_media.mate(struct.borrow(state,field=document),clip)!=0 {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  match editor.add_filter(struct.borrow(state, field=document), clip, kind) {
-    some(id) => { app.set_selected_filter(state, id)
-      app.document_changed(state)
+  if not option.is_some(editor.clip(struct.borrow(state,field=document),clip)) {return refused("no such clip")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  match editor.add_filter(candidate, clip, kind) {
+    some(id) => {
+      if not commit_filter_candidate(state,candidate) {return refused("[GA_AUDIO_CONTEXT] Filter is incompatible with retained audio processing history")}
+      app.set_selected_filter(state, id)
       done("filter added", id) },
-    none => refused("no such clip"),
+    none => refused("[GA_AUDIO_CONTEXT] Filter is incompatible with retained audio processing history"),
   }
+}
+// A refusal must preserve the document, every Undo/Redo snapshot and selection.
+// Successful identity writes also leave history/revision untouched.
+fn commit_filter_candidate(state:ref<app.App>,candidate:ref<editor.Document>) -> bool effects {alloc} {
+  var i:u64=0
+  loop {if i>=editor.clip_count(candidate) {break}
+    if not editor.audio_context_valid(candidate,option.unwrap(editor.clip_at(candidate,i))) {return false}
+    i=i+1}
+  if trim_unchanged(struct.borrow(state,field=document),candidate) {return true}
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=ref.swap(struct.borrow(state,field=document),editor.copy_document(candidate))
+  app.document_changed(state)
+  true
 }
 pub fn remove_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
   if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.remove_filter(struct.borrow(state, field=document), filter) {
-    return refused("no such filter")
-  }
+  if not option.is_some(editor.filter_slot(struct.borrow(state,field=document),filter)) {return refused("no such filter")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  if not editor.remove_filter(candidate, filter) or not commit_filter_candidate(state,candidate) {
+    return refused("[GA_AUDIO_CONTEXT] Filter removal is incompatible with retained audio processing history")}
   if app.selected_filter(state) == filter { app.set_selected_filter(state, 0) }
-  app.document_changed(state)
   done("filter removed", filter)
 }
 pub fn toggle_filter(state: ref<app.App>, filter: u64) -> Result effects {alloc} {
   if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
+  if not option.is_some(editor.filter_slot(struct.borrow(state,field=document),filter)) {return refused("no such filter")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
   let now: bool = editor.filter_enabled(struct.borrow(state, field=document), filter)
-  if not editor.set_filter_enabled(struct.borrow(state, field=document), filter, not now) {
-    return refused("no such filter")
-  }
-  app.document_changed(state)
+  if not editor.set_filter_enabled(candidate, filter, not now) or not commit_filter_candidate(state,candidate) {
+    return refused("[GA_AUDIO_CONTEXT] Filter state is incompatible with retained audio processing history")}
   done(if now { "filter disabled" } else { "filter enabled" }, filter)
 }
 pub fn reorder_filter(state: ref<app.App>, filter: u64, position: u32) -> Result effects {alloc} {
   if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.reorder_filter(struct.borrow(state, field=document), filter, position) {
-    return refused("no such filter")
-  }
-  app.document_changed(state)
+  if not option.is_some(editor.filter_slot(struct.borrow(state,field=document),filter)) {return refused("no such filter")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  if not editor.reorder_filter(candidate, filter, position) or not commit_filter_candidate(state,candidate) {
+    return refused("[GA_AUDIO_CONTEXT] Filter order is incompatible with retained audio processing history")}
   done("filter reordered", filter)
 }
 pub fn set_filter_param(state: ref<app.App>, filter: u64, name: str, value: f64) -> Result effects {alloc} {
   if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.set_filter_param(struct.borrow(state, field=document), filter, name, value) {
-    return refused("no such filter")
-  }
-  app.document_changed(state)
+  if not option.is_some(editor.filter_slot(struct.borrow(state,field=document),filter)) {return refused("no such filter")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  if not editor.set_filter_param(candidate, filter, name, value) or not commit_filter_candidate(state,candidate) {
+    return refused("[GA_AUDIO_CONTEXT] Parameter is incompatible with retained audio processing history")}
   done("parameter set", filter)
 }
 
 pub fn set_filter_text_param(state: ref<app.App>, filter: u64, name: str, value: str)
                              -> Result effects {alloc} {
   if paired_speed_filter(struct.borrow(state,field=document),filter) {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
-  editor.capture(struct.borrow(state, field=history), struct.borrow(state, field=document))
-  if not editor.set_filter_text_param(struct.borrow(state, field=document), filter,
-    name, value) { return refused("no such filter") }
-  app.document_changed(state)
+  if not option.is_some(editor.filter_slot(struct.borrow(state,field=document),filter)) {return refused("no such filter")}
+  var candidate:editor.Document=editor.copy_document(struct.borrow(state,field=document))
+  if not editor.set_filter_text_param(candidate, filter, name, value) or not commit_filter_candidate(state,candidate) {
+    return refused("[GA_AUDIO_CONTEXT] Text parameter is incompatible with retained audio processing history")}
   done("text parameter set", filter)
 }
 
@@ -1305,7 +1450,7 @@ pub fn set_parameter(state:ref<app.App>,domain:u32,target:u64,kind:str,name:str,
   if domain==2 and filter==0 {
     if str.eq(kind,"speed") and linked_media.mate(candidate,clip)!=0 {return refused("[GA_LINKED_SPEED] Linked rate filters cannot be edited independently")}
     filter=filter_of_kind(candidate,clip,kind)
-    if filter==0 {filter=match editor.add_filter(candidate,clip,kind) {none=>{return refused("no such clip")},some(id)=>id,}}
+    if filter==0 {filter=match editor.add_filter(candidate,clip,kind) {none=>{return refused("[GA_AUDIO_CONTEXT] Filter is incompatible with retained audio processing history")},some(id)=>id,}}
   }
   let outcome:Result=update_parameter_document(candidate,domain,filter,name,value)
   if not outcome.ok {return outcome}
@@ -1649,9 +1794,56 @@ pub fn transition_at_playhead(state: ref<app.App>, duration: i64) -> Result effe
   let clip: u64 = app.current_clip(state)
   if clip == 0 { return refused("select a clip beside the cut first") }
   let document: ref<editor.Document> = struct.borrow(state, field=document)
-  match editor.clip(document, clip) {
-    none => refused("no such clip"),
-    some(value) => { add_transition(state, value.track, editor.clip_end(value), duration,
-      "dissolve") },
+  let value:editor.Clip=match editor.clip(document,clip) {none=>{return refused("[GA_TRANSITION_TARGET] Selected clip is missing")},some(value)=>value,}
+  let problem:string=transition_track_problem(document,value.track)
+  if str.len(str.view(problem))!=0 {return refused(str.view(problem))}
+  // Guard boundary_pairs' arithmetic even for a malformed loaded document.
+  var i:u64=0
+  loop {if i>=editor.clip_count(document) {break}
+    let item:editor.Clip=array.get(struct.borrow(document,field=clips),i)
+    if item.track==value.track and (item.start<0 or item.length<1 or item.start>9223372036854775807-item.length) {
+      return refused("[GA_TRANSITION_RANGE] A timeline clip has invalid geometry")
+    }
+    i=i+1}
+  var pairs:array<editor.Boundary> =editor.boundary_pairs(document,value.track)
+  let wanted:i64=editor.playhead(document)
+  if wanted<0 {return refused("[GA_TRANSITION_RANGE] The playhead is outside the timeline")}
+  var best:i64=-1
+  var distance:i64=9223372036854775807
+  i=0
+  loop {if i>=array.len(pairs) {break}
+    let pair:editor.Boundary=array.get(pairs,i)
+    i=i+1
+    // Existing seams retain their own type/window. Validate that actual edit
+    // instead of the new-seam default, without letting unsupported legacy
+    // seams bypass the toolbar's supported-boundary policy.
+    var existing:u64=0
+    var j:u64=0
+    loop {if j>=editor.transition_count(document) {break}
+      let seam:editor.Transition=array.get(struct.borrow(document,field=transitions),j)
+      if seam.owner==document.active and seam.track==value.track and seam.center==pair.center {existing=seam.id
+        break}
+      j=j+1}
+    let error:string=if existing==0 {transition_problem(document,value.track,pair.center,duration,"dissolve",0)}else{
+      let seam:editor.Transition=option.unwrap(editor.transition(document,existing))
+      let kind:string=editor.name_text(document,seam.kind)
+      transition_problem(document,value.track,pair.center,seam.duration,str.view(kind),existing)
+    }
+    if str.len(str.view(error))!=0 {continue}
+    let gap:i64=if pair.center>=wanted {pair.center-wanted}else{wanted-pair.center}
+    if gap<distance or (gap==distance and (best<0 or pair.center<best)) {distance=gap
+      best=pair.center}
   }
+  if best<0 {return refused("[GA_TRANSITION_BOUNDARY] No supported video boundary is available")}
+  var selected_id:u64=0
+  i=0
+  loop {if i>=editor.transition_count(document) {break}
+    let seam:editor.Transition=array.get(struct.borrow(document,field=transitions),i)
+    if seam.owner==document.active and seam.track==value.track and seam.center==best {selected_id=seam.id
+      break}
+    i=i+1}
+  let track:u64=value.track
+  if selected_id!=0 {app.set_selected_transition(state,selected_id)
+    return done("transition selected",selected_id)}
+  add_transition(state,track,best,duration,"dissolve")
 }

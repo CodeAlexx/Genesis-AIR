@@ -78,10 +78,11 @@ pub fn drag() -> Drag effects {} {
 
 
 // A modal draft owns its opening target; selection is independent view state.
-pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string,
+pub type Prompt = struct { active: bool, action: u32, label: string, buffer: string, feedback: string,
   caret:u64,anchor:u64,first_row:u64,scroll_x:f64,goal_x:f64,dragging:bool,
   target_filter:u64,target_clip:u64,target_sequence:u64,target_project:u64,
-  target_kind:string,original:string,multiline:bool }
+  target_kind:string,original:string,multiline:bool,
+  target_transition:u64,target_track:u64,target_center:i64,target_duration:i64 }
 
 // A deferred project replacement belongs to the session, never to the document.
 pub type ProjectAction = enum { None, New, Open, Recover, Close }
@@ -115,6 +116,8 @@ pub type App = struct {
   hover_target: u64,
   pool_row: u64,
   selected_filter: u64,
+  selected_transition: u64,
+  selected_transition_epoch: u64,
   dock_tab: u32,
   dock_scroll: f64,
   dock_scroll_dragging: bool,
@@ -172,15 +175,16 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
   let _ = editor.add_track(document, sequence, editor.track_video(), "V2")
   App {document: document, history: editor.history(64), provider: engine,
     viewport: viewport(), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
-    pool_row: 0, selected_filter: 0,
+    pool_row: 0, selected_filter: 0, selected_transition:0, selected_transition_epoch:0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
     clipboard: option.none(), clipboard_peer:option.none(), clipboard_resource_valid: false,
     gesture: drag(),
-    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(),
+    prompt: Prompt {active: false, action: 0, label: string.new(), buffer: string.new(), feedback: string.new(),
       caret:0,anchor:0,first_row:0,scroll_x:0.0,goal_x:-1.0,dragging:false,
       target_filter:0,target_clip:0,target_sequence:0,target_project:0,
-      target_kind:string.new(),original:string.new(),multiline:false},
+      target_kind:string.new(),original:string.new(),multiline:false,
+      target_transition:0,target_track:0,target_center:0,target_duration:0},
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     recovery_lease: option.none(), recovered_lease: option.none(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
@@ -230,6 +234,7 @@ pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
 // Saving, repainting and following the heard clock do not change this revision.
 pub fn document_changed(state: ref<App>) -> unit effects {} {
   refresh_clipboard_resource(state)
+  if state.selected_transition!=0 and current_transition(state)==0 {set_selected_transition(state,0)}
   struct.set(state,state.document_revision+1,field=document_revision)
   struct.set(state,true,field=dirty)
   ()
@@ -333,6 +338,17 @@ pub fn set_pool_row(state: ref<App>, value: u64) -> unit effects {} {
 pub fn selected_filter(state: ref<App>) -> u64 effects {} { state.selected_filter }
 pub fn set_selected_filter(state: ref<App>, value: u64) -> unit effects {} {
   struct.set(state, value, field=selected_filter)
+  ()
+}
+pub fn current_transition(state:ref<App>) -> u64 effects {} {
+  if state.selected_transition_epoch!=state.project_epoch {return 0}
+  match editor.transition(struct.borrow(state,field=document),state.selected_transition) {
+    none=>0,some(value)=>if value.owner==state.document.active {value.id}else{0},
+  }
+}
+pub fn set_selected_transition(state:ref<App>,id:u64) -> unit effects {} {
+  struct.set(state,id,field=selected_transition)
+  struct.set(state,state.project_epoch,field=selected_transition_epoch)
   ()
 }
 // ---- dock, snapping and the clipboard --------------------------------------
@@ -493,6 +509,14 @@ pub fn prompt_label(state: ref<App>) -> string effects {alloc} {
 pub fn prompt_text(state: ref<App>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(struct.borrow(state, field=prompt), field=buffer)))
 }
+pub fn prompt_feedback(state: ref<App>) -> string effects {alloc} {
+  string.copy(str.view(struct.borrow(struct.borrow(state, field=prompt), field=feedback)))
+}
+pub fn set_prompt_feedback(state: ref<App>, value: str) -> unit effects {alloc} {
+  if not prompt_active(state) {return ()}
+  let _=ref.swap(struct.borrow(struct.borrow(state,field=prompt),field=feedback),string.copy(value))
+  ()
+}
 pub fn prompt_selected_all(state: ref<App>) -> bool effects {} {
   let asking:ref<Prompt> =struct.borrow(state,field=prompt)
   str.len(str.view(struct.borrow(asking,field=buffer)))>0 and
@@ -526,12 +550,15 @@ pub fn begin_prompt(state: ref<App>, action: u32, label: str, seed: str) -> unit
   struct.set(asking,0,field=target_filter)
   struct.set(asking,0,field=target_clip)
   struct.set(asking,0,field=target_sequence)
+  struct.set(asking,0,field=target_transition)
+  struct.set(asking,0,field=target_track)
   struct.set(asking,state.project_epoch,field=target_project)
   struct.set(asking,false,field=multiline)
   let _=ref.swap(struct.borrow(asking,field=target_kind),string.new())
   let _=ref.swap(struct.borrow(asking,field=original),string.copy(seed))
   let _ = ref.swap(struct.borrow(asking, field=label), string.copy(label))
   let _ = ref.swap(struct.borrow(asking, field=buffer), string.copy(seed))
+  let _ = ref.swap(struct.borrow(asking, field=feedback), string.new())
   ()
 }
 pub fn begin_filter_prompt(state:ref<App>,action:u32,label:str,seed:str,filter:u64) -> unit effects {alloc} {
@@ -559,6 +586,32 @@ pub fn prompt_multiline(state:ref<App>) -> bool effects {} {
 }
 pub fn prompt_filter(state:ref<App>) -> u64 effects {} {
   struct.get(struct.borrow(state,field=prompt),field=target_filter)
+}
+pub fn begin_transition_prompt(state:ref<App>,action:u32,id:u64) -> bool effects {alloc} {
+  let value:editor.Transition=match editor.transition(struct.borrow(state,field=document),id) {
+    none=>{return false},some(value)=>value,
+  }
+  begin_prompt(state,action,"Transition duration (frames)",str.view(string.from_int(value.duration)))
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  struct.set(asking,id,field=target_transition)
+  struct.set(asking,value.owner,field=target_sequence)
+  struct.set(asking,value.track,field=target_track)
+  struct.set(asking,value.center,field=target_center)
+  struct.set(asking,value.duration,field=target_duration)
+  let _=ref.swap(struct.borrow(asking,field=target_kind),editor.name_text(struct.borrow(state,field=document),value.kind))
+  true
+}
+pub fn prompt_transition(state:ref<App>) -> u64 effects {} {state.prompt.target_transition}
+pub fn prompt_transition_valid(state:ref<App>) -> bool effects {alloc} {
+  let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  if asking.target_project!=state.project_epoch or asking.target_transition==0 {return false}
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  match editor.transition(doc,asking.target_transition) {
+    none=>false,some(value)=>value.owner==asking.target_sequence and value.owner==doc.active and
+      value.track==asking.target_track and value.center==asking.target_center and
+      value.duration==asking.target_duration and
+      str.eq(str.view(editor.name_text(doc,value.kind)),str.view(struct.borrow(asking,field=target_kind))),
+  }
 }
 pub fn prompt_target_valid(state:ref<App>) -> bool effects {alloc} {
   let asking:ref<Prompt> =struct.borrow(state,field=prompt)
@@ -626,6 +679,7 @@ fn prompt_replace(state:ref<App>,insert:str) -> unit effects {alloc} {
   let start:u64=font.cluster_start(str.view(built),boundary)
   let at:u64=if start==boundary {boundary}else{font.cluster_end(str.view(built),start)}
   let asking:ref<Prompt> =struct.borrow(state,field=prompt)
+  if not str.eq(str.view(current),str.view(built)) {let _=ref.swap(struct.borrow(asking,field=feedback),string.new())}
   let _=ref.swap(struct.borrow(asking,field=buffer),built)
   struct.set(asking,at,field=caret)
   struct.set(asking,at,field=anchor)
@@ -739,6 +793,7 @@ pub fn end_prompt(state: ref<App>) -> unit effects {alloc} {
   let _=ref.swap(struct.borrow(asking,field=target_kind),string.new())
   let _=ref.swap(struct.borrow(asking,field=original),string.new())
   let _ = ref.swap(struct.borrow(asking, field=buffer), string.new())
+  let _ = ref.swap(struct.borrow(asking, field=feedback), string.new())
   ()
 }
 

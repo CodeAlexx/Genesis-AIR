@@ -1,8 +1,7 @@
 diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
-index 25f4555..b6f8a0b 100644
 --- a/stdlib/editor_io.ai
 +++ b/stdlib/editor_io.ai
-@@ -15,10 +15,11 @@ module std.editor_io
+@@ -15,10 +15,11 @@
  import std.codec as codec
  import std.editor as editor
  import std.json as json
@@ -11,11 +10,11 @@ index 25f4555..b6f8a0b 100644
  // The document format this build writes and the only revision it reads.
  pub fn schema_name() -> string effects {alloc} { string.copy("air.editor.project") }
 -pub fn schema_revision() -> u64 effects {} { 2 }
-+pub fn schema_revision() -> u64 effects {} { 3 }
++pub fn schema_revision() -> u64 effects {} { 4 }
  
  fn write_source(w: ref<codec.Writer>, entry: ref<editor.Source>) -> unit effects {alloc} {
    codec.begin_object(w)
-@@ -58,6 +59,21 @@ fn write_clip(w: ref<codec.Writer>, value: editor.Clip) -> unit effects {alloc}
+@@ -58,6 +59,29 @@
    codec.field_f64(w, "pan", value.pan)
    codec.field_f64(w, "speed", value.speed)
    codec.field_bool(w, "reverse", value.reverse)
@@ -32,12 +31,20 @@ index 25f4555..b6f8a0b 100644
 +    codec.field_i64(w,"origin",ctx.origin)
 +    codec.field_u64(w,"crop_start",ctx.crop_start)
 +    codec.field_u64(w,"output_frames",ctx.output_frames)
++    match ctx.extent {none=>{},some(extent)=>{
++      codec.key(w,"extent")
++      codec.begin_object(w)
++      codec.field_u64(w,"input_duration_us",extent.input_duration_us)
++      codec.field_i64(w,"processing_length",extent.processing_length)
++      codec.field_u64(w,"processing_frames",extent.processing_frames)
++      codec.end_object(w)
++    },}
 +    codec.end_object(w)
 +  },}
    codec.end_object(w)
    ()
  }
-@@ -79,10 +95,25 @@ fn write_transport(w: ref<codec.Writer>, name: str, value: editor.Transport) ->
+@@ -79,10 +103,26 @@
  // writer's own state machine, so a structural mistake is an error here rather than text that
  // fails to parse later.
  pub fn encode(doc: ref<editor.Document>) -> result<string, codec.Error> effects {alloc} {
@@ -52,7 +59,8 @@ index 25f4555..b6f8a0b 100644
 +    if option.is_some(value.audio_context) {
 +      if not editor.audio_context_valid(doc,value) {return result.err(codec.error(codec.Code.Range,
 +        text.concat("/clips/",text.concat(string.from_int(stream_at),"/audio_context")),"valid complete audio processing context","invalid geometry or sample phase"))}
-+      revision=3
++      if revision < 3 {revision=3}
++      match value.audio_context {none=>{},some(ctx)=>{if option.is_some(ctx.extent) {revision=4}},}
 +    }
 +    stream_at=stream_at+1
 +  }
@@ -64,16 +72,16 @@ index 25f4555..b6f8a0b 100644
    codec.field_u64(w, "active", doc.active)
    codec.field_u64(w, "source_bounds", cast.wrap(doc.source_bounds))
    codec.field_u64(w, "monitor_source", doc.monitor_source)
-@@ -327,7 +358,7 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
+@@ -327,7 +367,7 @@
      return result.err(codec.error(codec.Code.Invalid, "/schema", str.view(schema_name()), str.view(schema)))
    }
    let revision: u64 = try codec.u64_field(document, root, "revision")
 -  if revision != 1 and revision != schema_revision() {
-+  if revision != 1 and revision != 2 and revision != schema_revision() {
++  if revision != 1 and revision != 2 and revision != 3 and revision != schema_revision() {
      let want: i64 = cast.sat(schema_revision())
      let got: i64 = cast.sat(revision)
      return result.err(codec.error(codec.Code.Invalid, "/revision",
-@@ -449,12 +480,35 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
+@@ -449,12 +489,47 @@
          let pan: f64 = try codec.f64_field(document, entry, "pan")
          let speed: f64 = try codec.f64_field(document, entry, "speed")
          let reverse: bool = try codec.bool_field(document, entry, "reverse")
@@ -86,6 +94,18 @@ index 25f4555..b6f8a0b 100644
 +        if revision >= 3 {
 +          match try codec.optional_object_field(document,entry,"audio_context",codec.strict()) {
 +            none=>{},some(found_context)=>{var c:codec.Reader=found_context
++              var extent:option<editor.AudioExtent> =option.none()
++              if revision >= 4 {
++                match try codec.optional_object_field(document,c,"extent",codec.strict()) {
++                  none=>{},some(found_extent)=>{var e:codec.Reader=found_extent
++                    let found:editor.AudioExtent=editor.AudioExtent {
++                      input_duration_us:try codec.u64_field(document,e,"input_duration_us"),
++                      processing_length:try codec.i64_field(document,e,"processing_length"),
++                      processing_frames:try codec.u64_field(document,e,"processing_frames")}
++                    let _=try codec.reader_finish(document,e)
++                    extent=option.some(found)
++                  },}
++              }
 +              let ctx:editor.AudioContext=editor.AudioContext {
 +                source_in:try codec.i64_field(document,c,"source_in"),
 +                length:try codec.i64_field(document,c,"length"),
@@ -95,7 +115,7 @@ index 25f4555..b6f8a0b 100644
 +                reverse:try codec.bool_field(document,c,"reverse"),
 +                origin:try codec.i64_field(document,c,"origin"),
 +                crop_start:try codec.u64_field(document,c,"crop_start"),
-+                output_frames:try codec.u64_field(document,c,"output_frames")}
++                output_frames:try codec.u64_field(document,c,"output_frames"),extent:extent}
 +              let _=try codec.reader_finish(document,c)
 +              context=option.some(ctx)
 +            },}
@@ -110,7 +130,7 @@ index 25f4555..b6f8a0b 100644
      }
    }
  
-@@ -582,5 +636,11 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
+@@ -582,5 +657,11 @@
    }
  
    let _ = try codec.reader_finish(document, root)

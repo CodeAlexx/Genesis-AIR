@@ -614,6 +614,14 @@ fn incoming_transition_supported(doc: ref<editor.Document>, clip: editor.Clip,
                                  frame: i64, prepared: bool) -> bool effects {alloc} {
   if clip.nested != 0 or not source_range_ok(doc, clip) or
      (not prepared and clip_factor(doc,clip,frame) != 1.0) { return false }
+  transition_incoming_edits_supported(doc,clip)
+}
+
+// Shared memory-only policy for creation/edit controls. Compound inputs are
+// projected before the renderer's source check; their authored keys/operators
+// still obey this same incoming-half policy.
+pub fn transition_incoming_edits_supported(doc:ref<editor.Document>,clip:editor.Clip)
+    -> bool effects {alloc} {
   var key_index: u64 = 0
   loop {
     if key_index >= array.len(struct.borrow(doc, field=keys)) { break }
@@ -2610,6 +2618,7 @@ fn audio_context_graph(doc: ref<editor.Document>, clip: editor.Clip) -> bool eff
     }
     return temporal
   },some(value)=>value,}
+  if option.is_some(context.extent) {return true}
   if not editor.audio_context_valid(doc,clip) {return true}
   if clip.nested != 0 or context.reverse or context.rate != 1.0 {return true}
   let samples: f64 = 48000.0/context.fps
@@ -2774,15 +2783,20 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
       let context:editor.AudioContext=editor.audio_context_for(doc,clip)
       let original_source:f64=cast.float(context.source_in)/context.fps
       var original_duration:f64=cast.float(context.length)*context.rate/context.fps
-      if source.frames>0 and source.fps>0.0 {
+      let processing_length:i64=match context.extent {none=>context.length,some(extent)=>{
+        original_duration=cast.float(extent.input_duration_us)/1000000.0
+        extent.processing_length},}
+      if not option.is_some(context.extent) and source.frames>0 and source.fps>0.0 {
         let available:f64=cast.float(source.frames)/source.fps-original_source
         if original_duration>available {original_duration=available}
       }
       let request_crop:u64=context.crop_start+cast.sat(audio_sample_frame(begin,fps)-audio_sample_frame(clip.start,fps))
-      var context_fields:array<string> = ["AUDIOCTX",string.from_float(original_source),string.from_float(original_duration),
-        string.from_int(context.output_frames),string.from_int(request_crop),
-        string.from_int(audio_sample_frame(end,fps)-audio_sample_frame(begin,fps))]
-      if not streaming and end==editor.clip_end(clip) and context.offset+clip.length==context.length {
+      var context_fields:array<string> = [string.copy(if option.is_some(context.extent) {"AUDIOCTX2"}else{"AUDIOCTX"}),
+        string.from_float(original_source),string.from_float(original_duration),string.from_int(context.output_frames)]
+      match context.extent {none=>{},some(extent)=>{array.push(context_fields,string.from_int(extent.processing_frames))},}
+      array.push(context_fields,string.from_int(request_crop))
+      array.push(context_fields,string.from_int(audio_sample_frame(end,fps)-audio_sample_frame(begin,fps)))
+      if not streaming and end==editor.clip_end(clip) and context.offset+clip.length==processing_length {
         array.push(context_fields,"TAIL")
       }
       array.push(fields,text.join(context_fields,":"))
@@ -2932,7 +2946,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   let has_context: bool = option.is_some(editor.audio_context(clip))
   if has_context {
     struct.set(processing,context.source_in,field=source_in)
-    struct.set(processing,context.length,field=length)
+    struct.set(processing,match context.extent {none=>context.length,some(extent)=>extent.processing_length,},field=length)
   }
   if clip.nested == 0 {
     let slot: u64 = match editor.source_slot(doc,clip.source) {
@@ -2967,7 +2981,8 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
     if not source_range_ok(doc,processing) {return result.err("[GA_AUDIO_NESTED_PROTOCOL] Nested leaf exceeds its source frames")}
     let source_s: f64 = cast.float(processing.source_in)/bounds.fps
     var duration_s: f64 = cast.float(processing.length)*bounds.speed/bounds.fps
-    if source.frames > 0 and source.fps > 0.0 {
+    match context.extent {none=>{},some(extent)=>{duration_s=cast.float(extent.input_duration_us)/1000000.0},}
+    if not option.is_some(context.extent) and source.frames > 0 and source.fps > 0.0 {
       let remaining: f64 = cast.float(source.frames)/source.fps-source_s
       if duration_s > remaining {duration_s=remaining}
     }

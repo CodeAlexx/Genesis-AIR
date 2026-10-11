@@ -325,7 +325,17 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   emit_result("ungroup", ungrouped)
 
   // transitions, fades, keyframes, markers, subtitles
-  var seam: commands.Result = commands.add_transition(state, v1, 150, 24, "crossfade")
+  // Ripple edits above moved the cut. Use its retained incoming clip identity
+  // to resolve the model's current boundary rather than an obsolete frame.
+  var seam_center:i64=-1
+  var seam_pairs:array<editor.Boundary> =editor.boundary_pairs(struct.borrow(state,field=document),v1)
+  var seam_index:u64=0
+  loop {if seam_index>=array.len(seam_pairs) {break}
+    let boundary:editor.Boundary=array.get(seam_pairs,seam_index)
+    if boundary.incoming==second.value {seam_center=boundary.center
+      break}
+    seam_index=seam_index+1}
+  var seam: commands.Result = commands.add_transition(state, v1, seam_center, 24, "crossfade")
   emit_result("transition", seam)
   var wider: commands.Result = commands.set_transition_duration(state, seam.value, 40)
   emit_result("transition_resize", wider)
@@ -461,6 +471,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var about: string = click_action(state, help, 0)
   emit_b("menu_item_reports", str.len(str.view(about)) != 0)
   emit_b("menu_closes_after_item", app.open_menu(state) == chrome.menu_none())
+
+  let _ = commands.select_only(state, first.value)
 
   // Wheel routing uses the wheel event's own point, not whichever panel was clicked last.
   // The same scrollbar geometry used for painting drives track paging and thumb dragging.
