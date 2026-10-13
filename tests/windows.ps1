@@ -83,6 +83,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'linked-media/linked-media-tests.json') -Destination (Join-Path $reports 'linked-media-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-snap-controls.exe' @((Join-Path $work 'snap-controls'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'snap-controls/snap-controls-tests.json') -Destination (Join-Path $reports 'snap-controls-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-bidi-layout.exe' @((Join-Path $work 'bidi-layout'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'bidi-layout/bidi-layout-tests.json') -Destination (Join-Path $reports 'bidi-layout-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-transition-controls.exe' @((Join-Path $work 'transition-controls'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'transition-controls/transition-controls-tests.json') -Destination (Join-Path $reports 'transition-controls-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-filter-transactions.exe' @((Join-Path $work 'filter-transactions'))).TrimEnd()

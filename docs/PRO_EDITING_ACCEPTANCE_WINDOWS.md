@@ -19,14 +19,19 @@ the 46-column trace, 50,000-row cap, parser and strict cadence gates are unchang
 R18's two successful strip-arrival assignments coalesce passive damage while
 retaining the 33 ms fallback. No timing threshold was relaxed for R19.
 
-Current coherent identities:
+Current coherent identities (R22, published 2026-10-13; see the
+[R22 checkpoint](PRO_EDITING_R22_2026-10-13.md)):
 
-- App: `a2d950cb2ae9a6b922e0e7d7efa78265ca477def639baeeb47924472adcd77c1`.
-- Audio DLL: `f6885bec959c0e29b3583af5cab28dcb28a07996b2c356b860ed1cda097829d9`.
-- Worker: `079171d5d625e6acb36bcd80809279e43838278b5dd9bc21d7403ce1ec4c81d3`.
-- Frozen source SHA: `46dbc02762d260ca2385b48e5f22c342fad24075fc038c67cc25b3da0e4ac66d`.
-- Build receipt SHA: `70173a79abfe6b739f7d3e0a0767b798e829dbe033cd82de7b6d406767942fb8`;
-  exact 69 generated C and 90 native artifacts.
+- App: `6988c9b70d60b6deb18bfde026f3099a7906af876878f925108156d931d931a0`.
+- Audio DLL: `3eb1b1d80a37b11520a6d2f0192529634d4b9febae9524f865fb0c30b5924885`.
+- Worker: `9c5c8057b49c4c40afbb18a5a5daadd83de7457d5d4eaaf9f8260c90440af44d`.
+- Frozen source SHA: `614a09c56adf4eeaa77f6926e64528907eab19ac587dd7b4bf14561c5edabff4`.
+- Build receipt SHA: `99632a5074029482847840d4ad156df53857521b60bcba3257e2b6b0eae78501`.
+- Background receipt SHA: `28ddbb81a5be47861e79235df12f9605eb58c7972bab6483797dc882fdb4970d`.
+
+R19 identities (app `a2d950cb…`, audio DLL `f6885bec…`, worker `079171d5…`) remain
+the subject of the R19 receipts and cadence results below; R22 did not rerun the
+native desktop cadence recorders.
 
 Unless a full filename is given, receipt paths below are relative to
 `build-windows/pro-native-edit-export-r19-2026-10-13/`.
@@ -59,7 +64,10 @@ whole-source sustained playback or every raw presentation being unique.
   4K60, all footage and whole-source sustained playback remain unqualified.
 - Mappings for 31 video/20 audio filters and representative master/preview checks
   do not establish every parameter, order, animated curve or composition.
-  Track/audio-filter automation and live scrub sound remain incomplete.
+  Track/audio-filter automation and live scrub sound remain incomplete. Clip Pan
+  curves render exactly over memoryless chains since R22
+  ([R22 checkpoint](PRO_EDITING_R22_2026-10-13.md)); before stateful filters they
+  stay refused.
 - Supported direct forward static 44.1/48 kHz endpoint graphs preserve actual
   EOF with the existing five-second total tail budget. Delay/Reverb retained
   cuts have a restricted unit-rate/phase/filter domain; Normalize stays
@@ -75,9 +83,12 @@ whole-source sustained playback or every raw presentation being unique.
 - Upper transitions have maintained side-processing and lower-gap pixel gates.
   Nonzero PiP rotation on transition sides, direct compound clips as transition
   sides and incoming overlay-only edits on base transitions remain refused.
-- Text still lacks complex-script shaping/right-to-left layout and richer
-  typography. Unsupported glyphs are coded refusals. Stabilize covers local
-  translation within 24 output pixels, not rotation/perspective/path smoothing.
+- Text lays out right-to-left rows (simplified bidi) and joins Arabic through
+  presentation forms since R22; OpenType GSUB/GPOS shaping (Indic, general
+  ligatures, mark positioning), explicit embeddings and richer typography remain
+  missing. Unsupported glyphs are coded refusals. Stabilize covers local
+  translation up to 96 output pixels (canvas-scaled, R22), not
+  rotation/perspective/path smoothing.
 - Physical audio/video latency, reference-monitor HDR and scene-linear
   compositing remain outside these checks. Cold complete-audio preparation has
   cache I/O/startup costs; `Preparing audio` is asynchronous rather than a promise

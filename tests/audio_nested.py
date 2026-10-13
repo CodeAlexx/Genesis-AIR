@@ -101,6 +101,8 @@ def filter_chain(doc, clip):
             chain.append(f"acompressor=threshold={threshold:.17g}:ratio={values['ratio']}:attack={values['attack']}:release={values['release']}")
         elif effect["kind"] == "delay":
             chain.append(f"aecho=0.8:0.9:{int(values['time'])}:{values['decay']}")
+        elif effect["kind"] == "gain":
+            chain.append(f"volume={values['level']:.17g}dB")
         else:
             raise AssertionError(("Unauthored oracle effect", effect))
     return chain

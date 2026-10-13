@@ -1,0 +1,42 @@
+module genesis.tests.bidi_layout
+import std.files as files
+import std.font as font
+import std.path as path
+import std.testing as test
+import "../src/bidi.ai" as bidi
+import "../src/typeface.ai" as typeface
+
+// Expected visual strings are derived by hand from the Unicode Bidirectional
+// Algorithm and the Arabic Presentation Forms-B table, not from this module.
+fn expect(suite: ref<test.Suite>, face: ref<font.Font>, name: str, logical: str, visual: str)
+    -> unit effects {alloc, io.write, time} {
+  let _ = test.start(suite, name)
+  let actual: string = bidi.visual(face, logical)
+  let _ = test.eq_str(suite, str.view(actual), visual, name)
+  ()
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, time} {
+  if view.len(args) != 2 { return 2 }
+  let root: str = view.get(args, 1)
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Right-to-left title layout", false)
+  var paths: array<string> = typeface.search_paths()
+  var face: font.Font = match typeface.load(paths, 32) {
+    ok(value) => value, err(problem) => { io.write(problem)
+      return 1 },
+  }
+  expect(suite, face, "Latin passes through", "Hello, world 123", "Hello, world 123")
+  expect(suite, face, "Hebrew word reverses", "שלום", "םולש")
+  expect(suite, face, "Hebrew inside a left-to-right paragraph", "abc שלום def", "abc םולש def")
+  expect(suite, face, "European number keeps its order in a right-to-left paragraph", "שלום 123", "123 םולש")
+  expect(suite, face, "Brackets mirror in a right-to-left paragraph", "(שלום)", "(םולש)")
+  expect(suite, face, "Arabic joins with the lam-alef ligature", "سلام", "ﻡﻼﺳ")
+  expect(suite, face, "Hebrew point stays after its base", "שָל", "לשָ")
+  expect(suite, face, "Trailing space returns to the paragraph level", "abc שלום ", "abc םולש ")
+  expect(suite, face, "Right-to-left paragraph detection", "שלום abc", "abc םולש")
+  let _ = test.start(suite, "Paragraph level follows the first strong scalar")
+  let _ = test.check(suite, bidi.rtl_paragraph("שלום abc") and not bidi.rtl_paragraph("abc שלום"), "paragraph level")
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(root, "bidi-layout-tests.json"), 16)
+}

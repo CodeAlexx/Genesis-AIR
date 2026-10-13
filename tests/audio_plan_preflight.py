@@ -26,6 +26,13 @@ SR = 48000
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
+# Independent stereotools output balance for the authored linear pan curve
+# (-1 at frame -3, +1 at frame 20; 1600 samples per 30 fps frame).
+def pan_scale(n, sample0=0):
+    s = sample0 + n//2
+    b = max(-1., min(1., -1. + 2.*(s+4800)/36800))
+    return 1.-max(0.,b) if n % 2 == 0 else 1.+min(0.,b)
+
 def cases(source, av=None):
     base = document([source], (0,))
     base["sources"][0].update(frames=60)
@@ -35,8 +42,16 @@ def cases(source, av=None):
         result.append(dict(name=name, doc=doc, expected=expected, clip=clip, pcm=pcm,
                            start=start, export=export, peak=peak, source_status=source_status))
     add("valid-before", copy.deepcopy(base), export=True)
-    pan = copy.deepcopy(base)
-    keys(pan,20,2,"pan",[(-3,-1,2),(20,1,2)])
+    animated = copy.deepcopy(base)
+    keys(animated,20,2,"pan",[(-3,-1,2),(20,1,2)])
+    add("direct-pan-animated",animated,pcm="pan",export=True,peak="ACCEPT")
+    memoryless = copy.deepcopy(animated)
+    memoryless["clips"][0]["pan"]=.5
+    effect(memoryless,20,"gain",{"level":0})
+    add("direct-pan-memoryless-chain",memoryless,pcm="pan",export=True,peak="ACCEPT")
+    # A stateful stage after the static pan position keeps the exact refusal.
+    pan = copy.deepcopy(animated)
+    effect(pan,20,"compressor",dict(threshold=-14,ratio=4,attack=3,release=80))
     add("direct-pan",pan,AUTO,export=True,peak=AUTO)
     for name, param in (("direct-speed","speed"),("direct-filter-speed","filter.50.speed.rate"),
                         ("direct-scoped-filter","filter.50.gain.level"),("direct-legacy-filter","gain.level")):
@@ -264,6 +279,8 @@ def main():
                 if case["pcm"]=="gain-fades":
                     expected=[v*(.25+.5*min(n//2,9600)/9600)*min(1,(n//2)/4800)*min(1,(19200-n//2)/4800)
                               for n,v in enumerate(expected)]
+                if case["pcm"]=="pan":
+                    expected=[v*pan_scale(n,begin) for n,v in enumerate(expected)]
                 check(len(actual)==len(expected),name+" exact count")
                 err=max((abs(x-y) for x,y in zip(actual,expected)),default=0)
                 maximum=max(maximum,err); compared+=len(actual)
@@ -299,6 +316,8 @@ def main():
                 if case["pcm"]=="gain-fades":
                     expected=[v*(.25+.5*min(n//2,9600)/9600)*min(1,(n//2)/4800)*min(1,(19200-n//2)/4800)
                               for n,v in enumerate(expected)]
+                if case["pcm"]=="pan":
+                    expected=[v*pan_scale(n) for n,v in enumerate(expected)]
                 check(len(actual)==len(expected),name+" exact master sample count")
                 error=max((abs(x-y) for x,y in zip(actual,expected)),default=0.)
                 master_maximum=max(master_maximum,error); master_compared+=len(actual)

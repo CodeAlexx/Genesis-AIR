@@ -43,7 +43,8 @@ fn integer(out: ref<string>, value: i64) -> unit effects {alloc} {
 }
 pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_poll: bool) -> i32
     effects {alloc,env,ffi,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
-  if seconds < 2 or seconds > 180 {io.write("[GA_PLAYBACK_PROFILE_ARGS] Use 2..180 seconds\n")
+  // Whole-source measurements are allowed; rows stay in owned RAM until the end.
+  if seconds < 2 or seconds > 3600 {io.write("[GA_PLAYBACK_PROFILE_ARGS] Use 2..3600 seconds\n")
     return 2}
   let active: u64 = struct.get(struct.borrow(state,field=document),field=active)
   let fps: f64 = editor.sequence_fps(struct.borrow(state,field=document),active)

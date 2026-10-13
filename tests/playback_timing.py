@@ -183,7 +183,7 @@ def main():
     parser.add_argument("--poll", action="store_true", help="reproduce the earlier sleep/poll diagnostic")
     args = parser.parse_args()
     assert 1 <= args.pairs <= 5
-    assert 2 <= args.seconds <= 180, "measurement duration must be 2..180 seconds"
+    assert 2 <= args.seconds <= 3600, "measurement duration must be 2..3600 seconds"
     binary, worker = args.binary.resolve(), args.worker.resolve()
     report = args.report.resolve()
     report.parent.mkdir(parents=True, exist_ok=True)

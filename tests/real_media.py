@@ -1327,6 +1327,47 @@ def main():
             run([args.binary, "preview", keyed_frame, shake_project], env)
             assert abs(marker_center(keyed_frame) - expected) <= 1.5
 
+        # Wide camera jumps of 60 output pixels exceed the former 24 pixel
+        # window. The coarse-to-fine estimator must still remove them exactly.
+        wide_offsets = (0, 10, 0, -10, 0, 10, 0)
+        for frame_no, offset in enumerate(wide_offsets):
+            pixels = bytearray()
+            for y in range(180):
+                for x in range(320):
+                    sx = x - offset
+                    if 142 <= sx < 178 and 75 <= y < 105:
+                        pixels.extend((0, 255, 255))
+                    else:
+                        shade = ((sx * 91 + y * 137 + sx * y * 17) & 63) + 8
+                        pixels.extend((shade, shade, shade))
+            (root / f"wide-shake-{frame_no:02d}.ppm").write_bytes(b"P6\n320 180\n255\n" + pixels)
+        wide_source = root / "wide-shake.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-framerate", "30",
+             "-i", root / "wide-shake-%02d.ppm", "-c:v", "libx264", "-crf", "0",
+             "-pix_fmt", "yuv420p", wide_source])
+        wide_doc = json.loads(json.dumps(shake_doc))
+        wide_doc["keys"] = []
+        wide_doc["sources"][0]["path"] = str(wide_source)
+        wide_project = root / "wide-shake.air"
+        wide = {}
+        for strength in (0.0, 1.0):
+            wide_doc["filter_params"][0]["value"] = strength
+            points = []
+            for frame_no in (1, 2, 3):
+                wide_doc["program"]["frame"] = frame_no
+                wide_project.write_text(json.dumps(wide_doc))
+                frame_path = root / f"wide-shake-{strength}-{frame_no}.png"
+                run([args.binary, "preview", frame_path, wide_project], env)
+                points.append(marker_center(frame_path))
+            wide[strength] = points
+        assert max(wide[0.0]) - min(wide[0.0]) >= 35.0, wide
+        assert max(wide[1.0]) - min(wide[1.0]) <= 1.5, wide
+        wide_movie = root / "wide-shake-stabilized.mp4"
+        run([args.binary, "export", wide_movie, wide_project], env)
+        for frame_no, expected in zip((1, 2, 3), wide[1.0]):
+            encoded = marker_center(wide_movie, True, frame_no / 30 + 0.01)
+            assert abs(encoded - expected) <= 1.5, (frame_no, encoded, expected)
+
         # Stabilization also runs before compositing when the clip sits on an
         # upper lane, rather than shifting the already-combined lower image.
         upper_shake = json.loads(json.dumps(document))

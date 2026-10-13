@@ -18,6 +18,7 @@ import std.font as font
 import "chrome.ai" as chrome
 import "provider.ai" as provider
 import "typeface.ai" as typeface
+import "bidi.ai" as bidi
 import "filter_keys.ai" as filter_keys
 import "picture_memory.ai" as picture_memory
 import "audio_endpoint.ai" as endpoint
@@ -941,7 +942,9 @@ fn raster_clip_text(doc: ref<editor.Document>, clip: editor.Clip, frame: i64,
               var row: u64 = 0
               loop {
                 if row >= array.len(rows) { break }
-                let line: str = str.view(array.borrow(rows, row))
+                // Rows are authored in logical order; draw their visual order.
+                let shaped: string = bidi.visual(typeface_ref, str.view(array.borrow(rows, row)))
+                let line: str = str.view(shaped)
                 let _ = try typeface.covered(typeface_ref, line)
                 let x: f64 = if str.eq(str.view(kind), "timer") { 40.0 * cast.float(cache.width) / 1280.0 }
                   else { cast.float(cache.width) * (0.5 + 0.5 * x_value) - font.measure(typeface_ref, line) * 0.5 }
@@ -1938,10 +1941,16 @@ fn raster_subtitle(doc: ref<editor.Document>, id: u64, prefix: str,
   var at: u64 = 0
   loop {
     if at >= array.len(rows) { break }
-    let line: str = str.view(array.borrow(rows, at))
+    let logical: str = str.view(array.borrow(rows, at))
+    let shaped: string = bidi.visual(typeface_ref, logical)
+    let line: str = str.view(shaped)
     let _ = try typeface.covered(typeface_ref, line)
     let y: f64 = (720.0 + cast.float(at) * 48.0) * caption_scale
-    typeface.draw_label(canvas, typeface_ref, 154.0 * cast.float(cache.width) / 1280.0, y, line, 44.0 * caption_scale)
+    // A right-to-left caption keeps the same margin from the right edge.
+    let margin: f64 = 154.0 * cast.float(cache.width) / 1280.0
+    let x: f64 = if bidi.rtl_paragraph(logical) { cast.float(cache.width) - margin - font.measure(typeface_ref, line) }
+      else { margin }
+    typeface.draw_label(canvas, typeface_ref, x, y, line, 44.0 * caption_scale)
     at = at + 1
   }
   var finished: draw.Surface = draw.finish(canvas)
@@ -2827,6 +2836,50 @@ fn audio_gain_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, fps
   result.ok(token)
 }
 
+// Animated clip pan uses the gain curve adapter with signed [-1,1] values. The
+// worker applies stereotools output balance per destination sample after the
+// clip chain; audio_pan_post_chain proves that position equals the static stage.
+fn audio_pan_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, fps: f64)
+    -> result<string, string> effects {alloc} {
+  var points: array<string> = array.new()
+  var at: u64 = 0
+  loop { if at >= array.len(struct.borrow(doc, field=keys)) { break }
+    let key: editor.Key = array.get(struct.borrow(doc, field=keys), at)
+    at = at + 1
+    if key.clip != clip.id { continue }
+    let name: string = editor.name_text(doc, key.param)
+    if not str.eq(str.view(name), "pan") { continue }
+    if not math.is_finite(key.value) or key.value < -1.0 or key.value > 1.0 or key.interp >= 38 {
+      return result.err("[GA_AUDIO_PAN_KEYS] Invalid clip pan keyframe")
+    }
+    var fields: array<string> = [string.from_int(audio_sample_frame(clip.start + key.frame, fps)),
+      string.from_int(key.frame), string.from_float(key.value), string.from_int(key.interp)]
+    array.push(points, text.join(fields, ","))
+  }
+  if array.len(points) == 0 { return result.ok(string.copy("")) }
+  var token: string = string.copy("PANKEYS:")
+  string.append(token, str.view(string.from_int(audio_sample_frame(begin, fps))))
+  string.append(token, ":")
+  string.append(token, str.view(text.join(points, "/")))
+  result.ok(token)
+}
+
+// Gain, pan and mute stages are memoryless per-channel scales, so they commute
+// with a per-sample balance. Any other enabled audio stage keeps the refusal.
+fn audio_pan_post_chain(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {alloc} {
+  var at: u32 = 0
+  loop {match editor.filter_at(doc,clip.id,at) {none=>{break},some(filter)=>{
+    if editor.filter_enabled(doc,filter) {
+      let kind: string = editor.filter_kind(doc,filter)
+      if chrome.is_audio_kind(kind) and not str.eq(kind,"gain") and not str.eq(kind,"pan") and
+          not str.eq(kind,"volume") and not str.eq(kind,"mute") {return false}
+    }
+  },}
+    at=at+1
+  }
+  true
+}
+
 // Fade lengths remain in raw sequence frames through interpolation, including
 // surrounding off-body keys. The worker converts each evaluated length to
 // seconds and applies independent in/out ramps in destination-sample time.
@@ -2888,9 +2941,10 @@ fn audio_fade_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, end
   result.ok(text.join(fields,":"))
 }
 
-// Only contributing clip contexts reach this preflight. Gain/fade curves have
-// exact sample envelopes; the remaining active audio curves cannot yet retain
-// their DSP/time history. Dormant instance curves do not affect audible output.
+// Only contributing clip contexts reach this preflight. Gain/fade curves, and
+// pan curves over memoryless chains, have exact sample envelopes; the remaining
+// active audio curves cannot yet retain their DSP/time history. Dormant
+// instance curves do not affect audible output.
 fn audio_automation_preflight(doc: ref<editor.Document>, clip: editor.Clip, held: bool)
     -> result<unit,string> effects {alloc} {
   var at: u64 = 0
@@ -2899,8 +2953,11 @@ fn audio_automation_preflight(doc: ref<editor.Document>, clip: editor.Clip, held
     at=at+1
     if key.clip != clip.id {continue}
     let name: string = editor.name_text(doc,key.param)
-    if (not held and str.eq(name,"pan")) or str.eq(name,"speed") {
-      return result.err("[GA_AUDIO_AUTOMATION_UNSUPPORTED] Animated clip pan or speed needs preserved audio history")
+    if str.eq(name,"speed") {
+      return result.err("[GA_AUDIO_AUTOMATION_UNSUPPORTED] Animated clip speed needs preserved audio history")
+    }
+    if not held and str.eq(name,"pan") and not audio_pan_post_chain(doc,clip) {
+      return result.err("[GA_AUDIO_AUTOMATION_UNSUPPORTED] Animated clip pan before a stateful audio filter needs preserved audio history")
     }
     let canonical: string = filter_keys.canonical(name)
     var family: array<string> = text.split(canonical,".")
@@ -3109,7 +3166,11 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
     var stages: array<string> = array.new()
     if clip.reverse { array.push(stages, string.copy("areverse")) }
     tempo_stages(stages, speed)
-    if clip.pan != 0.0 {
+    let pan_keys: string = match audio_pan_keys(doc, clip, begin, fps) {
+      err(problem) => { return result.err(problem) }, ok(value) => value,
+    }
+    // A keyed curve replaces the static clip pan stage; track pan stays static.
+    if clip.pan != 0.0 and str.len(str.view(pan_keys)) == 0 {
       var stage: string = string.copy("stereotools=balance_out=")
       string.append(stage, str.view(string.from_float(clip.pan)))
       array.push(stages, stage)
@@ -3201,6 +3262,7 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
     }
     if str.len(str.view(gain_keys)) != 0 { array.push(fields, gain_keys) }
     if str.len(str.view(fade_keys)) != 0 { array.push(fields, fade_keys) }
+    if str.len(str.view(pan_keys)) != 0 { array.push(fields, pan_keys) }
     array.push(lines, text.join(fields, " "))
   }
   result.ok(lines)
@@ -3244,6 +3306,16 @@ fn nested_audio_bounds(doc: ref<editor.Document>, clip: editor.Clip)
   result.ok(NestedAudioBounds {first:cast.sat(first),last:cast.sat(last),fps:fps,speed:speed})
 }
 
+fn clip_pan_keyed(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {alloc} {
+  var at: u64 = 0
+  loop {if at >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),at)
+    at=at+1
+    if key.clip == clip.id and str.eq(editor.name_text(doc,key.param),"pan") {return true}
+  }
+  false
+}
+
 fn nested_audio_chain(doc: ref<editor.Document>, clip: editor.Clip, speed: f64)
     -> result<string,string> effects {alloc} {
   var stages: array<string> = array.new()
@@ -3252,7 +3324,7 @@ fn nested_audio_chain(doc: ref<editor.Document>, clip: editor.Clip, speed: f64)
   if not math.is_finite(clip.pan) or clip.pan < -1.0 or clip.pan > 1.0 {
     return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested clip pan")
   }
-  if clip.pan != 0.0 {
+  if clip.pan != 0.0 and not clip_pan_keyed(doc,clip) {
     array.push(stages,text.concat("stereotools=balance_out=",string.from_float(clip.pan)))
   }
   let track_pan: f64 = editor.track_pan(doc,clip.track)
@@ -3362,6 +3434,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   try nested_gain_preflight(doc,clip,bounds.fps)
   let gain_keys: string = try audio_gain_keys(doc,clip,clip.start,bounds.fps)
   let fade_keys: string = try audio_fade_keys(doc,clip,clip.start,editor.clip_end(clip),bounds.fps,false)
+  let pan_keys: string = try audio_pan_keys(doc,clip,clip.start,bounds.fps)
   let gain: f64 = if str.len(gain_keys) == 0 {editor.effective_gain(doc,clip.id)}else{editor.track_gain(doc,clip.track)}
   if not math.is_finite(gain) or gain < 0.0 or gain > 3.4028234663852886e38 or
       clip.fade_in < 0 or clip.fade_out < 0 {
@@ -3461,6 +3534,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   array.push(fields,chain)
   if str.len(gain_keys) != 0 {array.push(fields,gain_keys)}
   if str.len(fade_keys) != 0 {array.push(fields,fade_keys)}
+  if str.len(pan_keys) != 0 {array.push(fields,pan_keys)}
   if has_context {
     var ctx_fields: array<string> = ["AUDIOCTX",string.from_float(context_source),string.from_float(context_duration),
       string.from_int(context.output_frames)]

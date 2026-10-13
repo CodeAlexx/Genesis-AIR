@@ -95,10 +95,18 @@ def projects(paths):
     doc["tracks"][0]["muted"]=True
     doc=add("solo-excluded",7)
     doc["tracks"].append(dict(doc["tracks"][0],id=4,solo=True,order=1))
-    for name,param in (("animated-pan","pan"),("animated-speed","speed"),
+    # Animated clip pan is exact over memoryless chains (static clip pan is
+    # replaced by the curve; track pan and Gain stay static stages).
+    doc=add("animated-pan",7,pan=.75)
+    keys(doc,30,2,"pan",[(-5,-1,2),(20,.625,4),(31,.25,2),(55,1,2)])
+    doc["tracks"][0]["pan"]=-.375
+    doc=add("animated-pan-gain-filter",7)
+    keys(doc,30,2,"pan",[(0,.5,2),(48,-.75,2)])
+    effect(doc,30,"gain",dict(level=-3))
+    for name,param in (("animated-pan-compressor","pan"),("animated-speed","speed"),
                        ("animated-effect","filter.50.compressor.threshold")):
         doc=add(name,7)
-        if name=="animated-effect":
+        if name!="animated-speed":
             effect(doc,30,"compressor",dict(threshold=-14,ratio=4,attack=3,release=80))
         keys(doc,30,2,param,[(0,0,2),(48,.5,2)])
         result[-1]=(name,doc,"GA_AUDIO_CLIP_ENV")
@@ -136,7 +144,8 @@ def reference(doc,sources,worker):
            "aformat=sample_fmts=flt:sample_rates=48000:channel_layouts=stereo"]
     if clip["reverse"]:chain.append("areverse")
     if speed!=1:chain.append(f"atempo={float(speed):.17g}")
-    for pan in (clip["pan"],track["pan"]):
+    pan_keys=points(doc,clip,"pan")
+    for pan in ((0 if pan_keys else clip["pan"]),track["pan"]):
         if pan:chain.append(f"stereotools=balance_out={pan:.17g}")
     chain+=filter_chain(doc,clip)
     chain.append("aformat=sample_fmts=flt:sample_rates=48000:channel_layouts=stereo")
@@ -153,6 +162,11 @@ def reference(doc,sources,worker):
         ramp=min(1.,max(0.,local/incoming)) if incoming else 1.
         if outgoing:ramp*=min(1.,max(0.,(clip["length"]/fps-local)/outgoing))
         gain=f32(gain*f32(ramp))
+        if pan_keys:
+            # stereotools output balance, evaluated per destination sample.
+            balance=f32(min(1.,max(-1.,curve(pan_keys,placement+n,clip["start"],fps,clip["pan"]))))
+            values[n*2]=f32(values[n*2]*f32(1-max(0.,balance)))
+            values[n*2+1]=f32(values[n*2+1]*f32(1+min(0.,balance)))
         for channel in (0,1):values[n*2+channel]=f32(values[n*2+channel]*gain)
     return values
 
