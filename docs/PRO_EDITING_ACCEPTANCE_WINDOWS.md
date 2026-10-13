@@ -19,15 +19,16 @@ the 46-column trace, 50,000-row cap, parser and strict cadence gates are unchang
 R18's two successful strip-arrival assignments coalesce passive damage while
 retaining the 33 ms fallback. No timing threshold was relaxed for R19.
 
-Current coherent identities (R22, published 2026-10-13; see the
+Current coherent identities (R23 title typography on top of R22, published
+2026-10-13; see the [R23 notes](TITLE_TYPOGRAPHY_R23_2026-10-13.md) and the
 [R22 checkpoint](PRO_EDITING_R22_2026-10-13.md)):
 
-- App: `6988c9b70d60b6deb18bfde026f3099a7906af876878f925108156d931d931a0`.
-- Audio DLL: `3eb1b1d80a37b11520a6d2f0192529634d4b9febae9524f865fb0c30b5924885`.
-- Worker: `9c5c8057b49c4c40afbb18a5a5daadd83de7457d5d4eaaf9f8260c90440af44d`.
-- Frozen source SHA: `614a09c56adf4eeaa77f6926e64528907eab19ac587dd7b4bf14561c5edabff4`.
-- Build receipt SHA: `99632a5074029482847840d4ad156df53857521b60bcba3257e2b6b0eae78501`.
-- Background receipt SHA: `28ddbb81a5be47861e79235df12f9605eb58c7972bab6483797dc882fdb4970d`.
+- App: `c0e82010116df8649777a479d1df76f9a9897ee2e94315b4130fcf468de89593`.
+- Audio DLL: `883b5a92237d531f05f2167f3faecc1265235f79dfd48e8a35fbd56b43906729`.
+- Worker: `9c5c8057b49c4c40afbb18a5a5daadd83de7457d5d4eaaf9f8260c90440af44d` (unchanged from R22).
+- Frozen source SHA: `e39a0cc2c3a1d15674d60881f9b2dbef8c6fca92622cc07768a1cc13f29be2a7`.
+- Build receipt SHA: `489ff07d56288c0fbb29255c38b28092f9a9476c4841e25e073622fd89d6c6d8`.
+- Background receipt SHA: `556ad9658ccf0d24f07b847295d87764603abdde16853f2ebce40ed12b348cfa`.
 
 R19 identities (app `a2d950cb…`, audio DLL `f6885bec…`, worker `079171d5…`) remain
 the subject of the R19 receipts and cadence results below; R22 did not rerun the
@@ -86,7 +87,10 @@ whole-source sustained playback or every raw presentation being unique.
 - Text lays out right-to-left rows (simplified bidi) and joins Arabic through
   presentation forms since R22; OpenType GSUB/GPOS shaping (Indic, general
   ligatures, mark positioning), explicit embeddings and richer typography remain
-  missing. Unsupported glyphs are coded refusals. Stabilize covers local
+  missing. Titles choose among seven font families with bold/italic, colour,
+  outline, drop shadow, translucent box and left/centre/right alignment (R23);
+  per-character styling and arbitrary installed-font selection are not offered.
+  Unsupported glyphs are coded refusals. Stabilize covers local
   translation up to 96 output pixels (canvas-scaled, R22), not
   rotation/perspective/path smoothing.
 - Physical audio/video latency, reference-monitor HDR and scene-linear

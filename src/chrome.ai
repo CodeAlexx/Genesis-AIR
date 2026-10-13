@@ -20,6 +20,7 @@ import "ui_text.ai" as ui_text
 import "app.ai" as app
 import "layout.ai" as layout
 import "filter_keys.ai" as filter_keys
+import "typeface.ai" as typeface
 
 // ---------------------------------------------------------------------------
 // How a control is drawn.
@@ -761,6 +762,16 @@ pub fn params_for(kind: str) -> array<Spec> effects {alloc} {
     sp(out, "size", "Size", 4.0, 200.0, 2.0, 36.0)
     sp(out, "x", "X", -1.0, 1.0, 0.01, 0.0)
     sp(out, "y", "Y", -1.0, 1.0, 0.01, 0.0)
+    sp(out, "font", "Font", 0.0, 6.0, 1.0, 0.0)
+    sp(out, "bold", "Bold", 0.0, 1.0, 1.0, 0.0)
+    sp(out, "italic", "Italic", 0.0, 1.0, 1.0, 0.0)
+    sp(out, "align", "Align", 0.0, 2.0, 1.0, 0.0)
+    sp(out, "color_r", "Red", 0.0, 1.0, 0.02, 1.0)
+    sp(out, "color_g", "Green", 0.0, 1.0, 0.02, 1.0)
+    sp(out, "color_b", "Blue", 0.0, 1.0, 0.02, 1.0)
+    sp(out, "outline", "Outline", 0.0, 12.0, 0.5, 0.0)
+    sp(out, "shadow", "Shadow", 0.0, 1.0, 1.0, 1.0)
+    sp(out, "box", "Box opacity", 0.0, 1.0, 0.05, 0.0)
   }
   else if str.eq(kind, "timer") { sp(out, "size", "Size", 4.0, 200.0, 2.0, 36.0) }
   else if str.eq(kind, "denoise") { sp(out, "amount", "Amount", 0.0, 1.0, 0.02, 0.3) }
@@ -1074,6 +1085,12 @@ fn kind_section(out: ref<array<Control>>, area: layout.Rect, top: f64,
     array.push(out, edit)
     cursor = cursor + row_height()
     cursor = text_row(out, area, cursor, "Current", str.view(current))
+    if str.eq(kind, "text") {
+      let family: string = typeface.family_name(editor.filter_param(doc, id, "font", 0.0))
+      cursor = text_row(out, area, cursor, "Font name", str.view(family))
+      let align: string = typeface.align_name(editor.filter_param(doc, id, "align", 0.0))
+      cursor = text_row(out, area, cursor, "Alignment", str.view(align))
+    }
   }
   var index: u64 = 0
   loop {

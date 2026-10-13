@@ -131,3 +131,101 @@ pub fn draw_label(canvas: ref<draw.Canvas>, typeface: ref<font.Font>, x: f64, to
   let _ = font.draw_text(canvas, typeface, geometry.vec2(x, baseline), line, draw.rgb(255, 255, 255))
   ()
 }
+
+/// Title font families offered by the inspector. 0 keeps the configured default chain.
+pub fn family_names() -> array<string> effects {alloc} {
+  ["Default", "Arial", "Georgia", "Times New Roman", "Impact", "Consolas", "Verdana"]
+}
+
+pub fn family_name(family: f64) -> string effects {alloc} {
+  var names: array<string> = family_names()
+  let index: u64 = cast.sat(math.max(0.0, family))
+  if index >= array.len(names) { return string.copy("Default") }
+  string.copy(str.view(array.borrow(names, index)))
+}
+
+pub fn align_name(align: f64) -> string effects {alloc} {
+  if align >= 1.5 { string.copy("Right") } else if align >= 0.5 { string.copy("Left") } else { string.copy("Center") }
+}
+
+// Windows file stems for regular, bold, italic, bold italic; Linux equivalents follow.
+fn family_files(family: u64, style: u64) -> array<string> effects {alloc} {
+  var windows: array<string> = if family == 1 { ["arial", "arialbd", "ariali", "arialbi"] }
+    else if family == 2 { ["georgia", "georgiab", "georgiai", "georgiaz"] }
+    else if family == 3 { ["times", "timesbd", "timesi", "timesbi"] }
+    else if family == 4 { ["impact", "impact", "impact", "impact"] }
+    else if family == 5 { ["consola", "consolab", "consolai", "consolaz"] }
+    else if family == 6 { ["verdana", "verdanab", "verdanai", "verdanaz"] }
+    else { ["segoeui", "segoeuib", "segoeuii", "segoeuiz"] }
+  var linux: array<string> = if family == 2 or family == 3 {
+      ["DejaVuSerif", "DejaVuSerif-Bold", "DejaVuSerif-Italic", "DejaVuSerif-BoldItalic"] }
+    else if family == 5 { ["DejaVuSansMono", "DejaVuSansMono-Bold", "DejaVuSansMono-Oblique", "DejaVuSansMono-BoldOblique"] }
+    else { ["DejaVuSans", "DejaVuSans-Bold", "DejaVuSans-Oblique", "DejaVuSans-BoldOblique"] }
+  var out: array<string> = array.new()
+  array.push(out, text.concat("C:/Windows/Fonts/", str.view(text.concat(str.view(array.borrow(windows, style)), ".ttf"))))
+  array.push(out, text.concat("/usr/share/fonts/truetype/dejavu/", str.view(text.concat(str.view(array.borrow(linux, style)), ".ttf"))))
+  array.push(out, text.concat("/usr/share/fonts/TTF/", str.view(text.concat(str.view(array.borrow(linux, style)), ".ttf"))))
+  out
+}
+
+/// Faces for a styled title: the chosen family/style first, then the configured chain as
+/// fallback for scalars it lacks. The default family with no style is exactly `defaults`.
+pub fn styled_paths(defaults: ref<array<string>>, family: u64, bold: bool, italic: bool)
+    -> array<string> effects {alloc} {
+  var out: array<string> = array.new()
+  let style: u64 = (if bold { 1 } else { 0 }) + (if italic { 2 } else { 0 })
+  if family != 0 or style != 0 {
+    var chosen: array<string> = family_files(family, style)
+    var i: u64 = 0
+    loop { if i >= array.len(chosen) { break }
+      array.push(out, string.copy(str.view(array.borrow(chosen, i))))
+      i = i + 1 }
+  }
+  var i: u64 = 0
+  loop { if i >= array.len(defaults) { break }
+    array.push(out, string.copy(str.view(array.borrow(defaults, i))))
+    i = i + 1 }
+  out
+}
+
+/// Title styling. Defaults (white, drop shadow, no outline, no box) draw exactly as
+/// `draw_label`. Outline rings are drawn in black around the glyphs; the box is a
+/// translucent black panel behind the measured line.
+pub type TextStyle = struct { colour: draw.Color, outline: f64, shadow: bool, box: f64 }
+
+pub fn plain_style() -> TextStyle effects {} {
+  TextStyle {colour: draw.rgb(255, 255, 255), outline: 0.0, shadow: true, box: 0.0}
+}
+
+pub fn draw_styled(canvas: ref<draw.Canvas>, typeface: ref<font.Font>, x: f64, top: f64,
+                   line: str, cap_height: f64, style: TextStyle) -> unit effects {alloc} {
+  let baseline: f64 = top + cap_height
+  if style.box > 0.0 {
+    let pad: f64 = cap_height * 0.35
+    let width: f64 = font.measure(typeface, line)
+    let alpha: u8 = cast.sat(math.round(math.min(1.0, style.box) * 255.0))
+    match geometry.rect(x - pad, top - pad, x + width + pad, baseline + cap_height * 0.45) {
+      some(area) => { draw.fill_rect(canvas, area, draw.color(0, 0, 0, alpha)) }, none => { },
+    }
+  }
+  if style.shadow {
+    let _ = font.draw_text(canvas, typeface, geometry.vec2(x + 2.0, baseline + 2.0), line, draw.rgb(0, 0, 0))
+  }
+  if style.outline > 0.0 {
+    // Concentric rings of offset copies approximate a stroke without gaps.
+    var radius: f64 = style.outline
+    loop {
+      if radius <= 0.0 { break }
+      let steps: u64 = cast.sat(math.max(8.0, math.ceil(radius * 6.2832)))
+      var k: u64 = 0
+      loop { if k >= steps { break }
+        let angle: f64 = cast.float(k) * 6.283185307179586 / cast.float(steps)
+        let _ = font.draw_text(canvas, typeface, geometry.vec2(x + radius * math.cos(angle),
+          baseline + radius * math.sin(angle)), line, draw.rgb(0, 0, 0))
+        k = k + 1 }
+      radius = radius - 1.0
+    }
+  }
+  let _ = font.draw_text(canvas, typeface, geometry.vec2(x, baseline), line, style.colour)
+  ()
+}

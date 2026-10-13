@@ -276,6 +276,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Ordered and duplicate picture-filter preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'filter_titles.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Ordered title and independent multilayer raster acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'title_typography.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --report (Join-Path $reports 'title-typography.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Title font, style, colour, outline, box and alignment acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'transition_clips.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Per-clip transition preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_export_length.py') --worker $worker
