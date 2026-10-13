@@ -212,18 +212,18 @@ def check(client,worker,root,report,old_worker=None):
             rows.append(dict(case=name,edit=variant,whole_pcm_codes=error,retained_pcm_codes=pe,fresh_pcm_codes=fe,
                              body_peaks_threshold=2e-6,wave_endpoint_zeros=extra,
                              virtual_frames=sample(60,fps),processing_frames=end))
-            if variant=='retimed':masters[name]=(target.copy(),fps)
+            if variant=='retimed':masters[name]=(target.copy(),fps,sample(30,fps) if name=="normalize" else len(full))
     run([client,worker,root,'--export'])
     master_rows=[]
-    for name,(wanted,fps) in masters.items():
+    for name,(wanted,fps,independent_end) in masters.items():
         movie=root/f'{name}-master.mkv'
         raw=run([ffmpeg,'-nostdin','-v','error','-i',movie,'-map','0:a:0','-f','f32le','pipe:1'])
         got=np.frombuffer(raw,dtype='<f4').reshape(-1,2)
-        assert len(got)==math.ceil(120/fps*SR),(name,'master frame count',len(got))
-        expected=fitted(np.clip(wanted,-1,1),len(got))
+        assert len(got)==independent_end,(name,"accepted native EOF frame count",len(got),independent_end)
+        expected=np.clip(wanted[:independent_end],-1,1)
         error=float(np.max(np.abs(got-expected)))
         assert error<=2e-6,(name,'lossless PCM24',error)
-        master_rows.append(dict(case=name,samples=len(got),pcm24_error=error,threshold=2e-6))
+        master_rows.append(dict(case=name,samples=len(got),independent_eof_samples=independent_end,pcm24_error=error,threshold=2e-6))
     valid=json.loads((root/'compressor-retimed.air').read_text());bad=[]
     for label in ('revision3','zero-end','mismatched-frames','unavailable-input','body-after-end','reverse','negative-duration','over-budget'):
         doc=copy.deepcopy(valid);clip=doc['clips'][0];extent=clip['audio_context']['extent']

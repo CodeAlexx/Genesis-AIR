@@ -46,6 +46,7 @@ pub fn message(value: ref<Result>) -> string effects {alloc} {
 // Installing a different project begins a new undo/session context.
 pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> unit effects {alloc} {
   var loaded: editor.Document = document
+  let saved_program:i64=editor.playhead(loaded)
   let _ = editor.program_action(loaded, editor.pause())
   let _ = editor.monitor_action(loaded, editor.pause())
   if editor.selection_count(loaded) == 0 and editor.clip_count(loaded) == 1 {
@@ -69,6 +70,12 @@ pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> un
   app.document_changed(state)
   struct.set(state, state.project_epoch + 1, field=project_epoch)
   app.mark_media_changed(state)
+  if saved_program>=editor.duration(struct.borrow(state,field=document)) and saved_program>0 and
+      app.request_endpoint_seek(state,saved_program) {
+    // Preserve the saved coordinate while decoding is deferred. Only accepted
+    // endpoint metadata may clamp it; this intent itself is not serialized.
+    struct.set(struct.borrow(struct.borrow(state,field=document),field=program),saved_program,field=frame)
+  }
   ()
 }
 
@@ -857,12 +864,10 @@ pub fn transition_problem(doc:ref<editor.Document>,track:u64,center:i64,duration
   if a.owner!=doc.active or b.owner!=doc.active or not a.enabled or not b.enabled or not editor.clip_has_video(a) or not editor.clip_has_video(b) {
     return string.copy("[GA_TRANSITION_BOUNDARY] Both boundary clips must have enabled video")
   }
-  if not timeline_media.transition_incoming_edits_supported(doc,b) {
-    return string.copy("[GA_TRANSITION_INCOMING] The incoming clip uses an unsupported transition edit")
-  }
   let start:i64=center-duration/2
   let end:i64=start+duration
   if start<a.start or end>editor.clip_end(b) {return string.copy("[GA_TRANSITION_DURATION] Transition window extends outside its adjacent clips")}
+  var upper_composition:bool=false
   let chosen_slot:u64=option.unwrap(editor.track_slot(doc,track))
   let chosen:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),chosen_slot)
   let chosen_order:u32=chosen.order
@@ -880,7 +885,7 @@ pub fn transition_problem(doc:ref<editor.Document>,track:u64,center:i64,duration
     if lane_kind==editor.track_video() and editor.track_visible(doc,lane_id) and
         (lane_order<chosen_order or (lane_order==chosen_order and lane_id<chosen_id)) and
         value.start<end and editor.clip_end(value)>start {
-      return string.copy("[GA_TRANSITION_BASE] A visible lower video clip overlaps this transition window")
+      upper_composition=true
     }
   }
   i=0
@@ -906,7 +911,7 @@ pub fn transition_problem(doc:ref<editor.Document>,track:u64,center:i64,duration
           let incoming:editor.Clip=option.unwrap(editor.clip(doc,boundary.incoming))
           if outgoing.owner==doc.active and incoming.owner==doc.active and outgoing.enabled and incoming.enabled and
               editor.clip_has_video(outgoing) and editor.clip_has_video(incoming) {
-            return string.copy("[GA_TRANSITION_BASE] A visible lower transition overlaps this transition window")
+            upper_composition=true
           }
         },
       }
@@ -915,6 +920,13 @@ pub fn transition_problem(doc:ref<editor.Document>,track:u64,center:i64,duration
     if editor.transition_start(value)<end and editor.transition_end(value)>start {
       return string.copy("[GA_TRANSITION_OVERLAP] Transition windows may not overlap on one track")
     }
+  }
+  if not (if upper_composition {timeline_media.transition_upper_edits_supported(doc,b)}
+      else {timeline_media.transition_incoming_edits_supported(doc,b)}) {
+    return string.copy("[GA_TRANSITION_INCOMING] The incoming clip uses an unsupported transition edit")
+  }
+  if upper_composition and not timeline_media.transition_upper_edits_supported(doc,a) {
+    return string.copy("[GA_TRANSITION_OUTGOING] The outgoing upper clip uses an unsupported composition edit")
   }
   string.new()
 }
@@ -1161,14 +1173,38 @@ fn marks_change(current: editor.Transport, action: u32) -> bool effects {} {
   false
 }
 pub fn program(state: ref<app.App>, action: u32) -> Result effects {alloc} {
+  if not app.endpoint_picture_ready(state) and (action==editor.play() or action==editor.pause()) {
+    if action==editor.play() and not app.endpoint_requested(state) {
+      if not app.request_endpoint_seek(state,editor.playhead(struct.borrow(state,field=document))) {
+        return refused("[GA_AUDIO_ENDPOINT_RANGE] Program position exceeds supported endpoint budget")}
+    }
+    struct.set(struct.borrow(struct.borrow(state,field=document),field=program),action==editor.play(),field=playing)
+    return done(if action==editor.play() {"Preparing audio..."}else{"Paused pending audio endpoint"},0)
+  }
+  struct.set(state,-1,field=endpoint_seek_requested)
+  if action!=editor.go_end() {struct.set(state,false,field=endpoint_end_requested)}
   let marks: bool = marks_change(struct.get(struct.borrow(state,field=document),field=program),action)
   if marks {editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))}
-  let landed: editor.Transport = editor.program_action(struct.borrow(state, field=document), action)
+  if action==editor.go_end() and not app.endpoint_current(state) {
+    struct.set(state,true,field=endpoint_end_requested)
+    return done("Preparing actual audio end",0)
+  }
+  if action==editor.go_end() {struct.set(state,false,field=endpoint_end_requested)}
+  let total:i64=app.presentation_duration(state)
+  let landed: editor.Transport = editor.program_action_until(struct.borrow(state, field=document), action,total)
   if marks {app.document_changed(state)}
   done("program transport", cast.wrap(landed.frame))
 }
 pub fn seek(state: ref<app.App>, frame: i64) -> Result effects {alloc} {
-  let landed: i64 = editor.seek(struct.borrow(state, field=document), frame)
+  if not app.endpoint_current(state) and frame>=editor.duration(struct.borrow(state,field=document)) and frame>=0 {
+    if not app.request_endpoint_seek(state,frame) {return refused("[GA_AUDIO_ENDPOINT_RANGE] Seek exceeds supported endpoint budget")}
+    struct.set(struct.borrow(struct.borrow(state,field=document),field=program),false,field=playing)
+    return done("Preparing audio endpoint for seek",cast.wrap(frame))
+  }
+  struct.set(state,false,field=endpoint_end_requested)
+  struct.set(state,-1,field=endpoint_seek_requested)
+  let total:i64=app.presentation_duration(state)
+  let landed: i64 = editor.seek_until(struct.borrow(state, field=document), frame,total)
   done("sought", cast.wrap(landed))
 }
 pub fn open_source(state: ref<app.App>, source: u64) -> Result effects {alloc} {

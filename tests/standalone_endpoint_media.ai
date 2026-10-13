@@ -1,0 +1,66 @@
+module test.standalone_endpoint_media
+import std.editor as editor
+import std.editor_io as codec
+import std.files as files
+import std.path as path
+import std.text as text
+import std.process as proc
+import "../src/timeline_media.ai" as media
+import "../src/audio_endpoint.ai" as endpoint
+fn run(worker:str,input:str,out:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,process,time} {
+  let raw:string=match files.read_text(input) {ok(v)=>v,err(_)=>{return result.err("input read")},}
+  var doc:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
+  let before:string=match codec.encode(doc) {ok(v)=>v,err(_)=>{return result.err("encode before")},}
+  let plan:media.EndpointPlan=try media.endpoint_plan(doc,worker,path.join(out,"prepared.wav"))
+  var prepared:media.PreparedAudio=try media.prepare_audio_endpoint(plan,option.none(),"",1)
+  let metadata:string=endpoint.encode(struct.borrow(prepared,field=end))
+  let _=files.write_text(path.join(out,"endpoint.air"),metadata)
+  var cursor:i64=0
+  var index:u64=0
+  var manifest:string=string.new()
+  loop {if cursor>=prepared.end.actual {break}
+    let width:i64=if index%3==0 {731}else if index%3==1 {12347}else{24000}
+    let count:i64=if prepared.end.actual-cursor<width {prepared.end.actual-cursor}else{width}
+    let target:string=path.join(out,text.concat("pull-",text.concat(string.from_int(index),".wav")))
+    let session:media.AudioSession=struct.replace(prepared,media.AudioSession {child:option.none(),reader:proc.line_reader(65536),cache:string.new()},field=session)
+    let next:media.AudioSession=try media.execute_endpoint_pull(session,struct.borrow(prepared,field=end),worker,str.view(target),cursor,cast.wrap(count),"",index+2)
+    let _=struct.replace(prepared,next,field=session)
+    string.append(manifest,str.view(target))
+    string.append(manifest,"\n")
+    cursor=cursor+count
+    index=index+1
+  }
+  let post:i64=prepared.end.authored+17
+  if post<prepared.end.actual {
+    let count:i64=if prepared.end.actual-post<4093 {prepared.end.actual-post}else{4093}
+    let session:media.AudioSession=struct.replace(prepared,media.AudioSession {child:option.none(),reader:proc.line_reader(65536),cache:string.new()},field=session)
+    let next:media.AudioSession=try media.execute_endpoint_pull(session,struct.borrow(prepared,field=end),worker,path.join(out,"postbody.wav"),post,cast.wrap(count),"",index+2)
+    let _=struct.replace(prepared,next,field=session)
+  }
+  let _=try media.shutdown_audio_checked(struct.replace(prepared,media.AudioSession {child:option.none(),reader:proc.line_reader(65536),cache:string.new()},field=session))
+  let _=files.write_text(path.join(out,"pulls.txt"),manifest)
+  let after:string=match codec.encode(doc) {ok(v)=>v,err(_)=>{return result.err("encode after")},}
+  if not str.eq(before,after) {return result.err("runtime endpoint mutated authored graph")}
+  let _=files.write_text(path.join(out,"saved.air"),after)
+  result.ok(())
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.read,fs.meta,fs.write,process,time,io.write} {
+  if view.len(args)==5 and str.eq(view.get(args,4),"--export") {return export(view.get(args,1),view.get(args,2),view.get(args,3))}
+  if view.len(args)!=4 {return 2}
+  match run(view.get(args,1),view.get(args,2),view.get(args,3)) {ok(_)=>0,err(p)=>{io.write(str.view(p))
+    3},}
+}
+
+fn export(worker:str,input:str,out:str) -> i32 effects {alloc,fs.read,fs.meta,fs.write,process,time,io.write} {
+  let raw:string=match files.read_text(input) {ok(v)=>v,err(_)=>{return 3},}
+  var doc:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return 4},}
+  let before:string=match codec.encode(doc) {ok(v)=>v,err(_)=>{return 5},}
+  var fonts:array<string> =array.new()
+  match media.render_profile(doc,worker,path.join(out,"master.mkv"),fonts,"","",3) {
+    err(p)=>{io.write(str.view(p))
+      return 6},ok(_)=>{},}
+  let after:string=match codec.encode(doc) {ok(v)=>v,err(_)=>{return 7},}
+  if not str.eq(before,after) {return 8}
+  let _=files.write_text(path.join(out,"saved.air"),after)
+  0
+}

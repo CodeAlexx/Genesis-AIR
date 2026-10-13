@@ -1,11 +1,53 @@
 # Control acceptance ledger
 
-The target is every control Genesis AIR currently exposes. All 31 video and 20 audio filter
-kinds have a media mapping, but a mapping alone is not control acceptance. A control is
-complete when its document edit, saved/reloaded state, preview, export, and failure behavior
-agree. The current 757-outcome UI gate proves hit testing and command dispatch in its representative
-panel states;
-state-dependent controls also need focused checks. It does not by itself prove media output.
+## Current R19 control scope
+
+The target is every exposed control. A mapping or successful command is not
+acceptance by itself: document/Undo behavior, saved/reloaded state, evaluated
+preview/master output and coded failure behavior must agree. The
+[current checkpoint ledger](PRO_EDITING_ACCEPTANCE_WINDOWS.md#r19-checkpoint-status)
+records R19's exact combined and native receipts. Its complete BackgroundOnly
+suite passes all 92 required fresh reports; native UI checks remain limited to
+the explicitly observed workflows. All six native Delay/Reverb export variants
+now pass their independent picture/PCM checks. R19 coherent root products are
+published and fresh actual-root 4K workflow/module/owned Close verification
+passes. The accompanying sanitized archive and verification receipt preserve
+the measured workflows and separately scoped history.
+
+| Current control family | Maintained R19 report coverage | Practical limits |
+|---|---|---|
+| Linked timeline editing and Snap | `linked-media-tests.json`, `editing-safety-tests.json`, `snap-controls-tests.json`, `editor-trim-tests.json`, clipboard/model/media gates; actual paired split/head trim, Undo/Redo, reopen and locked refusal | Native edited effect-tail equality is separately qualified, not inferred from geometry. |
+| A1 reference waveform and visible mixer state | `waveform-visual-tests.json`, `waveform-visual.json`, waveform view/detail, direct/nested waveform gates | Reference display neutralizes the owning track mixer only. Mute/Gain 0/Solo exclusion preserve a dimmed labelled shape; actual postmix output still follows mixer state. Cold effects/descendants need background cache work. |
+| Follow, marker/time and scopes | `timeline-track-scroll-tests.json`, picture clock/queue, inspector/live-paint and actual cadence gates | Pages from current completed Program pictures. Manual scrolling suspends Follow; Source, gestures and pending endpoint preparation cannot page Program. No physical AV/fullscreen proof. |
+| Titles and shared prompts | `inspector-tests.json`, transition controls, current native Unicode edit/Save/Open/title master | Shared caret, selection, multiline editing and visible draft refusals; complex shaping/right-to-left and richer typography remain incomplete. |
+| Keyframes and effect parameters | `keyframe-controls-tests.json`, `keyframe-controls-media.json`, filter order/transactions and evaluated media gates | Previous/Next, exact-key Delete/interpolation, local-frame conversion and one Undo; unsupported audio FX/track automation retain refusals. Not every mapped parameter/order/curve is qualified. |
+| Transition management and compositor | `transition-controls-tests.json`, `transition-controls-media-tests.json`, `upper-transition-media.json`, `upper-transition-protocol.json`, picture-memory gates | Stable selected seam badge, 11 types, exact duration, Remove and atomic Undo/Redo. Unsupported direct compound sides, side PiP rotation and base incoming overlay-only edits are refused. No audio fades are synthesized. |
+| Save/Open/recovery | Project-safety, recovery-ownership and current native paired/title Save/Open receipts | Actual recovery/failed-save/dirty-close interaction beyond the measured workflows remains separate from model checks. |
+| Program/Source transport and accepted EOF | Standalone endpoint actor/controller/media/export/preview, audio EOF query/tail phase/protocol/history and source-boundary gates | Same accepted graph/session, exact PCM count, independent Source, black after video body; restricted DSP domains and actual native tail outputs remain separately scoped. |
+| Export ownership and cancellation | Export-ownership and all-phase CLI cancellation checks; actual active native Cancel/same-target retry plus independent all-picture/PCM verifier | Owned cleanup/retry is tested, not a promise of a fixed GUI cancel latency for every frame or codec. Foreign output/partials remain protected. |
+| Video/audio filter mappings | 31 video/20 audio mapped kinds with representative current background preview/master/PCM checks | Mapping counts do not qualify every combination, animated field or authored-history transform. |
+
+Normal import/Open separates linked V1 pictures and A1 sound. A1 displays processed
+clip audio with its owning track mixer made neutral for reference only; clip
+processing and compound child mixing remain represented. `Muted`, `Gain 0`,
+`Solo excluded`, `Loading waveform...` and `Unavailable` distinguish actual state
+and data availability. A visible shape does not prove audible sound.
+
+Follow in the timeline bar and View menu shares one view toggle. It pages from
+completed Program picture/frame identity, aligning ruler, time and marker;
+manual horizontal scrolling suspends it. Toggling Follow does not author a
+project edit or consume Undo. Actual software steady cadence passes retain raw
+inputs/startup/shutdown and do not imply physical scanout or speaker latency.
+
+## Historical control and media catalogue
+
+Everything below records the dated binary/component scopes named in its section.
+It is retained for test/control detail, not a statement that an old candidate is
+current or that its pending work remains pending in R19. Older counts, throughput
+measurements and renderer refusals must be read with their original identities;
+current upper-transition/endpoint/reference-waveform behavior is summarized
+above. Complete prior candidate documents and failures are retained as described
+in the [acceptance history](PRO_EDITING_ACCEPTANCE_WINDOWS.md#retained-history-and-checkpoint-completion).
 
 ## Verified Windows checkpoint (2026-10-09)
 
@@ -235,7 +277,7 @@ Preview spatial resampling differs at edges; master transforms retain the refere
 
 | Area | Verified | Still required |
 |---|---|---|
-| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; X11 import, V1 placement, ruler scrub, and save at 1× and 4K 2×; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have crossfade gates; incoming/outgoing Text, opacity keys, fades and independent grades have native preview/master pixel checks | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, measured sustained interactive throughput. Incoming transition Blend/PiP/Chroma key and transitions above the base lane currently fail explicitly. |
+| Timeline, pool, tracks, transport, undo/redo | Command/state gate, save/reload, drag undo step; X11 import, V1 placement, ruler scrub, and save at 1× and 4K 2×; generated-media preview/export and X11 Play/Pause for representative cases; all 11 named transition kinds have spatial preview/MP4 gates on touching cuts; overlap and short-gap seams have crossfade gates; incoming/outgoing Text, opacity keys, fades and independent grades have native preview/master pixel checks | Media outcomes for every edit operation, nested sequences, non-touching seams for every kind, measured sustained interactive throughput. The historical checkpoint refused incoming Blend/PiP/Chroma key and upper transitions; later maintained upper-side support is scoped above. Incoming overlay-only base-transition edits remain refused. |
 | Project lifecycle | Save/Discard/Cancel for New/Open/Recover/Close, failed-save retry and preservation, isolated history/clipboard, independent paused autosave, separate snapshots, newest-valid and legacy recovery, Save as copy and atomic temporary collision checks; Win32 Cancel/New and Unicode Save as/Open; actual simultaneous-process lock, crash, claim-race and failed-cleanup checks on Windows/Linux | Native recovery, failed-save and dirty-close interaction under an interactive Windows session. |
 | Inspector and keyframes | Representative controls are clicked; focused drag/undo/cancel checks pass; clip-local opacity and brightness keyframes change the render wire; keyed picture fade and base opacity have preview/MP4 pixel gates; LUT3D Amount and Stabilize Strength have keyed preview endpoints; K creates a missing filter in one undo step; audio gain K/faders write local keys, show evaluated values and undo a drag together; gain curves have native PCM/AAC output gates | Full mapped video parameter coverage, remaining keyframed clip properties, unsupported video filter combinations, and track/audio-filter automation. K/faders now refuse unsupported PiP/Blend/Chroma-key layers and transition sides, unknown fields, unsupported rotation and stale filter targets with codes. Keyed video faders display/edit evaluated values; held Blend mode switches are exact. |
 | Subtitles and text | Two timed caption cues, one Latin/Cyrillic/CJK, appear in preview and MP4; Text content, Size/X/Y, and Timer timecode/Size have generated media gates | Complex-script shaping, right-to-left text, richer typography, and subtitle placement. |

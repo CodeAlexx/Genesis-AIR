@@ -60,3 +60,27 @@ pub fn paint(canvas:ref<draw.Canvas>, color:draw.Color, model:ref<timeline.Timel
     at=end}
   ()
 }
+
+// A reference strip remains visible for real silence and while no cache exists.
+// Its center line is UI geometry, never a fabricated sample or peak.
+pub fn paint_baseline(canvas:ref<draw.Canvas>,color:draw.Color,model:ref<timeline.Timeline>,
+    lane:u64,start:i64,length:i64,first:f64,top_edge:f64,last:f64,bottom_edge:f64)->unit effects {alloc} {
+  if lane>=array.len(struct.borrow(model,field=tracks)) or length<=0 {return ()}
+  let top:f64=timeline.track_top(model,lane)
+  let height:f64=struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=height)
+  let middle:f64=top+height*0.5
+  let left:f64=math.max(first,timeline.frame_to_x(model,start))
+  let right:f64=math.min(last,timeline.frame_to_x(model,add.sat(start,length)))
+  let high:f64=math.max(top_edge,middle)
+  let low:f64=math.min(bottom_edge,middle+1.0)
+  if not math.is_finite(left) or not math.is_finite(right) or not math.is_finite(high) or not math.is_finite(low) or
+      right<=left or low<=high or top>=bottom_edge or top+height<=top_edge {return ()}
+  match geometry.rect(left,high,right,low) {none=>{},some(box)=>draw.fill_rect(canvas,box,color),}
+  ()
+}
+pub fn paint_reference(canvas:ref<draw.Canvas>,color:draw.Color,baseline:draw.Color,model:ref<timeline.Timeline>,
+    lane:u64,start:i64,length:i64,values:view<f64>,first:f64,top_edge:f64,last:f64,bottom_edge:f64)->unit effects {alloc} {
+  paint_baseline(canvas,baseline,model,lane,start,length,first,top_edge,last,bottom_edge)
+  paint(canvas,color,model,lane,start,length,values,first,top_edge,last,bottom_edge)
+  ()
+}

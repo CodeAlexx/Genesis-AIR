@@ -1,0 +1,167 @@
+// Original DSP is evaluated to real EOF by the independent Python oracle.
+// This client only performs actual SDK edits and application audio planning.
+module genesis.tests.audio_tail_history
+import std.editor as editor
+import std.editor_io as store
+import std.codec as codec
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/timeline_media.ai" as media
+
+fn encoded(doc:ref<editor.Document>)->result<string,string> effects {alloc} {
+  match store.encode(doc) {ok(v)=>result.ok(v),err(e)=>result.err(codec.describe(e)),}
+}
+fn decoded(raw:str)->result<editor.Document,string> effects {alloc} {
+  match store.decode(raw) {ok(v)=>result.ok(v),err(e)=>result.err(codec.describe(e)),}
+}
+fn write(file:str,value:str)->result<unit,string> effects {alloc,fs.write} {
+  match files.write_text(file,value) {ok(_)=>result.ok(()),err(_)=>result.err("fixture output write failed"),}
+}
+fn project(root:str,name:str)->result<editor.Document,string> effects {alloc,fs.read} {
+  let raw:string=match files.read_text(path.join(root,text.concat(name,".air"))) {
+    ok(v)=>v,err(_)=>{return result.err("fixture input read failed")},}
+  decoded(raw)
+}
+fn pull(doc:ref<editor.Document>,worker:str,first:i64,last:i64,out:str)
+    ->result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var plan:media.AudioPlan=try media.audio_plan_range(doc,worker,first,last,out)
+  let _=try media.execute_audio_plan(plan)
+  result.ok(())
+}
+fn output(doc:ref<editor.Document>,worker:str,root:str,label:str)
+    ->result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let prefix:string=path.join(root,label)
+  let before:string=try encoded(doc)
+  let _=try write(text.concat(prefix,".air"),before)
+  var loaded:editor.Document=try decoded(before)
+  if not str.eq(before,try encoded(loaded)) {return result.err("codec did not preserve exact graph")}
+  let _=try media.prepare_audio(loaded,worker,0,text.concat(prefix,".wav"))
+  try pull(loaded,worker,61,96,text.concat(prefix,"-fresh61.wav"))
+  try pull(loaded,worker,91,126,text.concat(prefix,"-fresh91.wav"))
+  var held:option<media.AudioSession> =option.none()
+  var cursor:i64=0
+  var index:u64=0
+  var manifest:string=string.new()
+  loop {if cursor>=editor.duration(loaded) {break}
+    let width:i64=if index%3==0 {7}else if index%3==1 {11}else{13}
+    let end:i64=if cursor+width<editor.duration(loaded) {cursor+width}else{editor.duration(loaded)}
+    let out:string=text.concat(prefix,text.concat("-pull-",text.concat(string.from_int(index),".wav")))
+    let plan:media.AudioPlan=try media.audio_plan_range(loaded,worker,cursor,end,out)
+    var job:media.AudioJob=media.audio_job(plan,ref.swap(held,option.none()))
+    let session:media.AudioSession=try media.execute_playback_audio(job,"",0)
+    let _=ref.swap(held,option.some(session))
+    string.append(manifest,out)
+    string.append(manifest,"\n")
+    cursor=end
+    index=index+1
+  }
+  match held {none=>{},some(session)=>{let _=try media.shutdown_audio_checked(session)},}
+  let _=try write(text.concat(prefix,"-pulls.txt"),manifest)
+  var plan:media.AudioPlan=try media.audio_plan_range(loaded,worker,61,96,"unused.wav")
+  let _=try write(text.concat(prefix,"-after-body.plan"),text.join(struct.borrow(plan,field=sounds),"\n"))
+  if not str.eq(before,try encoded(doc)) or not str.eq(before,try encoded(loaded)) {
+    return result.err("audio rendering mutated authored graph")}
+  result.ok(())
+}
+fn run(worker:str,root:str,mode:str)->result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  if str.eq(mode,"--cancel") {
+    var doc:editor.Document=try project(root,"cancel")
+    if not editor.trim_start(doc,20,15) {return result.err("long tail head trim refused")}
+    let plan:media.AudioPlan=try media.audio_plan_range(doc,worker,18000,18015,path.join(root,"cancelled.wav"))
+    var job:media.AudioJob=media.audio_job(plan,option.none())
+    match media.execute_playback_audio(job,root,1) {
+      ok(session)=>{let _=try media.shutdown_audio_checked(session)
+        return result.err("cold render completed before cancellation")},
+      err(e)=>{let _=try write(path.join(root,"cancel-result.txt"),e)
+        if not text.contains(e,"[GA_AUDIO_STREAM_CANCELLED]") {return result.err(e)}},
+    }
+    var recovery:editor.Document=try project(root,"recovery")
+    try pull(recovery,worker,0,15,path.join(root,"recovered.wav"))
+    return result.ok(())
+  }
+  let raw:string=match files.read_text(path.join(root,"cases.tsv")) {
+    ok(v)=>v,err(_)=>{return result.err("fixture manifest read failed")},}
+  var names:array<string> =text.split(raw,"\n")
+  var i:u64=0
+  loop {if i>=array.len(names) {break}
+    let name:str=text.trim(array.borrow(names,i))
+    i=i+1
+    if str.len(name)==0 {continue}
+    if str.eq(mode,"--export") {
+      var variants:array<string> =["unedited","split","head","tail","moved"]
+      var k:u64=0
+      var fonts:array<string> =array.new()
+      loop {if k>=array.len(variants) {break}
+        let label:string=text.concat(name,text.concat("-",array.borrow(variants,k)))
+        k=k+1
+        var doc:editor.Document=try project(root,label)
+        let before:string=try encoded(doc)
+        let _=try media.render_profile(doc,worker,path.join(root,text.concat(label,"-master.mkv")),fonts,"","",3)
+        if not str.eq(before,try encoded(doc)) {return result.err("export mutated project")}
+      }
+      continue
+    }
+    var original:editor.Document=try project(root,name)
+    try output(original,worker,root,text.concat(name,"-unedited"))
+    if str.eq(mode,"--unedited-only") {continue}
+    let before:string=try encoded(original)
+    var split:editor.Document=editor.copy_document(original)
+    var history:editor.History=editor.history(8)
+    editor.capture(history,split)
+    let right:u64=match editor.split(split,20,30) {
+      none=>{return result.err("[GA_TEST_AUDIO_TAIL_EDIT] Delay/Reverb split refused")},some(v)=>v,}
+    let after:string=try encoded(split)
+    if not editor.undo(history,split) or not str.eq(before,try encoded(split)) or
+       not editor.redo(history,split) or not str.eq(after,try encoded(split)) {
+      return result.err("split Undo/Redo changed graph")}
+    try output(split,worker,root,text.concat(name,"-split"))
+    var head:editor.Document=editor.copy_document(original)
+    if not editor.trim_start(head,20,15) {return result.err("[GA_TEST_AUDIO_TAIL_EDIT] Delay/Reverb head trim refused")}
+    try output(head,worker,root,text.concat(name,"-head"))
+    var offline:editor.Document=editor.copy_document(head)
+    var source_at:u64=0
+    loop {if source_at>=array.len(struct.borrow(offline,field=sources)) {break}
+      let source:ref<editor.Source> =array.borrow(struct.borrow(offline,field=sources),source_at)
+      if source.id==7 {let _=struct.replace(source,false,field=online)}
+      source_at=source_at+1
+    }
+    let offline_before:string=try encoded(offline)
+    match media.audio_plan_range(offline,worker,61,96,path.join(root,"offline-unpublished.wav")) {
+      ok(_)=>{return result.err("after-body offline source silently admitted")},
+      err(e)=>{if not text.contains(e,"[GA_AUDIO_SOURCE_OFFLINE]") {return result.err(e)}
+        let _=try write(path.join(root,text.concat(name,"-offline-refusal.txt")),e)},
+    }
+    if not str.eq(offline_before,try encoded(offline)) {return result.err("offline refusal changed graph")}
+    var interior:editor.Document=editor.copy_document(original)
+    let middle:u64=match editor.split(interior,20,15) {none=>{return result.err("first interior split refused")},some(v)=>v,}
+    let _=match editor.split(interior,middle,45) {none=>{return result.err("second interior split refused")},some(v)=>v,}
+    if not editor.lift(interior,middle) {return result.err("interior lift refused")}
+    try output(interior,worker,root,text.concat(name,"-interior"))
+    var tail:editor.Document=editor.copy_document(original)
+    if not editor.trim_end(tail,20,30) {return result.err("tail trim refused")}
+    try output(tail,worker,root,text.concat(name,"-tail"))
+    var moved:editor.Document=editor.copy_document(split)
+    let track:u64=option.unwrap(editor.clip(moved,right)).track
+    if not editor.move_clip(moved,right,track,60) {return result.err("final survivor move refused")}
+    try output(moved,worker,root,text.concat(name,"-moved"))
+    var repeated:editor.Document=editor.copy_document(split)
+    if not editor.trim_start(repeated,right,40) or not editor.trim_end(repeated,right,15) {
+      return result.err("repeated inward cuts refused")}
+    try output(repeated,worker,root,text.concat(name,"-repeated"))
+    var saved:editor.Document=try decoded(after)
+    try output(saved,worker,root,text.concat(name,"-saveopen"))
+    if not str.eq(before,try encoded(original)) {return result.err("copy/edit mutated original")}
+  }
+  result.ok(())
+}
+pub fn main(args:view<str>)->i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=3 and view.len(args)!=4 {return 2}
+  let mode:string=if view.len(args)==4 {string.copy(view.get(args,3))}else{string.new()}
+  if str.len(mode)>0 and not str.eq(mode,"--export") and not str.eq(mode,"--unedited-only") and not str.eq(mode,"--cancel") {return 2}
+  match run(view.get(args,1),view.get(args,2),mode) {
+    ok(_)=>{io.write("tail-history edits and render paths complete\n")
+      0},err(problem)=>{io.write(problem)
+      3},}
+}

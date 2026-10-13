@@ -150,32 +150,176 @@ static int stall_audio(const wchar_t *marker) {
     return 3;
 }
 
-/* Stall one export phase, including exit after replying to CLOSE. The fake
- * owns no child; its recorded PID must be gone before the CLI finishes. */
-static int stall_export(const wchar_t *marker) {
-    wchar_t phase[32], partial[32768];
-    if (!GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_PHASE", phase, 32) ||
-        !GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_PARTIAL", partial, 32768)) return 2;
-    char line[16384];
-    while (fgets(line, sizeof(line), stdin)) {
-        if (strncmp(line, "OPEN ", 5) == 0) {
-            FILE *output = _wfopen(partial, L"wb");
-            if (!output) return 2;
-            fputs("partial", output); fclose(output);
-        }
-        int block = (wcscmp(phase, L"open") == 0 && strncmp(line, "OPEN ", 5) == 0) ||
-            (wcscmp(phase, L"frame") == 0 && strncmp(line, "ENC ", 4) == 0) ||
-            (wcscmp(phase, L"audio") == 0 && strncmp(line, "AUDIO ", 6) == 0) ||
-            ((wcscmp(phase, L"close") == 0 || wcscmp(phase, L"exit") == 0) && strncmp(line, "CLOSE", 5) == 0);
-        if (!block || wcscmp(phase, L"exit") == 0) { fputs("DONE\n", stdout); fflush(stdout); }
-        if (!block) continue;
-        FILE *record = _wfopen(marker, L"wb");
-        if (!record) return 2;
-        fprintf(record, "%lu\n", GetCurrentProcessId()); fclose(record);
-        Sleep(INFINITE);
-        return 3;
+/* Genuine pre-OPEN graph/query RPC for the cancellation fixture only.
+ * A suspended child enters a private kill-on-close job before resume. The job
+ * handle is never inherited; killing the wrapper cannot orphan its child. */
+typedef struct export_preflight {
+    HANDLE input, output, process, job;
+    DWORD pid;
+    FILE *trace;
+} export_preflight;
+
+static void export_trace(export_preflight *state, const char *kind, const char *line) {
+    if (!state->trace) return;
+    fprintf(state->trace,"%s %s",kind,line);
+    size_t count=strlen(line);
+    if (!count || line[count-1]!='\n') fputc('\n',state->trace);
+    fflush(state->trace);
+}
+static void preflight_close(export_preflight *state) {
+    if (state->input) {CloseHandle(state->input);state->input=NULL;}
+    if (state->output) {CloseHandle(state->output);state->output=NULL;}
+    if (state->process) {CloseHandle(state->process);state->process=NULL;}
+    if (state->job) {CloseHandle(state->job);state->job=NULL;}
+}
+static int preflight_failure(export_preflight *state, const char *operation) {
+    DWORD error=GetLastError();
+    fprintf(stderr,"[GA_TEST_EXPORT_PREFLIGHT] %s (Win32 %lu)\n",operation,error);fflush(stderr);
+    if (state->job) TerminateJobObject(state->job,2);
+    if (state->process) WaitForSingleObject(state->process,5000);
+    preflight_close(state);
+    return 0;
+}
+static int preflight_start(export_preflight *state, int argc, wchar_t **argv, const wchar_t *worker) {
+    SECURITY_ATTRIBUTES security={sizeof(security),NULL,TRUE};
+    HANDLE child_input=NULL,child_output=NULL;
+    if (!CreatePipe(&child_input,&state->input,&security,0) ||
+        !CreatePipe(&state->output,&child_output,&security,0)) goto failure;
+    if (!SetHandleInformation(state->input,HANDLE_FLAG_INHERIT,0) ||
+        !SetHandleInformation(state->output,HANDLE_FLAG_INHERIT,0)) goto failure;
+    state->job=CreateJobObjectW(NULL,NULL);if(!state->job)goto failure;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};
+    limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if(!SetInformationJobObject(state->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)))goto failure;
+    wchar_t command[32768];
+    if(_snwprintf_s(command,32768,_TRUNCATE,L"\"%s\"",worker)<0)goto failure;
+    for(int i=1;i<argc;i++) {
+        if(wcschr(argv[i],L'"') || wcslen(command)+wcslen(argv[i])+4>=32768)goto failure;
+        wcscat_s(command,32768,L" \"");wcscat_s(command,32768,argv[i]);wcscat_s(command,32768,L"\"");
     }
-    return 3;
+    SIZE_T bytes=0;
+    InitializeProcThreadAttributeList(NULL,1,0,&bytes);
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes=HeapAlloc(GetProcessHeap(),0,bytes);
+    if(!attributes)goto failure;
+    if(!InitializeProcThreadAttributeList(attributes,1,0,&bytes)) {HeapFree(GetProcessHeap(),0,attributes);goto failure;}
+    HANDLE inherited[2]={child_input,child_output};
+    if(!UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL)) {
+        DeleteProcThreadAttributeList(attributes);HeapFree(GetProcessHeap(),0,attributes);goto failure;
+    }
+    STARTUPINFOEXW startup={0};startup.StartupInfo.cb=sizeof(startup);
+    startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput=child_input;startup.StartupInfo.hStdOutput=child_output;
+    startup.StartupInfo.hStdError=child_output;startup.lpAttributeList=attributes;
+    PROCESS_INFORMATION child={0};
+    BOOL created=CreateProcessW(worker,command,NULL,NULL,TRUE,
+        CREATE_NO_WINDOW|CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT,NULL,NULL,&startup.StartupInfo,&child);
+    DeleteProcThreadAttributeList(attributes);HeapFree(GetProcessHeap(),0,attributes);
+    CloseHandle(child_input);child_input=NULL;CloseHandle(child_output);child_output=NULL;
+    if(!created)goto failure;
+    state->process=child.hProcess;state->pid=child.dwProcessId;
+    if(!AssignProcessToJobObject(state->job,child.hProcess)) {
+        TerminateProcess(child.hProcess,2);WaitForSingleObject(child.hProcess,5000);CloseHandle(child.hThread);goto failure;
+    }
+    if(ResumeThread(child.hThread)==(DWORD)-1) {CloseHandle(child.hThread);goto failure;}
+    CloseHandle(child.hThread);
+    char event[128];sprintf_s(event,sizeof(event),"%lu",state->pid);export_trace(state,"CHILD",event);
+    return 1;
+failure:
+    if(child_input)CloseHandle(child_input);
+    if(child_output)CloseHandle(child_output);
+    return preflight_failure(state,"Cannot start owned genuine worker");
+}
+static int preflight_rpc(export_preflight *state, const char *command) {
+    export_trace(state,"IN",command);
+    size_t count=strlen(command),at=0;
+    while(at<count) {
+        DWORD wrote=0;
+        if(!WriteFile(state->input,command+at,(DWORD)(count-at),&wrote,NULL) || !wrote)
+            return preflight_failure(state,"Cannot forward pre-OPEN command");
+        at+=wrote;
+    }
+    for(;;) {
+        char reply[65536];size_t used=0;
+        for(;;) {
+            char byte;DWORD got=0;
+            if(!ReadFile(state->output,&byte,1,&got,NULL) || got!=1)
+                return preflight_failure(state,"Missing genuine worker reply");
+            if(used+1>=sizeof(reply))return preflight_failure(state,"Genuine reply exceeds fixture bound");
+            reply[used++]=byte;
+            if(byte=='\n')break;
+        }
+        reply[used]=0;export_trace(state,"OUT",reply);
+        if(fwrite(reply,1,used,stdout)!=used || fflush(stdout)!=0)
+            return preflight_failure(state,"Cannot relay genuine worker reply");
+        if(strncmp(reply,"DONE",4)==0 && (reply[4]==' ' || reply[4]=='\r' || reply[4]=='\n'))return 1;
+        if(strncmp(reply,"ERR",3)==0 && (reply[3]==' ' || reply[3]=='\r' || reply[3]=='\n')) {
+            preflight_failure(state,"Genuine pre-OPEN worker refused command");return 0;
+        }
+    }
+}
+static int preflight_join(export_preflight *state) {
+    if(state->input){CloseHandle(state->input);state->input=NULL;}
+    if(WaitForSingleObject(state->process,5000)!=WAIT_OBJECT_0)
+        return preflight_failure(state,"Genuine pre-OPEN worker failed to join");
+    DWORD status=2;
+    if(!GetExitCodeProcess(state->process,&status) || status!=0)
+        return preflight_failure(state,"Genuine pre-OPEN worker exited unsuccessfully");
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting={0};
+    ULONGLONG deadline=GetTickCount64()+5000;
+    for(;;) {
+        if(!QueryInformationJobObject(state->job,JobObjectBasicAccountingInformation,&accounting,sizeof(accounting),NULL))
+            return preflight_failure(state,"Cannot verify genuine worker descendants");
+        if(!accounting.ActiveProcesses)break;
+        if(GetTickCount64()>=deadline)return preflight_failure(state,"Genuine worker descendants did not join");
+        Sleep(5);
+    }
+    char event[256];sprintf_s(event,sizeof(event),"%lu exit=%lu active=%lu total=%lu",
+        state->pid,status,accounting.ActiveProcesses,accounting.TotalProcesses);
+    export_trace(state,"JOIN",event);preflight_close(state);return 1;
+}
+
+/* Stall one export phase after genuinely resolving the accepted audio graph.
+ * The genuine preflight child is joined before OPEN/marker. The blocked fake
+ * owns no running child; its recorded PID must be gone before the CLI finishes. */
+static int stall_export(const wchar_t *marker, int argc, wchar_t **argv, const wchar_t *worker) {
+    wchar_t phase[32],partial[32768],trace_path[32768];
+    if(!GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_PHASE",phase,32) ||
+       !GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_PARTIAL",partial,32768))return 2;
+    export_preflight genuine={0};
+    if(GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_TRACE",trace_path,32768)) {
+        genuine.trace=_wfopen(trace_path,L"wb");if(!genuine.trace)return 2;
+    }
+    if(!preflight_start(&genuine,argc,argv,worker)) {if(genuine.trace)fclose(genuine.trace);return 2;}
+    int pre_open=1,status=3;char line[16384];
+    while(fgets(line,sizeof(line),stdin)) {
+        if(pre_open && strncmp(line,"OPEN ",5)!=0) {
+            if(!preflight_rpc(&genuine,line)){status=2;goto finished;}
+            continue;
+        }
+        if(pre_open) {
+            if(!preflight_join(&genuine)){status=2;goto finished;}
+            pre_open=0;
+        }
+        export_trace(&genuine,"MOCK_IN",line);
+        if(strncmp(line,"OPEN ",5)==0) {
+            FILE *output=_wfopen(partial,L"wb");if(!output){status=2;goto finished;}
+            fputs("partial",output);fclose(output);
+        }
+        int audio=strncmp(line,"AUDIO ",6)==0 || strncmp(line,"NESTMIX ",8)==0 || strncmp(line,"NESTMIXTAIL ",12)==0;
+        int block=(wcscmp(phase,L"open")==0 && strncmp(line,"OPEN ",5)==0) ||
+            (wcscmp(phase,L"frame")==0 && strncmp(line,"ENC ",4)==0) ||
+            (wcscmp(phase,L"audio")==0 && audio) ||
+            ((wcscmp(phase,L"close")==0 || wcscmp(phase,L"exit")==0) && strncmp(line,"CLOSE",5)==0);
+        if(!block || wcscmp(phase,L"exit")==0) {fputs("DONE\n",stdout);fflush(stdout);export_trace(&genuine,"MOCK_OUT","DONE\n");}
+        if(!block)continue;
+        FILE *record=_wfopen(marker,L"wb");if(!record){status=2;goto finished;}
+        fprintf(record,"%lu\n",GetCurrentProcessId());fclose(record);
+        export_trace(&genuine,"BLOCK",line);Sleep(INFINITE);status=3;goto finished;
+    }
+finished:
+    if(genuine.process)preflight_failure(&genuine,"Pre-OPEN input ended before controlled stall");
+    if(genuine.trace)fclose(genuine.trace);
+    return status;
 }
 
 /* CPU-only strip producer: coded refusal and retained-session recovery, without
@@ -238,7 +382,7 @@ int wmain(int argc, wchar_t **argv) {
     wchar_t export_block[32768];
     if (argc > 1 && wcscmp(argv[1], L"--serve") == 0 &&
         GetEnvironmentVariableW(L"GENESIS_TEST_EXPORT_BLOCK", export_block, 32768) &&
-        GetFileAttributesW(export_block) == INVALID_FILE_ATTRIBUTES) return stall_export(export_block);
+        GetFileAttributesW(export_block) == INVALID_FILE_ATTRIBUTES) return stall_export(export_block,argc,argv,worker);
     if (GetEnvironmentVariableW(L"GENESIS_TEST_CRASH", crash, 32768) &&
         GetFileAttributesW(crash) == INVALID_FILE_ATTRIBUTES) {
         FILE *marker = _wfopen(crash, L"wb");

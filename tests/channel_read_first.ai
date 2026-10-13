@@ -1,0 +1,128 @@
+module tests.channel_read_first
+
+import std.channel as channel
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.testing as test
+
+pub type Work = struct { ticket:channel.Ticket, gate:string, count:u64, wait_after:u64, length:u64 }
+
+fn payload(index:u64,length:u64) -> string effects {alloc} {
+  var value:string=string.from_int(index)
+  loop {if str.len(str.view(value))>=length {break}
+    string.append(value,"abcdefghijklmnop")}
+  string.copy(str.slice(str.view(value),0,length))
+}
+
+fn produce(value:Work own) -> bool effects {alloc,fs.meta,net,time} {
+  var work:Work=value
+  var sender:channel.Sender=match channel.connect(struct.borrow(work,field=ticket),time.monotonic_ns()+2000000000) {
+    ok(v)=>v,err(_)=>{return false},
+  }
+  var good:bool=true
+  var index:u64=0
+  loop {
+    if index==work.count {break}
+    if index==work.wait_after {
+      let limit:u64=time.monotonic_ns()+2000000000
+      loop {
+        if match files.exists(str.view(struct.borrow(work,field=gate))) {ok(v)=>v,err(_)=>false,} {break}
+        if time.monotonic_ns()>=limit {good=false
+          break}
+        time.sleep_ms(1)
+      }
+      if not good {break}
+    }
+    let value:string=payload(index,work.length)
+    match channel.send(sender,1,str.bytes(str.view(value)),time.monotonic_ns()+2000000000) {
+      ok(_)=>{},err(_)=>{good=false
+        break},
+    }
+    index=index+1
+  }
+  if good {
+    good=match channel.finish(sender,9,b"final-coded-result",time.monotonic_ns()+2000000000) {ok(_)=>true,err(_)=>false,}
+  }
+  let _=channel.hang_up(sender)
+  good
+}
+
+fn receive(receiver:ref<channel.Receiver>,polling:bool) -> result<option<channel.Message>,channel.Error> effects {alloc,net,time} {
+  let limit:u64=time.monotonic_ns()+2000000000
+  loop {
+    let outcome:result<option<channel.Message>,channel.Error> = if polling {channel.recv_now(receiver,time.monotonic_ns())}else{channel.recv(receiver,limit)}
+    match outcome {ok(v)=>{return result.ok(v)},err(e)=>{
+      if e.code!=channel.code_empty() or not polling or time.monotonic_ns()>=limit {return result.err(e)}},}
+  }
+  result.ok(option.none())
+}
+
+fn take_value(suite:ref<test.Suite>,receiver:ref<channel.Receiver>,index:u64,terminal:bool,length:u64,polling:bool) -> bool effects {alloc,net,time} {
+  var item:channel.Message=match receive(receiver,polling) {ok(value)=>match value {some(v)=>v,none=>{return false},},err(_)=>{return false},}
+  let _=test.eq_u64(suite,item.kind,if terminal {9}else{1},"Exact message kind survives delivery")
+  let value:string=match channel.text_of(item) {some(v)=>v,none=>string.new(),}
+  let expected:string=if terminal {string.copy("final-coded-result")}else{payload(index,length)}
+  let _=test.eq_str(suite,str.view(value),str.view(expected),"Exact ordered payload survives delivery")
+  true
+}
+
+fn run_case(suite:ref<test.Suite>,root:str,mode:u64,before:u64,count:u64,length:u64,polling:bool) -> bool effects {alloc,fs.meta,fs.write,net,thread,time} {
+  let _=files.mkdirs(root)
+  let gate:string=path.join(root,"finish.allowed")
+  var receiver:channel.Receiver=match channel.open(if mode==2 {2}else{16},65536) {ok(v)=>v,err(_)=>{return false},}
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(Work {ticket:channel.ticket(receiver),gate:string.copy(str.view(gate)),count:count,wait_after:if mode==1 {before}else{18446744073709551615},length:length},fn=produce)]
+    var index:u64=0
+    loop {if index==before {break}
+      good=take_value(suite,receiver,index,false,length,polling) and good
+      index=index+1
+    }
+    if mode==1 {good=match files.write_text(str.view(gate),"1") {ok(_)=>true,err(_)=>false,} and good}
+    if mode!=2 {
+      let begin:u64=time.monotonic_ns()
+      good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+      let _=test.check(suite,time.monotonic_ns()-begin<2000000000,"Producer closes within unchanged two-second bound before receiver resumes")
+    }
+    loop {if index==count {break}
+      good=take_value(suite,receiver,index,false,length,polling) and good
+      index=index+1
+    }
+    good=take_value(suite,receiver,0,true,length,polling) and good
+    let drained:bool=match receive(receiver,polling) {ok(v)=>not option.is_some(v),err(_)=>false,}
+    let _=test.check(suite,drained,"Final EOF is clean and every queued message was observed")
+    if mode==2 {good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good}
+  }
+  let _=test.eq_u64(suite,channel.close(receiver),count+1,"Decoded count includes exactly one terminal message")
+  good
+}
+
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,net,thread,time} {
+  if view.len(args)<2 {return 2}
+  let root:str=view.get(args,1)
+  var suite:test.Suite=test.suite("Read-before-credit terminal delivery",false)
+  let _=test.start(suite,"Producer joins before first receive")
+  let _=test.check(suite,run_case(suite,path.join(root,"eager"),0,0,4,2,false),"Eager lifecycle retains every record and terminal result")
+  let _=test.done(suite)
+  let _=test.start(suite,"Progressed receiver joins before terminal read")
+  let _=test.check(suite,run_case(suite,path.join(root,"progressed"),1,3,4,2,false),"Outstanding reverse credits cannot destroy already written terminal data")
+  let _=test.done(suite)
+  let _=test.start(suite,"Capacity-two producer requires returned credits")
+  let _=test.check(suite,run_case(suite,path.join(root,"backpressure"),2,0,32,2,false),"Read-first ordering still unblocks a credit-starved sender")
+  let _=test.done(suite)
+  let owed:array<u64> = [1,3,7]
+  let lengths:array<u64> = [257,65536]
+  var index:u64=0
+  loop {if index>=12 {break}
+    let count:u64=array.get(owed,index%3)
+    let length:u64=array.get(lengths,(index/3)%2)
+    let polling:bool=index>=6
+    let name:string=string.from_int(index)
+    let _=test.start(suite,str.view(name))
+    let _=test.check(suite,run_case(suite,path.join(root,str.view(name)),1,count,count+1,length,polling),"Post-join records and terminal survive varied credit debt and payload lengths")
+    let _=test.done(suite)
+    index=index+1
+  }
+  test.conclude(suite,path.join(root,"channel-read-first-tests.json"),15)
+}

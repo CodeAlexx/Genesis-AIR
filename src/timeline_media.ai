@@ -20,6 +20,7 @@ import "provider.ai" as provider
 import "typeface.ai" as typeface
 import "filter_keys.ai" as filter_keys
 import "picture_memory.ai" as picture_memory
+import "audio_endpoint.ai" as endpoint
 
 type SourceInfo = struct {path: string, frames: i64, fps: f64, audio: bool, online: bool}
 
@@ -500,13 +501,21 @@ pub fn key_layer_supported(doc: ref<editor.Document>, clip: editor.Clip, kind: s
       match picture_transition_at(doc,track,frame) {
         none=>{},
         some(id)=>{
-          if track == clip.track { return false }
+          if track == clip.track {
+            let transition:editor.Transition=option.unwrap(editor.transition(doc,id))
+            if not lower and not transition_lower_span(doc,transition) { return false }
+            match transition_pair(doc,track,transition.center) {
+              none=>{return false},some(pair)=>{
+                return pair.outgoing.id==clip.id or pair.incoming.id==clip.id
+              },
+            }
+          }
         },
       }
       match composited_clip(doc,track,frame) {
         none=>{},
         some(visible)=>{
-          if visible.id == clip.id { return lower }
+          if visible.id == clip.id { return lower or clip_needs_alpha_composition(doc,clip) }
           lower=true
         },
       }
@@ -1083,11 +1092,300 @@ fn append_plan(lines: ref<array<string>>, prepared: ref<PreparedClip>) -> unit e
   ()
 }
 
+// Per-side overlay controls are resolved before the upper transition. Blend
+// remains metadata for the stationary-lower composition in UTRANS.
+pub fn transition_upper_edits_supported(doc:ref<editor.Document>,clip:editor.Clip)
+    -> bool effects {alloc} {
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(doc,field=keys)) {break}
+    let key:editor.Key=array.get(struct.borrow(doc,field=keys),at)
+    if key.clip==clip.id and not key_supported(str.view(editor.name_text(doc,key.param))) {return false}
+    at=at+1
+  }
+  var index:u32=0
+  loop {match editor.filter_at(doc,clip.id,index) {
+    none=>{break},some(filter)=>{
+      if editor.filter_enabled(doc,filter) {
+        let kind:string=editor.filter_kind(doc,filter)
+        if kind=="size_position" and editor.filter_param(doc,filter,"rotation",0.0)!=0.0 {return false}
+      }
+    },
+  }
+  index=index+1}
+  true
+}
+
+type UpperSide = struct {lines:array<string>,path:string,blend:string}
+fn upper_side_plan(doc:ref<editor.Document>,clip:editor.Clip,frame:i64,
+    prefix:str,slot:u64,output:str,cache:ref<RenderCache>)
+    -> result<UpperSide,string> effects {alloc,fs.meta,fs.read,fs.write} {
+  if not transition_upper_edits_supported(doc,clip) or clip.nested!=0 or not source_range_ok(doc,clip) {
+    return result.err("[GA_VIDEO_TRANSITION_SIDE] Invalid upper transition side")
+  }
+  var lines:array<string> = array.new()
+  var source:string=match source_path(doc,clip) {
+    none=>{return result.err("[GA_VIDEO_TRANSITION_SOURCE] Upper transition side is offline")},
+    some(value)=>try picture_path(doc,clip,frame,value),
+  }
+  var prepassed:bool=false
+  match try text_clip_plan(doc,clip,frame,prefix,slot,true,cache) {
+    some(value)=>{var prepared:PreparedClip=value
+      source=string.copy(str.view(prepared.path))
+      append_plan(lines,prepared)
+      prepassed=true},
+    none=>{let raster:string=preclip_path(prefix,slot)
+      match try preclip_line(doc,clip,frame,str.view(raster),true) {
+        none=>{},some(line)=>{array.push(lines,line)
+          source=text.concat("FLOAT:",str.view(raster))
+          prepassed=true},
+      }
+    },
+  }
+  var values:array<string> = neutral()
+  put(values,1,str.view(provider.wire_path(str.view(source))))
+  put_i(values,3,if prepassed {0}else{source_frame(doc,clip,frame)})
+  let factor:f64=clip_factor(doc,clip,frame)
+  if not math.is_finite(factor) or factor<0.0 or factor>1.0 {
+    return result.err("[GA_VIDEO_TRANSITION_SIDE] Invalid upper side opacity")
+  }
+  put_f(values,4,factor)
+  if not filters(doc,clip,values,true,frame,prepassed) {
+    return result.err("[GA_VIDEO_TRANSITION_FILTER] Unsupported upper side filter")
+  }
+  let blend:string=string.copy(str.view(array.borrow(values,5)))
+  put(values,5,"0")
+  // A missing base is transparent in compound mode. PiP and keying affect this
+  // side alone; ordered grades/titles have already run before its placement.
+  array.push(lines,wire_line(values,"FLOAT",output))
+  result.ok(UpperSide {lines:lines,path:string.copy(output),blend:blend})
+}
+
+// Upper transitions operate on a straight-alpha lane before that lane is
+// composited over the lower picture. Sliding or zooming this lane must leave the
+// lower image stationary. The surrounding compound canvas owns alpha semantics.
+// The controller admits an upper seam when a lower picture intersects ANY part
+// of its authored window. Keep that role throughout the window: a temporary
+// lower gap is transparent, never a different base-transition policy.
+fn transition_lower_span(doc:ref<editor.Document>,transition:editor.Transition) -> bool effects {alloc} {
+  let chosen_slot:u64=match editor.track_slot(doc,transition.track) {none=>{return false},some(value)=>value,}
+  let chosen:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),chosen_slot)
+  let chosen_order:u32=chosen.order
+  let chosen_id:u64=chosen.id
+  if transition.duration<2 or transition.center<transition.duration/2 or
+     transition.center>9223372036854775807-(transition.duration-transition.duration/2) {return false}
+  let start:i64=editor.transition_start(transition)
+  let end:i64=editor.transition_end(transition)
+  var at:u64=0
+  loop {if at>=editor.clip_count(doc) {break}
+    let clip:editor.Clip=array.get(struct.borrow(doc,field=clips),at)
+    at=at+1
+    if clip.owner!=doc.active or not clip.enabled or not editor.clip_has_video(clip) or
+       clip.start>=end or editor.clip_end(clip)<=start {continue}
+    let slot:u64=match editor.track_slot(doc,clip.track) {none=>{continue},some(value)=>value,}
+    let lane:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),slot)
+    let lower_kind:u32=lane.kind
+    let lower_order:u32=lane.order
+    let lower_id:u64=lane.id
+    if lower_kind==editor.track_video() and editor.track_visible(doc,lower_id) and
+       (lower_order<chosen_order or (lower_order==chosen_order and lower_id<chosen_id)) {return true}
+  }
+  at=0
+  loop {if at>=editor.transition_count(doc) {break}
+    let value:editor.Transition=array.get(struct.borrow(doc,field=transitions),at)
+    at=at+1
+    if value.duration<2 or value.center<value.duration/2 or
+       value.center>9223372036854775807-(value.duration-value.duration/2) {continue}
+    if value.owner!=doc.active or editor.transition_start(value)>=end or editor.transition_end(value)<=start {continue}
+    let slot:u64=match editor.track_slot(doc,value.track) {none=>{continue},some(value)=>value,}
+    let lane:ref<editor.Track> =array.borrow(struct.borrow(doc,field=tracks),slot)
+    let lower_kind:u32=lane.kind
+    let lower_order:u32=lane.order
+    let lower_id:u64=lane.id
+    if lower_kind!=editor.track_video() or not editor.track_visible(doc,lower_id) or
+       not (lower_order<chosen_order or (lower_order==chosen_order and lower_id<chosen_id)) {continue}
+    match transition_pair(doc,lower_id,value.center) {none=>{},some(pair)=>{
+      if pair.outgoing.enabled and pair.incoming.enabled and editor.clip_has_video(pair.outgoing) and editor.clip_has_video(pair.incoming) {return true}
+    },}
+  }
+  false
+}
+fn upper_lane_at(doc:ref<editor.Document>,track:u64,frame:i64) -> bool effects {alloc} {
+  match picture_transition_at(doc,track,frame) {none=>false,some(id)=>{
+    match editor.transition(doc,id) {none=>false,some(value)=>transition_lower_span(doc,value),}
+  },}
+}
+fn clip_needs_alpha_composition(doc:ref<editor.Document>,clip:editor.Clip) -> bool effects {alloc} {
+  var at:u32=0
+  loop {match editor.filter_at(doc,clip.id,at) {none=>{break},some(id)=>{
+    if editor.filter_enabled(doc,id) {
+      let kind:string=editor.filter_kind(doc,id)
+      if kind=="blend" or kind=="size_position" or kind=="chroma_key" {return true}
+    }
+  },}
+  at=at+1}
+  false
+}
+fn upper_transition_requested(doc:ref<editor.Document>,frame:i64) -> bool effects {alloc} {
+  var lower:bool=false
+  var lanes:array<u64> =editor_view.lanes(doc,doc.active)
+  var at:u64=0
+  loop {if at>=array.len(lanes) {break}
+    let track:u64=array.get(lanes,at)
+    if editor.track_kind(doc,track)==editor.track_video() and editor.track_visible(doc,track) {
+      if upper_lane_at(doc,track,frame) {return true}
+      match composited_clip(doc,track,frame) {none=>{},some(clip)=>{
+        // A static overlay with no current lower picture composes against
+        // transparent. No persistent transition role is invented for it.
+        if not lower and clip_needs_alpha_composition(doc,clip) {
+          match picture_transition_at(doc,track,frame) {none=>{return true},some(_)=>{},}
+        }
+        lower=true
+      },}
+    }
+    at=at+1
+  }
+  false
+}
+
+fn isolated_picture_lane(doc:ref<editor.Document>,track:u64) -> editor.Document effects {alloc} {
+  var isolated:editor.Document=editor.copy_document(doc)
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(isolated,field=tracks)) {break}
+    let value:ref<editor.Track> =array.borrow(struct.borrow(isolated,field=tracks),at)
+    if value.owner==doc.active and value.kind==editor.track_video() {
+      struct.set(value,value.id!=track,field=hidden)
+      struct.set(value,false,field=solo)
+    }
+    at=at+1
+  }
+  isolated
+}
+
+fn append_lines(lines:ref<array<string>>,prepared:ref<array<string>>) -> unit effects {alloc} {
+  var at:u64=0
+  loop {if at>=array.len(prepared) {break}
+    array.push(lines,string.copy(str.view(array.borrow(prepared,at))))
+    at=at+1
+  }
+  ()
+}
+
+fn upper_transition_plan(doc:ref<editor.Document>,frame:i64,kind:str,out:str,
+    prefix:str,cache:ref<RenderCache>) -> result<array<string>,string>
+    effects {alloc,fs.meta,fs.read,fs.write} {
+  var visible:array<editor.Clip> =array.new()
+  var lanes:array<u64> =editor_view.lanes(doc,doc.active)
+  var at:u64=0
+  loop {if at>=array.len(lanes) {break}
+    let track:u64=array.get(lanes,at)
+    if editor.track_kind(doc,track)==editor.track_video() and editor.track_visible(doc,track) {
+      match composited_clip(doc,track,frame) {none=>{},some(clip)=>{array.push(visible,clip)},}
+    }
+    at=at+1
+  }
+  if array.len(visible)==0 or array.len(visible)>4096 {
+    return result.err("[GA_VIDEO_TRANSITION_CAPACITY] Invalid upper transition lane count")
+  }
+  match files.mkdirs(path.dirname(prefix)) {err(_)=>{return result.err("[GA_VIDEO_TRANSITION_SCRATCH] Cannot create lane scratch")},ok(_)=>{},}
+  match files.write_text(text.concat(prefix,".lane-count"),string.from_int(cast.sat(array.len(visible)))) {
+    err(_)=>{return result.err("[GA_VIDEO_TRANSITION_SCRATCH] Cannot record lane rasters")},ok(_)=>{},
+  }
+  let first:editor.Clip=array.get(visible,0)
+  let first_prefix:string=text.concat(prefix,".lane-0")
+  var previous:string=text.concat(str.view(first_prefix),".output.rgba")
+  var lines:array<string> =array.new()
+  var layer:u64=0
+  let transparent_first:bool=upper_lane_at(doc,first.track,frame) or
+    (clip_needs_alpha_composition(doc,first) and match picture_transition_at(doc,first.track,frame) {none=>true,some(_)=>false,})
+  if transparent_first {
+    var clear:array<string> =neutral()
+    put(clear,107,"1")
+    array.push(lines,wire_line(clear,"FLOAT",str.view(previous)))
+  }else{
+    var base_doc:editor.Document=isolated_picture_lane(doc,first.track)
+    lines=try media_plan(base_doc,frame,"FLOAT",str.view(previous),str.view(first_prefix),cache)
+    layer=1
+  }
+  loop {if layer>=array.len(visible) {break}
+    let clip:editor.Clip=array.get(visible,layer)
+    let lane_prefix:string=text.concat(text.concat(prefix,".lane-"),string.from_int(cast.sat(layer)))
+    var values:array<string> =neutral()
+    put(values,0,str.view(provider.wire_path(text.concat("FLOAT:",str.view(previous)))))
+    match picture_transition_at(doc,clip.track,frame) {
+      some(id)=>{
+        let transition:editor.Transition=match editor.transition(doc,id) {
+          none=>{return result.err("[GA_VIDEO_TRANSITION_SIDE] Missing upper transition")},some(value)=>value,
+        }
+        let pair:TransitionPair=match transition_pair(doc,clip.track,transition.center) {
+          none=>{return result.err("[GA_VIDEO_TRANSITION_SIDE] Missing upper transition pair")},some(value)=>value,
+        }
+        let worker_kind:i64=transition_kind(str.view(editor.name_text(doc,transition.kind)))
+        if worker_kind<0 {return result.err("[GA_VIDEO_TRANSITION_SIDE] Unsupported upper transition kind")}
+        let outgoing_path:string=text.concat(str.view(lane_prefix),".side-out.rgba")
+        let incoming_path:string=text.concat(str.view(lane_prefix),".side-in.rgba")
+        var outgoing:UpperSide=try upper_side_plan(doc,pair.outgoing,frame,str.view(lane_prefix),0,str.view(outgoing_path),cache)
+        var incoming:UpperSide=try upper_side_plan(doc,pair.incoming,frame,str.view(lane_prefix),1,str.view(incoming_path),cache)
+        append_lines(lines,struct.borrow(outgoing,field=lines))
+        append_lines(lines,struct.borrow(incoming,field=lines))
+        let next:string=layer_path(prefix,layer%2)
+        var fields:array<string> = ["UTRANS",
+          provider.wire_path(text.concat("FLOAT:",str.view(previous))),
+          provider.wire_path(text.concat("FLOAT:",str.view(outgoing.path))),
+          provider.wire_path(text.concat("FLOAT:",str.view(incoming.path))),
+          string.from_int(worker_kind),string.from_float(editor.transition_progress(transition,frame)),"4",
+          string.copy(str.view(outgoing.blend)),string.copy(str.view(incoming.blend)),provider.wire_path(str.view(next))]
+        array.push(lines,text.join(fields," "))
+        previous=next
+        layer=layer+1
+        continue
+      },
+      none=>{
+        if clip.nested!=0 or not source_range_ok(doc,clip) {
+          return result.err("[GA_VIDEO_TRANSITION_SOURCE] Invalid upper clip source")
+        }
+        var path:string=match source_path(doc,clip) {
+          none=>{return result.err("[GA_VIDEO_TRANSITION_SOURCE] Upper clip is offline")},
+          some(value)=>try picture_path(doc,clip,frame,value),
+        }
+        var prepassed:bool=false
+        match try text_clip_plan(doc,clip,frame,str.view(lane_prefix),0,true,cache) {
+          some(value)=>{var prepared:PreparedClip=value
+            path=string.copy(str.view(prepared.path))
+            append_plan(lines,prepared)
+            prepassed=true},
+          none=>{let raster:string=preclip_path(str.view(lane_prefix),0)
+            match try preclip_line(doc,clip,frame,str.view(raster),true) {
+              none=>{},some(line)=>{array.push(lines,line)
+                path=text.concat("FLOAT:",str.view(raster))
+                prepassed=true},
+            }
+          },
+        }
+        put(values,1,str.view(provider.wire_path(str.view(path))))
+        put_i(values,3,if prepassed {0}else{source_frame(doc,clip,frame)})
+        put_f(values,4,clip_factor(doc,clip,frame))
+        if not filters(doc,clip,values,true,frame,prepassed) {
+          return result.err("[GA_VIDEO_TRANSITION_FILTER] Upper clip uses an unsupported filter")
+        }
+      },
+    }
+    let next:string=layer_path(prefix,layer%2)
+    array.push(lines,wire_line(values,"FLOAT",str.view(next)))
+    previous=next
+    layer=layer+1
+  }
+  var final:array<string> =neutral()
+  put(final,0,str.view(provider.wire_path(text.concat("FLOAT:",str.view(previous)))))
+  array.push(lines,wire_line(final,kind,out))
+  result.ok(lines)
+}
+
 // Fold visible lanes bottom to top. The worker accepts RAW: RGBA as a base, so each
 // PREVIEW output becomes the next input. ENC then consumes the completed raw frame.
 fn media_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
               scratch_prefix: str, cache: ref<RenderCache>)
               -> result<array<string>, string> effects {alloc, fs.meta, fs.read, fs.write} {
+  if upper_transition_requested(doc,frame) {return upper_transition_plan(doc,frame,kind,out,scratch_prefix,cache)}
   var visible: array<editor.Clip> = array.new()
   var lanes: array<u64> = editor_view.lanes(doc, doc.active)
   var at: u64 = 0
@@ -1685,6 +1983,22 @@ fn flat_frame_plan(doc: ref<editor.Document>, frame: i64, kind: str, out: str,
 }
 
 fn cleanup_flat_plan(prefix: str) -> unit effects {alloc, fs.read, fs.write} {
+  let lane_count:string=text.concat(prefix,".lane-count")
+  match files.read_text(str.view(lane_count)) {
+    err(_)=>{},ok(value)=>{
+      let count:u64=match text.parse_u64(str.view(value)) {none=>0,some(number)=>number,}
+      var lane:u64=0
+      loop {if lane>=count or lane>=4096 {break}
+        let child:string=text.concat(text.concat(prefix,".lane-"),string.from_int(cast.sat(lane)))
+        cleanup_flat_plan(str.view(child))
+        let _=files.remove(text.concat(str.view(child),".output.rgba"))
+        let _=files.remove(text.concat(str.view(child),".side-out.rgba"))
+        let _=files.remove(text.concat(str.view(child),".side-in.rgba"))
+        lane=lane+1
+      }
+    },
+  }
+  let _=files.remove(str.view(lane_count))
   let _ = files.remove(str.view(text.concat(prefix, ".base-opacity.rgba")))
   let _ = files.remove(str.view(text.concat(prefix, ".incoming-opacity.rgba")))
   let _ = files.remove(str.view(layer_path(prefix, 0)))
@@ -1840,6 +2154,10 @@ fn picture_preflight(doc:ref<editor.Document>, sequence:u64, ancestors:ref<array
   array.push(next,sequence)
   var view_doc:editor.Document=editor.copy_document(doc)
   struct.set(view_doc,sequence,field=active)
+  if visible_context and upper_transition_requested(view_doc,frame) {
+    // One explicit transparent seed also covers a temporary lower-lane gap.
+    let _=try picture_charge(budget,width,height,1,prefix_bytes*6+384)
+  }
   at=0
   loop {if at >= editor.clip_count(doc) {break}
     let clip:editor.Clip=array.get(struct.borrow(doc,field=clips),at)
@@ -1908,7 +2226,18 @@ fn picture_preflight(doc:ref<editor.Document>, sequence:u64, ancestors:ref<array
         return result.err("[GA_VIDEO_NESTED_SOURCE] Compound leaf rate and length exceed source frames")
       }
     }
-    if used {let _=try picture_charge(budget,width,height,operators+3,path_bytes)}
+    if used {
+      let _=try picture_charge(budget,width,height,operators+3,path_bytes)
+      // Two side preparation passes replace the old isolated-lane transition.
+      // Charge explicitly before any title or scratch ownership writes.
+      if upper_transition_requested(view_doc,frame) {
+        match picture_transition_at(view_doc,clip.track,frame) {none=>{},some(_)=>{
+          match composited_clip(view_doc,clip.track,frame) {none=>{},some(selected)=>{
+            if selected.id==clip.id {let _=try picture_charge(budget,width,height,2,path_bytes)}
+          },}
+        },}
+      }
+    }
     var key_at:u64=0
     loop {if key_at >= array.len(struct.borrow(doc,field=keys)) {break}
       let key:editor.Key=array.get(struct.borrow(doc,field=keys),key_at)
@@ -2032,7 +2361,7 @@ fn picture_lines_valid(lines:ref<array<string>>) -> bool effects {} {
 pub fn frame_plan(doc:ref<editor.Document>,frame:i64,kind:str,out:str,
     scratch_prefix:str,cache:ref<RenderCache>)
     -> result<array<string>,string> effects {alloc,fs.meta,fs.read,fs.write} {
-  if not nested_picture_requested(doc) {
+  if not nested_picture_requested(doc) and not upper_transition_requested(doc,frame) {
     return flat_frame_plan(doc,frame,kind,out,scratch_prefix,cache)
   }
   if str.len(scratch_prefix) == 0 or str.len(scratch_prefix) > 4096 or
@@ -2159,8 +2488,8 @@ fn audio_request_current(root: str, id: u64) -> result<bool,string> effects {all
     some(value)=>result.ok(value == id),none=>result.err("[GA_AUDIO_STREAM_CONTROL] Invalid playback request marker"),
   }
 }
-fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: str, root: str, id: u64, cancel: str)
-           -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
+fn reply_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: str, root: str, id: u64, cancel: str)
+           -> result<string, string> effects {alloc, fs.meta, fs.read, process, time} {
   var request: string = string.copy(line)
   string.append(request, "\n")
   let cancellable: bool = str.len(root) != 0 or str.len(cancel) != 0
@@ -2207,7 +2536,7 @@ fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: st
             if text.contains(str.view(reply), "AUDIO fx chain failed") {
               return result.err("worker could not apply an audio filter chain")
             }
-            if str.starts_with(str.view(reply), "DONE") { return result.ok(()) }
+            if str.starts_with(str.view(reply), "DONE") { return result.ok(reply) }
             if str.starts_with(str.view(reply), "ERR") {
               if str.len(str.view(detail)) > 0 {
                 return result.err(text.concat("worker rejected request: ", str.view(detail)))
@@ -2222,6 +2551,11 @@ fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: st
     count = count + 1
   }
   result.err("worker gave no reply")
+}
+fn command_for_request(child: ref<Child>, reader: ref<proc.LineReader>, line: str, root: str, id: u64, cancel: str)
+           -> result<unit,string> effects {alloc,fs.meta,fs.read,process,time} {
+  let _ = try reply_for_request(child,reader,line,root,id,cancel)
+  result.ok(())
 }
 fn export_command(child: ref<Child>, reader: ref<proc.LineReader>, line: str, cancel: str)
            -> result<unit, string> effects {alloc, fs.meta, fs.read, process, time} {
@@ -2592,9 +2926,73 @@ fn audio_automation_preflight(doc: ref<editor.Document>, clip: editor.Clip, held
   result.ok(())
 }
 
+fn audio_tail_graph(doc:ref<editor.Document>,clip:editor.Clip)->bool effects {alloc} {
+  if clip.nested != 0 {return false}
+  var at:u32=0
+  loop {match editor.filter_at(doc,clip.id,at) {none=>{break},some(filter)=>{
+    if editor.filter_enabled(doc,filter) {
+      let kind:string=editor.filter_kind(doc,filter)
+      if str.eq(kind,"delay") or str.eq(kind,"reverb") {return true}
+    }
+  },}
+    at=at+1
+  }
+  false
+}
+
+// Only this proved direct static phase may retain the original actual EOF tail.
+// The SDK uses the same capability when opening destructive editing guards.
+fn audio_tail_owner(doc:ref<editor.Document>,clip:editor.Clip)->bool effects {alloc} {
+  if not audio_tail_graph(doc,clip) or not editor.audio_tail_context_potential(doc,clip) {return false}
+  let context:editor.AudioContext=editor.audio_context_for(doc,clip)
+  context.offset+clip.length == context.length
+}
+
+// Native EOF is distinct from the legacy authored-body cache. The original
+// forward graph is processed at normalized 48k before its actual count is read.
+// No new schema is authored; END2 identifies this runtime-only accepted bound.
+fn audio_native_eof_owner(doc:ref<editor.Document>,clip:editor.Clip)->bool effects {alloc} {
+  if clip.nested!=0 or clip.reverse or not editor.clip_has_audio(clip) or
+      not editor.audio_context_valid(doc,clip) {return false}
+  let speed:f64=effective_speed(doc,clip)
+  if not math.is_finite(speed) or speed<0.05 or speed>16.0 {return false}
+  let source_slot:u64=match editor.source_slot(doc,clip.source) {none=>{return false},some(v)=>v,}
+  let rate:u32=struct.get(array.borrow(struct.borrow(doc,field=sources),source_slot),field=audio_rate)
+  if rate!=44100 and rate!=48000 {return false}
+  var needed:bool=speed!=1.0
+  var at:u32=0
+  loop {match editor.filter_at(doc,clip.id,at) {none=>{break},some(filter)=>{
+    if editor.filter_enabled(doc,filter) {
+      let kind:string=editor.filter_kind(doc,filter)
+      if chrome.is_audio_kind(kind) {
+        if str.eq(kind,"compressor") or str.eq(kind,"gate") or str.eq(kind,"limiter") or
+            str.eq(kind,"eq_3band") or str.eq(kind,"eq_10band") {needed=true}
+        else if not str.eq(kind,"volume") and not str.eq(kind,"mute") and not str.eq(kind,"pan") {return false}
+      }
+    }
+  },}
+    at=at+1
+  }
+  if not needed {return false}
+  let context:editor.AudioContext=editor.audio_context_for(doc,clip)
+  let end:i64=match context.extent {none=>context.length,some(v)=>v.processing_length,}
+  if context.reverse or context.offset+clip.length!=end {return false}
+  var key_at:u64=0
+  loop {if key_at>=array.len(struct.borrow(doc,field=keys)) {break}
+    let key:editor.Key=array.get(struct.borrow(doc,field=keys),key_at)
+    if key.clip==clip.id {
+      let name:string=editor.name_text(doc,key.param)
+      if str.eq(name,"fade_in") or str.eq(name,"fade_out") {return false}
+    }
+    key_at=key_at+1
+  }
+  true
+}
+
 // Context-bearing clips need a full original DSP graph followed by an exact
 // sample crop. Legacy AUDIO/AUDIOSTREAM remains unchanged for context-free clips.
 fn audio_context_graph(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {alloc} {
+  if audio_tail_graph(doc,clip) and editor.audio_tail_context_potential(doc,clip) {return true}
   let context: editor.AudioContext = match editor.audio_context(clip) {none=>{
     // These verified same-length graphs need their full authored history even
     // before the first cut. Unknown/tail-producing legacy chains keep their
@@ -2931,7 +3329,7 @@ fn nested_audio_append(tree: ref<NestedAudioTree>, fields: ref<array<string>>, b
 }
 
 fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: str, parent: str,
-    ancestors: ref<array<u64>>, tree: ref<NestedAudioTree>)
+    ancestors: ref<array<u64>>, tree: ref<NestedAudioTree>, direct_tail:bool,native_eof:bool)
     -> result<unit,string> effects {alloc} {
   if not editor.clip_has_audio(clip) {return result.ok(())}
   if array.len(ancestors) > 16 or str.len(instance) > 256 {
@@ -2943,7 +3341,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   }
   var processing: editor.Clip = clip
   let context: editor.AudioContext = editor.audio_context_for(doc,clip)
-  let has_context: bool = option.is_some(editor.audio_context(clip))
+  let has_context: bool = option.is_some(editor.audio_context(clip)) or direct_tail
   if has_context {
     struct.set(processing,context.source_in,field=source_in)
     struct.set(processing,match context.extent {none=>context.length,some(extent)=>extent.processing_length,},field=length)
@@ -3049,7 +3447,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
       let child_bounds: NestedAudioBounds = try nested_audio_bounds(doc,child)
       if child_bounds.last <= child_first or child_bounds.first >= child_last {continue}
       let child_path: string = text.concat(instance,text.concat(if child.nested == 0 {".l"}else{".n"},string.from_int(child.id)))
-      let _ = try nested_audio_define(doc,child,child_path,instance,next_ancestors,tree)
+      let _ = try nested_audio_define(doc,child,child_path,instance,next_ancestors,tree,false,false)
     }
     disk_bytes=disk_bytes+cast.float(child_last-child_first)*8.0+128.0
     fields=[string.copy("NESTBUS"),string.copy(instance),string.copy(parent),
@@ -3065,21 +3463,50 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   if str.len(fade_keys) != 0 {array.push(fields,fade_keys)}
   if has_context {
     var ctx_fields: array<string> = ["AUDIOCTX",string.from_float(context_source),string.from_float(context_duration),
-      string.from_int(context.output_frames),string.from_int(context.crop_start)]
+      string.from_int(context.output_frames)]
+    if native_eof {match context.extent {none=>{},some(extent)=>{
+      array.set(ctx_fields,0,"AUDIOCTX2")
+      array.push(ctx_fields,string.from_int(extent.processing_frames))
+    },}}
+    array.push(ctx_fields,string.from_int(context.crop_start))
     array.push(fields,text.join(ctx_fields,":"))
+  }
+  if direct_tail {
+    if not native_eof {array.push(fields,"AUDIOTAIL")}
+    let phase_source:u64=option.unwrap(editor.source_slot(doc,clip.source))
+    let phase_rate:u32=struct.get(array.borrow(struct.borrow(doc,field=sources),phase_source),field=audio_rate)
+    let admitted_phase:bool=audio_phase_fps(context.fps)
+    if native_eof {
+      var eof_fields:array<string> =["AUDIOEOF",string.from_float(bounds.speed),string.from_int(phase_rate)]
+      array.push(fields,text.join(eof_fields,":"))
+    }else if admitted_phase {
+      var phase:array<string> =["AUDIOPHASE",string.from_int(phase_rate),
+        string.from_float(context.fps),string.from_int(context.origin),string.from_int(context.length),
+        string.from_int(context.source_in),string.from_int(context.offset),string.from_int(clip.length),
+        string.from_int(clip.start)]
+      array.push(fields,text.join(phase,":"))
+    }
+    disk_bytes=disk_bytes+1920024.0
   }
   nested_audio_append(tree,fields,disk_bytes)
 }
 
+fn audio_phase_fps(fps:f64)->bool effects {} {
+  fps == 24.0 or fps == 30.0 or fps == 60.0 or fps == 24000.0/1001.0 or
+    fps == 30000.0/1001.0 or fps == 60000.0/1001.0
+}
+
 fn direct_audio_define(doc: ref<editor.Document>,clip: editor.Clip,instance: str,
-    ancestors: ref<array<u64>>,tree: ref<NestedAudioTree>) -> result<unit,string> effects {alloc} {
+    ancestors: ref<array<u64>>,tree: ref<NestedAudioTree>,native_eof:bool) -> result<unit,string> effects {alloc} {
   let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
+  let tail:bool=native_eof or audio_tail_owner(doc,clip)
   let leaf: string = text.concat(instance,text.concat(".l",string.from_int(clip.id)))
-  try nested_audio_define(doc,clip,leaf,instance,ancestors,tree)
+  try nested_audio_define(doc,clip,leaf,instance,ancestors,tree,tail,native_eof)
   var neutral: array<string> = ["NESTBUS",string.copy(instance),"-",string.from_int(bounds.first),string.from_int(bounds.last),
     string.from_int(bounds.first),string.from_int(bounds.last),"1","0","0",
     string.from_float(cast.float(bounds.last-bounds.first)/48000.0),"-"]
-  nested_audio_append(tree,neutral,cast.float(bounds.last-bounds.first)*16.0+256.0)
+  if tail {array.push(neutral,"AUDIOTAIL")}
+  nested_audio_append(tree,neutral,cast.float(bounds.last-bounds.first)*16.0+256.0+if tail {3840048.0}else{0.0})
 }
 
 fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, streaming: bool)
@@ -3097,23 +3524,35 @@ fn audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64, str
         not editor.track_audible(doc,clip.track) {continue}
     if clip.nested == 0 and (not audio_context_disk(doc,clip) or
         (not streaming and not option.is_some(editor.audio_context(clip)) and start<=clip.start)) {continue}
-    if editor.clip_end(clip) <= start or clip.start >= finish {continue}
+    let tail:bool=audio_tail_owner(doc,clip)
+    if (editor.clip_end(clip) <= start and not tail) or clip.start >= finish {continue}
     let bounds: NestedAudioBounds = try nested_audio_bounds(doc,clip)
-    if bounds.last <= origin or bounds.first >= finish_sample {continue}
-    if bounds.speed == 0.0 {
-      try audio_automation_preflight(doc,clip,true)
-      continue
+    let tail_allowance:i64=if tail {if audio_phase_fps(bounds.fps) {240003}else{240000}}else{0}
+    if bounds.last > 9007199254740991-tail_allowance {return result.err("[GA_AUDIO_CONTEXT_TAIL] Audible tail exceeds exact sample coordinates")}
+    let audible_bound:i64=bounds.last+tail_allowance
+    if audible_bound <= origin or bounds.first >= finish_sample {continue}
+    try audio_automation_preflight(doc,clip,bounds.speed == 0.0)
+    if bounds.speed == 0.0 {continue}
+    if clip.nested==0 {
+      let source_slot:u64=match editor.source_slot(doc,clip.source) {none=>{continue},some(slot)=>slot,}
+      let source:SourceInfo=source_info(doc,source_slot)
+      if not source.audio {continue}
+      if not source.online {return result.err("[GA_AUDIO_SOURCE_OFFLINE] Audible clip source is offline")}
+    }
+    if clip.nested==0 and audio_tail_graph(doc,clip) and option.is_some(editor.audio_context(clip)) and
+        not editor.audio_tail_context_supported(doc,clip) {
+      return result.err("[GA_AUDIO_CONTEXT_TAIL] Retained Delay/Reverb needs admitted native source/owner phase history")
     }
     let instance: string = text.concat("n",string.from_int(clip.id))
     if clip.nested == 0 {
       let slot: u64 = match editor.source_slot(doc,clip.source) {none=>{continue},some(value)=>value,}
       let source: SourceInfo = source_info(doc,slot)
       if not source.audio {continue}
-      let _ = try direct_audio_define(doc,clip,instance,ancestors,tree)
-    }else{let _ = try nested_audio_define(doc,clip,instance,"-",ancestors,tree)}
+      let _ = try direct_audio_define(doc,clip,instance,ancestors,tree,false)
+    }else{let _ = try nested_audio_define(doc,clip,instance,"-",ancestors,tree,false,false)}
     let begin: i64 = if bounds.first > origin {bounds.first}else{origin}
-    let end: i64 = if bounds.last < finish_sample {bounds.last}else{finish_sample}
-    var fields: array<string> = [string.copy("NESTMIX"),instance,string.from_int(begin),string.from_int(end),string.from_int(begin-origin)]
+    let end: i64 = if audible_bound < finish_sample {audible_bound}else{finish_sample}
+    var fields: array<string> = [string.copy(if tail {"NESTMIXTAIL"}else{"NESTMIX"}),instance,string.from_int(begin),string.from_int(end),string.from_int(begin-origin)]
     array.push(slices,text.join(fields," "))
   }
   var flat: array<string> = try flat_audio_lines(doc,start,finish,fps,streaming)
@@ -3167,7 +3606,7 @@ pub fn clip_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buckets:
   var tree: NestedAudioTree = NestedAudioTree {lines:array.new(),nodes:0,disk_bytes:0.0,descriptor_bytes:0}
   var ancestors: array<u64> = [clip.owner]
   let instance: string = text.concat("n",string.from_int(clip.id))
-  try direct_audio_define(doc,clip,instance,ancestors,tree)
+  try direct_audio_define(doc,clip,instance,ancestors,tree,false)
   envelope_tree_lines(tree,instance,buckets,output)
 }
 
@@ -3197,7 +3636,7 @@ pub fn compound_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buck
   var tree: NestedAudioTree = NestedAudioTree {lines:array.new(),nodes:0,disk_bytes:0.0,descriptor_bytes:0}
   var ancestors: array<u64> = [clip.owner]
   let instance: string = text.concat("n",string.from_int(clip.id))
-  try nested_audio_define(doc,clip,instance,"-",ancestors,tree)
+  try nested_audio_define(doc,clip,instance,"-",ancestors,tree,false,false)
   if tree.nodes == 0 {return result.err("[GA_AUDIO_NESTED_ENV] Compound rate has no output")}
   envelope_tree_lines(tree,instance,buckets,output)
 }
@@ -3205,6 +3644,135 @@ pub fn compound_envelope_plan(doc: ref<editor.Document>, clip: editor.Clip, buck
 // Absolute boundaries prevent fractional-rate chunks accumulating roundoff.
 pub fn audio_sample_frame(frame: i64, fps: f64) -> i64 effects {} {
   cast.sat(math.floor(cast.float(frame) * 48000.0 / fps + 0.5))
+}
+
+// Complete accepted graph for endpoint discovery and subsequent PCM pulls.
+// There is deliberately no legacy AUDIO path after this descriptor is committed.
+pub type AudioSession = struct {child: option<Child>, reader: proc.LineReader, cache: string}
+pub type EndpointPlan = struct {worker:string,output:string,end:endpoint.End,lines:array<string>}
+pub type PreparedAudio = struct {session:AudioSession,end:endpoint.End}
+pub fn endpoint_plan(doc:ref<editor.Document>,worker:str,output:str) -> result<EndpointPlan,string> effects {alloc} {
+  let fps:f64=editor.sequence_fps(doc,doc.active)
+  let authored:i64=audio_sample_frame(editor.duration(doc),fps)
+  let frames:i64=try endpoint.frame_end(authored,fps)
+  var end:endpoint.End=endpoint.End {generation:0,authored:authored,actual:0,frames:frames,fps:fps,roots:array.new()}
+  var tree:NestedAudioTree=NestedAudioTree {lines:array.new(),nodes:0,disk_bytes:0.0,descriptor_bytes:0}
+  var ancestors:array<u64> =[doc.active]
+  var at:u64=0
+  loop {if at>=editor.clip_count(doc) {break}
+    let clip:editor.Clip=match editor.clip_at(doc,at) {none=>{break},some(v)=>v,}
+    at=at+1
+    if clip.owner!=doc.active or not clip.enabled or not editor.clip_has_audio(clip) or not editor.track_audible(doc,clip.track) {continue}
+    let bounds:NestedAudioBounds=try nested_audio_bounds(doc,clip)
+    try audio_automation_preflight(doc,clip,bounds.speed==0.0)
+    if bounds.speed==0.0 {continue}
+    if clip.nested==0 {
+      let slot:u64=match editor.source_slot(doc,clip.source) {none=>{return result.err("[GA_AUDIO_SOURCE_OFFLINE] Audible source is missing")},some(v)=>v,}
+      let source:SourceInfo=source_info(doc,slot)
+      if not source.audio {continue}
+      if not source.online {return result.err("[GA_AUDIO_SOURCE_OFFLINE] Audible source is offline")}
+    }
+    if clip.nested==0 and audio_tail_graph(doc,clip) and not editor.audio_tail_context_supported(doc,clip) {return result.err("[GA_AUDIO_CONTEXT_TAIL] Endpoint preparation requires supported complete static tail history")}
+    let instance:string=text.concat("n",string.from_int(clip.id))
+    if clip.nested==0 {let _=try direct_audio_define(doc,clip,str.view(instance),ancestors,tree,audio_native_eof_owner(doc,clip))}
+    else {let _=try nested_audio_define(doc,clip,str.view(instance),"-",ancestors,tree,false,false)}
+    array.push(struct.borrow(end,field=roots),endpoint.Root {id:instance,start:bounds.first,body:bounds.last,actual:bounds.last,tail:audio_native_eof_owner(doc,clip) or audio_tail_owner(doc,clip),native_eof:audio_native_eof_owner(doc,clip)})
+  }
+  var root_at:u64=0
+  loop {if root_at>=array.len(struct.borrow(end,field=roots)) {break}
+    let value:ref<endpoint.Root> =array.borrow(struct.borrow(end,field=roots),root_at)
+    let body:i64=value.body
+    if body>end.actual {struct.set(end,body,field=actual)}
+    root_at=root_at+1
+  }
+  if tree.nodes>0 {struct.set(end,1,field=generation)}
+  var lines:array<string> =array.new()
+  if tree.nodes>0 {
+    array.push(lines,"NESTBEGIN -")
+    at=0
+    loop {if at>=array.len(struct.borrow(tree,field=lines)) {break}
+      array.push(lines,string.copy(array.borrow(struct.borrow(tree,field=lines),at)))
+      at=at+1
+    }
+    array.push(lines,"NESTCOMMIT")
+  }
+  if str.len(text.join(lines,"\n"))+str.len(endpoint.encode(end))>960000 {return result.err("[GA_AUDIO_NESTED_CAPACITY] Endpoint descriptor exceeds mailbox")}
+  result.ok(EndpointPlan {worker:string.copy(worker),output:string.copy(output),end:end,lines:lines})
+}
+fn query_endpoint(child:ref<Child>,reader:ref<proc.LineReader>,end:ref<endpoint.End>,root:str,id:u64,cancel:str) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,process,time} {
+  var generation:u64=end.generation
+  var maximum:i64=0
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(end,field=roots)) {break}
+    let value:ref<endpoint.Root> =array.borrow(struct.borrow(end,field=roots),at)
+    let command:string=endpoint.fields(["NESTEND",string.from_int(id),string.copy(str.view(struct.borrow(value,field=id))),string.from_int(generation)])
+    let reply:string=try reply_for_request(child,reader,str.view(command),root,id,cancel)
+    var f:array<string> =text.split(str.view(reply)," ")
+    if array.len(f)!=8 or not str.eq(str.view(array.borrow(f,0)),"DONE") or not str.eq(str.view(array.borrow(f,1)),"NESTEND") or
+        not str.eq(str.view(array.borrow(f,2)),str.view(string.from_int(id))) or not str.eq(str.view(array.borrow(f,3)),str.view(value.id)) {
+      return result.err("[GA_AUDIO_ENDPOINT] Worker endpoint identity differs from query")
+    }
+    let gen:u64=match text.parse_u64(str.view(array.borrow(f,4))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid accepted generation")},some(v)=>v,}
+    let start:i64=match text.parse_i64(str.view(array.borrow(f,5))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid start")},some(v)=>v,}
+    let body:i64=match text.parse_i64(str.view(array.borrow(f,6))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid body")},some(v)=>v,}
+    let actual:i64=match text.parse_i64(str.view(array.borrow(f,7))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid EOF")},some(v)=>v,}
+    if gen==0 or (generation!=0 and gen!=generation) or start!=value.start or body!=value.body or actual<start or
+        (not value.native_eof and actual<body-if value.tail {if endpoint.phase_fps(end.fps) {2}else{0}}else{1}) or actual>body+if value.native_eof {240000}else if value.tail {if endpoint.phase_fps(end.fps) {240003}else{240000}}else{1} {return result.err("[GA_AUDIO_ENDPOINT] Worker endpoint geometry differs from accepted plan")}
+    generation=gen
+    struct.set(value,actual,field=actual)
+    if actual>maximum and not (value.native_eof and actual==start) {maximum=actual}
+    at=at+1
+  }
+  struct.set(end,generation,field=generation)
+  struct.set(end,maximum,field=actual)
+  struct.set(end,try endpoint.frame_end(if maximum>end.authored {maximum}else{end.authored},end.fps),field=frames)
+  result.ok(())
+}
+pub fn prepare_audio_endpoint(plan:EndpointPlan own,previous:option<AudioSession> own,root:str,id:u64) -> result<PreparedAudio,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var owned:EndpointPlan=plan
+  var session:AudioSession=match previous {some(v)=>v,none=>{
+    var argv:array<string> =[string.copy(str.view(owned.worker)),"--serve"]
+    let child:Child=match proc.spawn_piped_merged(argv) {err(p)=>{return result.err(text.concat("[GA_AUDIO_ENDPOINT_START] ",fs.error.message(p)))},ok(v)=>v,}
+    AudioSession {child:option.some(child),reader:proc.line_reader(65536),cache:string.new()}
+  },}
+  if array.len(struct.borrow(owned,field=lines))>0 and str.len(struct.borrow(session,field=cache))==0 {
+    let cache:string=match nested_audio_reserve(str.view(owned.output)) {err(p)=>{return result.err(nested_audio_failure(p,shutdown_audio_checked(session)))},ok(v)=>v,}
+    let _=struct.replace(session,cache,field=cache)
+  }
+  var child:Child=option.unwrap(struct.replace(session,option.none(),field=child))
+  var reader:proc.LineReader=struct.replace(session,proc.line_reader(65536),field=reader)
+  var failure:string=string.new()
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(owned,field=lines)) {break}
+    let line:string=nested_audio_runtime_line(array.borrow(struct.borrow(owned,field=lines),at),struct.borrow(session,field=cache))
+    match command_for_request(child,reader,str.view(line),root,id,"") {ok(_)=>{},err(p)=>{failure=p
+        break},}
+    at=at+1
+  }
+  struct.set(struct.borrow(owned,field=end),0,field=generation)
+  if str.len(failure)==0 {match query_endpoint(child,reader,struct.borrow(owned,field=end),root,id,"") {ok(_)=>{},err(p)=>{failure=p},}}
+  let _=struct.replace(session,option.some(child),field=child)
+  let _=struct.replace(session,reader,field=reader)
+  if str.len(failure)>0 {return result.err(nested_audio_failure(failure,shutdown_audio_checked(session)))}
+  result.ok(PreparedAudio {session:session,end:struct.replace(owned,endpoint.empty(),field=end)})
+}
+fn endpoint_mix_plan(worker:str,output:str,end:ref<endpoint.End>,start:i64,frames:u64) -> result<AudioPlan,string> effects {alloc} {
+  if start<0 or start>end.actual or frames==0 or frames>1036800000 or frames>cast.wrap(end.actual-start) {
+    return result.err("[GA_AUDIO_ENDPOINT_RANGE] PCM pull exceeds accepted exact EOF")
+  }
+  let finish:i64=start+cast.wrap(frames)
+  var lines:array<string> =array.new()
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(end,field=roots)) {break}
+    let value:ref<endpoint.Root> =array.borrow(struct.borrow(end,field=roots),at)
+    let begin:i64=if value.start>start {value.start}else{start}
+    let last:i64=if value.actual<finish {value.actual}else{finish}
+    if begin<last {array.push(lines,endpoint.fields([if value.tail {"NESTMIXTAIL"}else{"NESTMIX"},string.copy(str.view(struct.borrow(value,field=id))),string.from_int(begin),string.from_int(last),string.from_int(begin-start)]))}
+    at=at+1
+  }
+  result.ok(AudioPlan {worker:string.copy(worker),output:string.copy(output),duration:cast.float(frames)/48000.0,frames:frames,sounds:lines})
 }
 
 pub type AudioPlan = struct {
@@ -3351,7 +3919,6 @@ fn nested_audio_stop(child: Child own, cache: str) -> result<unit,string>
   if close_failed {return result.err(nested_audio_failure("[GA_AUDIO_NESTED_CACHE] Cannot release audio worker",cleaned))}
   cleaned
 }
-pub type AudioSession = struct {child: option<Child>, reader: proc.LineReader, cache: string}
 pub type AudioJob = struct {plan: AudioPlan, session: option<AudioSession>}
 pub fn audio_job(plan: AudioPlan own, session: option<AudioSession> own) -> AudioJob effects {} {
   AudioJob {plan: plan, session: session}
@@ -3385,7 +3952,12 @@ pub fn clip_envelope(doc: ref<editor.Document>, clip: editor.Clip, buckets: u64,
   var lines: array<string> = match clip_envelope_plan(doc,clip,buckets,output) {
     ok(value)=>value,err(problem)=>{return result.err(nested_audio_failure(problem,nested_audio_cleanup(cache)))},
   }
-  if clip.nested == 0 {
+  // Original native/destination phase and native EOF markers require the
+  // accepted exact cache path; the streamed reducer deliberately rejects them.
+  let descriptor: string = text.join(lines,"\n")
+  let cached_phase: bool = text.contains(str.view(descriptor)," AUDIOPHASE:") or
+    text.contains(str.view(descriptor)," AUDIOEOF:")
+  if clip.nested == 0 and not cached_phase {
     // The public cached-bus plan remains the PCM/reference path. Waveforms alone
     // can reduce its exact direct leaf while streaming, without RF64 bodies.
     // The worker proves the identity wrapper before accepting this terminator.
@@ -3491,6 +4063,11 @@ pub fn execute_playback_audio(job: ref<AudioJob>, root: str, id: u64) -> result<
   }
 }
 
+pub fn endpoint_pull_plan(worker:str,output:str,end:ref<endpoint.End>,start:i64,frames:u64) -> result<AudioPlan,string> effects {alloc} {
+  if frames>1440000 {return result.err("[GA_AUDIO_ENDPOINT_RANGE] Playback pull exceeds 30 seconds")}
+  endpoint_mix_plan(worker,output,end,start,frames)
+}
+
 // Assemble the plan as a WAV through the worker. The document is no longer involved.
 pub fn execute_audio_plan(plan: ref<AudioPlan>) -> result<bool, string>
                           effects {alloc, fs.meta, fs.read, fs.write, process, time} {
@@ -3550,9 +4127,7 @@ pub fn prepare_audio(doc: ref<editor.Document>, worker: str, start: i64, output:
 fn render_into(doc: ref<editor.Document>, worker: str, output: str, fonts: ref<array<string>>,
                cancel: str, progress: str, profile: u32, sounds: ref<array<string>>)
                -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  let range: editor.Transport = editor.export_range(doc)
   try export_current(cancel)
-  if range.mark_out <= range.mark_in { return result.err("[GA_EXPORT_RANGE] the export range is empty") }
   let sequence_slot: u64 = match editor.sequence_slot(doc, doc.active) {
     none => { return result.err("[GA_EXPORT_SEQUENCE] the project has no active sequence") },
     some(slot) => slot,
@@ -3597,7 +4172,27 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
                   profile: u32, width: u32, height: u32, fps: f64,
                   sounds: ref<array<string>>, cache_directory: str)
                   -> result<unit,string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
-  let range: editor.Transport = editor.export_range(doc)
+  var accepted:EndpointPlan=try endpoint_plan(doc,"",output)
+  var warm:u64=0
+  loop {if warm>=array.len(struct.borrow(accepted,field=lines)) {break}
+    let line:string=nested_audio_runtime_line(array.borrow(struct.borrow(accepted,field=lines),warm),cache_directory)
+    let _=try export_command(child,reader,str.view(line),cancel)
+    warm=warm+1
+  }
+  struct.set(struct.borrow(accepted,field=end),0,field=generation)
+  let _=try query_endpoint(child,reader,struct.borrow(accepted,field=end),"",1,cancel)
+  let range:editor.Transport=editor.export_range_until(doc,accepted.end.frames)
+  if range.mark_out<=range.mark_in {return result.err("[GA_EXPORT_RANGE] the export range is empty")}
+  let audio_start:i64=audio_sample_frame(range.mark_in,fps)
+  let marked_end:i64=audio_sample_frame(range.mark_out,fps)
+  let audio_end:i64=if accepted.end.actual<marked_end {accepted.end.actual}else{marked_end}
+  let exact_frames:u64=if audio_end>audio_start {cast.wrap(audio_end-audio_start)}else{0}
+  if exact_frames>1036800000 {return result.err("[GA_AUDIO_CAPACITY] Exact export audio exceeds six hours")}
+  var mix:array<string> =array.new()
+  if exact_frames>0 {
+    var plan:AudioPlan=try endpoint_mix_plan("",output,struct.borrow(accepted,field=end),audio_start,exact_frames)
+    mix=struct.replace(plan,array.new(),field=sounds)
+  }
   let fractional: bool = math.abs(fps - 30000.0 / 1001.0) < 0.001 or
     math.abs(fps - 24000.0 / 1001.0) < 0.001 or math.abs(fps - 60000.0 / 1001.0) < 0.001
   let fps_denominator: i64 = if fractional { 1001 } else { 1000000 }
@@ -3613,16 +4208,8 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
     string.copy(if profile == 2 or profile == 3 or profile == 5 { "pcm_s24le" } else { "aac" }),
     string.from_float(fps)
   ]
+  array.push(open_fields,text.concat("AUDIOFRAMES:",string.from_int(exact_frames)))
   try export_command(child, reader, str.view(text.join(open_fields, " ")), cancel)
-  var warm: u64 = 0
-  if nested_audio_requested(sounds) {
-    loop {if warm >= array.len(sounds) {break}
-      let line: string = nested_audio_runtime_line(array.borrow(sounds,warm),cache_directory)
-      try export_command(child,reader,line,cancel)
-      warm=warm+1
-      if str.eq(line,"NESTCOMMIT") {break}
-    }
-  }
   var cache: RenderCache = render_cache(fonts)
   struct.set(cache, width, field=width)
   struct.set(cache, height, field=height)
@@ -3648,10 +4235,10 @@ fn render_session(doc: ref<editor.Document>, child: ref<Child>, reader: ref<proc
     }
     frame = frame + 1
   }
-  var at: u64 = warm
+  var at: u64 = 0
   loop {
-    if at >= array.len(sounds) { break }
-    let line: string = nested_audio_runtime_line(array.borrow(sounds,at),cache_directory)
+    if at >= array.len(mix) { break }
+    let line: string = nested_audio_runtime_line(array.borrow(mix,at),cache_directory)
     try export_command(child, reader, line, cancel)
     at = at + 1
   }
@@ -3736,15 +4323,16 @@ pub fn render_profile_detailed(doc: ref<editor.Document>, worker: str, output: s
   }
   // Pure audio rejection owns neither output nor sidecars. Resolve before
   // entering the executor's cleanup boundary; preserve foreign sidecars.
-  let range: editor.Transport = editor.export_range(doc)
+  // Actual end is resolved on the retained worker before OPEN. A mark beginning
+  // after authored video may still select a real audio tail.
   try export_current(cancel)
-  if range.mark_out <= range.mark_in {return result.err("[GA_EXPORT_RANGE] the export range is empty")}
   match editor.sequence_slot(doc,doc.active) {
     none=>{return result.err("[GA_EXPORT_SEQUENCE] the project has no active sequence")},some(_)=>{},
   }
   let fps: f64 = editor.sequence_fps(doc,doc.active)
   if not (fps > 0.0) {return result.err("[GA_EXPORT_FPS] the sequence frame rate is invalid")}
-  var sounds: array<string> = try audio_lines(doc,range.mark_in,range.mark_out,fps,false)
+  var accepted_plan:EndpointPlan=try endpoint_plan(doc,worker,output)
+  var sounds:array<string> =struct.replace(accepted_plan,array.new(),field=lines)
   let helper: string = try export_publish_helper()
   let reservation: string = text.concat(output,".genesis-air-owner")
   // mkdir without recursive semantics is atomic on POSIX and Windows. A
@@ -3890,4 +4478,20 @@ pub fn run_export(job: ExportJob own) -> result<unit,string>
     effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   let _ = try run_export_detailed(job)
   result.ok(())
+}
+
+pub fn execute_endpoint_pull(session:AudioSession own,end:ref<endpoint.End>,worker:str,output:str,start:i64,frames:u64,root:str,id:u64)
+    -> result<AudioSession,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var retained:AudioSession=session
+  var copy:endpoint.End=match endpoint.decode(str.view(endpoint.encode(end))) {ok(v)=>v,err(p)=>{return result.err(nested_audio_failure(p,shutdown_audio_checked(retained)))},}
+  var child:Child=option.unwrap(struct.replace(retained,option.none(),field=child))
+  var reader:proc.LineReader=struct.replace(retained,proc.line_reader(65536),field=reader)
+  let checked:result<unit,string> =query_endpoint(child,reader,copy,root,id,"")
+  let _=struct.replace(retained,option.some(child),field=child)
+  let _=struct.replace(retained,reader,field=reader)
+  match checked {err(p)=>{return result.err(nested_audio_failure(p,shutdown_audio_checked(retained)))},ok(_)=>{},}
+  if not str.eq(endpoint.encode(copy),endpoint.encode(end)) {return result.err(nested_audio_failure("[GA_AUDIO_ENDPOINT_STALE] Accepted EOF changed before pull",shutdown_audio_checked(retained)))}
+  let plan:AudioPlan=match endpoint_pull_plan(worker,output,end,start,frames) {ok(v)=>v,err(p)=>{return result.err(nested_audio_failure(p,shutdown_audio_checked(retained)))},}
+  var job:AudioJob=audio_job(plan,option.some(retained))
+  execute_playback_audio(job,root,id)
 }

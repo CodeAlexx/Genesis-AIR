@@ -90,6 +90,9 @@ fn run_pair(suite: ref<test.Suite>, root: str, source_playing: bool) -> bool
     good=check_packet(suite,transport,1,10,20) and good
     good=check_packet(suite,transport,2,if source_playing {10}else{11},if source_playing {21}else{20}) and good
     let _ = test.eq_u64(suite,link.next_completed(transport),0,"Taking both completions releases all FIFO credit")
+    let _=files.remove(path.join(root,"request.id"))
+    let _=test.check(suite,match files.mkdirs(path.join(root,"request.id")) {ok(_)=>true,err(_)=>false,},
+      "Steady window runs with an unwritable and unreadable marker directory")
     let _ = test.check(suite,preview.request_window(state,root,transport,3,2,"stable epoch",30,40,32,18,source_playing),"Next accepted window reuses the immutable snapshot")
     good=await_pair(transport,4) and good
     good=check_packet(suite,transport,3,30,40) and good
@@ -266,9 +269,9 @@ fn modal_retirement(suite:ref<test.Suite>,root:str,unreceived:bool) -> bool
     let sent:u64=channel.sent(array.borrow(struct.borrow(transport,field=commands),0))
     let _=test.check(suite,not preview.retire_request(root,transport,2),"Retirement must use a strictly newer ID")
     let _=test.check(suite,preview.retire_request(root,transport,3),"Cancellation-only marker retires before consumer hold")
-    let _=test.eq_str(suite,read(root,"request.id"),"3","Authoritative cancellation ID is committed")
+    let _=test.eq_str(suite,read(root,"request.id"),"1","Command retirement does not write the disk marker")
     let _=test.eq_str(suite,read(root,"request.air"),snapshot,"Retirement publishes no new render snapshot")
-    let _=test.eq_u64(suite,channel.sent(array.borrow(struct.borrow(transport,field=commands),0)),sent,"Retirement sends no render command or wake")
+    let _=test.eq_u64(suite,channel.sent(array.borrow(struct.borrow(transport,field=commands),0)),sent+1,"Retirement sends exactly one cancellation command")
     let _=test.eq_u64(suite,transport.snapshot_generation,0,"Next real request must install a fresh snapshot")
     let _=test.eq_u64(suite,link.next_completed(transport),0,"Retirement releases all receiver packet ownership")
     let _=editor.program_action(struct.borrow(state,field=document),editor.pause())
@@ -362,7 +365,7 @@ fn gain_midpacket(suite:ref<test.Suite>,root:str) -> bool
     let _=test.check(suite,not preview.request_window(state,root,transport,5,2,"retry",32,20,480,270,false),
       "Closed producer refuses retry before mailbox mutation")
     let _=test.eq_str(suite,read(root,"request.air"),snapshot,"Failed retry preserves the last accepted snapshot")
-    let _=test.eq_str(suite,read(root,"request.id"),"4","Failed retry preserves the accepted retirement marker")
+    let _=test.eq_str(suite,read(root,"request.id"),"3","Failed retry preserves the snapshot-only disk marker")
     let _=test.eq_str(suite,struct.borrow(transport,field=error),cause,"Retry cannot mask the original producer failure")
   }
   good
@@ -383,6 +386,195 @@ fn failure_scope(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.read,
   let _=test.check(suite,not option.is_some(preview.producer_failure(root,7,5)),"New producer reset clears previous ownership record")
   ()
 }
+
+fn legacy_single(suite:ref<test.Suite>,root:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_frame(state,root,transport,1,"legacy",10,20,32,18) and good
+    good=await_pair(transport,1) and good
+    var first:array<draw.Surface> =link.take_images(transport,1)
+    var program:draw.Surface=option.unwrap(array.pop(first))
+    let _=test.check(suite,corner(program,10),"Legacy wake decodes the original file snapshot")
+    good=preview.request_frame(state,root,transport,2,"legacy",30,20,32,18) and good
+    good=await_pair(transport,2) and good
+    let _=test.eq_str(suite,read(root,"request.id"),"2","Legacy kind8 still publishes the authoritative file marker")
+    let _=test.check(suite,not transport.command_retirement,"Legacy single-frame caller never opts into command retirement")
+    var second:array<draw.Surface> =link.take_images(transport,2)
+    program=option.unwrap(array.pop(second))
+    let _=test.check(suite,corner(program,30),"Legacy single-frame exact pixels are preserved")
+    let _=test.check(suite,preview.retire_request(root,transport,3),"Legacy retirement retains file publication")
+    let _=test.eq_str(suite,read(root,"request.id"),"3","Legacy cancellation marker remains observable")
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+
+fn mixed_modes(suite:ref<test.Suite>,root:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"moving",5,20,32,18,false) and good
+    good=await_pair(transport,2) and good
+    good=check_packet(suite,transport,1,5,20) and good
+    good=check_packet(suite,transport,2,6,20) and good
+    good=preview.request_frame(state,root,transport,3,"paused",10,20,32,18) and good
+    good=await_pair(transport,3) and good
+    var first:array<draw.Surface> =link.take_images(transport,3)
+    var program:draw.Surface=option.unwrap(array.pop(first))
+    let _=test.check(suite,corner(program,10),"Legacy wake decodes the original file snapshot")
+    good=preview.request_frame(state,root,transport,4,"paused",30,20,32,18) and good
+    good=await_pair(transport,4) and good
+    let _=test.eq_str(suite,read(root,"request.id"),"4","Legacy kind8 still publishes the authoritative file marker")
+    let _=test.check(suite,not transport.command_retirement,"Legacy single-frame caller never opts into command retirement")
+    var second:array<draw.Surface> =link.take_images(transport,4)
+    program=option.unwrap(array.pop(second))
+    let _=test.check(suite,corner(program,30),"Legacy single-frame exact pixels are preserved")
+    good=preview.request_window(state,root,transport,5,2,"moving-again",40,20,32,18,false) and good
+    good=await_pair(transport,6) and good
+    good=check_packet(suite,transport,5,40,20) and good
+    good=check_packet(suite,transport,6,41,20) and good
+    let _=test.check(suite,transport.command_retirement,"Moving requests reenter command authority")
+    let _=test.check(suite,preview.retire_request(root,transport,7),"Moving retirement uses command authority again")
+    let _=test.eq_str(suite,read(root,"request.id"),"5","Moving retirement does not rewrite the snapshot marker")
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+
+fn malformed_retire(suite:ref<test.Suite>,root:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"steady",10,20,32,18,false) and good
+    good=await_pair(transport,2) and good
+    good=check_packet(suite,transport,1,10,20) and good
+    good=check_packet(suite,transport,2,11,20) and good
+    let marker:string=read(root,"request.id")
+    let _=test.check(suite,match channel.send(array.borrow(struct.borrow(transport,field=commands),0),11,b"bad",time.monotonic_ns()+100000000) {
+      ok(_)=>true,err(_)=>false,},"Malformed retirement arrives through reliable command lane")
+    let _=test.check(suite,await_error(transport),"Malformed retirement publishes a coded error")
+    let _=test.check(suite,text.contains(struct.borrow(transport,field=error),"GA_PREVIEW_REQUEST"),"Refusal retains exact request error family")
+    let _=test.eq_u64(suite,transport.error_generation,2,"Invalid anonymous retirement cannot fabricate a new request ID")
+    let _=test.eq_u64(suite,transport.completed_total,2,"Refused command does not create pixels")
+    good=preview.request_window(state,root,transport,3,2,"steady",30,20,32,18,false) and good
+    good=await_pair(transport,4) and good
+    good=check_packet(suite,transport,3,30,20) and good
+    good=check_packet(suite,transport,4,31,20) and good
+    let _=test.eq_str(suite,read(root,"request.id"),marker,"Refusal and recovery require no steady marker writes")
+    let _=test.check(suite,not transport.closed,"Current malformed command is recoverable on same producer")
+    // Old malformed IDs cannot taint newer successfully completed ownership.
+    let _=test.check(suite,match channel.send(array.borrow(struct.borrow(transport,field=commands),0),10,
+      b"1\t2\t1\tbad\t20\t7\t0",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,},
+      "Stale malformed command is injected after newer acceptance")
+    let stale:string=match channel.recv(struct.borrow(transport,field=events),time.monotonic_ns()+1000000000) {
+      ok(v)=>match v {some(m)=>match channel.text_of(m) {some(v)=>v,none=>string.new(),},none=>string.new(),},err(_)=>string.new(),}
+    let _=test.check(suite,text.contains(stale,"2\n[GA_PREVIEW_REQUEST]"),"Full stale envelope emits coded refusal under old ID")
+    link.poll(transport)
+    let _=test.eq_u64(suite,transport.ready,4,"Stale wire command cannot replace current completion")
+    let _=test.check(suite,not transport.closed and transport.error_generation!=4,"Stale refusal cannot blame current generation")
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+
+fn malformed_then_stop(suite:ref<test.Suite>,root:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"steady",10,20,32,18,false) and good
+    good=await_pair(transport,2) and good
+    good=check_packet(suite,transport,1,10,20) and good
+    good=check_packet(suite,transport,2,11,20) and good
+    let sender:ref<channel.Sender> =array.borrow(struct.borrow(transport,field=commands),0)
+    let _=test.check(suite,match channel.send(sender,10,b"3\t4\t1\tbad\t20\t7\t0",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,},"Malformed command is reliably queued before Stop")
+    let _=test.check(suite,match channel.send(sender,9,b"",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,},"Stop is queued after malformed command")
+    let _=test.check(suite,match channel.send(sender,10,b"5\t6\t1\t30\t20\t7\t0",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,},"Replacement deliberately follows Stop")
+    good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+    link.poll(transport)
+    let _=test.eq_u64(suite,transport.error_generation,4,"Malformed envelope refusal is delivered before sticky Stop")
+    let _=test.check(suite,text.contains(struct.borrow(transport,field=error),"GA_PREVIEW_REQUEST"),"Later Stop/replacement never coalesces away the coded refusal")
+    let _=test.eq_u64(suite,transport.completed_total,2,"Queued replacement cannot render after Stop")
+    let _=test.check(suite,transport.closed,"Stopped producer closes cleanly after ordered refusal")
+    link.close_commands(transport)
+  }
+  good
+}
+
+
+fn malformed_replacement(suite:ref<test.Suite>,root:str) -> bool
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"steady",10,20,32,18,false) and good
+    good=await_pair(transport,2) and good
+    good=check_packet(suite,transport,1,10,20) and good
+    good=check_packet(suite,transport,2,11,20) and good
+    let _=test.check(suite,match channel.send(array.borrow(struct.borrow(transport,field=commands),0),10,
+      b"3\t4\t1\tbad\t20\t7\t0",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,},"Malformed envelope is queued before valid replacement")
+    good=preview.request_window(state,root,transport,5,2,"steady",30,20,32,18,false) and good
+    let refusal:string=match channel.recv(struct.borrow(transport,field=events),time.monotonic_ns()+1000000000) {
+      ok(v)=>match v {some(m)=>match channel.text_of(m) {some(v)=>v,none=>string.new(),},none=>string.new(),},err(_)=>string.new(),}
+    let _=test.check(suite,text.contains(refusal,"4\n[GA_PREVIEW_REQUEST]"),"Replacement cannot coalesce away preceding coded refusal")
+    good=await_pair(transport,6) and good
+    good=check_packet(suite,transport,5,30,20) and good
+    good=check_packet(suite,transport,6,31,20) and good
+    let _=test.eq_u64(suite,transport.completed_total,4,"Healthy replacement delivers both exact owned packets")
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+
 pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
   if view.len(args) < 2 {return 2}
   let root: str = view.get(args,1)
@@ -425,5 +617,20 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.start(suite,"Terminal diagnostics preserve request and producer ownership")
   failure_scope(suite,path.join(root,"failure-scope"))
   let _=test.done(suite)
-  test.conclude(suite,path.join(root,"preview-batch-tests.json"),8)
+  let _=test.start(suite,"Legacy single frame retains file-marker semantics")
+  let _=test.check(suite,legacy_single(suite,path.join(root,"legacy-single")),"Legacy kind1/kind8 decode and retirement remain unchanged")
+  let _=test.done(suite)
+  let _=test.start(suite,"Malformed retirement retains current identity and recovers")
+  let _=test.check(suite,malformed_retire(suite,path.join(root,"malformed-retire")),"Malformed and stale control do not corrupt reliable ownership")
+  let _=test.done(suite)
+  let _=test.start(suite,"Moving windows switch to paused single requests and back")
+  let _=test.check(suite,mixed_modes(suite,path.join(root,"mixed-modes")),"Both cancellation authorities remain compatible on one producer")
+  let _=test.done(suite)
+  let _=test.start(suite,"Malformed command followed by Stop and replacement")
+  let _=test.check(suite,malformed_then_stop(suite,path.join(root,"malformed-stop")),"Coded refusal and sticky Stop both survive command ordering")
+  let _=test.done(suite)
+  let _=test.start(suite,"Malformed envelope followed by healthy replacement")
+  let _=test.check(suite,malformed_replacement(suite,path.join(root,"malformed-replacement")),"Ordered coded refusal and later pixels both survive")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"preview-batch-tests.json"),13)
 }

@@ -28,6 +28,7 @@ import "layout.ai" as layout
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
 import "waveform_view.ai" as waveform_view
+import "preview.ai" as preview
 
 pub type Theme = struct {
   background: draw.Color,
@@ -338,7 +339,8 @@ fn paint_ruler(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
     if struct.get(entry, field=owner) == sequence {
       let x: f64 = timeline.frame_to_x(model, struct.get(entry, field=frame))
       if x >= area.left and x <= area.right {
-        fill_at(canvas, x - 3.0, area.top + 2.0, x + 4.0, area.top + 9.0, draw.rgb(236, 96, 116))
+        // Marker ink belongs to the ruler, including its boundary centers.
+        fill_at(canvas, math.max(area.left,x-3.0), area.top + 2.0, math.min(area.right,x+4.0), area.top + 9.0, draw.rgb(236, 96, 116))
       }
     }
     index = index + 1
@@ -386,46 +388,73 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
 // matches the one `editor_view.view` assigned, so the bars land on their own clip.
 fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state: ref<app.App>,
                    model: ref<timeline.Timeline>, area: layout.Rect) -> unit effects {alloc} {
-  let count: u64 = app.waveform_count(state)
-  if count == 0 { return () }
-  let document: ref<editor.Document> = struct.borrow(state, field=document)
-  let sequence: u64 = document.active
-  var lanes: array<u64> = editor_view.lanes(document, sequence)
-  let total: u64 = array.len(lanes)
-  var index: u64 = 0
-  loop {
-    if index >= count { break }
-    let entry: ref<app.Waveform> = array.borrow(struct.borrow(state, field=waveforms), index)
-    let clip: u64 = struct.get(entry, field=clip)
-    match editor.clip(document, clip) {
-      none => { },
-      some(value) => {
-        if value.owner != sequence or editor.track_kind(document,value.track) != editor.track_audio() or
-            not editor.clip_has_audio(value) or entry.source != value.source or entry.length != value.length or entry.revision != state.media_revision or
-            entry.document_revision != state.document_revision or
-            timeline_media.source_frame(document,value,value.start) != entry.first or
-            timeline_media.source_frame(document,value,value.start+value.length-1) != entry.last {index=index+1
-          continue}
-        var position: u64 = total
-        var scan: u64 = 0
-        loop {
-          if scan >= total { break }
-          if array.get(lanes, scan) == value.track { position = scan
-            break }
-          scan = scan + 1
-        }
-        if position < total {
-          let lane: u64 = total - 1 - position
-          waveform_view.paint(canvas, colours.waveform, model, lane, value.start, value.length,
-            array.view(struct.borrow(entry, field=peaks)),area.left,area.top,area.right,area.bottom)
-        }
-      },
-    }
-    index = index + 1
+  let owner:u64=state.document.active
+  // Same-revision entries were already validated at atomic receipt. Only a
+  // document edit needs a fresh exact neutral descriptor; avoid copying/hashing
+  // the authored graph on every native paint.
+  var reference:editor.Document=editor.document(30.0,1,1)
+  var reference_ready:bool=false
+  var lanes:array<u64> =editor_view.lanes(struct.borrow(state,field=document),owner)
+  let total:u64=array.len(lanes)
+  var at:u64=0
+  // Iterate authored audio clips even when cache count is zero, so initial load
+  // or refusal has an honest visible baseline/state instead of a blank A1 lane.
+  loop {if at>=editor.clip_count(struct.borrow(state,field=document)) {break}
+    let value:editor.Clip=match editor.clip_at(struct.borrow(state,field=document),at) {none=>{break},some(v)=>v,}
+    at=at+1
+    if value.owner!=owner or editor.track_kind(struct.borrow(state,field=document),value.track)!=editor.track_audio() or
+        not chrome.clip_has_audio(struct.borrow(state,field=document),value.id) {continue}
+    var position:u64=total
+    var scan:u64=0
+    loop {if scan>=total {break}
+      if array.get(lanes,scan)==value.track {position=scan
+        break}
+      scan=scan+1}
+    if position>=total {continue}
+    let lane:u64=total-1-position
+    let top:f64=timeline.track_top(model,lane)
+    let height:f64=struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=height)
+    let left:f64=math.max(area.left,timeline.frame_to_x(model,value.start))
+    let right:f64=math.min(area.right,timeline.frame_to_x(model,editor.clip_end(value)))
+    if right<=left or top>=area.bottom or top+height<=area.top {continue}
+    var current:bool=false
+    match app.visual_waveform_slot(state,value.id) {none=>{},some(slot)=>{
+      let entry:ref<app.VisualWaveform> =array.borrow(struct.borrow(state,field=visual_waveforms),slot)
+      let buckets:u64=array.len(struct.borrow(entry,field=peaks))
+      let cached_revision:u64=entry.document_revision
+      var cached_key:string=string.copy(struct.borrow(entry,field=key))
+      if cached_revision==state.document_revision {
+        current=preview.visual_reference_current(state,value,str.view(cached_key),buckets)
+      }else{
+        if not reference_ready {reference=preview.visual_reference_document(struct.borrow(state,field=document))
+          reference_ready=true}
+        let key:string=match preview.visual_reference_key(reference,value,buckets) {err(_)=>string.new(),ok(v)=>v,}
+        current=preview.visual_reference_current(state,value,str.view(key),buckets)
+      }
+      if current {
+        let audible:bool=editor.track_audible(struct.borrow(state,field=document),value.track)
+        let gain:f64=editor.track_gain(struct.borrow(state,field=document),value.track)
+        let muted:bool=not value.enabled or not audible or gain==0.0
+        let shown:ref<app.VisualWaveform> =array.borrow(struct.borrow(state,field=visual_waveforms),slot)
+        waveform_view.paint_reference(canvas,if muted {draw.rgb(151,174,168)}else{draw.rgb(215,255,236)},
+          if muted {draw.rgb(112,138,132)}else{draw.rgb(145,194,171)},model,lane,value.start,value.length,
+          array.view(struct.borrow(shown,field=peaks)),area.left,area.top,area.right,area.bottom)
+      }
+    },}
+    if not current {
+      waveform_view.paint_baseline(canvas,draw.rgb(151,174,168),model,lane,value.start,value.length,
+        area.left,area.top,area.right,area.bottom)}
+    let message:string=preview.visual_waveform_label(state,value,current)
+    if str.len(message)!=0 and right-left>42.0 {
+      let saved:draw.State=draw.state(canvas)
+      match geometry.rect(left,math.max(area.top,top),right,math.min(area.bottom,top+height)) {
+        none=>{},some(box)=>{let _=draw.clip_rect(canvas,box)
+          label(canvas,struct.borrow(state,field=typography),left+4.0,math.max(area.top,top)+3.0,
+            str.view(message),10.0,draw.rgb(235,246,242))},}
+      draw.restore(canvas,saved)}
   }
   ()
 }
-
 
 fn paint_thumbnails(canvas: ref<draw.Canvas>, state: ref<app.App>, model: ref<timeline.Timeline>, area: layout.Rect) -> unit effects {alloc} {
   var doc: editor.Document = editor.copy_document(struct.borrow(state, field=document))
@@ -1113,6 +1142,26 @@ fn paint_dock(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   ()
 }
 
+// Preserve the complete painter's timeline order and shared borders. Cache
+// deliveries and viewport changes damage these sections, never the monitors.
+fn paint_timeline_sections(canvas:ref<draw.Canvas>,colors:Theme,state:ref<app.App>,
+    frame:layout.Frame) -> unit effects {alloc} {
+  var model:timeline.Timeline=timeline_model(state,frame.timeline)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let fps:f64=editor.sequence_fps(doc,doc.active)
+  paint_ruler(canvas,colors,state,frame.ruler,model,fps)
+  paint_timeline(canvas,colors,state,frame.timeline,model)
+  paint_headers(canvas,colors,state,frame.headers,model)
+  var buttons:array<chrome.Control> =chrome.track_controls(frame,state,model)
+  let saved:draw.State=draw.state(canvas)
+  match geometry.rect(frame.headers.left,frame.headers.top,frame.headers.right,frame.headers.bottom) {
+    some(box)=>{let _=draw.clip_rect(canvas,box)},none=>{},
+  }
+  paint_controls(canvas,struct.borrow(state,field=typography),colors,buttons)
+  draw.restore(canvas,saved)
+  ()
+}
+
 // Paint the whole application. `source_image` and `program_image` are the frames the
 // provider returned for this repaint; the view never calls the provider itself, so painting
 // stays free of media work.
@@ -1171,19 +1220,7 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
   paint_dock(canvas, colors, state, frame, program_image)
   paint_timeline_bar(canvas, colors, state, frame)
 
-  var model: timeline.Timeline = timeline_model(state, frame.timeline)
-  paint_ruler(canvas, colors, state, frame.ruler, model, fps)
-  paint_timeline(canvas, colors, state, frame.timeline, model)
-  paint_headers(canvas, colors, state, frame.headers, model)
-  var track_buttons: array<chrome.Control> = chrome.track_controls(frame, state, model)
-  let saved: draw.State = draw.state(canvas)
-  match geometry.rect(frame.headers.left, frame.headers.top, frame.headers.right,
-                      frame.headers.bottom) {
-    some(box) => { let _ = draw.clip_rect(canvas, box) },
-    none => { },
-  }
-  paint_controls(canvas, struct.borrow(state, field=typography), colors, track_buttons)
-  draw.restore(canvas, saved)
+  paint_timeline_sections(canvas, colors, state, frame)
   paint_status(canvas, colors, state, frame.status)
   // Menus are painted last because their popup deliberately overlays the toolbar and panels.
   var menu: array<chrome.Control> = chrome.menu_popup(frame, state)
@@ -1199,11 +1236,13 @@ pub fn paint(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: 
 pub type Renderer = struct {
   surface: draw.Surface, frame: i64, source_width: u32, source_height: u32,
   program_width: u32, program_height: u32, fullscreen: u32,
-  source_playing: bool, program_playing: bool, overlay: bool
+  source_playing: bool, program_playing: bool, overlay: bool,
+  scroll: i64, zoom: f64, first_lane: u64, track_height: f64
 }
 pub fn renderer() -> Renderer effects {alloc} {
   Renderer {surface: draw.empty_surface(), frame: 0, source_width: 0, source_height: 0,
-    program_width: 0, program_height: 0, fullscreen: 0, source_playing: false, program_playing: false, overlay: false}
+    program_width: 0, program_height: 0, fullscreen: 0, source_playing: false, program_playing: false, overlay: false,
+    scroll: -1, zoom: 0.0, first_lane: 0, track_height: 0.0}
 }
 
 fn repaint_head(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: Theme,
@@ -1269,9 +1308,10 @@ fn paint_live_monitor(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: The
   fill_at(canvas, area.left + 6.0, area.top + 30.0, area.right - 6.0, area.bottom - 72.0,
     draw.rgb(8, 9, 11))
   paint_monitor_image(canvas, area, image)
+  let presentation:i64=app.presentation_duration(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   let transport: editor.Transport = if source { doc.monitor } else { doc.program }
-  let last: i64 = if source { editor.source_frames(doc, doc.monitor_source) } else { editor.duration(doc) }
+  let last: i64 = if source { editor.source_frames(doc, doc.monitor_source) } else { presentation }
   let fps: f64 = if source { match editor.source_slot(doc, doc.monitor_source) {
       none => editor.sequence_fps(doc, doc.active),
       some(slot) => struct.get(array.borrow(struct.borrow(doc, field=sources), slot), field=fps),
@@ -1281,7 +1321,8 @@ fn paint_live_monitor(canvas: ref<draw.Canvas>, state: ref<app.App>, colors: The
     if last > 0 { last - 1 } else { 0 }, transport.mark_in, transport.mark_out, fps, transport.playing)
 }
 fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height: f64,
-    previous_frame: i64, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool) -> unit effects {alloc} {
+    previous_frame: i64, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool,
+    timeline_damage: bool, waveform_damage:bool, thumbnail_damage:bool) -> unit effects {alloc} {
   ui_text.set_scale(struct.borrow(state, field=typography), draw.transform(canvas).a)
   let colors: Theme = theme(state)
   let frame: layout.Frame = layout.frame(width, height)
@@ -1294,12 +1335,44 @@ fn paint_live(state: ref<app.App>, canvas: ref<draw.Canvas>, width: f64, height:
   if not hold_source { paint_live_monitor(canvas, state, colors, frame, true, source) }
   paint_live_monitor(canvas, state, colors, frame, false, program)
   let current: i64 = app.timeline_frame(state)
-  let doc: ref<editor.Document> = struct.borrow(state, field=document)
-  let animated: bool = array.len(struct.borrow(doc, field=keys)) != 0
-  if current != previous_frame {
+  let animated: bool = array.len(struct.borrow(struct.borrow(state, field=document), field=keys)) != 0
+  if timeline_damage {
+    // Restore the full painter's background under fractional edge coverage.
+    // The two-physical-pixel guard stays inside the four-logical-pixel gutters.
+    erase_section(canvas,layout.rect(frame.tbar.left,frame.tbar.top,frame.tbar.right,frame.headers.bottom),colors.background)
+    paint_timeline_bar(canvas,colors,state,frame)
+    paint_timeline_sections(canvas,colors,state,frame)
+  } else {
+    if waveform_damage or thumbnail_damage {
+      var delivery_model:timeline.Timeline=timeline_model(state,frame.timeline)
+      var lane:u64=0
+      loop {if lane>=array.len(struct.borrow(delivery_model,field=tracks)) {break}
+        let track:u64=struct.get(array.borrow(struct.borrow(delivery_model,field=tracks),lane),field=id)
+        let kind:u32=editor.track_kind(struct.borrow(state,field=document),track)
+        let top:f64=math.max(frame.timeline.top,timeline.track_top(delivery_model,lane))
+        let height:f64=struct.get(array.borrow(struct.borrow(delivery_model,field=tracks),lane),field=height)
+        let bottom:f64=math.min(frame.timeline.bottom,timeline.track_top(delivery_model,lane)+height)
+        if bottom>top and ((waveform_damage and kind==editor.track_audio()) or
+            (thumbnail_damage and kind==editor.track_video())) {
+          let saved:draw.State=draw.state(canvas)
+          let guard:f64=2.0/draw.transform(canvas).a
+          match geometry.rect(frame.timeline.left-guard,top-guard,frame.timeline.right+guard,bottom+guard) {
+            none=>{},some(box)=>{let _=draw.clip_rect(canvas,box)
+              erase_section(canvas,layout.rect(frame.timeline.left,top,frame.timeline.right,bottom),colors.background)
+              // Use the complete painter's exact order, clipped to the changed
+              // authored lane and its physical edge coverage. Adjacent panels,
+              // headers and the toolbar retain their already-correct pixels.
+              paint_timeline_sections(canvas,colors,state,frame)},
+          }
+          draw.restore(canvas,saved)
+        }
+        lane=lane+1}
+    }
+    if current != previous_frame {
     var model: timeline.Timeline = timeline_model(state, frame.timeline)
     repaint_head(canvas, state, colors, frame, model, previous_frame)
     repaint_head(canvas, state, colors, frame, model, current)
+    }
   }
   if app.dock_tab(state) == chrome.tab_audio() and not animated and layout.width_of(frame.dock_body) >= 360.0 {
     // Unkeyed faders and effect controls change only through full input paints.
@@ -1335,6 +1408,24 @@ pub fn render(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32
 // repaint the entire canvas. Ordinary render callers remain conservative.
 pub fn render_with_source_hold(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
     full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool) -> bool effects {alloc} {
+  render_with_timeline_damage(state,cache,width,height,full,source,program,hold_source,false)
+}
+// Full edits keep their existing conservative path. A current cache receipt can
+// repaint only its timeline; viewport identity also protects legacy callers.
+pub fn render_with_timeline_damage(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
+    full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool,
+    timeline_damage: bool) -> bool effects {alloc} {
+  render_with_timeline_regions(state,cache,width,height,full,source,program,hold_source,timeline_damage,false,false)
+}
+pub fn render_with_timeline_regions(state: ref<app.App>, cache: ref<Renderer>, width: u32, height: u32,
+    full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, hold_source: bool,
+    timeline_damage: bool, waveform_damage:bool, thumbnail_damage:bool) -> bool effects {alloc} {
+  let viewport_scroll:i64=app.scroll(state)
+  let viewport_zoom:f64=app.zoom(state)
+  let viewport_lane:u64=app.track_scroll(state)
+  let viewport_height:f64=app.track_height(state)
+  let timeline_changed:bool=timeline_damage or cache.scroll!=viewport_scroll or cache.zoom!=viewport_zoom or
+    cache.first_lane!=viewport_lane or cache.track_height!=viewport_height
   let program_frame: i64 = app.timeline_frame(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   let source_playing: bool = struct.get(struct.borrow(doc, field=monitor), field=playing)
@@ -1352,7 +1443,7 @@ pub fn render_with_source_hold(state: ref<app.App>, cache: ref<Renderer>, width:
   let scale: f64 = layout.ui_scale(cast.float(width), cast.float(height))
   draw.set_transform(canvas, draw.scale(scale, scale))
   if repaint { paint(state, canvas, cast.float(width) / scale, cast.float(height) / scale, source, program) }
-  else { paint_live(state, canvas, cast.float(width) / scale, cast.float(height) / scale, cache.frame, source, program,hold_source) }
+  else { paint_live(state, canvas, cast.float(width) / scale, cast.float(height) / scale, cache.frame, source, program,hold_source,timeline_changed,waveform_damage,thumbnail_damage) }
   let _ = struct.replace(cache, draw.finish(canvas), field=surface)
   struct.set(cache, program_frame, field=frame)
   struct.set(cache, source.width, field=source_width)
@@ -1363,5 +1454,9 @@ pub fn render_with_source_hold(state: ref<app.App>, cache: ref<Renderer>, width:
   struct.set(cache, source_playing, field=source_playing)
   struct.set(cache, program_playing, field=program_playing)
   struct.set(cache, overlay, field=overlay)
+  struct.set(cache,viewport_scroll,field=scroll)
+  struct.set(cache,viewport_zoom,field=zoom)
+  struct.set(cache,app.track_scroll(state),field=first_lane)
+  struct.set(cache,viewport_height,field=track_height)
   true
 }

@@ -1,0 +1,74 @@
+module test.standalone_endpoint_cancel
+import std.editor as editor
+import std.editor_io as codec
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/audio_endpoint.ai" as endpoint
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+import "../src/main.ai" as window
+fn ready(peer:ref<link.Link>,id:u64) -> result<unit,string> effects {alloc,net,time} {
+  try link.wake(peer,false)
+  link.await_ready(peer,id,time.monotonic_ns()+30000000000)
+}
+fn prepare(peer:ref<link.Link>,root:str,worker:str,doc:ref<editor.Document>,id:u64,generation:u64) -> result<endpoint.End,string> effects {alloc,fs.read,fs.write,net,time} {
+  if not playback.request_prepare_document(root,id,generation,doc,path.join(root,"unused.wav")) {return result.err("prepare publication")}
+  try ready(peer,id)
+  playback.read_endpoint(root)
+}
+fn pull(peer:ref<link.Link>,root:str,id:u64,generation:u64,prepared:u64,name:str,start:i64,count:u64) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  if not playback.request_pull(root,id,generation,prepared,path.join(root,name),start,count) {return result.err("pull publication")}
+  ready(peer,id)
+}
+fn expected_failure(peer:ref<link.Link>,root:str,id:u64,generation:u64,prepared:u64,start:i64,count:u64,code:str) -> bool effects {alloc,fs.write,net,time} {
+  match pull(peer,root,id,generation,prepared,"refused.wav",start,count) {ok(_)=>false,err(p)=>text.contains(str.view(p),code),}
+}
+fn run(worker:str,input:str,recovery_input:str,root:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time} {
+  let raw:string=match files.read_text(input) {ok(v)=>v,err(_)=>{return result.err("input read")},}
+  var doc:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
+  let fresh_raw:string=match files.read_text(recovery_input) {ok(v)=>v,err(_)=>{return result.err("recovery read")},}
+  var fresh:editor.Document=match codec.decode(str.view(fresh_raw)) {ok(v)=>v,err(_)=>{return result.err("recovery decode")},}
+  playback.reset(root)
+  var peer:link.Link=try link.open()
+  let config:playback.Config=playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var problem:string=string.new()
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=playback.run)]
+    let observed:result<unit,string> =sequence(peer,root,worker,doc,fresh)
+    match observed {ok(_)=>{},err(p)=>{problem=p},}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    match tasks.join_next<bool>(jobs,2500) {none=>{problem="actor did not join"},some(v)=>{if not v {problem="actor returned false"}},}
+    link.close_commands(peer)
+  }
+  if str.len(problem)>0 {result.err(problem)}else{result.ok(())}
+}
+fn sequence(peer:ref<link.Link>,root:str,worker:str,doc:ref<editor.Document>,fresh:ref<editor.Document>) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,time} {
+  try link.connect(peer)
+  if not playback.request_prepare_document(root,1,1,doc,path.join(root,"prepare.wav")) {return result.err("prepare publication")}
+  try link.wake(peer,false)
+  let deadline:u64=time.monotonic_ns()+30000000000
+  // External independent observer admits cancellation only after real RF64 samples are written.
+  loop {if match files.exists(path.join(root,"cancel-now")) {ok(v)=>v,err(_)=>false,} {break}
+    if time.monotonic_ns()>=deadline {return result.err("cold cache witness deadline")}
+    time.sleep_ms(1)
+  }
+  let began:u64=time.monotonic_ns()
+  if not playback.discard(root,2,2) {return result.err("cold preparation discard publication")}
+  try ready(peer,2)
+  let _=files.write_text(path.join(root,"cancel-ns.txt"),string.from_int(time.monotonic_ns()-began))
+  if match files.exists(path.join(root,"endpoint.air")) {ok(v)=>v,err(_)=>true,} {return result.err("cancelled endpoint published")}
+  var recovered:endpoint.End=try prepare(peer,root,worker,fresh,3,3)
+  try pull(peer,root,4,3,3,"recovery.wav",0,cast.wrap(recovered.actual))
+  if not playback.discard(root,5,4) {return result.err("recovery retirement")}
+  try ready(peer,5)
+  result.ok(())
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time,io.write} {
+  if view.len(args)!=5 {return 2}
+  match run(view.get(args,1),view.get(args,2),view.get(args,3),view.get(args,4)) {ok(_)=>0,err(p)=>{io.write(str.view(p))
+    3},}
+}

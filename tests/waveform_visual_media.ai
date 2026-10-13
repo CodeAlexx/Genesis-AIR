@@ -1,0 +1,81 @@
+module genesis.tests.waveform_visual_media
+import std.editor as editor
+import std.editor_io as codec
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+fn dump(values:view<f64>,file:str)->bool effects {alloc,fs.write} {
+  var data:string=string.new()
+  var at:u64=0
+  loop {if at>=view.len(values) {break}
+    string.append(data,string.from_float(view.get(values,at)))
+    string.append(data,"\n")
+    at=at+1}
+  match files.write_text(file,data) {ok(_)=>true,err(_)=>false,}
+}
+pub fn main(args:view<str>)->i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args)!=4 {return 2}
+  let root:str=view.get(args,1)
+  let worker:str=view.get(args,2)
+  let manifest:str=view.get(args,3)
+  let _=files.mkdirs(root)
+  let data:string=match files.read_text(manifest) {ok(v)=>v,err(_)=>{return 3},}
+  var rows:array<string> =text.split(data,"\n")
+  var suite:test.Suite=test.suite("Real display reference and unchanged processed peaks",true)
+  var at:u64=0
+  loop {if at>=array.len(rows) {break}
+    let name:str=text.trim(array.borrow(rows,at))
+    at=at+1
+    if str.len(name)==0 {continue}
+    let saved:string=match files.read_text(path.join(path.dirname(manifest),text.concat(name,".air"))) {ok(v)=>v,err(_)=>{return 3},}
+    var doc:editor.Document=match codec.decode(saved) {ok(v)=>v,err(_)=>{return 3},}
+    var before:string=match codec.encode(doc) {ok(v)=>v,err(_)=>{return 3},}
+    let scratch:string=path.join(root,name)
+    let _=files.mkdirs(scratch)
+    var value:app.App=app.app(provider.gcompose(worker,scratch))
+    let _=struct.replace(value,doc,field=document)
+    let _=test.start(suite,name)
+    var failure:string=string.new()
+    let n:u64=match preview.visual_waveforms_for_viewport(value,"",0,0,120,preview.StripView {limited:false,first:0,height:0.0}) {
+      ok(v)=>v,err(e)=>{failure=e
+        0},}
+    if str.len(failure)!=0 {io.write(text.concat(failure,"\n"))}
+    let _=test.eq_u64(suite,n,1,"One visible active clip has real display reference")
+    match app.visual_waveform_slot(value,30) {none=>{},some(slot)=>{
+      let entry:ref<app.VisualWaveform> =array.borrow(struct.borrow(value,field=visual_waveforms),slot)
+      let _=test.check(suite,dump(array.view(struct.borrow(entry,field=peaks)),path.join(scratch,"visual.tsv")),"Publish every real reference peak")
+      let _=files.write_text(path.join(scratch,"key.txt"),struct.borrow(entry,field=key))},}
+    // Legacy numerical endpoint stays distinct: mixer suppression yields zeros.
+    let count:u64=match preview.waveforms_for_request(value,"",0) {ok(v)=>v,err(e)=>{io.write(text.concat(e,"\n"))
+      0},}
+    let _=test.eq_u64(suite,count,1,"Legacy processed endpoint still produces one exact cache")
+    match app.waveform_slot(value,30) {none=>{},some(slot)=>{
+      let entry:ref<app.Waveform> =array.borrow(struct.borrow(value,field=waveforms),slot)
+      let _=test.check(suite,dump(array.view(struct.borrow(entry,field=peaks)),path.join(scratch,"processed.tsv")),"Publish every processed peak")},}
+    preview.write_waveforms(value,scratch)
+    let old:string=match files.read_text(path.join(scratch,"waveforms.tsv")) {ok(v)=>v,err(_)=>string.new(),}
+    let _=test.check(suite,str.starts_with(old,"WAVEFORMS 2\t"),"Public processed writer retains its WAVEFORMS2 header")
+    // Change only owning output controls. A missing decoder makes any hidden
+    // refresh observable; descriptor-equal cache reuse must still succeed.
+    let clip:editor.Clip=option.unwrap(editor.clip(struct.borrow(value,field=document),30))
+    let _=editor.set_track_muted(struct.borrow(value,field=document),clip.track,true)
+    let _=editor.set_track_gain(struct.borrow(value,field=document),clip.track,0.0)
+    let _=editor.set_track_pan(struct.borrow(value,field=document),clip.track,-1.0)
+    app.document_changed(value)
+    let original_worker:string=struct.replace(struct.borrow(value,field=provider),path.join(scratch,"absent-worker.exe"),field=worker)
+    let reuse:u64=match preview.visual_waveforms_for_viewport(value,"",0,0,120,preview.StripView {limited:false,first:0,height:0.0}) {ok(v)=>v,err(e)=>{io.write(text.concat(e,"\n"))
+      0},}
+    let _=test.eq_u64(suite,reuse,1,"Mute/gain0/pan cache hit needs no decoder")
+    match app.visual_waveform_slot(value,30) {none=>{},some(slot)=>{
+      let entry:ref<app.VisualWaveform> =array.borrow(struct.borrow(value,field=visual_waveforms),slot)
+      let _=test.check(suite,dump(array.view(struct.borrow(entry,field=peaks)),path.join(scratch,"retained.tsv")),"Retain exact reference bytes after mixer changes")},}
+    let _=struct.replace(struct.borrow(value,field=provider),original_worker,field=worker)
+    let _=test.check(suite,app.waveform_peak_count(value)<=app.waveform_peak_budget(),"Combined peak ownership is bounded")
+    let _=test.done(suite)
+  }
+  test.conclude(suite,path.join(root,"visual-media-tests.json"),8)
+}

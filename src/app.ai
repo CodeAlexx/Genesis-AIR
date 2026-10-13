@@ -22,6 +22,7 @@ import "provider.ai" as provider
 import "typeface.ai" as typeface
 import "ui_text.ai" as ui_text
 import "linked_media.ai" as linked_media
+import "audio_endpoint.ai" as endpoint
 
 // The panels a keystroke can be aimed at. The filter stack, the properties column and the
 // mixer used to be panels of their own; they are tabs of the dock now, and `chrome` decides
@@ -44,6 +45,8 @@ pub type Viewport = struct { pixels_per_frame: f64, scroll_frames: i64, track_he
 // Peak data for one audio clip, keyed by the clip's STABLE id. The view reads this; only a
 // refresh step fills it, so painting never calls the media provider.
 pub type Waveform = struct {clip: u64, source: u64, length: i64, first: i64, last: i64, revision: u64, document_revision: u64, peaks: array<f64>}
+pub type VisualWaveform = struct {clip:u64,source:u64,nested:u64,length:i64,
+  media:u64,project:u64,document_revision:u64,key:string,peaks:array<f64>}
 pub type Thumbnail = struct {clip: u64, frame: i64, source: u64, source_frame: i64,
   revision: u64, document_revision: u64, pixels: draw.Surface}
 
@@ -107,6 +110,7 @@ pub fn parameter_drag() -> ParameterDrag effects {alloc} {
 
 pub type App = struct {
   document: editor.Document,
+  accepted_audio:option<endpoint.End>, endpoint_revision:u64,endpoint_media:u64,endpoint_owner:u64,endpoint_prepare:u64,endpoint_end_requested:bool,endpoint_seek_requested:i64,runtime_program_end:i64,
   history: editor.History,
   provider: provider.Provider,
   viewport: Viewport,
@@ -147,6 +151,11 @@ pub type App = struct {
   window_timing_requested: bool,
   document_revision: u64,
   waveforms: array<Waveform>,
+  visual_waveforms: array<VisualWaveform>,
+  waveform_pending:u64, waveform_failed:bool, timeline_follow_program:bool,
+  visual_cache_epoch:u64, visual_receipt_epoch:u64, visual_receipt_document:u64,
+  visual_receipt_media:u64, visual_receipt_project:u64, visual_receipt_body:string,
+  visual_receipt_clips:array<u64>,
   thumbnails: array<Thumbnail>,
   presented_source_frame: i64,
   presented_program_frame: i64,
@@ -173,7 +182,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
   let _ = editor.add_track(document, sequence, editor.track_audio(), "A1")
   let _ = editor.add_track(document, sequence, editor.track_video(), "V1")
   let _ = editor.add_track(document, sequence, editor.track_video(), "V2")
-  App {document: document, history: editor.history(64), provider: engine,
+  App {document: document,accepted_audio:option.none(),endpoint_revision:0,endpoint_media:0,endpoint_owner:0,endpoint_prepare:0,endpoint_end_requested:false,endpoint_seek_requested:-1,runtime_program_end:0, history: editor.history(64), provider: engine,
     viewport: viewport(), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
     pool_row: 0, selected_filter: 0, selected_transition:0, selected_transition_epoch:0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
@@ -188,7 +197,11 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     pending_project: no_project_request(), recovery_file: string.new(), recovered_file: string.new(),
     recovery_lease: option.none(), recovered_lease: option.none(),
     project_path: string.new(), status: string.copy("New project"), dirty: false,
-    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, window_timing_requested:false, document_revision: 0, waveforms: array.new(), thumbnails: array.new(),
+    running: true, export_profile: 0, frames_painted: 0, fullscreen: 0, media_revision: 0, project_epoch: 0, window_timing_requested:false, document_revision: 0, waveforms: array.new(), visual_waveforms:array.new(),
+    waveform_pending:0,waveform_failed:false,timeline_follow_program:true,
+    visual_cache_epoch:0,visual_receipt_epoch:0,visual_receipt_document:0,
+    visual_receipt_media:0,visual_receipt_project:0,visual_receipt_body:string.new(),
+    visual_receipt_clips:array.new(),thumbnails: array.new(),
     presented_source_frame: -1, presented_program_frame: -1, audio_left: 0.0, audio_right: 0.0,
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
@@ -209,8 +222,13 @@ pub fn set_project_path(state: ref<App>, text: str) -> unit effects {alloc} {
 }
 // A reload changes external media without necessarily changing saved project facts.
 pub fn mark_media_changed(state: ref<App>) -> unit effects {alloc} {
+  retire_endpoint(state)
   struct.set(state, state.media_revision + 1, field=media_revision)
   let _ = struct.replace(state,array.new(),field=waveforms)
+  let _ = struct.replace(state,array.new(),field=visual_waveforms)
+  visual_cache_changed(state)
+  struct.set(state,0,field=waveform_pending)
+  struct.set(state,false,field=waveform_failed)
   let _ = struct.replace(state,array.new(),field=thumbnails)
   struct.set(state,-1,field=presented_source_frame)
   struct.set(state,-1,field=presented_program_frame)
@@ -235,6 +253,7 @@ pub fn mark_dirty(state: ref<App>, value: bool) -> unit effects {} {
 pub fn document_changed(state: ref<App>) -> unit effects {} {
   refresh_clipboard_resource(state)
   if state.selected_transition!=0 and current_transition(state)==0 {set_selected_transition(state,0)}
+  retire_endpoint(state)
   struct.set(state,state.document_revision+1,field=document_revision)
   struct.set(state,true,field=dirty)
   ()
@@ -950,7 +969,7 @@ pub fn waveform_peak_count(state: ref<App>) -> u64 effects {} {
     total=total+array.len(struct.borrow(array.borrow(struct.borrow(state,field=waveforms),at),field=peaks))
     at=at+1
   }
-  total
+  total+visual_peak_count(state)
 }
 pub fn touch_waveform(state: ref<App>, clip: u64) -> unit effects {alloc} {
   var previous: array<Waveform> =ref.swap(struct.borrow(state,field=waveforms),array.new())
@@ -984,6 +1003,9 @@ pub fn set_waveform(state: ref<App>, clip: u64, peaks: array<f64> own, first: i6
     if entry.clip != clip {total=total+array.len(struct.borrow(entry,field=peaks))}
     index=index+1
   }
+  // A validated processed result may evict older display-only references.
+  loop {if total+visual_peak_count(state) <= waveform_peak_budget() or array.len(struct.borrow(state,field=visual_waveforms))==0 {break}
+    drop_visual_waveform(state,0)}
   var evict: u64=0
   loop {if total <= waveform_peak_budget() or evict >= array.len(struct.borrow(state,field=waveforms)) {break}
     let entry: ref<Waveform> =array.borrow(struct.borrow(state,field=waveforms),evict)
@@ -1015,4 +1037,159 @@ pub fn waveform_slot(state: ref<App>, clip: u64) -> option<u64> effects {} {
 }
 pub fn waveform_count(state: ref<App>) -> u64 effects {} {
   array.len(struct.borrow(state, field=waveforms))
+}
+
+pub fn retire_endpoint(state:ref<App>) -> unit effects {} {
+  let _=struct.replace(state,option.none(),field=accepted_audio)
+  struct.set(state,0,field=runtime_program_end)
+  struct.set(state,0,field=endpoint_prepare)
+  struct.set(state,false,field=endpoint_end_requested)
+  struct.set(state,-1,field=endpoint_seek_requested)
+}
+pub fn endpoint_current(state:ref<App>) -> bool effects {} {
+  match struct.borrow(state,field=accepted_audio) {some(_)=>true,none=>false,} and state.endpoint_revision==state.document_revision and
+    state.endpoint_media==state.media_revision and state.endpoint_owner==state.document.active
+}
+pub fn presentation_duration(state:ref<App>) -> i64 effects {} {
+  if endpoint_current(state) {return match struct.borrow(state,field=accepted_audio) {some(v)=>v.frames,none=>editor.duration(struct.borrow(state,field=document)),}}
+  if state.runtime_program_end>editor.duration(struct.borrow(state,field=document)) {return state.runtime_program_end}
+  editor.duration(struct.borrow(state,field=document))
+}
+pub fn accept_endpoint(state:ref<App>,value:endpoint.End own,prepare:u64,revision:u64,media:u64,owner:u64) -> bool effects {} {
+  if revision!=state.document_revision or media!=state.media_revision or owner!=state.document.active {return false}
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let fps:f64=editor.sequence_fps(doc,owner)
+  if value.fps!=fps or value.authored!=endpoint.sample(editor.duration(doc),fps) {return false}
+  let _=struct.replace(state,option.some(value),field=accepted_audio)
+  struct.set(state,prepare,field=endpoint_prepare)
+  struct.set(state,revision,field=endpoint_revision)
+  struct.set(state,media,field=endpoint_media)
+  struct.set(state,owner,field=endpoint_owner)
+  true
+}
+
+// A pending navigation coordinate is runtime-only and is never an EOF guess.
+pub fn endpoint_requested(state:ref<App>) -> bool effects {} {
+  state.endpoint_end_requested or state.endpoint_seek_requested>=0
+}
+// Both monitors share one picture packet. An unvalidated parked Program time
+// must not be decoded/clamped by a Source packet or a previous completion.
+pub fn endpoint_picture_ready(state:ref<App>) -> bool effects {} {
+  if endpoint_requested(state) {return false}
+  if endpoint_current(state) {return true}
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let total:i64=editor.duration(doc)
+  let frame:i64=editor.playhead(doc)
+  frame>=0 and (frame<total or (total==0 and frame==0))
+}
+pub fn request_endpoint_seek(state:ref<App>,frame:i64) -> bool effects {alloc} {
+  let owner:u64=state.document.active
+  let maximum:i64=match endpoint.frame_end(1037040003,editor.sequence_fps(struct.borrow(state,field=document),owner)) {ok(v)=>v,err(_)=>0,}
+  if frame<0 or frame>=maximum {return false}
+  struct.set(state,false,field=endpoint_end_requested)
+  struct.set(state,frame,field=endpoint_seek_requested)
+  true
+}
+pub fn complete_endpoint_navigation(state:ref<App>) -> bool effects {} {
+  if not endpoint_current(state) {return false}
+  let total:i64=presentation_duration(state)
+  if state.endpoint_end_requested {
+    let _=editor.program_action_until(struct.borrow(state,field=document),editor.go_end(),total)
+  }else if state.endpoint_seek_requested>=0 {
+    let _=editor.seek_until(struct.borrow(state,field=document),state.endpoint_seek_requested,total)
+  }else{return false}
+  struct.set(state,false,field=endpoint_end_requested)
+  struct.set(state,-1,field=endpoint_seek_requested)
+  true
+}
+
+// Display reference is distinct from the exact audible processed envelope.
+// It retains root-track-neutral DSP; mute/fader state affects paint, not these bytes.
+pub fn waveform_request(state:ref<App>,id:u64)->unit effects {} {
+  struct.set(state,id,field=waveform_pending)
+  struct.set(state,false,field=waveform_failed)
+  ()
+}
+pub fn waveform_failure(state:ref<App>,id:u64)->unit effects {} {
+  if id==0 or id==state.waveform_pending {
+    struct.set(state,0,field=waveform_pending)
+    struct.set(state,true,field=waveform_failed)}
+  ()
+}
+pub fn waveform_complete(state:ref<App>,id:u64)->unit effects {} {
+  if id==state.waveform_pending {
+    struct.set(state,0,field=waveform_pending)
+    struct.set(state,false,field=waveform_failed)}
+  ()
+}
+pub fn visual_peak_count(state:ref<App>)->u64 effects {} {
+  var count:u64=0
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(state,field=visual_waveforms)) {break}
+    count=count+array.len(struct.borrow(array.borrow(struct.borrow(state,field=visual_waveforms),at),field=peaks))
+    at=at+1}
+  count
+}
+pub fn visual_waveform_slot(state:ref<App>,clip:u64)->option<u64> effects {} {
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(state,field=visual_waveforms)) {break}
+    if struct.get(array.borrow(struct.borrow(state,field=visual_waveforms),at),field=clip)==clip {return option.some(at)}
+    at=at+1}
+  option.none()
+}
+fn visual_cache_changed(state:ref<App>)->unit effects {alloc} {
+  struct.set(state,add.sat(state.visual_cache_epoch,1),field=visual_cache_epoch)
+  let _=struct.replace(state,string.new(),field=visual_receipt_body)
+  let _=struct.replace(state,array.new(),field=visual_receipt_clips)
+  ()
+}
+fn drop_visual_waveform(state:ref<App>,slot:u64)->unit effects {alloc} {
+  visual_cache_changed(state)
+  var previous:array<VisualWaveform> =ref.swap(struct.borrow(state,field=visual_waveforms),array.new())
+  var reverse:array<VisualWaveform> =array.new()
+  loop {if array.len(previous)==0 {break}
+    let at:u64=array.len(previous)-1
+    var value:VisualWaveform=option.unwrap(array.pop(previous))
+    if at!=slot {array.push(reverse,value)}}
+  loop {match array.pop(reverse) {none=>{break},some(value)=>array.push(struct.borrow(state,field=visual_waveforms),value),}}
+  ()
+}
+pub fn touch_visual_waveform(state:ref<App>,clip:u64)->unit effects {alloc} {
+  var previous:array<VisualWaveform> =ref.swap(struct.borrow(state,field=visual_waveforms),array.new())
+  var reverse:array<VisualWaveform> =array.new()
+  var found:option<VisualWaveform> =option.none()
+  loop {match array.pop(previous) {none=>{break},some(value)=>{
+    if value.clip==clip {let _=ref.swap(found,option.some(value))}else{array.push(reverse,value)}},}}
+  loop {match array.pop(reverse) {none=>{break},some(value)=>array.push(struct.borrow(state,field=visual_waveforms),value),}}
+  match found {none=>{},some(value)=>array.push(struct.borrow(state,field=visual_waveforms),value),}
+  ()
+}
+pub fn set_visual_waveform(state:ref<App>,clip:u64,key:str,peaks:array<f64> own)->bool effects {alloc} {
+  var incoming:array<f64> =peaks
+  let count:u64=array.len(incoming)
+  if count<8 or count>waveform_bucket_limit() or str.len(key)!=64 {return false}
+  var at:u64=0
+  loop {if at>=count {break}
+    let value:f64=array.get(incoming,at)
+    if not math.is_finite(value) or value<0.0 {return false}
+    at=at+1}
+  let value:editor.Clip=match editor.clip(struct.borrow(state,field=document),clip) {none=>{return false},some(v)=>v,}
+  match visual_waveform_slot(state,clip) {none=>{},some(slot)=>drop_visual_waveform(state,slot),}
+  // Validation precedes eviction. Prefer old exact-envelope entries, which GUI
+  // reference requests do not use, then least recently retained references.
+  loop {if waveform_peak_count(state)+count<=waveform_peak_budget() {break}
+    if array.len(struct.borrow(state,field=waveforms))>0 {
+      var old:array<Waveform> =ref.swap(struct.borrow(state,field=waveforms),array.new())
+      var reverse:array<Waveform> =array.new()
+      loop {if array.len(old)==0 {break}
+        let slot:u64=array.len(old)-1
+        var entry:Waveform=option.unwrap(array.pop(old))
+        if slot!=0 {array.push(reverse,entry)}}
+      loop {match array.pop(reverse) {none=>{break},some(entry)=>array.push(struct.borrow(state,field=waveforms),entry),}}
+    }else if array.len(struct.borrow(state,field=visual_waveforms))>0 {drop_visual_waveform(state,0)}else{return false}}
+  array.push(struct.borrow(state,field=visual_waveforms),VisualWaveform {clip:clip,source:value.source,nested:value.nested,
+    length:value.length,media:state.media_revision,project:state.project_epoch,
+    document_revision:state.document_revision,key:string.copy(key),peaks:incoming})
+  visual_cache_changed(state)
+  true
 }

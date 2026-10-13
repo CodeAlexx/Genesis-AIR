@@ -9,7 +9,12 @@ import std.text as text
 import "preview_link.ai" as link
 import "timeline_media.ai" as media
 import "provider.ai" as provider
+import "audio_endpoint.ai" as endpoint
+import std.process as proc
+import std.editor_io as editor_io
+import std.editor as editor
 
+type Retained=struct {session:option<media.AudioSession>,end:option<endpoint.End>}
 pub type Config = struct {root: string, worker: string, events: channel.Ticket}
 fn publish(root: str, name: str, value: str) -> bool effects {alloc,fs.write} {
   let target: string = path.join(root,name)
@@ -66,7 +71,8 @@ fn close_session(session: media.AudioSession own, root: str, peer: ref<link.Peer
 pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,net,process,time} {
   var owned: Config = config
   var peer: link.Peer = match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}
-  var session: option<media.AudioSession> = option.none()
+  var retained:Retained=Retained {session:option.none(),end:option.none()}
+  var prepared_id:u64=0
   var transport: u64 = 0
   var seen: u64 = 0
   var good: bool = true
@@ -89,19 +95,95 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
     if array.len(lines) < 2 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Missing playback fields")
       continue}
     var header: array<string> = text.split(str.view(array.borrow(lines,0))," ")
-    if array.len(header) != 3 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid playback header")
+    if array.len(header) != 3 and array.len(header)!=4 and array.len(header)!=6 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid playback header")
       continue}
     let snapshot: u64 = u64_or(str.view(array.borrow(header,0)),0)
     let generation: u64 = u64_or(str.view(array.borrow(header,1)),0)
     let frames: u64 = u64_or(str.view(array.borrow(header,2)),18446744073709551615)
     if snapshot != id or number(str.view(owned.root),"request.id") != id {continue}
-    if generation != transport or frames == 0 {
-      let closed: bool = match ref.swap(session,option.none()) {
+    let document_preparation:bool=array.len(header)==4 and str.eq(str.view(array.borrow(header,3)),"prepare_doc")
+    let preparation:bool=document_preparation or (array.len(header)==4 and str.eq(str.view(array.borrow(header,3)),"prepare"))
+    let pull:bool=array.len(header)==6 and str.eq(str.view(array.borrow(header,3)),"pull")
+    if (array.len(header)==4 and not preparation) or (array.len(header)==6 and not pull) {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid endpoint mode")
+      continue}
+    if generation != transport or (frames == 0 and not preparation) or (not preparation and not pull and match struct.borrow(retained,field=end) {some(_)=>true,none=>false,}) {
+      let _=struct.replace(retained,option.none(),field=end)
+      prepared_id=0
+      let closed: bool = match struct.replace(retained,option.none(),field=session) {
         none=>true,some(value)=>close_session(value,str.view(owned.root),peer,id),
       }
       transport=generation
       if not closed {good=false
         continue}
+    }
+    if preparation {
+      if frames!=0 or array.len(lines)<3 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid preparation descriptor")
+        continue}
+      let output:string=decoded(str.view(array.borrow(lines,1)))
+      var plan:media.EndpointPlan=if document_preparation {
+        var document_lines:array<string> =array.new()
+        var pos:u64=2
+        loop {if pos>=array.len(lines) {break}
+          array.push(document_lines,string.copy(array.borrow(lines,pos)))
+          pos=pos+1
+        }
+        var document:editor.Document=match editor_io.decode(str.view(text.join(document_lines,"\n"))) {ok(v)=>v,err(_)=>{link.fail(peer,id,"[GA_AUDIO_ENDPOINT] Invalid document snapshot")
+          continue},}
+        match media.endpoint_plan(document,str.view(owned.worker),str.view(output)) {ok(v)=>v,err(p)=>{link.fail(peer,id,str.view(p))
+          continue},}
+      }else{
+        let end:endpoint.End=match endpoint.decode(str.view(decoded(str.view(array.borrow(lines,2))))) {ok(v)=>v,err(p)=>{link.fail(peer,id,str.view(p))
+          continue},}
+        var definitions:array<string> =array.new()
+        var pos:u64=3
+        loop {if pos>=array.len(lines) {break}
+          let line:str=str.view(array.borrow(lines,pos))
+          if str.len(line)>0 {array.push(definitions,string.copy(line))}
+          pos=pos+1
+        }
+        media.EndpointPlan {worker:string.copy(str.view(owned.worker)),output:output,end:end,lines:definitions}
+      }
+      match media.prepare_audio_endpoint(plan,struct.replace(retained,option.none(),field=session),str.view(owned.root),id) {
+        err(p)=>{let _=struct.replace(retained,option.none(),field=end)
+          prepared_id=0
+          if not str.starts_with(str.view(p),"[GA_AUDIO_STREAM_CANCELLED]") {link.fail(peer,id,str.view(p))}},
+        ok(value)=>{
+          var ready:media.PreparedAudio=value
+          let metadata:string=endpoint.encode(struct.borrow(ready,field=end))
+          let current:bool=number(str.view(owned.root),"request.id")==id
+          let written:bool=current and publish(str.view(owned.root),"endpoint.air",str.view(metadata))
+          if not written {
+            if current {link.fail(peer,id,"[GA_AUDIO_ENDPOINT_PATH] Cannot publish accepted endpoint")}
+            let _=close_session(struct.replace(ready,media.AudioSession {child:option.none(),reader:proc.line_reader(65536),cache:string.new()},field=session),str.view(owned.root),peer,id)
+            let _=struct.replace(retained,option.none(),field=end)
+            prepared_id=0
+          }else{
+            let _=struct.replace(retained,option.some(struct.replace(ready,media.AudioSession {child:option.none(),reader:proc.line_reader(65536),cache:string.new()},field=session)),field=session)
+            let _=struct.replace(retained,option.some(struct.replace(ready,endpoint.empty(),field=end)),field=end)
+            prepared_id=id
+            let _=link.notify(peer,1,id)
+          }
+        },
+      }
+      continue
+    }
+    if pull {
+      let origin:i64=match text.parse_i64(str.view(array.borrow(header,5))) {some(v)=>v,none=>-1,}
+      if u64_or(str.view(array.borrow(header,4)),0)!=prepared_id or prepared_id==0 or not match struct.borrow(retained,field=end) {some(_)=>true,none=>false,} or not match struct.borrow(retained,field=session) {some(_)=>true,none=>false,} {
+        link.fail(peer,id,"[GA_AUDIO_ENDPOINT_STALE] PCM request does not own accepted session")
+        continue}
+      var end:endpoint.End=option.unwrap(struct.replace(retained,option.none(),field=end))
+      let owned_session:media.AudioSession=option.unwrap(struct.replace(retained,option.none(),field=session))
+      let output:string=decoded(str.view(array.borrow(lines,1)))
+      match media.execute_endpoint_pull(owned_session,end,str.view(owned.worker),str.view(output),origin,frames,str.view(owned.root),id) {
+        ok(v)=>{let _=struct.replace(retained,option.some(v),field=session)
+          let _=struct.replace(retained,option.some(end),field=end)
+          let _=link.notify(peer,1,id)},
+        err(p)=>{let _=struct.replace(retained,option.none(),field=end)
+          prepared_id=0
+          if not str.starts_with(str.view(p),"[GA_AUDIO_STREAM_CANCELLED]") {link.fail(peer,id,str.view(p))}},
+      }
+      continue
     }
     if frames == 0 {let _ = link.notify(peer,1,id)
       continue}
@@ -116,7 +198,7 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
     }
     var plan: media.AudioPlan = media.AudioPlan {worker:string.copy(str.view(owned.worker)),
       output:decoded(str.view(array.borrow(lines,1))),duration:cast.float(frames)/48000.0,frames:frames,sounds:sounds}
-    var job: media.AudioJob = media.audio_job(plan,ref.swap(session,option.none()))
+    var job: media.AudioJob = media.audio_job(plan,struct.replace(retained,option.none(),field=session))
     match media.execute_playback_audio(job,str.view(owned.root),id) {
       err(problem)=>{
         if text.contains(str.view(problem),"[GA_AUDIO_NESTED_CACHE]") {
@@ -124,13 +206,42 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
         }
         if not str.starts_with(str.view(problem),"[GA_AUDIO_STREAM_CANCELLED]") {
         link.fail(peer,id,str.view(problem))}},
-      ok(value)=>{session=option.some(value)
+      ok(value)=>{let _=struct.replace(retained,option.some(value),field=session)
         let _ = link.notify(peer,1,id)},
     }
   }
-  good=match ref.swap(session,option.none()) {
+  good=match struct.replace(retained,option.none(),field=session) {
     none=>true,some(value)=>close_session(value,str.view(owned.root),peer,seen),
   } and good
   link.finish(peer,seen)
   good
+}
+
+pub fn request_prepare(root:str,id:u64,generation:u64,plan:ref<media.EndpointPlan>) -> bool effects {alloc,fs.write} {
+  var lines:array<string> =[endpoint.fields([string.from_int(id),string.from_int(generation),"0","prepare"]),
+    provider.wire_path(str.view(plan.output)),provider.wire_path(str.view(endpoint.encode(struct.borrow(plan,field=end))))]
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(plan,field=lines)) {break}
+    array.push(lines,string.copy(array.borrow(struct.borrow(plan,field=lines),at)))
+    at=at+1
+  }
+  let descriptor:string=text.join(lines,"\n")
+  if str.len(descriptor)>1048576 {return false}
+  publish(root,"request.air",str.view(descriptor)) and publish(root,"request.id",str.view(string.from_int(id)))
+}
+pub fn request_pull(root:str,id:u64,generation:u64,prepared:u64,output:str,start:i64,frames:u64) -> bool effects {alloc,fs.write} {
+  let descriptor:string=endpoint.lines([endpoint.fields([string.from_int(id),string.from_int(generation),string.from_int(frames),"pull",string.from_int(prepared),string.from_int(start)]),provider.wire_path(output)])
+  publish(root,"request.air",str.view(descriptor)) and publish(root,"request.id",str.view(string.from_int(id)))
+}
+pub fn read_endpoint(root:str) -> result<endpoint.End,string> effects {alloc,fs.read} {
+  let data:bytes=match files.read_limited(path.join(root,"endpoint.air"),960000) {ok(v)=>v,err(_)=>{return result.err("[GA_AUDIO_ENDPOINT_PATH] Cannot read accepted endpoint")},}
+  let value:str=match str.from_bytes(bytes.view(data)) {some(v)=>v,none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid endpoint UTF-8")},}
+  endpoint.decode(value)
+}
+
+pub fn request_prepare_document(root:str,id:u64,generation:u64,document:ref<editor.Document>,output:str) -> bool effects {alloc,fs.write} {
+  let encoded:string=match editor_io.encode(document) {ok(v)=>v,err(_)=>{return false},}
+  let descriptor:string=endpoint.lines([endpoint.fields([string.from_int(id),string.from_int(generation),"0","prepare_doc"]),provider.wire_path(output),encoded])
+  if str.len(descriptor)>1048576 {return false}
+  publish(root,"request.air",str.view(descriptor)) and publish(root,"request.id",str.view(string.from_int(id)))
 }

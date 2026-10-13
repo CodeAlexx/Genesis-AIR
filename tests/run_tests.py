@@ -6,11 +6,13 @@ Stage 2 is a bounded real-media smoke test against the existing gcompose worker;
 BLOCKED, not passed, when the worker or a fixture is missing.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -403,6 +405,32 @@ def main():
         print(f"BLOCKED: {stdlib} has no std.editor", file=sys.stderr)
         return 1
 
+    with TemporaryDirectory(prefix="genesis-channel-read-first-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "channel_read_first.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "channel-read-first-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  channel terminal delivery: {report['checks']} shared transport checks")
+    for source, report_name, label in (
+        ("standalone_endpoint_controller_lifecycle.ai", "controller-tests.json", "standalone endpoint controller"),
+        ("standalone_endpoint_preview.ai", "preview-endpoint-tests.json", "standalone endpoint preview"),
+    ):
+        with TemporaryDirectory(prefix="genesis-standalone-endpoint-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+            done = run([airc, "run", HERE / source, "--mode", "release", "--", temporary], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            report = json.loads((Path(temporary) / report_name).read_text())["payload"]
+            assert report["status"] == "pass", report
+            print(f"  {label}: {report['checks']} shared lifecycle checks")
+    # Compile the remaining native clients without implying actor/device execution.
+    with TemporaryDirectory(prefix="genesis-endpoint-clients-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        for name in ("media", "actor_lifecycle", "cancel", "timing"):
+            done = run([airc, "build", HERE / f"standalone_endpoint_{name}.ai",
+                        "--mode", "release", "-o", Path(temporary) / name], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+        print("  standalone endpoint clients: media/actor/cancel/timing compiled; worker execution gates below require --worker")
     with TemporaryDirectory(prefix="genesis-audio-context-") as temporary:
         env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
         done = run([airc, "run", HERE / "audio_context.ai", "--mode", "release", "--", temporary], env)
@@ -410,6 +438,13 @@ def main():
         report = json.loads((Path(temporary) / "audio-context-tests.json").read_text())["payload"]
         assert report["status"] == "pass", report
         print(f"  audio context: {report['checks']} shared model/codec checks")
+    with TemporaryDirectory(prefix="genesis-audio-tail-context-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "audio_tail_context.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "audio-tail-context-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  audio tail context: {report['checks']} shared model/codec checks")
     with TemporaryDirectory(prefix="genesis-keyframe-controls-") as temporary:
         env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
         done = run([airc, "run", HERE / "keyframe_controls.ai", "--mode", "release", "--", temporary], env)
@@ -431,6 +466,13 @@ def main():
         report = json.loads((Path(temporary) / "transition-controls-tests.json").read_text())["payload"]
         assert report["status"] == "pass", report
         print(f"  transition controls: {report['checks']} shared pointer/transaction checks")
+    with TemporaryDirectory(prefix="genesis-picture-memory-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "picture_memory.ai", "--mode", "release", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "picture-memory-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  picture memory: {report['checks']} immutable input and last-use checks")
     with TemporaryDirectory(prefix="genesis-filter-transactions-") as temporary:
         env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
         done = run([airc, "run", HERE / "filter_transactions.ai", "--mode", "release", "--", temporary], env)
@@ -438,6 +480,14 @@ def main():
         report = json.loads((Path(temporary) / "filter-transactions-tests.json").read_text())["payload"]
         assert report["status"] == "pass", report
         print(f"  filter transactions: {report['checks']} actual command/history checks")
+    with TemporaryDirectory(prefix="genesis-waveform-visual-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "waveform_visual.ai", "--mode", "release",
+                    "--provider", "hash.sha256=portable", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "waveform-visual-tests.json").read_text(encoding="utf-8"))["payload"]
+        assert report["status"] == "pass" and report["cases"] == dict(total=11, passed=11, failed=0, skipped=0) and report["checks"] == 100, report
+        print("  visual waveforms: 11 cases / 100 identity, actual strip-task, budget and pixel checks")
     headless(airc, stdlib)
     controls(airc, stdlib)
 
@@ -461,6 +511,25 @@ def main():
         real_blocked = True
     else:
         gcompose_smoke(airc, binary, stdlib, worker, Path(args.media))
+        with TemporaryDirectory(prefix="genesis-waveform-reference-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib))
+            client = Path(temporary) / "genesis-waveform-visual-media"
+            done = run([airc, "build", HERE / "waveform_visual_media.ai", "--mode", "release",
+                        "--provider", "hash.sha256=portable", "-o", client], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            report = Path(temporary) / "waveform-visual.json"
+            done = run([sys.executable, HERE / "waveform_visual.py", "--client", client,
+                        "--worker", worker.resolve(), "--report", report], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            proof = json.loads(report.read_text(encoding="utf-8"))
+            assert proof["schema"] == "genesis.waveform-visual.v1" and proof["passed"] and not proof["failures"], proof
+            assert len(proof["cases"]) == proof["client_cases"] == 8 and proof["client_checks"] == 64, proof
+            assert proof["numeric_peak_values"] == 320 and proof["independent_pcm_values"] == 3072000, proof
+            assert proof["peak_tolerance"] == 2e-6 and not proof["normalization"], proof
+            assert proof["client_joined"] and proof["observed_worker_pids_joined"] and not proof["owned_caches"], proof
+            assert proof["client_sha256"] == hashlib.sha256(client.read_bytes()).hexdigest(), proof
+            assert proof["worker_sha256"] == hashlib.sha256(worker.read_bytes()).hexdigest(), proof
+            print("  display references: 8 real cases, independent processed peaks and owned joins")
         with TemporaryDirectory(prefix="genesis-nested-edit-context-") as temporary:
             env = dict(os.environ, AIR_STDLIB=str(stdlib))
             client = Path(temporary) / "genesis-audio-nested-edit-context"
@@ -483,6 +552,123 @@ def main():
                         "--report", Path(temporary) / "audio-context-retime.json"], env)
             assert done.returncode == 0, done.stdout + done.stderr
             print("  forward audio retime: independent original-origin PCM, peaks and export")
+        with TemporaryDirectory(prefix="genesis-audio-tail-history-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib))
+            client = Path(temporary) / "genesis-audio-tail-history"
+            done = run([airc, "build", HERE / "audio_tail_history.ai",
+                        "--mode", "release", "-o", client], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            helper = binary.resolve().parent / "air-file-publish"
+            assert helper.is_file(), "Build the shared atomic export helper before the tail master gate"
+            shutil.copy2(helper, Path(temporary) / "air-file-publish")
+            done = run([sys.executable, HERE / "audio_tail_history.py",
+                        "--client", client, "--worker", worker.resolve(),
+                        "--report", Path(temporary) / "audio-tail-history.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  audio tail history: 32 edited graphs, actual EOF, cancellation and 20 lossless masters")
+            done = run([sys.executable, HERE / "audio_tail_protocol.py",
+                        "--worker", worker.resolve(), "--report", Path(temporary) / "audio-tail-protocol.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  audio tail protocol: independent EOF, capacity, cache identity and malformed requests")
+            done = run([sys.executable, HERE / "audio_eof_query.py",
+                        "--worker", worker.resolve(), "--report", Path(temporary) / "audio-eof-query.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  audio EOF query: committed actual endpoint, generation and read-only refusal")
+            done = run([sys.executable, HERE / "audio_tail_phase.py",
+                        "--worker", worker.resolve(), "--report", Path(temporary) / "audio-tail-phase.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  audio native phase: original-owner samples, actual EOF, cache identity and true tail capacity")
+        with TemporaryDirectory(prefix="genesis-standalone-endpoint-media-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+            client = Path(temporary) / "genesis-standalone-endpoint-media"
+            done = run([airc, "build", HERE / "standalone_endpoint_media.ai",
+                        "--mode", "release", "-o", client], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            helper_name = "air-file-publish.exe" if os.name == "nt" else "air-file-publish"
+            helper = binary.resolve().parent / helper_name
+            assert helper.is_file(), "Build the shared atomic publisher before the endpoint export gate"
+            shutil.copy2(helper, client.parent / helper_name)
+            references = Path(temporary) / "pcm"
+            done = run([sys.executable, HERE / "standalone_endpoint_media.py",
+                        "--client", client, "--worker", worker.resolve(), "--work", references,
+                        "--report", Path(temporary) / "standalone-endpoint-media.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  standalone endpoint PCM: independent ordered DSP actual EOF, no carrier, crop and Save/Open")
+            done = run([sys.executable, HERE / "standalone_endpoint_export.py",
+                        "--client", client, "--worker", worker.resolve(), "--references", references,
+                        "--work", Path(temporary) / "export",
+                        "--report", Path(temporary) / "standalone-endpoint-export.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  standalone endpoint export: exact PCM count, marked crop and black postbody pictures")
+            actor = Path(temporary) / "genesis-standalone-endpoint-actor"
+            cancel = Path(temporary) / "genesis-standalone-endpoint-cancel"
+            for source, target in (("standalone_endpoint_actor_lifecycle.ai", actor),
+                                   ("standalone_endpoint_cancel.ai", cancel)):
+                done = run([airc, "build", HERE / source, "--mode", "release", "-o", target], env)
+                assert done.returncode == 0, done.stdout + done.stderr
+            actor_report = Path(temporary) / "standalone-endpoint-actor.json"
+            done = run([sys.executable, HERE / "standalone_endpoint_actor.py",
+                        "--client", actor, "--worker", worker.resolve(), "--cancel-client", cancel,
+                        "--work", Path(temporary) / "actor", "--report", actor_report], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            proof = json.loads(actor_report.read_text())
+            assert proof["passed"] and not proof["failures"], proof
+            assert (proof["requests"], proof["pcm_values"]) == (26, 1393786), proof
+            assert proof["max_error_codes"] <= 1 and proof["cache_cleanup"] and proof["actor"]["actor_joined"], proof
+            cold = proof["cold_cancel"]
+            assert cold["executed"] and cold["passed"] and cold["actor_joined"] and cold["cache_cleanup"], cold
+            assert cold["recovery_pcm_values"] == 225600 and cold["recovery_max_error_codes"] <= 1, cold
+            assert 0 < cold["acknowledgement_ns"] <= 2000000000, cold
+            assert proof["worker_sha256"] == hashlib.sha256(worker.resolve().read_bytes()).hexdigest(), proof
+            assert proof["client_sha256"] == hashlib.sha256(actor.read_bytes()).hexdigest(), proof
+            assert cold["client_sha256"] == hashlib.sha256(cancel.read_bytes()).hexdigest(), cold
+            print("  standalone endpoint actor:26 requests, independent PCM/Source, joined workers and observed cold cancellation")
+        with TemporaryDirectory(prefix="genesis-program-picture-") as temporary:
+            env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+            clients = {}
+            for kind in ("persistent", "protocol", "control", "epoch", "profile"):
+                clients[kind] = Path(temporary) / ("genesis-program-picture-" + kind)
+                done = run([airc, "build", HERE / f"program_picture_{kind}.ai",
+                            "--mode", "release", "-o", clients[kind]], env)
+                assert done.returncode == 0, done.stdout + done.stderr
+            mock = Path(temporary) / "genesis-program-picture-mock"
+            cc = shlex.split(os.environ.get("CC", "cc"))
+            done = run([*cc, "-std=c11", "-D_DEFAULT_SOURCE", "-O2", "-Wall", "-Wextra",
+                        HERE / "program_picture_mock.c", "-o", mock,
+                        *(["-lws2_32"] if os.name == "nt" else [])], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            helper = HERE / "program_picture_transport.py"
+            report = Path(temporary) / "program-picture-transport.json"
+            done = run([sys.executable, helper, "--protocol-client", clients["protocol"],
+                        "--control-client", clients["control"], "--mock", mock,
+                        "--persistent-client", clients["persistent"], "--epoch-client", clients["epoch"],
+                        "--worker", worker.resolve(), "--report", report], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            proof = json.loads(report.read_text())
+            assert proof["schema"] == "genesis.program-picture-transport.v2" and proof["passed"], proof
+            assert (len(proof["cases"]), proof["protocol_cases"], proof["control_cases"],
+                    proof["real_pictures_each"], proof["real_epoch_windows"]) == (24, 17, 5, 8193, 7), proof
+            assert (proof["real_metadata_workers"], proof["real_render_epochs"]) == (1,5), proof
+            expected_inputs = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest()
+                               for p in [clients["protocol"], clients["control"], mock, helper, worker.resolve(),
+                                         clients["persistent"], clients["epoch"]]}
+            assert proof["inputs"] == expected_inputs, proof
+            for case in proof["cases"]:
+                assert case["passed"] and case["exit"] == 0 and case["client_joined"] and case["all_owned_exited"], case
+                assert case["owned_pids"] and not any(case.get(k) for k in ("failure", "final_observation_error", "parent_cleanup_error")), case
+                kind = ("protocol" if case["name"].startswith("protocol-") else
+                        "control" if case["name"].startswith("control-") else
+                        "persistent" if case["name"] == "sustained" else "epoch" if case["name"] == "epochs" else None)
+                assert kind, case
+                engine = mock if kind in ("protocol", "control") else worker.resolve()
+                assert case["client_sha256"] == expected_inputs[str(clients[kind].resolve())], case
+                assert case["worker_sha256"] == expected_inputs[str(engine.resolve())], case
+            sustained = [c for c in proof["cases"] if c["name"] == "sustained"]
+            epochs = [c for c in proof["cases"] if c["name"] == "epochs"]
+            assert len(sustained) == len(epochs) == 1, proof
+            assert len(sustained[0]["observed_worker_pids"]) == len(sustained[0]["owned_pids"]) == 2, sustained
+            assert len(epochs[0]["observed_worker_pids"]) == len(epochs[0]["owned_pids"]) == 6, epochs
+            print("  Program picture transport:24 cases,16386 pictures,7 windows,5 picture epochs+1 metadata worker; profile compiled only")
         with TemporaryDirectory(prefix="genesis-transition-media-") as temporary:
             env = dict(os.environ, AIR_STDLIB=str(stdlib))
             client = Path(temporary) / "genesis-transition-controls-media"
@@ -494,6 +680,15 @@ def main():
                         "--report", Path(temporary) / "transition-controls-media-tests.json"], env)
             assert done.returncode == 0, done.stdout + done.stderr
             print("  transition media: independent preview/master pixels and unchanged audio")
+            done = run([sys.executable, HERE / "upper_transition_protocol.py",
+                        "--worker", worker.resolve(), "--report", Path(temporary) / "upper-transition-protocol.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  upper transition protocol: alpha, independent side blends, lifecycle and malformed input refusal")
+            done = run([sys.executable, HERE / "upper_transition_media.py",
+                        "--binary", binary.resolve(), "--worker", worker.resolve(),
+                        "--report", Path(temporary) / "upper-transition-media.json"], env)
+            assert done.returncode == 0, done.stdout + done.stderr
+            print("  upper transition media: complete lower-gap masters and ordered side previews")
 
     print("genesis-air: tests complete")
     return 1 if args.media and real_blocked else 0

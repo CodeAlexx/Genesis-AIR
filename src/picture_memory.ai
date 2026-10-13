@@ -63,16 +63,17 @@ pub fn lower(lines:ref<array<string>>,epoch:u64) -> result<array<string>,string>
       continue
     }
     let terminal:bool=step+1==array.len(lines)
-    if (command!="FLOAT" and command!="PREVIEW" and command!="ENC") or
-       (not terminal and command!="FLOAT") or
-       array.len(fields)!=if command=="ENC" {109}else{110} {
+    let upper:bool=command=="UTRANS"
+    if (command!="FLOAT" and command!="PREVIEW" and command!="ENC" and not upper) or
+       (not terminal and command!="FLOAT" and not upper) or (terminal and upper) or
+       array.len(fields)!=if upper {10}else if command=="ENC" {109}else{110} {
       return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid picture pass command")
     }
     // Resolve all reads against the previous version before defining this
     // output. Ordered filter stacks deliberately reuse their two scratch names.
     var slot:u64=0
     loop {if slot>=3 {break}
-      let field:u64=if slot==0 {1}else if slot==1 {2}else{20}
+      let field:u64=if upper {slot+1}else if slot==0 {1}else if slot==1 {2}else{20}
       let value:str=array.borrow(fields,field)
       if str.starts_with(value,"GPU:") or str.starts_with(value,"GPUDIM:") or str.starts_with(value,"GPUOPAQUE:") {
         return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Caller supplied a worker snapshot")
@@ -87,14 +88,15 @@ pub fn lower(lines:ref<array<string>>,epoch:u64) -> result<array<string>,string>
       slot=slot+1
     }
     if not terminal {
-      let output:str=array.borrow(fields,109)
+      let output_field:u64=if upper {9}else{109}
+      let output:str=array.borrow(fields,output_field)
       if output=="-" or str.len(output)==0 or str.starts_with(output,"GPU:") {
         return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid internal picture output")
       }
       let id:u64=array.len(last_use)+1
       let _=map.put(versions,output,string.from_int(id))
       array.push(last_use,step)
-      let _=ref.swap(array.borrow(fields,109),token("GPU",epoch,id))
+      let _=ref.swap(array.borrow(fields,output_field),token("GPU",epoch,id))
     }
     array.push(rewritten,text.join(fields," "))
     step=step+1

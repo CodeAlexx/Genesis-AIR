@@ -46,7 +46,7 @@ fn lifetimes(lines:ref<array<string>>) -> bool effects {alloc} {
     }else if command!="CANVAS" {
       var slot:u64=0
       loop {if slot>=3 {break}
-        let field:u64=if slot==0 {1}else if slot==1 {2}else{20}
+        let field:u64=if command=="UTRANS" {slot+1}else if slot==0 {1}else if slot==1 {2}else{20}
         let value:str=array.borrow(fields,field)
         if str.starts_with(value,"GPU:") or str.starts_with(value,"GPUDIM:") or str.starts_with(value,"GPUOPAQUE:") {
           var parts:array<string> = text.split(value,":")
@@ -55,8 +55,9 @@ fn lifetimes(lines:ref<array<string>>) -> bool effects {alloc} {
         }
         slot=slot+1
       }
-      if command=="FLOAT" and str.starts_with(array.borrow(fields,109),"GPU:") {
-        let value:str=array.borrow(fields,109)
+      let output_field:u64=if command=="UTRANS" {9}else{109}
+      if (command=="FLOAT" or command=="UTRANS") and str.starts_with(array.borrow(fields,output_field),"GPU:") {
+        let value:str=array.borrow(fields,output_field)
         let key:str=str.slice(value,4,str.len(value))
         if map.contains(ever,key) {return false}
         let _=map.put(live,key,"live")
@@ -125,5 +126,21 @@ pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,
   let _=test.check(suite,match memory.lower(lines,0) {err(_)=>true,ok(_)=>false,},"Epoch zero refused")
   lines=[pass("FLOAT","GPU:9:300","-","-","a"),pass("PREVIEW","FLOAT:a","-","-","monitor")]
   let _=test.check(suite,match memory.lower(lines,11) {err(_)=>true,ok(_)=>false,},"External snapshot IDs cannot enter a new plan")
+  let _=test.start(suite,"Upper transition reads three immutable versions and releases every side")
+  lines=[pass("FLOAT","lower.mkv","-","-","low.fp32"),
+    pass("FLOAT","outgoing.mkv","-","-","out.fp32"),
+    pass("FLOAT","incoming.mkv","-","-","in.fp32"),
+    "UTRANS FLOAT:low.fp32 FLOAT:out.fp32 FLOAT:in.fp32 5 0.37 4 1 2 result.fp32",
+    pass("PREVIEW","FLOAT:result.fp32","-","-","monitor")]
+  actual=lowered(suite,lines,12)
+  let upper_wire:string=text.join(actual,"\n")
+  let _=test.check(suite,text.contains(upper_wire,"UTRANS GPU:12:1 GPU:12:2 GPU:12:3 5 0.37 4 1 2 GPU:12:4"),"Three explicit side reads retain unique authored versions")
+  let _=test.check(suite,lifetimes(actual),"All three reads are live and released only after transition")
+  let _=test.check(suite,not text.contains(upper_wire,".fp32"),"All side and result raster paths lower to bounded owned snapshots")
+  let _=test.check(suite,text.contains(upper_wire,"PICDROP 12 1") and text.contains(upper_wire,"PICDROP 12 2") and text.contains(upper_wire,"PICDROP 12 3"),"Three last-use releases are explicit")
+  lines=["UTRANS FLOAT:a FLOAT:b FLOAT:c 0 0.5 4 0 0 result"]
+  let _=test.check(suite,match memory.lower(lines,13) {err(_)=>true,ok(_)=>false,},"A transition cannot replace the final preview/encoder contract")
+  lines=["UTRANS FLOAT:a FLOAT:b 0 0.5 4 0 0 result",pass("PREVIEW","FLOAT:result","-","-","monitor")]
+  let _=test.check(suite,match memory.lower(lines,14) {err(_)=>true,ok(_)=>false,},"Malformed side grammar refuses before snapshot assignment")
   test.conclude(suite,path.join(root,"picture-memory-tests.json"),20)
 }

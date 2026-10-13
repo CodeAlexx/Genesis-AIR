@@ -11,6 +11,93 @@ import "../src/preview_link.ai" as link
 import std.draw as draw
 import std.files as files
 import std.path as path
+import "../src/commands.ai" as commands
+import "../src/timeline_media.ai" as media
+import "../src/audio_endpoint.ai" as endpoint
+fn mute_setup(state:ref<app.App>,with_audio:bool) -> u64 effects {alloc} {
+  var doc:editor.Document=editor.document(60.0,64,36)
+  let source:u64=editor.add_source(doc,"never-decode.mp4","Source",600,60.0)
+  let _=editor.describe_source(doc,source,64,36,true,true,48000,2)
+  let owner:u64=doc.active
+  let vt:u64=editor.add_track(doc,owner,editor.track_video(),"V1")
+  let at:u64=editor.add_track(doc,owner,editor.track_audio(),"A1")
+  let v:u64=option.unwrap(editor.append(doc,vt,source,0,600))
+  let _=editor.set_clip_streams(doc,v,1)
+  if with_audio {let a:u64=option.unwrap(editor.append(doc,at,source,0,600))
+    let _=editor.set_clip_streams(doc,a,2)}
+  let _=editor.seek(doc,30)
+  let _=editor.program_action(doc,editor.play())
+  let _=ref.swap(struct.borrow(state,field=document),doc)
+  at
+}
+fn mute_encoded(state:ref<app.App>) -> string effects {alloc} {
+  match editor_io.encode(struct.borrow(state,field=document)) {ok(v)=>v,err(_)=>string.new(),}
+}
+fn mute_picture(frame:i64,revision:u64) -> pictures.Frame effects {alloc} {
+  pictures.Frame {source:draw.empty_surface(),program:draw.empty_surface(),
+    position:link.FramePosition {source_frame:0,program_frame:frame,revision:revision},held_source:true}
+}
+fn mute_supply(queue:ref<pictures.Queue>,id:u64,first:i64,count:u64,revision:u64) -> bool effects {alloc} {
+  var offset:u64=0
+  loop {if offset>=count {break}
+    let n:u64=if count-offset>=2 {2}else{1}
+    if not pictures.requested_window(queue,id+offset,n,first+cast.wrap(offset),599,100+offset) {return false}
+    var at:u64=0
+    loop {if at>=n {break}
+      let frame:i64=first+cast.wrap(offset+at)
+      if not pictures.receive(queue,id+offset+at,mute_picture(frame,revision),200+offset+at) {return false}
+      at=at+1}
+    offset=offset+n}
+  true
+}
+fn mute_empty_accept(state:ref<app.App>,suite:ref<test.Suite>,id:u64) -> unit effects {alloc} {
+  var plan:media.EndpointPlan=match media.endpoint_plan(struct.borrow(state,field=document),"never-start-worker.exe","never-create.wav") {
+    ok(v)=>v,err(p)=>{let _=test.check(suite,false,p)
+      return ()},}
+  let _=test.eq_u64(suite,array.len(struct.borrow(struct.borrow(plan,field=end),field=roots)),0,"Actual authored muted/video-only graph has no eligible roots")
+  let _=test.eq_u64(suite,array.len(struct.borrow(plan,field=lines)),0,"Empty endpoint creates no decoder/cache commands")
+  let _=test.eq_i64(suite,plan.end.actual,0,"Empty endpoint actual EOF is zero")
+  let revision:u64=state.document_revision
+  let media_revision:u64=state.media_revision
+  let owner:u64=state.document.active
+  let _=test.check(suite,app.accept_endpoint(state,struct.replace(plan,endpoint.empty(),field=end),id,revision,media_revision,owner),"Real empty endpoint accepted with current author identity")
+}
+fn mute_repaired_silence(state:ref<app.App>,suite:ref<test.Suite>,queue:ref<pictures.Queue>,epoch:u64,id:u64,target:i64) -> unit effects {alloc} {
+  let revision:u64=state.document_revision
+  let media_revision:u64=state.media_revision
+  let _=test.eq_i64(suite,target,30,"Stale native origin schedules exact current origin after empty receipt")
+  if target!=30 {
+    let _=test.check(suite,mute_supply(queue,id,target,8,revision),"Baseline witness fills only future credit")
+    let _=test.check(suite,not option.is_some(pictures.take_due(queue,30)),"Baseline future pixels stay held at frozen authored time")
+    let _=test.check(suite,not window.silent_origin_ready(state,queue,30,600,epoch,30,revision-1,media_revision,false),"Baseline old native origin cannot arm silence")
+    return ()
+  }
+  let _=test.check(suite,mute_supply(queue,id,30,2,revision),"Repair window owns actual origin plus one future")
+  var origin:pictures.Frame=option.unwrap(pictures.take_due(queue,30))
+  let _=test.eq_i64(suite,origin.position.program_frame,30,"Only origin is due before silent clock")
+  var source:draw.Surface=draw.empty_surface()
+  var program:draw.Surface=draw.empty_surface()
+  pictures.apply(state,origin,source,program)
+  let _=test.check(suite,not window.silent_origin_ready(state,queue,30,600,epoch,30,revision-1,media_revision,false),"Repaint alone does not relabel old native pixels")
+  let _=test.check(suite,mute_supply(queue,id+2,32,6,revision),"Seven actual futures remain below startup reserve")
+  let _=test.check(suite,not window.silent_origin_ready(state,queue,30,600,epoch,30,revision,media_revision,false),"Simulated successful origin present still needs eighth real future")
+  let _=test.check(suite,mute_supply(queue,id+8,38,1,revision),"Eighth future completes actual reserve")
+  let _=test.check(suite,not window.silent_origin_ready(state,queue,30,600,epoch,30,revision,media_revision+1,false),"Wrong native media identity cannot arm silence")
+  let _=test.check(suite,not window.silent_origin_ready(state,queue,30,600,epoch+1,30,revision,media_revision,false),"Retired epoch cannot arm silence")
+  let _=test.check(suite,window.silent_origin_ready(state,queue,30,600,epoch,30,revision,media_revision,false),"Successful current native-origin ledger and eight completed futures arm silence")
+  let graph:string=mute_encoded(state)
+  var clock:audio.Clock=audio.Clock {ok:true,samples:0,queued:0,error:string.new()}
+  window.extend_silent_clock(clock,1000000000,0,1017000000)
+  let _=test.eq_u64(suite,clock.samples,816,"Silent continuation derives elapsed48k presentation time")
+  let _=test.eq_u64(suite,clock.queued,0,"Silent continuation never invents PCM buffers")
+  var previous:i64=30
+  let actual=window.apply_picture_clock(state,clock,30,60.0,599,false,epoch,epoch,revision,media_revision,previous)
+  let _=test.eq_i64(suite,option.unwrap(actual),31,"Current runtime clock advances video after silence is armed")
+  let _=test.eq_i64(suite,previous,31,"Restart detector follows exact clock advancement")
+  let _=test.eq_u64(suite,state.document_revision,revision,"Silent runtime advancement is not an authored revision")
+  let _=editor.seek(struct.borrow(state,field=document),30)
+  let _=test.eq_str(suite,mute_encoded(state),graph,"After restoring only runtime coordinate the authored saved graph is exact")
+}
 fn encoded(state: ref<app.App>) -> string effects {alloc} {
   match editor_io.encode(struct.borrow(state,field=document)) {ok(value)=>value,err(_)=>string.new(),}
 }
@@ -343,6 +430,77 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
     let _=test.eq_i64(suite,shown,14,"All fourteen real boundaries survive the measured40/54/75ms stall")
     let _=test.done(suite)
     scenario=scenario+1}
+  // CPU native-presentation ledger simulation; live mute recovery remains a native follow-up.
+  if true {
+  let _=test.start(suite,"Fast mute receipt precedes first new-revision scheduling")
+  var fast:app.App=app.app(provider.fake(""))
+  let at:u64=mute_setup(fast,true)
+  let old_revision:u64=fast.document_revision
+  var muted:commands.Result=commands.toggle_mute(fast,at)
+  let _=test.check(suite,muted.ok and fast.document_revision==old_revision+1,"Real mixer mutation retires previous document identity")
+  mute_empty_accept(fast,suite,10)
+  var q:pictures.Queue=pictures.queue()
+  let _=pictures.configure(q,"fast-muted",10,true,false,64,36)
+  // Empty acceptance clears audio_preparing before the first scheduling pass.
+  let shown:i64=window.picture_schedule_shown(false,false,30)
+  let target:i64=option.unwrap(pictures.window_target(q,30,599,60.0,shown))
+  mute_repaired_silence(fast,suite,q,10,100,target)
+  let _=test.done(suite)
+  let _=test.start(suite,"Delayed empty receipt preserves already-issued origin repair")
+  var delayed:app.App=app.app(provider.fake(""))
+  let delayed_at:u64=mute_setup(delayed,true)
+  let _=commands.toggle_mute(delayed,delayed_at)
+  var delayed_q:pictures.Queue=pictures.queue()
+  let _=pictures.configure(delayed_q,"delayed-muted",11,true,false,64,36)
+  let delayed_target:i64=option.unwrap(pictures.window_target(delayed_q,30,599,60.0,window.picture_schedule_shown(true,false,30)))
+  mute_empty_accept(delayed,suite,11)
+  mute_repaired_silence(delayed,suite,delayed_q,11,200,delayed_target)
+  let _=test.done(suite)
+  let _=test.start(suite,"Normal video-only Play reuses genuinely current paused origin")
+  var video:app.App=app.app(provider.fake(""))
+  let _=mute_setup(video,false)
+  mute_empty_accept(video,suite,12)
+  var video_q:pictures.Queue=pictures.queue()
+  let _=pictures.configure(video_q,"video-only",12,true,false,64,36)
+  let video_target:i64=option.unwrap(pictures.window_target(video_q,30,599,60.0,window.picture_schedule_shown(false,true,30)))
+  let _=test.eq_i64(suite,video_target,31,"Current paused video origin needs next frame rather than duplicate decode")
+  let _=test.check(suite,mute_supply(video_q,300,31,8,video.document_revision),"Video-only actual eight futures completed")
+  let _=test.check(suite,window.silent_origin_ready(video,video_q,30,600,12,30,video.document_revision,video.media_revision,false),"Current native origin enables ordinary silent-video continuation")
+  let _=test.done(suite)
+  let _=test.start(suite,"Gain zero retains exact audio root and normal first-PCM admission")
+  var zero:app.App=app.app(provider.fake(""))
+  let zero_at:u64=mute_setup(zero,true)
+  let _=commands.set_track_gain(zero,zero_at,0.0)
+  var zero_plan:media.EndpointPlan=match media.endpoint_plan(struct.borrow(zero,field=document),"never-start-worker.exe","never-create.wav") {ok(v)=>v,err(p)=>{io.write(p)
+    return 2},}
+  let _=test.eq_u64(suite,array.len(struct.borrow(struct.borrow(zero_plan,field=end),field=roots)),1,"Zero fader leaves original root eligible")
+  let _=test.eq_i64(suite,zero_plan.end.actual,480000,"Zero-gain authored PCM interval remains exact")
+  let _=test.check(suite,array.len(struct.borrow(zero_plan,field=lines))>0,"Gain-zero follows PCM preparation rather than empty endpoint")
+  let revision:u64=zero.document_revision
+  let media_revision:u64=zero.media_revision
+  let owner:u64=zero.document.active
+  let _=test.check(suite,app.accept_endpoint(zero,struct.replace(zero_plan,endpoint.empty(),field=end),20,revision,media_revision,owner),"Zero-gain authored endpoint accepted")
+  var zero_q:pictures.Queue=pictures.queue()
+  let _=pictures.configure(zero_q,"gain-zero",20,true,false,64,36)
+  let zero_target:i64=option.unwrap(pictures.window_target(zero_q,30,599,60.0,window.picture_schedule_shown(true,false,30)))
+  let _=test.eq_i64(suite,zero_target,30,"Gain-zero still repairs edited origin before PCM")
+  let _=test.check(suite,mute_supply(zero_q,400,30,2,revision),"Gain-zero origin window completed")
+  let _=pictures.take_due(zero_q,30)
+  let _=test.check(suite,mute_supply(zero_q,402,32,7,revision),"Gain-zero eight consecutive futures completed")
+  var preroll:window.PcmPreroll=window.first_pcm_begin(zero,20,false,30)
+  let _=window.first_pcm_received(preroll,20,100)
+  let _=test.eq_u64(suite,cast.wrap(window.first_pcm_action(zero,preroll,zero_q,20,101,30)),1,"Simulated completed real PCM admits through unchanged eight-picture bridge")
+  let _=test.done(suite)
+  let _=test.start(suite,"Unmute restores contributing root and refuses retired silent epoch")
+  let _=commands.toggle_mute(fast,at)
+  var resumed:media.EndpointPlan=match media.endpoint_plan(struct.borrow(fast,field=document),"never-start-worker.exe","never-create.wav") {ok(v)=>v,err(p)=>{io.write(p)
+    return 2},}
+  let _=test.eq_u64(suite,array.len(struct.borrow(struct.borrow(resumed,field=end),field=roots)),1,"Unmute independently restores actual contributing root")
+  let _=test.check(suite,not app.endpoint_current(fast),"Unmute retires accepted silent endpoint before restart")
+  let _=test.check(suite,not window.silent_origin_ready(fast,q,30,600,21,30,old_revision+1,fast.media_revision,false),"Retired native silent ledger cannot arm restored audio epoch")
+  let _=test.eq_i64(suite,window.picture_schedule_shown(true,false,31),-1,"Unmute requires current origin repair without reusing silent pixels")
+  let _=test.done(suite)
+  }
   let report:string=if view.len(args)>1 {string.copy(view.get(args,1))}else{string.copy("picture-clock-tests.json")}
   test.conclude(suite,report,32)
 }

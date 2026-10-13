@@ -29,6 +29,7 @@ import std.widgets as widgets
 import "native_dialogs.ai" as dialogs
 import "native_audio.ai" as native_audio
 import "audio_playback.ai" as audio_playback
+import "audio_endpoint.ai" as endpoint
 import "diagnostics.ai" as diagnostics
 import "app.ai" as app
 import "typeface.ai" as typeface
@@ -48,6 +49,7 @@ import "window_cache.ai" as window_cache
 import "window_profile.ai" as window_profile
 import "playback_profile.ai" as playback_profile
 import "transport_clock.ai" as transport_clock
+import "timeline_follow.ai" as timeline_follow
 import "view.ai" as painter
 
 fn say(text: str) -> unit effects {io.write} {
@@ -280,15 +282,29 @@ fn pause_transport(state: ref<app.App>, source: bool) -> unit effects {alloc} {
 pub fn apply_picture_clock(state: ref<app.App>, device: ref<native_audio.Clock>,
     origin: i64, fps: f64, last: i64, source: bool, epoch: u64, picture_epoch: u64,
     revision: u64, media_revision: u64, previous: ref<i64>) -> option<i64> effects {} {
+  let presentation:i64=app.presentation_duration(state)
   let doc: ref<editor.Document> = struct.borrow(state,field=document)
   if not device.ok or not math.is_finite(fps) or fps <= 0.0 or last < 0 or origin < 0 or
       epoch != picture_epoch or state.document_revision != revision or
       state.media_revision != media_revision or doc.monitor.playing != source or
       (not source and not editor.playing(doc)) {return option.none()}
   let actual: i64 = transport_clock.frame_at_samples(origin,device.samples,fps,last)
-  let _ = if source {editor.seek_monitor(doc,actual)}else{editor.seek(doc,actual)}
+  let _ = if source {editor.seek_monitor(doc,actual)}else{editor.seek_until(doc,actual,presentation)}
   let _ = ref.swap(previous,actual)
   option.some(actual)
+}
+
+// Pure native bridge predicates; actual presentation/device ownership stays in the loop.
+pub fn picture_schedule_shown(preparing:bool,identity:bool,shown:i64) -> i64 effects {} {
+  if not identity {-1}else{shown}
+}
+pub fn silent_origin_ready(state:ref<app.App>,pictures:ref<picture_queue.Queue>,origin:i64,
+    finish:i64,epoch:u64,native_frame:i64,native_revision:u64,native_media:u64,
+    advanced_pcm:bool) -> bool effects {} {
+  let finish_ready:bool=advanced_pcm or picture_queue.window_primed(pictures,origin,
+    if finish>0 {finish-1}else{0},false,epoch,native_frame)
+  native_frame>=origin and native_revision==state.document_revision and
+    native_media==state.media_revision and finish_ready
 }
 
 // First PCM remains caller-owned while actual future pictures are prepared.
@@ -311,6 +327,18 @@ pub fn first_pcm_valid(state:ref<app.App>,preroll:ref<PcmPreroll>,epoch:u64) -> 
     doc.monitor.playing == preroll.source and (preroll.source or editor.playing(doc)) and
     (if preroll.source {doc.monitor.frame}else{editor.playhead(doc)}) == preroll.origin
 }
+
+// Actual native-loop restart decision. Runtime acceptance cannot survive an authored
+// revision change; reprepare through the existing stop/discard/start transaction.
+pub fn audio_restart_needed(state:ref<app.App>,source:bool,active:bool,was_playing:bool,
+    was_source:bool,frame:i64,previous:i64,mix_changed:bool,pending:bool,preparing:bool,
+    preroll:ref<PcmPreroll>,epoch:u64) -> bool effects {} {
+  not active or not was_playing or source!=was_source or frame!=previous or mix_changed or
+    (app.endpoint_requested(state) and not pending) or
+    (preparing and not first_pcm_valid(state,preroll,epoch)) or
+    (not source and not pending and not preparing and not app.endpoint_current(state))
+}
+
 pub fn first_pcm_received(preroll:ref<PcmPreroll>,epoch:u64,now:u64) -> bool effects {} {
   if not preroll.waiting or preroll.ready or preroll.epoch != epoch {return false}
   struct.set(preroll,true,field=ready)
@@ -325,7 +353,7 @@ pub fn first_pcm_action(state:ref<app.App>,preroll:ref<PcmPreroll>,
   if not preroll.ready {return 0}
   if now < preroll.ready_ns or now-preroll.ready_ns >= 2000000000 {return 3}
   let doc:ref<editor.Document> = struct.borrow(state,field=document)
-  let finish:i64 = if preroll.source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
+  let finish:i64 = if preroll.source {editor.source_frames(doc,doc.monitor_source)}else{app.presentation_duration(state)}
   if finish <= 0 {return 2}
   if picture_queue.window_primed(pictures,preroll.origin,finish-1,preroll.source,epoch,native_shown) {1}else{0}
 }
@@ -368,6 +396,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var source_pixels_pending: bool = true
   var displayed_source_id: u64 = 0
   var repaint_all: bool = true
+  var timeline_damage: bool = false
+  var waveform_damage:bool=false
+  var thumbnail_damage:bool=false
   var renderer: painter.Renderer = painter.renderer()
   var handled_prompt: u32 = 0
   var last_recorded_error: string = string.new()
@@ -384,6 +415,16 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var audio_active: bool = false
   var audio_origin: i64 = 0
   var audio_next: i64 = 0
+  var audio_next_sample:i64=0
+  var audio_task_end_sample:i64=0
+  var endpoint_pending:bool=false
+  var endpoint_requested_revision:u64=0
+  var endpoint_requested_media:u64=0
+  var endpoint_requested_owner:u64=0
+  var endpoint_requested_seek:i64=-1
+  var endpoint_requested_end:bool=false
+  var silent_begin:u64=0
+  var silent_anchor:u64=0
   var audio_generation: u64 = 0
   var audio_task_generation: u64 = 0
   var audio_task_end: i64 = 0
@@ -465,6 +506,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     audio_playback.stop(str.view(audio_root))
     return 1},}
   var strip_document_revision: u64 = 0
+  var strip_project_epoch: u64 = 0
   var strip_initialized: bool = false
   var strip_requested: u64 = 0
   var strip_revision: u64 = 0
@@ -527,6 +569,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let strip_problem: string = match preview.current_failure(strip_transport,strip_transport.error_generation==strip_requested) {
       none=>string.new(),some(detail)=>detail,
     }
+    if str.len(str.view(strip_problem))!=0 {
+      let reference_pending:u64=state.waveform_pending
+      let reference_failed:bool=state.waveform_failed
+      app.waveform_failure(state,if strip_transport.closed {0}else{strip_transport.error_generation})
+      if reference_pending!=state.waveform_pending or reference_failed!=state.waveform_failed {waveform_damage=true
+        dirty=true}
+    }
     if str.len(str.view(strip_problem)) != 0 and not str.eq(str.view(strip_problem),str.view(strip_error)) {
       app.set_status(state,str.view(strip_problem))
       dirty=true
@@ -536,16 +585,24 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     if wave_ready > waveform_seen {
       if preview.read_waveforms(state, str.view(strip_root),wave_ready) {
         waveform_seen = wave_ready
-        repaint_all = true
-        dirty = true
+        waveform_damage = true
+        passive_changed = true
+      }else if wave_ready==state.waveform_pending and wave_ready==strip_requested and strip_initialized and
+          strip_document_revision==state.document_revision and strip_revision==state.media_revision and
+          strip_project_epoch==state.project_epoch {
+        app.waveform_failure(state,wave_ready)
+        waveform_damage=true
+        waveform_seen=wave_ready
+        app.set_status(state,"[GA_WAVEFORM_REFERENCE] Current waveform reference unavailable: published payload refused")
+        dirty=true
       }
     }
     let thumb_ready: u64 = strip_transport.thumbnails
     if thumb_ready > thumbnail_seen {
       if preview.read_thumbnails(state, str.view(strip_root), thumb_ready) {
         thumbnail_seen = thumb_ready
-        repaint_all = true
-        dirty = true
+        thumbnail_damage = true
+        passive_changed = true
       }
     }
     let now_ns: u64 = clock.start()
@@ -603,10 +660,33 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     }
     match ref.swap(audio_library, option.none()) {
       none => {
-        if playing_now and transport_clock.advance(struct.borrow(state, field=document), elapsed_ns, frame_clock) { passive_changed = true }
+        if app.endpoint_requested(state) or (playing_now and not source_playing) {
+          endpoint_failure(state,"[GA_AUDIO_DEVICE_UNAVAILABLE] Accepted Program endpoint requires the native audio clock")
+          audio_active=false
+          audio_preparing=false
+          endpoint_pending=false
+          dirty=true
+        }
       },
       some(opened) => {
         var library: CAbiLibrary = opened
+        if endpoint_pending and (endpoint_requested_revision!=state.document_revision or endpoint_requested_media!=state.media_revision or
+            endpoint_requested_owner!=state.document.active or (source_playing and not app.endpoint_requested(state)) or (not playing_now and not app.endpoint_requested(state)) or
+            endpoint_requested_seek!=state.endpoint_seek_requested or endpoint_requested_end!=state.endpoint_end_requested) {
+          let next_seek:i64=state.endpoint_seek_requested
+          let next_end:bool=state.endpoint_end_requested
+          let same_identity:bool=endpoint_requested_revision==state.document_revision and endpoint_requested_media==state.media_revision and endpoint_requested_owner==state.document.active
+          audio_request=audio_request+1
+          let _=audio_playback.discard(str.view(audio_root),audio_request,audio_generation)
+          release_playback_output(first_pcm,str.view(audio_task_output))
+          let _=preview_link.wake(audio_transport,false)
+          endpoint_pending=false
+          app.retire_endpoint(state)
+          if same_identity and not source_playing {
+            struct.set(state,next_seek,field=endpoint_seek_requested)
+            struct.set(state,next_end,field=endpoint_end_requested)
+          }
+        }
         if not playing_now and audio_active {
           audio_preparing=false
           let _ = native_audio.request(library, "stop", "")
@@ -634,8 +714,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         }
         sound_revision = state.media_revision
         struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
-        if playing_now and (not audio_active or not previous_playing or source_playing != previous_source or frame_now != previous_frame or mix_changed or
-            (audio_preparing and not first_pcm_valid(state,first_pcm,audio_generation))) {
+        if playing_now and not source_waits_for_endpoint(state,source_playing) and audio_restart_needed(state,source_playing,audio_active,previous_playing,previous_source,frame_now,previous_frame,mix_changed,endpoint_pending,audio_preparing,first_pcm,audio_generation) {
           // A mix edit may retire a later completed chunk after the first PCM
           // flags are clear. Supersede its producer before releasing the owned
           // output, and only then reuse that path for the new device epoch.
@@ -654,13 +733,37 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               let _ = preview_link.wake(audio_transport,false)
               audio_origin = frame_now
               audio_next = frame_now
+              silent_begin=0
+              silent_anchor=0
+              endpoint_pending=false
               let started: string = native_audio.request(library, "start", "")
               audio_active = str.eq(str.view(started), "ok")
               audio_preparing = audio_active
               first_pcm=first_pcm_begin(state,audio_generation,source_playing,audio_origin)
-              if not audio_active {
-                app.set_status(state, str.view(started))
-                pause_transport(state, source_playing)
+              if audio_active and not source_playing {
+                audio_request=audio_request+1
+                endpoint_requested_revision=state.document_revision
+                endpoint_requested_media=state.media_revision
+                endpoint_requested_owner=state.document.active
+          endpoint_requested_seek=state.endpoint_seek_requested
+          endpoint_requested_end=state.endpoint_end_requested
+                audio_task_generation=audio_generation
+                if audio_playback.request_prepare_document(str.view(audio_root),audio_request,audio_generation,struct.borrow(state,field=document),str.view(path.join(str.view(audio_root),"prepare.wav"))) {
+                  endpoint_pending=true
+                  preparing_program_audio(state,false)
+                  dirty=true
+                  let _=preview_link.wake(audio_transport,false)
+                }else{fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,"[GA_AUDIO_ENDPOINT_PATH] Cannot publish Program preparation")
+                  audio_active=false
+                  audio_preparing=false
+                  audio_pending=false}
+              }
+              if not audio_active and not str.eq(str.view(started),"ok") {
+                if source_playing {app.set_status(state,str.view(started))
+                  pause_transport(state,true)}else{
+                  fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,str.view(started))
+                  audio_preparing=false
+                  audio_pending=false}
               }
             }else{
               app.set_status(state,"[GA_AUDIO_RETIRE] Cannot retire playback output before restart")
@@ -668,7 +771,72 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
             }
           }
         }
+        // Cold End is also an asynchronous graph preparation; it queues no PCM.
+        if app.endpoint_requested(state) and not endpoint_pending and (source_playing or not editor.playing(struct.borrow(state,field=document))) {
+          if audio_request>=18446744073709551614 {
+            fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,"[GA_AUDIO_RETIRE] Playback request identity exhausted")
+            audio_active=false
+            audio_preparing=false
+            audio_pending=false
+          }else{
+          audio_request=audio_request+1
+          endpoint_requested_revision=state.document_revision
+          endpoint_requested_media=state.media_revision
+          endpoint_requested_owner=state.document.active
+                endpoint_requested_seek=state.endpoint_seek_requested
+                endpoint_requested_end=state.endpoint_end_requested
+          audio_task_generation=audio_generation
+          if audio_playback.request_prepare_document(str.view(audio_root),audio_request,audio_generation,struct.borrow(state,field=document),str.view(path.join(str.view(audio_root),"prepare.wav"))) {
+            endpoint_pending=true
+            preparing_program_audio(state,true)
+            dirty=true
+            let _=preview_link.wake(audio_transport,false)
+          }else{fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,"[GA_AUDIO_ENDPOINT_PATH] Cannot publish End preparation")
+            audio_active=false
+            audio_preparing=false
+            audio_pending=false}
+          }
+        }
         preview_link.poll(audio_transport)
+        if endpoint_pending and (audio_transport.ready==audio_request or audio_transport.error_generation==audio_request or audio_transport.closed) {
+          dirty=true
+          endpoint_pending=false
+          if audio_transport.ready!=audio_request {
+            let problem:string=string.copy(struct.borrow(audio_transport,field=error))
+            fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,str.view(problem))
+            audio_active=false
+            audio_preparing=false
+            audio_pending=false
+          }else{
+            match audio_playback.read_endpoint(str.view(audio_root)) {
+              err(problem)=>{fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,str.view(problem))
+                audio_active=false
+                audio_preparing=false
+                audio_pending=false},
+              ok(end)=>{
+                if app.accept_endpoint(state,end,audio_request,endpoint_requested_revision,endpoint_requested_media,endpoint_requested_owner) {
+                  dirty=true
+                  let requested_end:bool=state.endpoint_end_requested
+                  if app.complete_endpoint_navigation(state) {
+                    audio_origin=editor.playhead(struct.borrow(state,field=document))
+                    audio_next=audio_origin
+                    if editor.playing(struct.borrow(state,field=document)) {first_pcm=first_pcm_begin(state,audio_generation,false,audio_origin)}
+                    prepared_program_audio(state,if requested_end {"End"}else{"Sought"})
+                  }
+                  let active:u64=state.document.active
+                  let fps:f64=editor.sequence_fps(struct.borrow(state,field=document),active)
+                  audio_next_sample=endpoint.sample(audio_origin,fps)
+                  let actual:i64=match struct.borrow(state,field=accepted_audio) {some(v)=>v.actual,none=>0,}
+                  if audio_next_sample>=actual {audio_preparing=false
+                    first_pcm=pcm_preroll()}
+                }else{fail_program_endpoint(state,library,audio_transport,first_pcm,str.view(audio_root),str.view(audio_task_output),audio_request,audio_generation,"[GA_AUDIO_ENDPOINT_STALE] Preparation identity was superseded")
+                  audio_active=false
+                  audio_preparing=false
+                  audio_pending=false}
+              },
+            }
+          }
+        }
         if audio_pending and not first_pcm.ready and (audio_transport.ready == audio_request or audio_transport.error_generation == audio_request or audio_transport.closed) {
           if audio_task_generation == audio_generation and playing_now and audio_active {
             if audio_transport.ready != audio_request {
@@ -689,6 +857,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
                 audio_active=false
               } else {
                 audio_next=audio_task_end
+                audio_next_sample=audio_task_end_sample
                 audio_preparing=false
               }
             }
@@ -704,31 +873,68 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           let fps: f64 = if source_playing { timeline_media.monitor_fps(struct.borrow(state, field=document)) }
             else { editor.sequence_fps(struct.borrow(state, field=document), active) }
           let finish: i64 = if source_playing { let selected: u64 = struct.get(struct.borrow(state, field=document), field=monitor_source)
-            editor.source_frames(struct.borrow(state, field=document), selected) } else { editor.duration(struct.borrow(state, field=document)) }
+            editor.source_frames(struct.borrow(state, field=document), selected) } else { app.presentation_duration(state) }
           if finish <= 0 {
             pause_transport(state, source_playing)
             let _ = native_audio.request(library, "stop", "")
             audio_active = false
             audio_preparing = false
           }
+          if not source_playing and app.endpoint_current(state) and not audio_preparing {
+            let actual_end:i64=match struct.borrow(state,field=accepted_audio) {some(v)=>v.actual,none=>0,}
+            if device.ok and device.queued==0 and not audio_pending and audio_next_sample>=actual_end {
+              let origin_ready:bool=silent_origin_ready(state,pictures,audio_origin,finish,audio_generation,
+                native_program_frame,native_program_revision,native_program_media,
+                audio_next_sample>endpoint.sample(audio_origin,fps))
+              if silent_begin==0 and origin_ready {silent_begin=clock.start()
+                silent_anchor=device.samples
+                prepared_program_audio(state,"Playing")
+                dirty=true}
+            }
+            if silent_begin!=0 {extend_silent_clock(device,silent_begin,silent_anchor,clock.start())}
+          }
           if not device.ok {
             app.set_status(state, str.view(struct.borrow(device, field=error)))
             pause_transport(state, source_playing)
           } else {
             if not audio_preparing {
+              let endpoint_done:bool=app.endpoint_current(state) and match struct.borrow(state,field=accepted_audio) {some(v)=>audio_next_sample>=v.actual and endpoint.completed(v,audio_origin,device.samples),none=>false,}
+              let presentation:i64=app.presentation_duration(state)
               let doc: ref<editor.Document> = struct.borrow(state, field=document)
               let last: i64 = if finish > 0 { finish - 1 } else { 0 }
               let actual: i64 = transport_clock.frame_at_samples(audio_origin,device.samples,fps,last)
               let current: i64 = if source_playing { struct.get(struct.borrow(doc, field=monitor), field=frame) } else { editor.playhead(doc) }
-              if actual != current { let _ = if source_playing { editor.seek_monitor(doc, actual) } else { editor.seek(doc, actual) }
+              if actual != current { let _ = if source_playing { editor.seek_monitor(doc, actual) } else { editor.seek_until(doc, actual,presentation) }
                 passive_changed = true }
-              if device.queued == 0 and audio_next >= finish {
-                let _ = if source_playing { editor.monitor_action(doc, editor.pause()) } else { editor.program_action(doc, editor.pause()) }
-                let _ = native_audio.request(library, "stop", "")
-                audio_active = false
+              let finished:bool=if source_playing {
+                if device.queued==0 and actual>=last and audio_next>=finish {let _=editor.monitor_action(doc,editor.pause())
+                  true}else{false}
+              }else if endpoint_done {match struct.borrow(state,field=accepted_audio) {some(v)=>finish_program_until(doc,v,audio_origin,device.samples,device.queued),none=>false,}}
+                else{false}
+              if finished {
+                let _=native_audio.request(library,"stop","")
+                audio_active=false
+                silent_begin=0
               }
             }
-            if audio_active and device.queued < 2 and not audio_pending and audio_next < finish {
+            if audio_active and device.queued<2 and not audio_pending and not endpoint_pending and not source_playing and app.endpoint_current(state) {
+              let accepted_end:i64=match struct.borrow(state,field=accepted_audio) {some(v)=>v.actual,none=>0,}
+              if audio_next_sample<accepted_end {
+                let remaining:i64=if accepted_end-audio_next_sample>240000 {240000}else{accepted_end-audio_next_sample}
+                let count:u64=cast.wrap(remaining)
+                audio_task_end_sample=audio_next_sample+cast.wrap(count)
+                audio_task_end=match endpoint.frame_end(audio_task_end_sample,fps) {ok(v)=>v,err(_)=>finish,}
+                audio_task_generation=audio_generation
+                audio_task_output=path.join(provider.media_root(struct.borrow(state,field=provider)),"playback-chunk.wav")
+                audio_request=audio_request+1
+                if audio_playback.request_pull(str.view(audio_root),audio_request,audio_generation,state.endpoint_prepare,str.view(audio_task_output),audio_next_sample,count) {
+                  audio_pending=true
+                  let _=preview_link.wake(audio_transport,false)
+                }else{app.set_status(state,"[GA_AUDIO_ENDPOINT_PATH] Cannot publish exact PCM pull")
+                  pause_transport(state,false)}
+              }
+            }
+            if audio_active and source_playing and device.queued < 2 and not audio_pending and audio_next < finish {
               let chunk: i64 = cast.sat(fps * 5.0)
               audio_task_end = if audio_next + chunk > finish { finish } else { audio_next + chunk }
               let worker: string = provider.worker_path(struct.borrow(state, field=provider))
@@ -767,7 +973,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
             }
           }
         }
-        if not audio_active and (audio_pending or playing_now) {
+        if not audio_active and not endpoint_pending and (audio_pending or playing_now) {
           audio_preparing=false
           if audio_request == 18446744073709551615 {
             app.set_status(state,"[GA_AUDIO_RETIRE] Playback request generation exhausted")
@@ -800,6 +1006,15 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     // clock was selected. Never apply that old device epoch to the new content.
     // Recorder I/O follows native audio service/retirement. A Stop plus Help-off
     // in the same input batch cannot flush before the device is stopped.
+    let timing_program_playing:bool=editor.playing(struct.borrow(state,field=document))
+    let timing_source_playing:bool=struct.get(struct.borrow(struct.borrow(state,field=document),field=monitor),field=playing)
+    let timing_publish_ready:bool=window_profile.flush_ready(timing_program_playing,timing_source_playing,audio_active)
+    // Automatic cap finalization waits for a paused, native-retired service phase.
+    // Explicit Help-off remains the user's immediate requested finalization.
+    if timing_limit_pending and window_measure.enabled and
+        window_profile.finish_cap(window_measure.rows,timing_program_playing,timing_source_playing,audio_active) {
+      struct.set(state,false,field=window_timing_requested)
+    }
     if state.window_timing_requested != window_measure.enabled {
       if state.window_timing_requested {
         match window_profile.start_local(provider.media_root(struct.borrow(state,field=provider))) {
@@ -816,7 +1031,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       timing_flush_pending=false
       dirty=true
     }
-    if timing_flush_pending {
+    if timing_flush_pending and timing_publish_ready {
       timing_flush_pending=false
       if window_measure.enabled {
         match window_profile.flush_checked(window_measure) {ok(_)=>{},err(problem)=>{
@@ -856,6 +1071,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       cast.float(physical_height))
     let logical_width: f64 = cast.float(physical_width) / ui_scale
     let logical_height: f64 = cast.float(physical_height) / ui_scale
+    let presentation:i64=app.presentation_duration(state)
     let doc: ref<editor.Document> = struct.borrow(state,field=document)
     let picture_source: bool = struct.get(struct.borrow(doc,field=monitor),field=playing)
     let picture_playing: bool = picture_source or editor.playing(doc)
@@ -863,7 +1079,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let parked_program: i64 = editor.playhead(doc)
     let parked_source: i64 = struct.get(struct.borrow(doc,field=monitor),field=frame)
     let fps: f64 = if picture_source {timeline_media.monitor_fps(doc)}else{editor.sequence_fps(doc,doc.active)}
-    let finish: i64 = if picture_source {editor.source_frames(doc,doc.monitor_source)}else{editor.duration(doc)}
+    let finish: i64 = if picture_source {editor.source_frames(doc,doc.monitor_source)}else{presentation}
     let picture_source_id:u64 = doc.monitor_source
     if window_measure.enabled {
       window_profile.context(window_row,picture_source,picture_playing,audio_origin,fps,
@@ -923,7 +1139,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       if not preview_link.select_completed(preview_transport,ready) {break}
       // Configure after following the audio clock, before consuming a completion:
       // a seek or restart must retire the previous epoch's prepared pictures.
-      if picture_queue.accepts(pictures,ready) {
+      if app.endpoint_picture_ready(state) and picture_queue.accepts(pictures,ready) {
         var images: array<draw.Surface> = preview_link.take_images(preview_transport,ready)
         let position: preview_link.FramePosition = preview_transport.position
         if array.len(images) == 2 and position.revision == state.media_revision and
@@ -982,6 +1198,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
         var library: CAbiLibrary = opened
         var device: native_audio.Clock = native_audio.clock(library)
+        if not picture_source and silent_begin!=0 {extend_silent_clock(device,silent_begin,silent_anchor,clock.start())}
         if not device.ok {
           app.set_status(state,str.view(struct.borrow(device,field=error)))
           pause_transport(state,picture_source)
@@ -997,7 +1214,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         audio_library=option.some(library)
       },}
     }
-    if not picture_failed {
+    if not picture_failed and app.endpoint_picture_ready(state) {
       match picture_queue.take_due(pictures,wanted) {none=>{},some(frame)=>{
         if not frame.held_source {
           source_pixels_pending = true
@@ -1014,10 +1231,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       source_pixels_revision == state.document_revision and source_pixels_media == state.media_revision and
         source_pixels_id == picture_source_id
     }else{program_pixels_revision == state.document_revision and program_pixels_media == state.media_revision}
-    let shown: i64 = if audio_preparing and not shown_identity {-1}else{
-      if picture_source {state.presented_source_frame}else{state.presented_program_frame}}
+    let shown:i64=picture_schedule_shown(audio_preparing,shown_identity,
+      if picture_source {state.presented_source_frame}else{state.presented_program_frame})
 
-    let next_target: option<i64> = if picture_failed {option.none()}else{
+    let next_target: option<i64> = if picture_failed or not app.endpoint_picture_ready(state) {option.none()}else{
       picture_queue.window_target(pictures,wanted,if finish > 0 {finish-1}else{0},fps,shown)
     }
     match next_target {
@@ -1073,6 +1290,22 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       struct.set(window_row,array.len(struct.borrow(pictures,field=frames)),field=owned_credit)
       struct.set(window_row,picture_queue.reserved(pictures),field=reserved_credit)
     }
+    // Following is a viewport action, independent of authored/history state.
+    // Use the same completed Program frame as the painted timeline and time.
+    // An active pointer gesture owns its geometry until release; Source never pans Program.
+    if timeline_follow.allowed(state.timeline_follow_program,source_playing,
+        app.gesture_kind(state)!=app.drag_none(),app.endpoint_requested(state),
+        editor.playing(struct.borrow(state,field=document)),state.presented_program_frame,
+        program_pixels_revision==state.document_revision and program_pixels_media==state.media_revision) {
+      let follow_frame:layout.Frame=layout.frame(logical_width,logical_height)
+      let follow_scroll:i64=app.scroll(state)
+      let follow_span:i64=app.visible_span(state,layout.width_of(follow_frame.timeline))
+      let followed:i64=timeline_follow.page(app.timeline_frame(state),follow_scroll,follow_span,
+        state.timeline_follow_program,source_playing)
+      if followed!=follow_scroll {let _=app.set_scroll(state,followed)
+        timeline_damage=true
+        dirty=true}
+    }
     // Fresh pictures and user actions repaint immediately. Clock/meter-only
     // updates get a bounded interval so repeated old frames cannot monopolize
     // the presenter while the next picture is being prepared.
@@ -1083,7 +1316,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       let span: i64 = app.visible_span(state,layout.width_of(view_frame.timeline))
       let body_height: f64 = layout.height_of(view_frame.timeline)
       let first_lane: u64 = app.clamp_track_scroll(state,body_height)
-      if not strip_initialized or strip_document_revision != state.document_revision or
+      if not strip_initialized or strip_document_revision != state.document_revision or strip_project_epoch != state.project_epoch or
           strip_revision != state.media_revision or strip_scroll != app.scroll(state) or strip_zoom != app.zoom(state) or strip_span != span or
           strip_first_lane != first_lane or strip_body_height != body_height {
         let signature_begin: u64 = window_profile.stamp(window_measure)
@@ -1092,9 +1325,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           ok(value)=>value,err(_)=>string.new(),
         }
         strip_requested=strip_requested+1
-        if preview.request_strips(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision,state.document_revision,first_lane,body_height) {
+        if preview.request_visual_strips(str.view(strip_root),str.view(signature),strip_requested,app.scroll(state),app.zoom(state),span,480,270,state.media_revision,state.document_revision,first_lane,body_height,state.project_epoch) {
+          app.waveform_request(state,strip_requested)
+          waveform_damage=true
           let _ = preview_link.wake(strip_transport,false)
           strip_document_revision=state.document_revision
+          strip_project_epoch=state.project_epoch
           strip_initialized=true
           strip_revision=state.media_revision
           strip_scroll=app.scroll(state)
@@ -1102,11 +1338,13 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           strip_span=span
           strip_first_lane=first_lane
           strip_body_height=body_height
-        }else{app.set_status(state,"[GA_TIMELINE_REQUEST] Cannot publish timeline bitmap request")}
+        }else{app.waveform_failure(state,0)
+          waveform_damage=true
+          app.set_status(state,"[GA_TIMELINE_REQUEST] Cannot publish timeline bitmap request")}
         struct.set(window_row,window_row.signature+window_profile.stamp(window_measure)-signature_begin,field=signature)
       }
       let paint_begin: u64 = window_profile.stamp(window_measure)
-      let painted: bool = painter.render_with_source_hold(state,renderer,width,height,repaint_all,source_image,program_image,not source_pixels_pending)
+      let painted: bool = painter.render_with_timeline_regions(state,renderer,width,height,repaint_all,source_image,program_image,not source_pixels_pending,timeline_damage,waveform_damage,thumbnail_damage)
       struct.set(window_row,window_profile.stamp(window_measure)-paint_begin,field=paint)
       if painted {
         if window_measure.enabled {
@@ -1137,6 +1375,9 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
         }
       } else {app.set_status(state,"[GA_UI_SURFACE] The window canvas could not be allocated")}
       if window_row.present_ok {
+        timeline_damage = false
+        waveform_damage=false
+        thumbnail_damage=false
         repaint_all = false
         dirty = false
       } else {
@@ -1159,7 +1400,10 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
           let queued:string = native_audio.request(library,"queue",str.view(audio_task_output))
           if queued == "ok" {
             audio_next=audio_task_end
+            audio_next_sample=audio_task_end_sample
             audio_preparing=false
+            prepared_program_audio(state,"Playing")
+            dirty=true
           }else{
             app.set_status(state,str.view(queued))
             pause_transport(state,first_pcm.source)
@@ -1214,6 +1458,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       match ref.swap(audio_library,option.none()) {none=>{},some(opened)=>{
         var library: CAbiLibrary = opened
         var device: native_audio.Clock = native_audio.clock(library)
+        if not picture_source and silent_begin!=0 {extend_silent_clock(device,silent_begin,silent_anchor,clock.start())}
         if device.ok {
           let heard: i64 = transport_clock.frame_at_samples(audio_origin,device.samples,fps,if finish > 0 {finish-1}else{0})
           event_wait=cast.wrap(picture_queue.next_due_wait(pictures,heard,device.samples,audio_origin,fps,8))
@@ -1442,7 +1687,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let timing_doc:ref<editor.Document> =struct.borrow(state,field=document)
     let timing_playing:bool=editor.playing(timing_doc) or
       struct.get(struct.borrow(timing_doc,field=monitor),field=playing)
-    let defer_timing_write:bool=not app.running(state) or (audio_active and not timing_playing)
+    let defer_timing_write:bool=window_profile.buffered_playback(editor.playing(timing_doc),
+      struct.get(struct.borrow(timing_doc,field=monitor),field=playing),audio_active,app.running(state))
     if window_measure.enabled {
       struct.set(window_row,window_profile.stamp(window_measure),field=end)
       struct.set(window_row,array.len(struct.borrow(pictures,field=frames)),field=prepared)
@@ -1455,13 +1701,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
       }else{window_profile.record_checked(window_measure,window_row)}
       match timing_record {
         ok(_)=>{
-          if window_measure.rows>=50000 {
-            struct.set(state,false,field=window_timing_requested)
-            if defer_timing_write {timing_limit_pending=true}else{
-              let _=window_profile.stop(window_measure)
-              app.set_status(state,text.concat("Playback timing saved (50,000-row limit): ",struct.borrow(window_measure,field=path)))
-              dirty=true}
-          }
+          if window_measure.rows>=50000 {timing_limit_pending=true}
         },err(problem)=>{
           struct.set(state,false,field=window_timing_requested)
           app.set_status(state,str.view(problem))
@@ -1472,7 +1712,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     }
     // Retain the Stop-input row in memory; next loop services native audio
     // before it publishes this pending partial block or turns recording off.
-    if window_measure.enabled and ((timing_transport_playing and not timing_playing) or defer_timing_write) {
+    if window_measure.enabled and window_profile.flush_transition(timing_transport_playing,timing_playing,app.running(state)) {
       timing_flush_pending=true
     }
     timing_transport_playing=timing_playing
@@ -1819,4 +2059,63 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
 
   say("unknown command")
   2
+}
+
+// Presentation-only continuation after an exact empty/drained audio endpoint.
+// The real device counter and PCM buffer remain untouched.
+pub fn extend_silent_clock(device:ref<native_audio.Clock>,begin:u64,anchor:u64,now:u64) -> unit effects {} {
+  if device.ok and now>=begin {
+    let elapsed:f64=cast.float(now-begin)*48000.0/1000000000.0
+    struct.set(device,add.sat(anchor,cast.sat(elapsed)),field=samples)
+  }
+}
+
+// The native loop invokes this only with the current accepted epoch. Exact EOF,
+// not the final ceil-frame boundary, admits one new loop epoch.
+pub fn finish_program_until(document:ref<editor.Document>,end:ref<endpoint.End>,origin:i64,samples:u64,queued:u64) -> bool effects {} {
+  if queued!=0 or not editor.playing(document) or end.frames<=0 or
+      editor.playhead(document)<end.frames-1 or not endpoint.completed(end,origin,samples) {return false}
+  let looping:bool=document.program.looping
+  let _=editor.program_action_until(document,editor.pause(),end.frames)
+  if looping {let _=editor.seek_until(document,0,end.frames)
+    let _=editor.program_action_until(document,editor.play(),end.frames)}
+  true
+}
+
+// Source uses its own graph/clock. Only an already requested unvalidated parked
+// Program coordinate defers its start until the shared two-monitor packet is safe.
+pub fn source_waits_for_endpoint(state:ref<app.App>,source:bool) -> bool effects {} {
+  source and app.endpoint_requested(state)
+}
+pub fn endpoint_failure(state:ref<app.App>,detail:str) -> unit effects {alloc} {
+  let waiting_source:bool=source_waits_for_endpoint(state,state.document.monitor.playing)
+  app.retire_endpoint(state)
+  if waiting_source {struct.set(struct.borrow(struct.borrow(state,field=document),field=monitor),false,field=playing)}
+  struct.set(struct.borrow(struct.borrow(state,field=document),field=program),false,field=playing)
+  app.set_status(state,detail)
+}
+fn fail_program_endpoint(state:ref<app.App>,library:ref<CAbiLibrary>,transport:ref<preview_link.Link>,preroll:ref<PcmPreroll>,root:str,output:str,request:ref<u64>,generation:u64,detail:str) -> unit effects {alloc,fs.write,net,time,ffi} {
+  endpoint_failure(state,detail)
+  let _=native_audio.request(library,"stop","")
+  let previous:u64=ref.swap(request,0)
+  if previous==18446744073709551615 {let _=ref.swap(request,previous)
+    return ()}
+  let next:u64=previous+1
+  let _=ref.swap(request,next)
+  if audio_playback.discard(root,next,generation) {
+    release_playback_output(preroll,output)
+    let _=preview_link.wake(transport,false)
+  }
+}
+
+// Draft status for asynchronous preparation is cleared only at the real ready
+// boundary (accepted paused End, queued first PCM, or a primed silent clock).
+pub fn preparing_program_audio(state:ref<app.App>,end_only:bool) -> unit effects {alloc} {
+  app.set_status(state,if end_only {if state.endpoint_seek_requested>=0 {"Preparing audio endpoint for seek..."}else{"Preparing audio endpoint for End..."}}else{"Preparing audio..."})
+}
+pub fn prepared_program_audio(state:ref<app.App>,detail:str) -> unit effects {alloc} {
+  if str.eq(str.view(struct.borrow(state,field=status)),"Preparing audio...") or
+      str.eq(str.view(struct.borrow(state,field=status)),"Preparing audio endpoint for End...") or
+      str.eq(str.view(struct.borrow(state,field=status)),"Preparing audio endpoint for seek...") {app.set_status(state,detail)}
+  ()
 }

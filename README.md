@@ -27,169 +27,52 @@ AIR stdlib
 
 ## What it is
 
-Windows Genesis reuses the [shared MM-AIR media runtime](docs/FFMPEG_GPU_PREVIEW.md)
-and calls its codec libraries directly from the native compositor. Setup accepts
-`-MmAirRoot` (default `C:\MM-Air`); Genesis does not package a separate FFmpeg
-executable or codec DLL set. An optional native Vulkan decoder is available with
-`GENESIS_VIDEO_BACKEND=vulkan`; D3D11 remains the default. Downscaled P010
-BT.2020/PQ previews now use native D3D11 compute color conversion and scaling,
-with FP32 intermediate math and 16-bit channel quantization. Set
-`GENESIS_GPU_PREVIEW=0` to use the reference CPU transform. Masters retain that
-reference transform. The current validated candidate also has a runtime-qualified
-native-size P010/PQ preview shader; unsupported configurations use the reference.
-The earlier playback checkpoint passed a bounded 133.89-second playback check from the
-supplied 4K/59.94 source with live stereo audio and fitted 480x270 monitors. Its
-steady interval presents 59.9377 changed pictures/s without skipped positions or
-presentations beyond the existing two-frame lateness limit. Fullscreen 4K,
-whole-duration and compound 4K60, and physical audio/display synchronization remain
-unqualified; [measured results and restrictions](docs/FFMPEG_GPU_PREVIEW.md) distinguish
-headless preparation from actual display performance.
+**Installed checkpoint: R19.** The published R19 checkpoint passes its normal
+coherent build, all 92 background reports, Linux recorder model, isolated audio
+device, fresh native Unicode title workflow and independent lossless master.
+Both bounded strict cadence runs pass: 154.6858228 seconds/9,282 changed 1080
+pictures and 165.3517818 seconds/9,912 fitted 4K pictures, with no steady-window
+omissions or repeats. Fresh paired split/head-trim Undo/Redo, reopen and locked
+refusal pass; active Cancel cleans up and retrying the identical target passes
+independent checks of all 12 pictures/9,600 stereo PCM frames. All six native
+Delay/Reverb unmarked, marked-body and tail-only exports pass independent
+picture/PCM checks. Exact coherent products are published, and fresh actual-root
+4K Play/Pause/Stop/Start, scrub/scopes, Follow and Save As pass with verified
+modules and normal owned Close. The accompanying sanitized evidence archive
+and its verification receipt are linked in the acceptance ledger. This is a
+tested core editing checkpoint; the ledger records practical limits.
 
-The [current native playback validation](docs/WINDOWS_PLAYBACK_VALIDATION_2026-10-10.md)
-records each qualified build's editing, modal recovery, export and native cadence
-checks alongside the retained failed and incomplete timing experiments.
+Video with sound uses linked lanes: **V1 thumbnails and a separate A1 waveform**,
+with synchronized edits and one sound contribution. A1 displays processed clip
+audio with its owning track mixer neutral for the reference. Track Mute, Gain 0
+and Solo exclusion keep the shape visible, dimmed and labelled; clip effects and
+compound child mixing still affect it. **View → Audio panel** shows actual gain,
+pan, Mute/Solo state and postmix stereo meters. A visible reference is not evidence
+of audible output.
 
-Video with sound now uses linked video and audio lanes: frame thumbnails on V1,
-processed waveforms on A1, with synchronized edits and one sound contribution.
-Native Open converts supported older layouts in memory; Save keeps the new layout.
-[Linked-lane behavior and validation](docs/LINKED_MEDIA_WINDOWS_2026-10-10.md)
-describe conversion safeguards and the background test scope. The linked-lane build
-passed the complete background Windows gate and a bounded check of the supplied
-1080p clip. Separately scoped [native workflow evidence](docs/NATIVE_WORKFLOW_WINDOWS_2026-10-11.md)
-now covers linked audio controls, multiline Unicode titles, modal safety, export
-Cancel/retry and a short runtime timing trace on the earlier 056E candidate.
-The earlier F718 build passes the complete background Windows gate, its own
-exact audio-device proof and a short native linked-lane workflow. The broader title
-and export observations retain their earlier 056E scope. That checkpoint did not
-qualify sustained cadence or complete its final root-ready/archive acceptance. The F718 first-epoch
-native timing traces fail the unchanged strict cadence gate: five omitted positions
-at 1080p, and nine omissions plus five presentations more than two frames late
-for fitted 4K. The pixel-credit checkpoint below has separate passing timing and
-native workflow evidence and is now published in the root workspace.
-Physical speaker/display alignment and fullscreen 4K remain unqualified.
+The timeline **Follow** toggle, also in **View → Follow Program playhead**, pages
+with the completed Program picture, time and marker. Manual horizontal scrolling
+turns Follow off; toggle it on to resume. Source has an independent transport.
+R18 made successful strip arrivals passive damage, retaining the 33 ms fallback.
+R19 buffers the existing timing rows in owned chunks during playback and flushes
+after retirement; its trace schema and strict acceptance thresholds stay unchanged. Native shared
+AIR UI/controller/theme code uses Win32/Direct2D and Windows audio adapters.
+Linux model checks do not establish native Linux UI acceptance.
 
-The published `pro-native-pixel-credit-2026-10-11` build combines a bounded loopback
-socket policy, 16×64 KiB pixel-channel messages and an isolated Genesis opt-in to
-immediate Direct2D presentation. The channel still allows 1 MiB payload; native
-send allowances are separate from application pixel storage. Focused FIFO,
-presenter checks, coherent build and same-binary full background retry pass.
-Its exact audio-device gate also passes. First-epoch native cadence passes at
-59.9985 changed pictures/s over 137.687 steady seconds for 1080p60, and 59.9393/s
-over 166.001 steady seconds for the 4K/59.94 source in a fitted 480×270 monitor.
-Both steady intervals have zero omitted/repeated positions, early/backward or
-more-than-two-frame late presentations, audio-queue drains and packet overwrites.
-The full 50,000-row recorder traces retain startup repeats/drains; the unchanged
-parser excludes its fixed first second and final half-second. This qualifies
-these bounded recorded intervals, not the whole source or physical scanout.
-Its fresh native workflow verifies linked lanes, scrub/scopes synchronization,
-gain/pan/mute/unmute, Program and Source playback, silent Stop, nonblank rewind
-and private Save/Open persistence. Title/export observations retain their earlier
-056E scope. Fresh root-ready passes with both monitors populated at zero and
-separate V1 filmstrip/A1 waveform. The [evidence bundle](archive/pro-native-pixel-credit-2026-10-11.tar.gz)
-and [archive receipt](archive/pro-native-pixel-credit-2026-10-11.json) retain the
-source and validation results; the receipt records the archive SHA. The first background attempt failed
-the unchanged playback-timing picture-gap limit; a focused repeat passed, and a
-separate full retry retained 64 fresh reports without replacing that failure.
-The SDK presentation default remains
-refresh-wait; software submission does not prove every-frame physical scanout.
+Genesis reuses the [shared MM-AIR media runtime](docs/FFMPEG_GPU_PREVIEW.md), not a
+separate FFmpeg/codec bundle. Setup accepts `-MmAirRoot` (default `C:\MM-Air`).
+D3D11 is the default native decoder; Vulkan is opt-in. Supported downscaled
+P010/BT.2020/PQ previews use native compute color conversion with a reference
+fallback. Exports retain the declared reference path.
 
-The unpublished `pro-native-edit-export-r4-2026-10-11` candidate passes its
-coherent build, full background suite with 72 fresh reports, exact audio-device
-gate and native editing workflow. Native title pointer/Unicode editing,
-Cancel/Undo/Redo, gain-key navigation/interpolation/deletion and idempotent
-Save/Open are verified. A long native export cancels and cleans up; a fresh short
-export after reopening passes independent picture/title/audio checks. This does
-not establish same-target native retry. Durable audio processing contexts and
-compound child padding pass independent PCM and model checks. Both r4 cadence
-attempts fail the unchanged 120-second minimum: the 50,000-row trace cap leaves
-105.1847 and 108.6679 steady seconds. The captured steady intervals have no
-omissions/repeats/backward/early/late-over-two-frame pictures or audio-queue drains;
-they remain too short for acceptance. Existing per-loop trace sensitivity and
-unchanged playback source hashes do not establish a new scheduler defect.
-The recorder-only r5 repair passes its qualification gates and its exact root
-products were installed at that checkpoint as B079/75F9/A8E; publication and fresh root-ready
-pass. The accompanying source and evidence archive identifies this installed
-checkpoint; `690aa8b` is the prior committed checkpoint.
-The r5 recorder/test source is now frozen and passes 12 cases and 2,641 checks
-on both Windows and Linux; the baseline retains a duplicate-poll failure.
-It preserves every presentation, actual device sample, input batch and semantic
-change, while retaining identical poll-only state at a 16 ms threshold on the
-next available loop. A zero-count sampled-clock marker is internal; the 46-column
-trace and 50,000-row cap are unchanged. Only the recorder and its fixture differ
-from r4; scheduler, parser, SDK, worker and shared runtime remain identical.
-The coherent r5 build passes all 69 targets. Its first full background attempt
-refuses an exclusive existing r4 nested-edit-context report before running those
-cases; this is a report collision, not a nested PCM failure. The failed log and
-47 fresh partial reports remain preserved, and the immutable r4 proof is unchanged.
-A fresh full repeat passes with 72 fresh reports, the same script and unchanged
-source/thresholds under exclusive alternate receipts. The original failure
-remains preserved. The exact r5 device gate passes with −0.320 ms interval drift,
-0.430 ms phase range and no drain/resume shortfalls; this is not a physical
-speaker/display alignment measurement. Its completed native workflow covers
-linked-lane migration, Play/mute/unmute/Stop/nonblank rewind, scrub/scopes and
-zoom, idempotent two-clip Save/Open and pointer/Unicode title editing with
-Cancel and one Undo/Redo. Active full-range export cancellation cleans up;
-reopening the saved short range and exporting to a fresh different destination
-succeeds. Same-target native retry and new keyframe GUI checks were not exercised
-on r5. Independent inspection of its 178-frame export passes at three picture
-positions, with over 99.9% title-interior coverage, 142,400 AAC sample frames
-and worker PCM within one code. R5's first 1080p cadence interval passes:
-10,085 consecutive pictures over 168.069 seconds at 59.999314 pictures/s,
-with no steady omissions, repeats, early/backward or late presentations, queue
-drains or overwrites. Its fitted 4K/59.94 interval also passes: 11,953 consecutive
-pictures over 199.402 seconds at 59.939363 pictures/s, with the same zero steady
-faults and maximum gap 24.9929 ms. Both use the ordinary editor's 480×270 monitor,
-fixed parser exclusions and preserved raw traces; they do not establish physical
-scanout, fullscreen 4K, compound 4K60 or whole-source playback. Publication binds
-the accepted full background repeat and preserves the original failed attempt.
-Fresh root-ready verifies the actually loaded B079 application and 75F9 audio
-DLL: the private saved 1080p project has two linked clips, V1 filmstrip only and
-A1 waveform only, populated Source/Program monitors, active Program playback
-and stereo meters, Stop retaining the picture with cleared meters, and nonblank
-Start at zero. That root-ready check left the editor open paused. The accompanying
-[source and evidence archive](archive/pro-native-edit-export-r5-2026-10-11.tar.gz)
-and [archive receipt](archive/pro-native-edit-export-r5-2026-10-11.json) bind the
-tested source and installed payload; the publication commit is identifiable
-through Git history.
-The [professional editing acceptance ledger](docs/PRO_EDITING_ACCEPTANCE_WINDOWS.md)
-binds the exact r4/r5 receipts and retained failures. R8 is now installed as
-5B80/B556/A5B0, with publication and fresh root-ready passed. Its coherent build passes,
-and a quick native prompt check verifies visible duration refusal, correction
-and Undo/Redo. The unchanged full background suite passes with 76 fresh reports
-and exit zero. Its isolated device and recorded linked native workflow pass:
-Clock31 transition editing/removal/Undo and Save/Open preserve the full A1 graph,
-and transport, meters, scrub and histogram respond. Native audio editing also
-verifies tail trim 60→30, exact Rate2.00 with a revision-4 extent, and a refused
-Delay edit preserving both the saved graph and a pending Gain Redo. Active native
-export cancellation cleans up, and a fresh short Unicode title export passes
-independent picture/audio checks. The first 1080p cadence epoch passes with 9,078
-consecutive pictures over 151.285 native seconds at 59.999197 pictures/s and zero
-steady omissions, repeats, backward/early/late-over-two-frame pictures, queue
-drains or overwrites. Fitted 4K/59.94 also passes: 8,984 consecutive pictures over
-149.869 native seconds at 59.939125 pictures/s, with the same zero steady faults,
-zero lag and maximum gap 24.5614 ms. Both use the ordinary editor's fitted
-480×270 monitor and unchanged parser exclusions; raw startup repeats/drains remain
-retained. Actual installed-root playback, Stop/nonblank rewind and scrub/scopes
-pass; the owned root check closes normally. Accompanying source/evidence bundle
-paths: `archive/pro-native-edit-export-r8-2026-10-11.tar.gz` and
-`archive/pro-native-edit-export-r8-2026-10-11.json` (archive SHA and evidence receipt).
-Device/GUI observations and software presentations do not establish
-physical hearing, speaker/display alignment, fullscreen 4K, compound 4K60 or
-whole-source playback.
-
-The candidate adds selectable `T` transition badges, all eleven supported types,
-exact frame duration and removal, with validation before Undo/Redo history changes.
-Shared modal refusals remain visible in the draft and status until the text changes:
-the Windows/Linux component passes 12 cases and 232 checks on each OS. Direct
-integral forward audio retiming uses an explicit available-input extent,
-`AUDIOCTX2` and project revision 4; incompatible filter edits are guarded before
-history capture (seven cases and 84 checks on each OS). These are component
-results with their own scope; the later R8 gates above provide separate native
-and combined acceptance. R7's full background repeat passed
-76 fresh reports, but its native hidden-refusal failure prevented publication;
-the earlier r6/r7 failures remain preserved in the ledger. Delay/Reverb tails,
-unavailable source prefix/body, reverse/fractional extent creation and new nested
-processing endpoints remain limited. The broader goal remains active.
+The [professional acceptance ledger](docs/PRO_EDITING_ACCEPTANCE_WINDOWS.md#r19-checkpoint-status)
+records exact identities, completed gates and practical limits. R18's accepted bounded 1080 run and
+failed fitted 4K run (5 omissions, no repeats), R17's 34 repeats, and R16's
+8 omissions/14 repeats remain separately scoped history. Software presentation
+is not physical scanout or speaker/display synchronization; fullscreen/compound
+4K60 and whole-source sustained playback remain unqualified.
+[Control coverage](docs/CONTROL_COVERAGE.md) separates implemented mappings from
+actual document, native and media acceptance.
 
 An AIR-native editing application with a tested project and control layer. Its media
 renderer covers the paths listed below; [the control acceptance ledger](docs/CONTROL_COVERAGE.md)
@@ -234,7 +117,7 @@ The right-hand dock has four tabs:
   filter's own parameters) above a library of **51 filter kinds**, 31 video and 20 audio.
   Text has an editable content field and LUT3D has a `.cube` path field. These strings
   persist in revision 2 projects. Projects with retained audio processing context
-  use revision 3. In the installed r8 checkpoint, direct forward retimes that
+  use revision 3. In the installed R19 checkpoint, direct forward retimes that
   retain an explicit available-input extent use revision 4; its reader accepts
   revisions 1 through 4. Older readers
   refuse newer revisions rather than silently losing processing history.
@@ -484,7 +367,7 @@ values around buffer boundaries, plus AAC stream durations. The encoder submits
 a short final frame when the selected codec supports it.
 
 Transitions prepare each side's picture effects, fade and opacity separately.
-In the installed r8 checkpoint, use **Transition** (or `t`) to choose the nearest
+In the installed R19 checkpoint, use **Transition** (or `t`) to choose the nearest
 supported cut to the playhead
 on the selected video track. Click its `T` badge to select the seam. Properties
 then exposes its type, exact duration in frames and **Remove**; Delete removes
@@ -495,16 +378,20 @@ An outgoing contrast edit preserves the incoming clip's colors; incoming opacity
 keys and fades now render through the transition. Fifty-one native preview/master
 comparisons cover all eleven transition kinds, keyed opacity, fades, separate
 grades, overlap, a short gap, titles and an upper layer, with audible audio of the
-exact master length. Incoming Blend/PiP/Chroma key and transitions above the base
-lane remain unsupported.
+exact master length. Current upper-lane transitions retain separate side
+processing over the lower picture, including accepted Blend/Size/Position/Chroma
+Key sides and transparent lower gaps. Direct compound sides, nonzero PiP rotation
+on transition sides and base incoming overlay-only edits retain coded refusals.
 
-In the installed r8 checkpoint, an inward trim of direct audio followed by a
+In the installed R19 checkpoint, an inward trim of direct audio followed by a
 forward rate change can retain
 the original effect history while declaring the available source input and the
 new processing endpoint. Subsequent cuts, seeks, waveform generation, Save/Open
 and export use that same extent. This path requires integral source and owner
-frame endpoints. Delay/Reverb cuts, reverse extents and nested endpoint
-extensions remain guarded. Normalize keeps its existing authored-body cap.
+frame endpoints. Delay/Reverb with a new retime extent, reverse extents and
+nested endpoint extensions remain guarded. Separate eligible unit-rate direct
+Delay/Reverb cuts preserve original-end tail ownership in their supported phase
+and static-filter domain. Normalize keeps its existing authored-body cap.
 Adding or enabling an incompatible filter is refused before changing the
 project or its redo history.
 
@@ -693,8 +580,9 @@ Drag the timeline ruler or the playhead line to change program time and preview.
 The line takes precedence over a clip underneath it, so seeking cannot move or
 trim that clip. Video/audio lane crossing is refused with `GA_TRACK_KIND`. Cached
 frame bitmaps fill visible video clips through a separate background decoder, including during playback;
-sampling follows the painted thumbnail width instead of leaving large empty gaps;
-waveforms also appear on video clips that contain audio.
+sampling follows the painted thumbnail width instead of leaving large empty gaps.
+Audio-track reference waveforms use their own background request; normal linked
+imports keep them on A1, with V1 reserved for pictures.
 
 Both monitors reuse unchanged pictures. Source transport changes keep the program
 picture, while timeline edits refresh it. Reload, Relink and opening a project
@@ -1301,7 +1189,7 @@ was added. It compares 520 project PCM outcomes within 0.500482 PCM units and
 144 mono decoder outcomes exactly. The corrected prior installed baseline failed
 102 of 364 checks across 91 cases on Matroska; WAV/NUT controls passed.
 
-The installed application SHA-256 is
+That historical installed application SHA-256 was
 `2DD0C3938EDD3DE5C061B91839092179EC016F5F8F1175CCEFD8B1075B892912`;
 the worker is `C2947D934F00EC9CFA0509F9215015BFE4D19AC3CF814A8C9F2B55B3A62FBEAB`.
 The native candidate window also showed Play with stereo meters, silent Stop,
@@ -1317,14 +1205,14 @@ The old path produced two 132,710,400-byte group files; the snapshot path produc
 none. This prototype comparison excludes audio, native presentation and paced
 playback. It is not a twelve-second run or evidence of sustained 4K60.
 
-See the [current acceptance ledger](docs/CONTROL_COVERAGE.md#gpu-picture-snapshots-and-source-audio-boundaries-on-2026-10-10)
+See the [historical acceptance ledger](docs/CONTROL_COVERAGE.md#gpu-picture-snapshots-and-source-audio-boundaries-on-2026-10-10)
 and [GPU protocol and measurement scope](docs/FFMPEG_GPU_PREVIEW.md#gpu-picture-snapshots-on-2026-10-10).
 `tests/audio_source_boundaries.py` is registered in the Windows gate; its
 independent PCM and decoded-PTS oracles cover ordinary and nested output,
 retained chunks, fresh seeks, reverse, fractional rates and source origin shifts.
 The 45-entry [source/acceptance archive](archive/picture-memory-audio-boundaries-2026-10-10.tar.gz)
 was sanitized and read back against its manifest. Its SHA-256 is
-`fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. A cold launch of the installed
+`fa5a0a08a435dbbc21ade6301ea3fc96c7544e118baa3999e3cc646e807a64b7`. A cold launch of that historical
 root payload restored visible frame-zero pictures and the compound filmstrip.
 
 ## Processed direct waveforms and track navigation
@@ -1416,7 +1304,7 @@ maximum gap. This is bounded near-60 playback, not zero-drop or full-source cade
 At that checkpoint, Fit stopped at 0.05 px/frame and the waveform had 512 peaks.
 The long-timeline update below addresses those two limitations.
 Earlier results retain
-their own scope. See the [current acceptance scope](docs/CONTROL_COVERAGE.md#visible-strips-lazy-gpu-and-qualified-hdr-candidate-on-2026-10-10)
+their own scope. See the [historical acceptance scope](docs/CONTROL_COVERAGE.md#visible-strips-lazy-gpu-and-qualified-hdr-candidate-on-2026-10-10)
 and [color/performance restrictions](docs/FFMPEG_GPU_PREVIEW.md#qualified-native-hdr-candidate-on-2026-10-10).
 
 Acceptance bundle location: [viewport/lazy/native-color/input evidence](archive/viewport-lazy-native-color-input-2026-10-10.tar.gz).
@@ -1483,7 +1371,7 @@ preview requests and five audition/master audio bodies. Streamed peaks pass
 
 ## Native playback reserve and editing recovery (2026-10-10)
 
-The installed application is
+At this historical checkpoint the installed application was
 `1A49B8AF32B9A9169DFCDEBB78D4F523BF742C4C34A006F90551C2B8251EB4B6`, with
 unchanged worker `AA40B96C631C82CFC834D027678E95A00BD8D5F61DB54F15E7C7ECEFCF74228C`.
 Playback prepares eight actual consecutive future pictures before first PCM
@@ -1507,7 +1395,7 @@ lateness beyond two frames, queue drains or overwrites. Two frame-zero repeats a
 two startup drains remain in the raw evidence; its maximum raw gap is 171.343 ms.
 This is ordinary maximized editor playback, not fullscreen or full-project proof.
 
-Publication and a fresh installed-root launch pass. The root window is left
+Publication and a fresh installed-root launch passed at that checkpoint. The root window was left
 paused at nonblank frame zero, with the whole 76,701-frame project fitted, 23 mapped
 bitmaps, 25,567 processed peak cells and populated histogram/RGB/luma scopes.
 Original projects/media and the shared MM-AIR runtime remain unchanged; existing
@@ -1540,7 +1428,7 @@ silent-loss baseline is retained. Expanded compressor/export checks and the
 **1A49/AA40** was the installed reserve checkpoint. The later published **06AF/AA40**
 linked-lane build includes the completed background preflight checks described in
 the [linked-lane record](docs/LINKED_MEDIA_WINDOWS_2026-10-10.md).
-The current native-title/recorder continuation has separately scoped acceptance and
+The historical native-title/recorder checkpoint has separately scoped acceptance and
 root publication in
 the [2026-10-11 workflow record](docs/NATIVE_WORKFLOW_WINDOWS_2026-10-11.md).
 Its bounded fitted-monitor cadence does not qualify physical A/V synchronization,
@@ -1576,7 +1464,7 @@ scope](docs/FFMPEG_GPU_PREVIEW.md#native-window-recovery-on-2026-10-10).
   preserve representable forward/reverse source samples and complete clip-local
   automation curves. An unsupported phase, partial edited fade or temporal effect
   context refuses with `GA_TRIM_CONTEXT`; refusals and clamped no-ops preserve redo.
-  The r5 processing context repair is now published after its combined and
+  The r5 processing context repair was published after its combined and
   independent PCM gates, while Delay/Reverb
   tails and unavailable full-history retime handles remain bounded limitations.
 - Source boundaries now count native decoded samples before resampling and preserve

@@ -89,6 +89,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'filter-transactions/filter-transactions-tests.json') -Destination (Join-Path $reports 'filter-transactions-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-audio-context.exe' @((Join-Path $work 'audio-context'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'audio-context/audio-context-tests.json') -Destination (Join-Path $reports 'audio-context-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-audio-tail-context.exe' @((Join-Path $work 'audio-tail-context'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'audio-tail-context/audio-tail-context-tests.json') -Destination (Join-Path $reports 'audio-tail-context-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-clip-clipboard.exe' @((Join-Path $work 'clip-clipboard'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'clip-clipboard/clip-clipboard-tests.json') -Destination (Join-Path $reports 'clip-clipboard-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-editing-safety.exe' @((Join-Path $work 'editing-safety'))).TrimEnd()
@@ -98,10 +100,22 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'preview-batch/preview-batch-tests.json') -Destination (Join-Path $reports 'preview-batch-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-preview-fifo.exe' @((Join-Path $work 'preview-fifo'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'preview-fifo/preview-fifo-tests.json') -Destination (Join-Path $reports 'preview-fifo-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-standalone-endpoint-controller.exe' @((Join-Path $work 'standalone-endpoint-controller'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'standalone-endpoint-controller/controller-tests.json') -Destination (Join-Path $reports 'standalone-endpoint-controller-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-standalone-endpoint-preview.exe' @((Join-Path $work 'standalone-endpoint-preview'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'standalone-endpoint-preview/preview-endpoint-tests.json') -Destination (Join-Path $reports 'standalone-endpoint-preview-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-channel-read-first.exe' @((Join-Path $work 'channel-read-first'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'channel-read-first/channel-read-first-tests.json') -Destination (Join-Path $reports 'channel-read-first-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-timeline-track-scroll.exe' @((Join-Path $work 'track-scroll'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'track-scroll/timeline-track-scroll-tests.json') -Destination (Join-Path $reports 'timeline-track-scroll-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-waveform-view.exe' @((Join-Path $work 'waveform-view'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'waveform-view/waveform-view-tests.json') -Destination (Join-Path $reports 'waveform-view-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-waveform-visual.exe' @((Join-Path $work 'waveform-visual'))).TrimEnd()
+  $visualModel = Get-Content -LiteralPath (Join-Path $work 'waveform-visual/waveform-visual-tests.json') -Raw | ConvertFrom-Json
+  if ($visualModel.payload.status -ne 'pass' -or $visualModel.payload.cases.total -ne 11 -or
+      $visualModel.payload.cases.passed -ne 11 -or $visualModel.payload.cases.failed -ne 0 -or
+      $visualModel.payload.cases.skipped -ne 0 -or $visualModel.payload.checks -ne 100) { throw 'Visual reference identity/publication/budget/pixels gate failed.' }
+  Copy-Item -LiteralPath (Join-Path $work 'waveform-visual/waveform-visual-tests.json') -Destination (Join-Path $reports 'waveform-visual-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-waveform-detail.exe' @((Join-Path $work 'waveform-detail'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'waveform-detail/waveform-detail-tests.json') -Destination (Join-Path $reports 'waveform-detail-tests.json') -Force
   $previousStripFixture = $env:GENESIS_TEST_STRIP_INPUT
@@ -198,6 +212,21 @@ try {
       --client (Join-Path $Bin 'genesis-direct-waveforms.exe') --worker $worker `
       --report (Join-Path $reports 'direct-waveforms.json')
     if ($LASTEXITCODE -ne 0) { throw 'Processed direct-source stereo waveforms, viewport scheduling and cancellation failed.' }
+    & python (Join-Path $PSScriptRoot 'waveform_visual.py') `
+      --client (Join-Path $Bin 'genesis-waveform-visual-media.exe') --worker $worker `
+      --report (Join-Path $reports 'waveform-visual.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Independent display-reference and legacy processed waveform peaks failed.' }
+    $visualProof = Get-Content -LiteralPath (Join-Path $reports 'waveform-visual.json') -Raw | ConvertFrom-Json
+    $visualClientHash = (Get-FileHash -Algorithm SHA256 (Join-Path $Bin 'genesis-waveform-visual-media.exe')).Hash.ToLowerInvariant()
+    $visualWorkerHash = (Get-FileHash -Algorithm SHA256 $worker).Hash.ToLowerInvariant()
+    if ($visualProof.schema -ne 'genesis.waveform-visual.v1' -or -not $visualProof.passed -or
+        $visualProof.failures.Count -ne 0 -or $visualProof.cases.Count -ne 8 -or
+        $visualProof.client_cases -ne 8 -or $visualProof.client_checks -ne 64 -or
+        $visualProof.numeric_peak_values -ne 320 -or $visualProof.independent_pcm_values -ne 3072000 -or
+        $visualProof.peak_tolerance -ne 0.000002 -or $visualProof.normalization -or
+        -not $visualProof.client_joined -or $visualProof.observed_worker_pids_joined.Count -eq 0 -or
+        $visualProof.owned_caches.Count -ne 0 -or $visualProof.client_sha256 -ne $visualClientHash -or
+        $visualProof.worker_sha256 -ne $visualWorkerHash) { throw 'Visual waveform proof identity/count/resource contract failed.' }
     & python (Join-Path $PSScriptRoot 'direct_waveform_stream.py') --worker $worker `
       --report (Join-Path $reports 'direct-waveform-stream.json')
     if ($LASTEXITCODE -ne 0) { throw 'Streamed direct waveform partitions, coded refusals and retained-cache recovery failed.' }
@@ -225,6 +254,12 @@ try {
       --client (Join-Path $Bin 'genesis-transition-controls-media.exe') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $reports 'transition-controls-media-tests.json')
     if ($LASTEXITCODE -ne 0) { throw 'Transition controls preview/master pixels and unchanged audio acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'upper_transition_protocol.py') --worker $worker `
+      --report (Join-Path $reports 'upper-transition-protocol.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Upper transition alpha, side blends, resource lifecycle and protocol refusal acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'upper_transition_media.py') --worker $worker `
+      --binary (Join-Path $Bin 'Genesis-AIR.exe') --report (Join-Path $reports 'upper-transition-media.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Upper transition lower-gap and ordered side preview/master pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'preview_canvas.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Small-sequence preview/master pixel acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'large_preview.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
@@ -286,6 +321,93 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_context_retime.py') --client (Join-Path $Bin 'genesis-audio-context-retime.exe') `
       --worker $worker --report (Join-Path $reports 'audio-context-retime.json')
     if ($LASTEXITCODE -ne 0) { throw 'The forward audio context retime gate failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_tail_history.py') --client (Join-Path $Bin 'genesis-audio-tail-history.exe') `
+      --worker $worker --report (Join-Path $reports 'audio-tail-history.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Original-end audio tail history, actual EOF, cancellation and lossless-master acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_tail_protocol.py') --worker $worker --report (Join-Path $reports 'audio-tail-protocol.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Actual EOF audio tail protocol, capacity and cache-identity acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_eof_query.py') --worker $worker --report (Join-Path $reports 'audio-eof-query.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Committed audio EOF query, generation and cache-identity acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_tail_phase.py') --worker $worker --report (Join-Path $reports 'audio-tail-phase.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Native sample phase, actual EOF, retained cache and true effect-tail capacity acceptance failed.' }
+    # Independent media/export and actor oracles execute the background workers.
+    # Timing remains a separately invoked diagnostic; no device/GUI loop claim.
+    $endpointClient = Join-Path $Bin 'genesis-standalone-endpoint-media.exe'
+    $endpointPublisher = Join-Path $Bin 'air-file-publish.exe'
+    if (-not (Test-Path -LiteralPath $endpointPublisher -PathType Leaf)) { throw 'Standalone endpoint export requires its adjacent atomic publisher.' }
+    $endpointReferences = Join-Path $work 'standalone-endpoint-pcm'
+    & python (Join-Path $PSScriptRoot 'standalone_endpoint_media.py') --client $endpointClient --worker $worker `
+      --work $endpointReferences --report (Join-Path $reports 'standalone-endpoint-media.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Standalone accepted EOF, no-carrier ordered DSP and exact PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'standalone_endpoint_export.py') --client $endpointClient --worker $worker `
+      --references $endpointReferences --work (Join-Path $work 'standalone-endpoint-export') `
+      --report (Join-Path $reports 'standalone-endpoint-export.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Standalone accepted EOF exact-count default and marked export acceptance failed.' }
+    $endpointActor = Join-Path $Bin 'genesis-standalone-endpoint-actor.exe'
+    $endpointCancel = Join-Path $Bin 'genesis-standalone-endpoint-cancel.exe'
+    $endpointActorReport = Join-Path $reports 'standalone-endpoint-actor.json'
+    & python (Join-Path $PSScriptRoot 'standalone_endpoint_actor.py') --client $endpointActor --worker $worker `
+      --cancel-client $endpointCancel --work (Join-Path $work 'standalone-endpoint-actor') --report $endpointActorReport
+    if ($LASTEXITCODE -ne 0) { throw 'Standalone background actor lifecycle and observed cold cancellation acceptance failed.' }
+    $actorProof = Get-Content -LiteralPath $endpointActorReport -Raw | ConvertFrom-Json
+    if (-not $actorProof.passed -or $actorProof.failures.Count -ne 0 -or $actorProof.requests -ne 26 -or
+        $actorProof.pcm_values -ne 1393786 -or $actorProof.max_error_codes -gt 1 -or -not $actorProof.cache_cleanup -or
+        -not $actorProof.actor.actor_joined -or -not $actorProof.cold_cancel.executed -or -not $actorProof.cold_cancel.passed -or
+        -not $actorProof.cold_cancel.actor_joined -or $actorProof.cold_cancel.recovery_pcm_values -ne 225600 -or
+        $actorProof.cold_cancel.recovery_max_error_codes -gt 1 -or $actorProof.cold_cancel.acknowledgement_ns -gt 2000000000 -or
+        $actorProof.worker_sha256 -ne (Get-FileHash -LiteralPath $worker -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $actorProof.client_sha256 -ne (Get-FileHash -LiteralPath $endpointActor -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        $actorProof.cold_cancel.client_sha256 -ne (Get-FileHash -LiteralPath $endpointCancel -Algorithm SHA256).Hash.ToLowerInvariant()) {
+      throw 'Standalone actor receipt count, cleanup, cancellation or exact binary identity mismatch.'
+    }
+    $pictureInputs = @{
+      protocol = (Join-Path $Bin 'genesis-program-picture-protocol.exe')
+      control = (Join-Path $Bin 'genesis-program-picture-control.exe')
+      persistent = (Join-Path $Bin 'genesis-program-picture-persistent.exe')
+      epoch = (Join-Path $Bin 'genesis-program-picture-epoch.exe')
+      mock = (Join-Path $Bin 'genesis-program-picture-mock.exe')
+      worker = $worker
+      helper = (Join-Path $PSScriptRoot 'program_picture_transport.py')
+    }
+    $pictureReport = Join-Path $reports 'program-picture-transport.json'
+    & python $pictureInputs.helper --protocol-client $pictureInputs.protocol --control-client $pictureInputs.control `
+      --mock $pictureInputs.mock --persistent-client $pictureInputs.persistent --epoch-client $pictureInputs.epoch `
+      --worker $pictureInputs.worker --report $pictureReport
+    if ($LASTEXITCODE -ne 0) { throw 'Persistent Program picture records, retirement and epoch acceptance failed.' }
+    $pictureProof = Get-Content -LiteralPath $pictureReport -Raw | ConvertFrom-Json
+    if ($pictureProof.schema -ne 'genesis.program-picture-transport.v2' -or -not $pictureProof.passed -or
+        $pictureProof.cases.Count -ne 24 -or $pictureProof.protocol_cases -ne 17 -or $pictureProof.control_cases -ne 5 -or
+        $pictureProof.real_pictures_each -ne 8193 -or $pictureProof.real_epoch_windows -ne 7 -or $pictureProof.real_metadata_workers -ne 1 -or $pictureProof.real_render_epochs -ne 5 -or
+        @($pictureProof.inputs.PSObject.Properties).Count -ne 7) {
+      throw 'Persistent Program picture report schema/count mismatch.'
+    }
+    $pictureHashes = @{}
+    foreach ($entry in $pictureInputs.GetEnumerator()) {
+      $path = (Resolve-Path -LiteralPath $entry.Value).Path
+      $pin = @($pictureProof.inputs.PSObject.Properties | Where-Object { $_.Name -ieq $path })
+      $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($pin.Count -ne 1 -or $pin[0].Value -ne $digest) { throw ('Persistent picture exact input identity mismatch: ' + $entry.Key) }
+      $pictureHashes[$entry.Key] = $digest
+    }
+    foreach ($case in $pictureProof.cases) {
+      if (-not $case.passed -or $case.exit -ne 0 -or -not $case.client_joined -or -not $case.all_owned_exited -or
+          $case.owned_pids.Count -eq 0 -or $case.failure -or $case.final_observation_error -or $case.parent_cleanup_error) {
+        throw ('Persistent picture case failure or unjoined ownership: ' + $case.name)
+      }
+      $kind = if ($case.name -like 'protocol-*') { 'protocol' } elseif ($case.name -like 'control-*') { 'control' }
+        elseif ($case.name -eq 'sustained') { 'persistent' } elseif ($case.name -eq 'epochs') { 'epoch' } else { throw 'Unknown picture case name.' }
+      $engine = if ($kind -in @('protocol','control')) { 'mock' } else { 'worker' }
+      if ($case.client_sha256 -ne $pictureHashes[$kind] -or $case.worker_sha256 -ne $pictureHashes[$engine]) {
+        throw ('Persistent picture per-case binary identity mismatch: ' + $case.name)
+      }
+    }
+    $sustained = @($pictureProof.cases | Where-Object { $_.name -eq 'sustained' })
+    $epochs = @($pictureProof.cases | Where-Object { $_.name -eq 'epochs' })
+    if ($sustained.Count -ne 1 -or $epochs.Count -ne 1 -or $sustained[0].observed_worker_pids.Count -ne 2 -or
+        $sustained[0].owned_pids.Count -ne 2 -or $epochs[0].observed_worker_pids.Count -ne 6 -or $epochs[0].owned_pids.Count -ne 6) {
+      throw 'Persistent picture exact physical epoch count mismatch.'
+    }
+    # The profile client is compiled separately; this gate makes no profile/cadence/device execution claim.
     & python (Join-Path $PSScriptRoot 'audio_plan_preflight.py') --binary (Join-Path $Bin 'genesis-audio-plan-preflight.exe') `
       --worker $worker --root (Join-Path $work 'audio-plan-preflight') --report (Join-Path $reports 'audio-plan-preflight.json')
     if ($LASTEXITCODE -ne 0) { throw 'Loaded-project audio preflight and valid-media recovery acceptance failed.' }

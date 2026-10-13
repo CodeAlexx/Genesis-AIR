@@ -28,6 +28,20 @@ import "linked_media.ai" as linked_media
 import "layout.ai" as layout
 import "view.ai" as painter
 
+// Only successful explicit Program navigation re-arms a manually suspended viewport.
+fn program_follow(state:ref<app.App>,action:u32) -> commands.Result effects {alloc} {
+  let outcome:commands.Result=commands.program(state,action)
+  if outcome.ok and (action==editor.play() or action==editor.go_start() or action==editor.go_end() or
+      action==editor.step_back() or action==editor.step_forward()) {
+    struct.set(state,true,field=timeline_follow_program)
+  }
+  outcome
+}
+fn seek_follow(state:ref<app.App>,frame:i64) -> commands.Result effects {alloc} {
+  let outcome:commands.Result=commands.seek(state,frame)
+  if outcome.ok {struct.set(state,true,field=timeline_follow_program)}
+  outcome
+}
 fn note(text: str) -> string effects {alloc} { string.copy(text) }
 
 // Which panel a point belongs to, so a keystroke reaches the panel a person is pointing at.
@@ -139,6 +153,10 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
   let domain: u32 = struct.get(control, field=domain)
   let target: u64 = struct.get(control, field=target)
   let value: f64 = struct.get(control, field=value)
+  if action==chrome.act_follow() {
+    struct.set(state,not state.timeline_follow_program,field=timeline_follow_program)
+    return note(if state.timeline_follow_program {"Follow Program playhead on"}else{"Follow off; timeline can be scrolled manually"})
+  }
   if action==chrome.act_record_timing() {
     struct.set(state,not state.window_timing_requested,field=window_timing_requested)
     return note(if state.window_timing_requested {"Starting playback timing..."}else{"Stopping playback timing..."})
@@ -257,10 +275,10 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
       else if action == chrome.act_go_start() { editor.go_start() }
       else if action == chrome.act_go_end() { editor.go_end() }
       else if action == chrome.act_step_back() { editor.step_back() } else { editor.step_forward() }
-    if source { let _ = commands.program(state, editor.pause()) }
+    if source { let _ = program_follow(state, editor.pause()) }
     else { let _ = commands.monitor(state, editor.pause()) }
     var landed: commands.Result = if source { commands.monitor(state, command) }
-      else { commands.program(state, command) }
+      else { program_follow(state, command) }
     if action == chrome.act_play() { return note(if playing { "Paused" } else { "Playing" }) }
     if action == chrome.act_stop() { return note("Stopped") }
     return commands.message(landed)
@@ -476,7 +494,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     app.set_selected_filter(state, target)
     let document: ref<editor.Document> = struct.borrow(state, field=document)
     let seed: string = editor.filter_text_param(document, target, str.view(name), "")
-    let _=commands.program(state,editor.pause())
+    let _=program_follow(state,editor.pause())
     let _=commands.monitor(state,editor.pause())
     app.begin_filter_prompt(state, action, if str.eq(str.view(kind), "text") {
       "Title text" } else { "LUT .cube file" }, str.view(seed),target)
@@ -508,6 +526,7 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
       if current == 0 {37}else{current-1}
     }else{if current >= 37 {0}else{current+1}}
     var result: commands.Result = commands.manage_key(state,domain,target,str.view(kind),str.view(name),operation,mode)
+    if result.ok and operation<2 {struct.set(state,true,field=timeline_follow_program)}
     return commands.message(result)
   }
 
@@ -664,7 +683,7 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
       some(index) => { return perform(state, array.borrow(controls, index), width, height) }, none => {},
     }
     if layout.contains(layout.monitor_scrub(chrome.monitor_area(frame, state, source)), x, y) {
-      let _ = commands.program(state, editor.pause())
+      let _ = program_follow(state, editor.pause())
       let _ = commands.monitor(state, editor.pause())
       app.begin_gesture(state, if source { app.drag_source_scrub() } else { app.drag_program_scrub() }, 0, 0, 0, 0, 0, 0)
       return seek_monitor_bar(state, frame, source, x)
@@ -733,7 +752,7 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
   let program_bar: layout.Rect = layout.monitor_scrub(frame.program)
   if layout.contains(source_bar, x, y) or layout.contains(program_bar, x, y) {
     let source: bool = layout.contains(source_bar, x, y)
-    let _ = commands.program(state, editor.pause())
+    let _ = program_follow(state, editor.pause())
     let _ = commands.monitor(state, editor.pause())
     app.begin_gesture(state, if source { app.drag_source_scrub() } else { app.drag_program_scrub() }, 0, 0, 0, 0, 0, 0)
     return seek_monitor_bar(state, frame, source, x)
@@ -779,11 +798,11 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
 
   // The ruler scrubs the program transport.
   if layout.contains(frame.ruler, x, y) {
-    let _ = commands.program(state, editor.pause())
+    let _ = program_follow(state, editor.pause())
     let _ = commands.monitor(state, editor.pause())
     let frame_at: i64 = timeline.x_to_frame(model, x)
     app.begin_gesture(state, app.drag_scrub(), 0, frame_at, 0, 0, 0, 0)
-    var landed: commands.Result = commands.seek(state, frame_at)
+    var landed: commands.Result = seek_follow(state, frame_at)
     return commands.message(landed)
   }
 
@@ -797,13 +816,13 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
       },
     }
     // The painted playhead is a seek handle above the clips, throughout the lane area.
-    let head: f64 = timeline.frame_to_x(model, editor.playhead(struct.borrow(state, field=document)))
+    let head: f64 = timeline.frame_to_x(model, model.playhead)
     if math.abs(x - head) <= 6.0 {
-      let _ = commands.program(state, editor.pause())
+      let _ = program_follow(state, editor.pause())
       let _ = commands.monitor(state, editor.pause())
       let at: i64 = timeline.x_to_frame(model, x)
       app.begin_gesture(state, app.drag_scrub(), 0, at, 0, 0, 0, 0)
-      var landed: commands.Result = commands.seek(state, at)
+      var landed: commands.Result = seek_follow(state, at)
       return commands.message(landed)
     }
     match timeline.clip_at(model, x, y) {
@@ -835,7 +854,7 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
         let _ = commands.clear_selection(state)
         app.end_gesture(state)
         let frame_at: i64 = timeline.x_to_frame(model, x)
-        var landed: commands.Result = commands.seek(state, frame_at)
+        var landed: commands.Result = seek_follow(state, frame_at)
         return commands.message(landed)
       },
     }
@@ -846,15 +865,16 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
 fn seek_monitor_bar(state: ref<app.App>, frame: layout.Frame, source: bool, x: f64)
                      -> string effects {alloc} {
   let bar: layout.Rect = layout.monitor_scrub(chrome.monitor_area(frame, state, source))
+  let presentation:i64=app.presentation_duration(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
-  let length: i64 = if source { editor.source_frames(doc, doc.monitor_source) } else { editor.duration(doc) }
+  let length: i64 = if source { editor.source_frames(doc, doc.monitor_source) } else { presentation }
   let ratio: f64 = math.max(0.0, math.min(1.0, (x - bar.left) / layout.width_of(bar)))
   let at: i64 = cast.sat(math.round(ratio * cast.float(if length > 0 { length - 1 } else { 0 })))
   if source {
     let landed: i64 = editor.seek_monitor(doc, at)
     return text.concat("Source frame ", str.view(string.from_int(landed)))
   }
-  var landed: commands.Result = commands.seek(state, at)
+  var landed: commands.Result = seek_follow(state, at)
   commands.message(landed)
 }
 
@@ -889,7 +909,7 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
   }
   if app.gesture_kind(state) == app.drag_scrub() {
     let at: i64 = timeline.x_to_frame(model, x)
-    var landed: commands.Result = commands.seek(state, at)
+    var landed: commands.Result = seek_follow(state, at)
     return commands.message(landed)
   }
   let held: app.Drag = app.gesture(state)
@@ -935,7 +955,7 @@ pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
     var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
     let at: i64 = timeline.x_to_frame(model, x)
     app.end_gesture(state)
-    var landed: commands.Result = commands.seek(state, at)
+    var landed: commands.Result = seek_follow(state, at)
     return commands.message(landed)
   }
   if not app.gesture_moved(state) {
@@ -1029,8 +1049,9 @@ pub fn wheel(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64,
   let widened: i64 = cast.wrap(rows)
   let step: i64 = widened * 12
   let now: i64 = app.scroll(state)
-  let _ = app.set_scroll(state, if down { add.sat(now,step) } else { now - step })
-  note("Scrolled")
+  let moved:i64=app.set_scroll(state, if down { add.sat(now,step) } else { now - step })
+  if moved!=now {struct.set(state,false,field=timeline_follow_program)}
+  note(if moved!=now {"Scrolled; Follow off"}else{"Timeline at scroll limit"})
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,13 +1243,13 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
   if code == widgets.key_space() {
     if app.focus(state) == app.panel_source() {
       let playing: bool = struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing)
-      let _ = commands.program(state, editor.pause())
+      let _ = program_follow(state, editor.pause())
       var landed: commands.Result = commands.monitor(state, if playing { editor.pause() } else { editor.play() })
       return commands.message(landed)
     }
     let _ = commands.monitor(state, editor.pause())
     let playing: bool = editor.playing(struct.borrow(state, field=document))
-    var landed: commands.Result = commands.program(state,
+    var landed: commands.Result = program_follow(state,
       if playing { editor.pause() } else { editor.play() })
     return note(if playing { "Paused" } else { "Playing" })
   }
@@ -1279,19 +1300,19 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     return commands.message(landed)
   }
   if code == widgets.key_left() {
-    var landed: commands.Result = commands.program(state, editor.step_back())
+    var landed: commands.Result = program_follow(state, editor.step_back())
     return commands.message(landed)
   }
   if code == widgets.key_right() {
-    var landed: commands.Result = commands.program(state, editor.step_forward())
+    var landed: commands.Result = program_follow(state, editor.step_forward())
     return commands.message(landed)
   }
   if code == widgets.key_home() {
-    var landed: commands.Result = commands.program(state, editor.go_start())
+    var landed: commands.Result = program_follow(state, editor.go_start())
     return commands.message(landed)
   }
   if code == widgets.key_end() {
-    var landed: commands.Result = commands.program(state, editor.go_end())
+    var landed: commands.Result = program_follow(state, editor.go_end())
     return commands.message(landed)
   }
   if code == widgets.key_page_up() {
@@ -1309,11 +1330,11 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     return note(str.view(named))
   }
   if code == 105 {
-    var landed: commands.Result = commands.program(state, editor.mark_in())
+    var landed: commands.Result = program_follow(state, editor.mark_in())
     return note("Marked in")
   }
   if code == 111 {
-    var landed: commands.Result = commands.program(state, editor.mark_out())
+    var landed: commands.Result = program_follow(state, editor.mark_out())
     return note("Marked out")
   }
   if code == 109 {

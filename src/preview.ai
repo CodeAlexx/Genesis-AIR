@@ -162,13 +162,13 @@ pub fn waveforms_for_strip_geometry(state: ref<app.App>, root: str, id: u64, geo
   waveforms_in_range(state,root,id,true,view.start,view.start+view.span,view.lanes)
 }
 pub type StripView = struct {limited:bool,first:u64,height:f64}
-pub type StripGeometry = struct {start:i64,zoom:f64,span:i64,lanes:StripView}
+pub type StripGeometry = struct {start:i64,zoom:f64,span:i64,lanes:StripView,visual:bool,project:u64}
 // The existing 3/5/6/7-field callers retain their complete-track semantics.
 // Native requests append the first displayed lane and logical body height.
 pub fn strip_geometry(geometry: str) -> result<StripGeometry,string> effects {alloc} {
   var fields: array<string> = text.split(geometry,"\t")
   let count: u64 = array.len(fields)
-  if count != 3 and count != 5 and count != 6 and count != 7 and count != 9 {
+  if count != 3 and count != 5 and count != 6 and count != 7 and count != 9 and count != 11 {
     return result.err("[GA_TIMELINE_RANGE] Invalid strip viewport field count")
   }
   let first: i64 = match text.parse_i64(array.borrow(fields,0)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid strip start")},}
@@ -178,7 +178,7 @@ pub fn strip_geometry(geometry: str) -> result<StripGeometry,string> effects {al
     return result.err("[GA_TIMELINE_RANGE] Invalid strip time viewport")
   }
   var lanes: StripView = StripView {limited:false,first:0,height:0.0}
-  if count == 9 {
+  if count == 9 or count == 11 {
     let lane: u64 = match text.parse_u64(array.borrow(fields,7)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid first strip lane")},}
     let height: f64 = match text.parse_f64(array.borrow(fields,8)) {some(value)=>value,none=>{return result.err("[GA_TIMELINE_RANGE] Invalid strip body height")},}
     if lane > 9007199254740991 or not math.is_finite(height) or height <= 0.0 or height > 32768.0 {
@@ -186,7 +186,11 @@ pub fn strip_geometry(geometry: str) -> result<StripGeometry,string> effects {al
     }
     lanes=StripView {limited:true,first:lane,height:height}
   }
-  result.ok(StripGeometry {start:first,zoom:zoom,span:span,lanes:lanes})
+  var project:u64=0
+  if count==11 {
+    if not str.eq(array.borrow(fields,9),"VISUAL1") {return result.err("[GA_TIMELINE_RANGE] Unknown display reference geometry")}
+    project=match text.parse_u64(array.borrow(fields,10)) {none=>{return result.err("[GA_TIMELINE_RANGE] Invalid display project epoch")},some(v)=>v,}}
+  result.ok(StripGeometry {start:first,zoom:zoom,span:span,lanes:lanes,visual:count==11,project:project})
 }
 // This uses the same sorted/reversed SDK lane identities as paint and hit-test.
 // It includes the partially visible final lane; the footer is excluded by the
@@ -284,6 +288,93 @@ fn waveform_current(state: ref<app.App>, document: ref<editor.Document>, value: 
       array.len(struct.borrow(cached,field=peaks)) == buckets
   },}
 }
+// GUI reference waveforms deliberately ignore only the owning sequence's
+// output mixer. Child sequence gain/mute/solo and ordered clip DSP stay intact.
+// This COPY never replaces or serializes the authored project.
+pub fn visual_reference_document(document:ref<editor.Document>)->editor.Document effects {alloc} {
+  var copy:editor.Document=editor.copy_document(document)
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(copy,field=tracks)) {break}
+    let track:ref<editor.Track> =array.borrow(struct.borrow(copy,field=tracks),at)
+    let id:u64=track.id
+    let owner:u64=track.owner
+    at=at+1
+    if owner!=copy.active {continue}
+    let _=editor.set_track_gain(copy,id,1.0)
+    let _=editor.set_track_pan(copy,id,0.0)
+    let _=editor.set_track_muted(copy,id,false)
+    let _=editor.set_track_solo(copy,id,false)}
+  copy
+}
+pub fn visual_reference_key(document:ref<editor.Document>,clip:editor.Clip,buckets:u64)
+    ->result<string,string> effects {alloc} {
+  if not editor.clip_has_audio(clip) or editor.track_gain(document,clip.track)!=1.0 or
+      editor.track_pan(document,clip.track)!=0.0 or not editor.track_audible(document,clip.track) {
+    return result.err("[GA_WAVEFORM_REFERENCE] Display descriptor must use the neutral owning output mixer")}
+  var plan:array<string> =if timeline_media.effective_speed(document,clip)==0.0 {
+    let saved:string=match editor_io.encode(document) {ok(v)=>v,err(_)=>{return result.err("[GA_WAVEFORM_REFERENCE] Cannot encode held display identity")},}
+    [text.concat("held-visual-silence\n",saved),string.from_int(clip.id),string.from_int(buckets)]
+  }else{try timeline_media.clip_envelope_plan(document,clip,buckets,"visual-envelope.f32")}
+  var descriptor:string=text.concat("visual-root-neutral-v1\n",text.join(plan,"\n"))
+  var digest:bytes=hash.sha256(str.bytes(str.view(descriptor)))
+  result.ok(bytes.hex(bytes.view(digest)))
+}
+pub fn visual_reference_current(state:ref<app.App>,clip:editor.Clip,key:str,buckets:u64)->bool effects {} {
+  match app.visual_waveform_slot(state,clip.id) {none=>false,some(slot)=>{
+    let entry:ref<app.VisualWaveform> =array.borrow(struct.borrow(state,field=visual_waveforms),slot)
+    entry.project==state.project_epoch and entry.media==state.media_revision and
+      entry.clip==clip.id and entry.source==clip.source and entry.nested==clip.nested and entry.length==clip.length and
+      str.eq(struct.borrow(entry,field=key),key) and array.len(struct.borrow(entry,field=peaks))==buckets
+  },}
+}
+pub fn visual_waveforms_for_viewport(state:ref<app.App>,root:str,id:u64,first:i64,last:i64,view:StripView)
+    ->result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var wanted:array<u64> =try strip_targets(state,first,last,true,view,false)
+  if array.len(wanted)>app.waveform_peak_budget()/8 {return result.err("[GA_AUDIO_CLIP_ENV_CAPACITY] Too many display waveforms")}
+  var document:editor.Document=visual_reference_document(struct.borrow(state,field=document))
+  var widths:array<u64> =array.new()
+  var keys:array<string> =array.new()
+  var at:u64=0
+  // Preflight every descriptor before evicting or publishing any new reference.
+  loop {if at>=array.len(wanted) {break}
+    let clip:editor.Clip=option.unwrap(editor.clip(document,array.get(wanted,at)))
+    let buckets:u64=try waveform_buckets(clip.length,array.len(wanted))
+    array.push(widths,buckets)
+    array.push(keys,try visual_reference_key(document,clip,buckets))
+    at=at+1}
+  at=0
+  loop {if at>=array.len(wanted) {break}
+    let clip:editor.Clip=option.unwrap(editor.clip(document,array.get(wanted,at)))
+    if visual_reference_current(state,clip,array.borrow(keys,at),array.get(widths,at)) {app.touch_visual_waveform(state,clip.id)}
+    at=at+1}
+  at=0
+  loop {if at>=array.len(wanted) {break}
+    if id!=0 and str.len(root)!=0 and number(root,"request.id")!=id {
+      return result.err("[GA_AUDIO_STREAM_CANCELLED] Display viewport was superseded")}
+    let clip:editor.Clip=option.unwrap(editor.clip(document,array.get(wanted,at)))
+    let buckets:u64=array.get(widths,at)
+    let key:str=array.borrow(keys,at)
+    if not visual_reference_current(state,clip,key,buckets) {
+      let engine:ref<provider.Provider> =struct.borrow(state,field=provider)
+      var peaks:array<f64> =if timeline_media.effective_speed(document,clip)==0.0 {array.repeat(0.0,buckets)
+      }else if engine.kind==provider.kind_fake() {
+        provider.envelope(engine,text.concat("visual:",key),buckets)
+      }else{
+        if engine.kind!=provider.kind_gcompose() {return result.err("[GA_WAVEFORM_REFERENCE] Display waveforms require the native worker")}
+        try timeline_media.clip_envelope(document,clip,buckets,provider.worker_path(engine),provider.audition_path(engine),root,id)}
+      if not app.set_visual_waveform(state,clip.id,key,peaks) {
+        return result.err("[GA_WAVEFORM_REFERENCE] Cannot retain validated display waveform")}
+    }
+    at=at+1}
+  at=0
+  loop {if at>=array.len(wanted) {break}
+    let clip:editor.Clip=option.unwrap(editor.clip(document,array.get(wanted,at)))
+    if not visual_reference_current(state,clip,array.borrow(keys,at),array.get(widths,at)) {
+      return result.err("[GA_AUDIO_CLIP_ENV_CAPACITY] Requested display waveform was evicted")}
+    at=at+1}
+  result.ok(array.len(wanted))
+}
+
 fn waveforms_in_range(state: ref<app.App>, root: str, id: u64, visible: bool, first: i64, last: i64, view: StripView)
     -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   var wanted: array<u64> = try strip_targets(state,first,last,visible,view,false)
@@ -450,11 +541,13 @@ pub fn poll_failure(root:str,transport:ref<link.Link>) -> unit effects {alloc,fs
   struct.set(transport,0,field=error_generation)
   ()
 }
-// request.id is committed before the command wake. Check that authoritative
-// marker after decoding without consuming the next queued frame command.
+// Legacy requests retain file authority; pixel windows poll their owned command
+// authority without losing any replacement that arrives during decode or send.
 pub fn fail_current(peer: ref<link.Peer>, root: str, generation: u64, detail: str)
     -> bool effects {alloc,fs.meta,fs.read,net,time} {
-  if tasks.requested_at(path.join(root,"stop")) or number(root,"request.id") != generation {return false}
+  if peer.control_mode {
+    if not match link.window_current(peer,generation) {ok(v)=>v,err(_)=>false,} {return false}
+  }else if tasks.requested_at(path.join(root,"stop")) or number(root,"request.id") != generation {return false}
   link.fail(peer,generation,detail)
   true
 }
@@ -494,6 +587,17 @@ pub fn request_strips(root: str, document: str, generation: u64, start: i64, zoo
   let lanes: string = text.concat(string.from_int(first_lane),text.concat("\t",string.from_float(body_height)))
   request_geometry(root,document,generation,start,zoom,span,width,height,media_revision,document_revision,str.view(lanes))
 }
+// Opt-in GUI reference protocol. Older request_strips/WAVEFORMS 2 callers
+// retain exact audible-contribution peaks, including muted/zero output.
+pub fn request_visual_strips(root:str,document:str,generation:u64,start:i64,zoom:f64,
+    span:i64,width:u32,height:u32,media_revision:u64,document_revision:u64,
+    first_lane:u64,body_height:f64,project_epoch:u64)->bool effects {alloc,fs.write} {
+  if start<0 or span<=0 or span>9223372036854775807-start or not math.is_finite(zoom) or zoom<=0.0 or
+      first_lane>9007199254740991 or not math.is_finite(body_height) or body_height<=0.0 or body_height>32768.0 {return false}
+  var lanes:string=text.concat(string.from_int(first_lane),text.concat("\t",string.from_float(body_height)))
+  string.append(lanes,text.concat("\tVISUAL1\t",string.from_int(project_epoch)))
+  request_geometry(root,document,generation,start,zoom,span,width,height,media_revision,document_revision,str.view(lanes))
+}
 fn request_geometry(root: str, document: str, generation: u64, start: i64, zoom: f64,
     span: i64, width: u32, height: u32, media_revision: u64, document_revision: u64, lanes: str)
     -> bool effects {alloc,fs.write} {
@@ -523,24 +627,29 @@ fn request_geometry(root: str, document: str, generation: u64, start: i64, zoom:
 pub fn request_frame(state: ref<app.App>, root: str, transport: ref<link.Link>, generation: u64,
     content: str, program_frame: i64, source_frame: i64, width: u32, height: u32)
     -> bool effects {alloc,fs.write,net,time} {
+  // A pending endpoint has no legal parked Program snapshot yet.
+  if not app.endpoint_picture_ready(state) {return false}
   // Viewport strip lanes retain full geometry snapshots through request_revision.
   if not transport.pixel_stream {return false}
+  let presentation:i64=app.presentation_duration(state)
   let document: ref<editor.Document> = struct.borrow(state,field=document)
   var key: string = string.copy(content)
   var fields: array<string> = [string.from_int(document.monitor_source),
     string.from_int(if editor.playing(document) {1}else{0}),
     string.from_int(if struct.get(struct.borrow(document,field=monitor),field=playing) {1}else{0}),
-    string.from_int(state.media_revision),string.from_int(width),string.from_int(height)]
+    string.from_int(state.media_revision),string.from_int(width),string.from_int(height),string.from_int(presentation),string.from_int(state.endpoint_prepare)]
   string.append(key,"\n")
   string.append(key,text.join(fields,"\t"))
   if transport.snapshot_generation == 0 or not str.eq(key,struct.borrow(transport,field=snapshot_key)) {
     var snapshot: editor.Document = editor.copy_document(document)
-    let _ = editor.seek(snapshot,program_frame)
+    let _ = editor.seek_until(snapshot,program_frame,presentation)
     let _ = editor.seek_monitor(snapshot,source_frame)
     let encoded: string = match editor_io.encode(snapshot) {ok(value)=>value,err(_)=>{return false},}
-    if not request_revision(root,encoded,generation,0,2.4,450,width,height,state.media_revision) {return false}
+    if not request_endpoint_snapshot(state,root,encoded,generation,width,height) {return false}
+    link.retire_window(transport)
     if not match link.wake(transport,false) {ok(_)=>true,err(_)=>false,} {return false}
     struct.set(transport,generation,field=snapshot_generation)
+    struct.set(transport,false,field=command_retirement)
     let _ = struct.replace(transport,key,field=snapshot_key)
     return true
   }
@@ -548,7 +657,8 @@ pub fn request_frame(state: ref<app.App>, root: str, transport: ref<link.Link>, 
   // holds pixel credit. It contains no project data and publishes before the tick.
   if not publish_checked(root,"request.id",string.from_int(generation)) {return false}
   match link.frame(transport,generation,transport.snapshot_generation,program_frame,source_frame,state.media_revision) {
-    ok(_)=>true,err(_)=>false,
+    ok(_)=>{struct.set(transport,false,field=command_retirement)
+      true},err(_)=>false,
   }
 }
 // A GUI-issued window decodes at most two frames within the caller's eight-slot
@@ -577,6 +687,9 @@ pub fn frame_window(command: str) -> result<FrameWindow,str> effects {alloc} {
 }
 pub fn window_positions(document: ref<editor.Document>, program: i64, source: i64,
     count: u64, source_playing: bool) -> bool effects {} {
+  window_positions_until(document,program,source,count,source_playing,editor.sequence_duration(document,document.active))
+}
+pub fn window_positions_until(document:ref<editor.Document>,program:i64,source:i64,count:u64,source_playing:bool,total_program:i64) -> bool effects {} {
   if count == 0 or count > 2 or program < 0 or source < 0 {return false}
   let extra: i64 = cast.sat(count-1)
   if (source_playing and source > 9223372036854775807-extra) or
@@ -588,7 +701,6 @@ pub fn window_positions(document: ref<editor.Document>, program: i64, source: i6
   }
   // Use the same bounds as seek/seek_monitor without copying a full project for
   // each moving request. A clamped frame cannot acquire an exact request stamp.
-  let total_program: i64 = editor.sequence_duration(document,document.active)
   let total_source: i64 = editor.source_frames(document,document.monitor_source)
   let last_program: i64 = if total_program > 0 {total_program-1}else{0}
   let last_source: i64 = if total_source > 0 {total_source-1}else{0}
@@ -608,44 +720,47 @@ fn request_problem(transport:ref<link.Link>,detail:str) -> bool effects {alloc} 
 pub fn request_window(state: ref<app.App>, root: str, transport: ref<link.Link>, first_id: u64,
     count: u64, content: str, program_frame: i64, source_frame: i64, width: u32, height: u32,
     source_playing: bool) -> bool effects {alloc,fs.read,fs.write,net,time} {
+  if not app.endpoint_picture_ready(state) {return false}
   if transport.closed {poll_failure(root,transport)
     return request_problem(transport,"[GA_PREVIEW_CHANNEL] Preview command lane is closed")}
   if not transport.pixel_stream or first_id == 0 or count == 0 or count > 2 or
       first_id > 18446744073709551615-(count-1) or width == 0 or height == 0 or width > 1280 or height > 720 {
     return request_problem(transport,"[GA_PREVIEW_REQUEST] Invalid decode-window identity or dimensions")}
+  let presentation:i64=app.presentation_duration(state)
   let document: ref<editor.Document> = struct.borrow(state,field=document)
-  if not window_positions(document,program_frame,source_frame,count,source_playing) {
+  if not window_positions_until(document,program_frame,source_frame,count,source_playing,presentation) {
     return request_problem(transport,"[GA_PREVIEW_REQUEST] Decode window exceeds its transport bounds")}
   let last_id: u64 = first_id+count-1
   var key: string = string.copy(content)
   var fields: array<string> = [string.from_int(document.monitor_source),
     string.from_int(if editor.playing(document) {1}else{0}),
     string.from_int(if struct.get(struct.borrow(document,field=monitor),field=playing) {1}else{0}),
-    string.from_int(state.media_revision),string.from_int(width),string.from_int(height)]
+    string.from_int(state.media_revision),string.from_int(width),string.from_int(height),string.from_int(presentation),string.from_int(state.endpoint_prepare)]
   string.append(key,"\n")
   string.append(key,text.join(fields,"\t"))
   if transport.snapshot_generation == 0 or not str.eq(key,struct.borrow(transport,field=snapshot_key)) {
     var snapshot: editor.Document = editor.copy_document(document)
-    let _ = editor.seek(snapshot,program_frame)
+    let _ = editor.seek_until(snapshot,program_frame,presentation)
     let _ = editor.seek_monitor(snapshot,source_frame)
     let encoded: string = match editor_io.encode(snapshot) {ok(value)=>value,err(_)=>{
       return request_problem(transport,"[GA_PREVIEW_REQUEST] Cannot encode the preview snapshot")},}
-    if not request_revision(root,encoded,first_id,0,2.4,450,width,height,state.media_revision) {
+    if not request_endpoint_snapshot(state,root,encoded,first_id,width,height) {
       return request_problem(transport,"[GA_PREVIEW_REQUEST] Cannot publish the preview snapshot")}
     struct.set(transport,first_id,field=snapshot_generation)
     let _ = struct.replace(transport,key,field=snapshot_key)
   }
-  if not publish_checked(root,"request.id",string.from_int(last_id)) {
-    return request_problem(transport,"[GA_PREVIEW_REQUEST] Cannot publish the preview retirement marker")}
   match link.window_frame(transport,first_id,last_id,transport.snapshot_generation,program_frame,source_frame,
-      state.media_revision,source_playing) {ok(_)=>true,err(problem)=>request_problem(transport,problem),}
+      state.media_revision,source_playing) {ok(_)=>{struct.set(transport,true,field=command_retirement)
+      true},err(problem)=>request_problem(transport,problem),}
 }
 // Retire live work before a synchronous picker holds the event consumer. This
-// cancellation-only ID carries no decode or wake; the next real request installs
-// a fresh snapshot. A failed marker write preserves all owned transport state.
-pub fn retire_request(root:str,transport:ref<link.Link>,id:u64) -> bool effects {alloc,fs.write} {
-  if id == 0 or id <= transport.ready or id <= transport.window_last or
-      id <= transport.retired_through or id <= transport.snapshot_generation {return false}
+// cancellation-only ID carries no decode; the next real request installs a
+// fresh snapshot. Failed submission preserves all owned transport state.
+pub fn retire_request(root:str,transport:ref<link.Link>,id:u64) -> bool effects {alloc,fs.write,net,time} {
+  if transport.command_retirement {return match link.retire_command(transport,id) {ok(_)=>true,err(_)=>false,}}
+  // Existing single-frame/nonpixel callers retain file-marker cancellation.
+  if id==0 or id<=transport.ready or id<=transport.window_last or id<=transport.retired_through or
+      id<=transport.snapshot_generation {return false}
   if not publish_checked(root,"request.id",string.from_int(id)) {return false}
   link.retire_window(transport)
   struct.set(transport,id,field=retired_through)
@@ -653,34 +768,41 @@ pub fn retire_request(root:str,transport:ref<link.Link>,id:u64) -> bool effects 
   let _=struct.replace(transport,string.new(),field=snapshot_key)
   true
 }
-fn window_current(root: str, last: u64) -> bool effects {alloc,fs.meta,fs.read} {
-  not tasks.requested_at(path.join(root,"stop")) and number(root,"request.id") == last
+fn window_current(peer:ref<link.Peer>,root: str,last:u64) -> result<bool,string>
+    effects {alloc,fs.meta,fs.read,net,time} {
+  if peer.control_mode {return link.window_current(peer,last)}
+  result.ok(not tasks.requested_at(path.join(root,"stop")) and number(root,"request.id")==last)
 }
 fn fail_window(peer: ref<link.Peer>, root: str, last: u64, failed: u64, detail: str)
     -> unit effects {alloc,fs.meta,fs.read,net,time} {
-  if window_current(root,last) {link.fail(peer,failed,detail)}
+  if match window_current(peer,root,last) {ok(v)=>v,err(_)=>false,} {link.fail(peer,failed,detail)}
   ()
 }
-fn render_window(state: ref<app.App>, peer: ref<link.Peer>, root: str, window: FrameWindow,
+fn render_window(state: ref<app.App>, peers: ref<array<link.Peer>>, root: str, window: FrameWindow,
     width: u32, height: u32, profile: bool, request_ns: u64, held_source: ref<string>)
     -> result<bool,string> effects {alloc,fs.meta,fs.read,fs.write,process,net,time} {
   var offset: u64 = 0
   loop {if offset > window.last-window.first {break}
-    if not window_current(root,window.last) {return result.ok(false)}
+    if not try window_current(array.borrow(peers,0),root,window.last) {return result.ok(false)}
     let id: u64 = window.first+offset
     let delta: i64 = cast.sat(offset)
     let program_frame: i64 = if window.source_playing {window.program}else{window.program+delta}
     let source_frame: i64 = if window.source_playing {window.source+delta}else{window.source}
-    let _ = editor.seek(struct.borrow(state,field=document),program_frame)
+    let presentation:i64=app.presentation_duration(state)
+    let _ = editor.seek_until(struct.borrow(state,field=document),program_frame,presentation)
     let _ = editor.seek_monitor(struct.borrow(state,field=document),source_frame)
     let _ = struct.replace(struct.borrow(state,field=provider),string.new(),field=last_error)
+    provider.begin_picture_control(struct.borrow(state,field=provider),option.unwrap(array.pop(peers)),window.last)
     var measured: Images = images_with_source(state,width,height,profile,str.view(held_source))
-    if not window_current(root,window.last) {return result.ok(false)}
+    // images returns a value on every error/cancel path; restore ownership before
+    // polling, propagation, or publication of any result.
+    array.push(peers,provider.end_picture_control(struct.borrow(state,field=provider)))
+    if not try window_current(array.borrow(peers,0),root,window.last) {return result.ok(false)}
     let problem: string = provider.last_error(struct.borrow(state,field=provider))
-    if str.len(problem) != 0 {fail_window(peer,root,window.last,id,problem)
+    if str.len(problem) != 0 {fail_window(array.borrow(peers,0),root,window.last,id,problem)
       return result.ok(false)}
     if measured.program_frame != program_frame or measured.source_frame != source_frame {
-      fail_window(peer,root,window.last,id,"[GA_PREVIEW_REQUEST] Decode window frame was clamped")
+      fail_window(array.borrow(peers,0),root,window.last,id,"[GA_PREVIEW_REQUEST] Decode window frame was clamped")
       return result.ok(false)
     }
     var rendered: array<draw.Surface> = struct.replace(measured,array.new(),field=pictures)
@@ -688,18 +810,20 @@ fn render_window(state: ref<app.App>, peer: ref<link.Peer>, root: str, window: F
     var source: draw.Surface = match array.pop(rendered) {some(value)=>value,none=>draw.empty_surface(),}
     let begin: u64 = time.monotonic_ns()
     let timing: link.FrameTiming = link.FrameTiming {generation:id,request_ns:request_ns,source_ns:measured.source_ns,
-      plan_ns:measured.plan_ns,program_ns:measured.program_ns,publish_ns:0,coalesce_ns:peer.last_drain_ns}
-    match link.notify_pixels_window(peer,root,window.last,source,program,"",measured.source_held,timing,
+      plan_ns:measured.plan_ns,program_ns:measured.program_ns,publish_ns:0,coalesce_ns:struct.get(array.borrow(peers,0),field=last_drain_ns)}
+    match link.notify_pixels_window(array.borrow(peers,0),root,window.last,source,program,"",measured.source_held,timing,
         link.FramePosition {source_frame:source_frame,program_frame:program_frame,revision:window.revision},begin) {
       ok(sent)=>{if not sent {return result.ok(false)}},
       err(problem)=>{
         // A superseding marker may retire this window while a blocked send
         // returns. That old send error must not close the current producer.
-        fail_window(peer,root,window.last,id,problem)
-        if not window_current(root,window.last) and not struct.get(struct.borrow(peer,field=events),field=failed) {
+        fail_window(array.borrow(peers,0),root,window.last,id,problem)
+        if not struct.get(struct.borrow(array.borrow(peers,0),field=events),field=failed) and
+            not (try window_current(array.borrow(peers,0),root,window.last)) {
           return result.ok(false)}
         return result.err(problem)},
     }
+    if not try window_current(array.borrow(peers,0),root,window.last) {return result.ok(false)}
     let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))
     offset=offset+1
   }
@@ -757,9 +881,9 @@ pub fn write_waveforms(state: ref<app.App>, root: str) -> unit effects {alloc, f
   let _ = write_selected_waveforms(state,root,false,selected)
   ()
 }
-fn write_strip_waveforms(state: ref<app.App>, root: str, viewport: StripGeometry) -> result<unit,string> effects {alloc,fs.write} {
+fn write_strip_waveforms(state: ref<app.App>, root: str, viewport: StripGeometry,id:u64) -> result<unit,string> effects {alloc,fs.write} {
   var selected: array<u64> = try strip_targets(state,viewport.start,viewport.start+viewport.span,true,viewport.lanes,false)
-  write_selected_waveforms(state,root,viewport.lanes.limited,selected)
+  if viewport.visual {write_visual_waveforms(state,root,selected,id)}else{write_selected_waveforms(state,root,viewport.lanes.limited,selected)}
 }
 fn write_selected_waveforms(state: ref<app.App>, root: str, limited: bool, selected: ref<array<u64>>) -> result<unit,string> effects {alloc,fs.write} {
   var lines: string = text.concat("WAVEFORMS 2\t",string.from_int(state.document_revision))
@@ -808,6 +932,7 @@ pub fn read_waveforms(state: ref<app.App>, root: str, id: u64) -> bool effects {
   if number(root,"waveforms.id") != id {return false}
   let content: string = match files.read_text(str.view(path.join(root, "waveforms.tsv"))) { ok(value) => value, err(_) => { return false }, }
   if number(root,"waveforms.id") != id {return false}
+  if str.starts_with(content,"VISUAL-WAVEFORMS 1\t") {return read_visual_waveforms(state,root,id,str.view(content))}
   var rows: array<string> = text.split(str.view(content), "\n")
   let versioned: bool = str.starts_with(content,"WAVEFORMS 2\t")
   if versioned {
@@ -1023,42 +1148,69 @@ pub fn read_thumbnails(state: ref<app.App>, root: str, id: u64) -> bool effects 
 
 pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.write, net, process, time} {
   var owned: Config = config
-  var wake: link.Peer = match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}
+  var wake:array<link.Peer> = [match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}]
+  // Only the real pixel producer opts into command-owned retirement. Direct
+  // Link fixtures, strip workers and old single-frame calls keep file authority.
+  struct.set(array.borrow(wake,0),owned.pixel_stream and not owned.strips_only,field=control_enabled)
   let root: string = string.copy(str.view(struct.borrow(owned, field=scratch)))
   var engine: provider.Provider = if owned.kind == provider.kind_gcompose() {
     provider.gcompose(str.view(struct.borrow(owned, field=worker)), str.view(root))
   } else if owned.kind == provider.kind_ffmpeg() {
     provider.native(str.view(struct.borrow(owned, field=worker)), str.view(struct.borrow(owned, field=ffprobe)), str.view(root))
   } else { provider.fake(str.view(root)) }
+  provider.use_program_stream(engine,owned.pixel_stream and not owned.strips_only)
   var state: app.App = app.app(engine)
   let _ = struct.replace(state, struct.replace(owned, array.new(), field=fonts), field=fonts)
   var seen: u64 = 0
   var snapshot_generation: u64 = 0
+  var retired_generation:u64=0
   var snapshot_geometry: string = string.new()
   var media_revision: u64 = 0
   var held_source: string = string.new()
   loop {
     if tasks.requested_at(str.view(path.join(str.view(root), "stop"))) { break }
-    match link.next_checked(wake) {ok(active)=>{if not active {break}},err(problem)=>{
+    match link.next_checked(array.borrow(wake,0)) {ok(active)=>{if not active {break}},err(problem)=>{
       terminal_failure(str.view(root),seen,snapshot_generation,problem)
       break},}
     let request_begin: u64 = if owned.profile {time.monotonic_ns()}else{0}
-    let id: u64 = number(str.view(root), "request.id")
+    let retired:u64=struct.get(array.borrow(wake,0),field=retired_generation)
+    if owned.pixel_stream and retired>retired_generation {
+      // A coalesced newer window must rebuild against a new worker, never reuse
+      // retained GPU identities from the explicitly retired transport epoch.
+      provider.restart(struct.borrow(state,field=provider))
+      let _=ref.swap(held_source,string.new())
+      snapshot_generation=0
+      retired_generation=retired
+    }
+    if owned.pixel_stream and struct.get(array.borrow(wake,0),field=command_kind)==11 {
+      provider.restart(struct.borrow(state,field=provider))
+      let _=ref.swap(held_source,string.new())
+      snapshot_generation=0
+      seen=struct.get(array.borrow(wake,0),field=current_generation)
+      continue}
+    if owned.pixel_stream and struct.get(array.borrow(wake,0),field=command_kind)==12 {
+      let control_detail:string=string.copy(struct.borrow(array.borrow(wake,0),field=command))
+      let failed_generation:u64=struct.get(array.borrow(wake,0),field=current_generation)
+      link.fail(array.borrow(wake,0),failed_generation,control_detail)
+      seen=struct.get(array.borrow(wake,0),field=current_generation)
+      continue}
+    if owned.pixel_stream and struct.get(array.borrow(wake,0),field=control_mode) and struct.get(array.borrow(wake,0),field=command_kind)==0 {continue}
+    let id:u64=if owned.pixel_stream and struct.get(array.borrow(wake,0),field=control_mode) {struct.get(array.borrow(wake,0),field=current_generation)}else{number(str.view(root),"request.id")}
     if id == 0 or id == seen { continue }
     var base: u64 = id
     var program_frame: i64 = 0
     var source_frame: i64 = 0
     var tick_revision: u64 = 0
-    let batch: bool = wake.command_kind == 10
+    let batch: bool = struct.get(array.borrow(wake,0),field=command_kind) == 10
     var window: FrameWindow = FrameWindow {first:id,last:id,snapshot:id,program:0,source:0,revision:0,source_playing:false}
-    let tick: bool = wake.command_kind == 8 or batch
+    let tick: bool = struct.get(array.borrow(wake,0),field=command_kind) == 8 or batch
     if batch {
       if not owned.pixel_stream or owned.strips_only {
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Decode windows require a pixel stream")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Decode windows require a pixel stream")
         continue
       }
-      window=match frame_window(struct.borrow(wake,field=command)) {ok(value)=>value,err(problem)=>{
-        let _ = fail_current(wake,str.view(root),id,problem)
+      window=match frame_window(struct.borrow(array.borrow(wake,0),field=command)) {ok(value)=>value,err(problem)=>{
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,problem)
         continue},}
       if window.last != id {continue}
       base=window.snapshot
@@ -1066,9 +1218,9 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       source_frame=window.source
       tick_revision=window.revision
     } else if tick {
-      var fields: array<string> = text.split(struct.borrow(wake,field=command),"\t")
+      var fields: array<string> = text.split(struct.borrow(array.borrow(wake,0),field=command),"\t")
       if array.len(fields) != 5 {
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame command")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame command")
         continue
       }
       let carried: u64 = match text.parse_u64(array.borrow(fields,0)) {some(value)=>value,none=>0,}
@@ -1078,30 +1230,35 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       source_frame=match text.parse_i64(array.borrow(fields,3)) {some(value)=>value,none=>{continue},}
       tick_revision=match text.parse_u64(array.borrow(fields,4)) {some(value)=>value,none=>{continue},}
       if base == 0 or base > id {
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame snapshot identity")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid frame snapshot identity")
         continue
       }
     }
     var geometry: string = string.copy(snapshot_geometry)
     if not tick or base != snapshot_generation {
       let data: string = match files.read_text(str.view(path.join(str.view(root), "request.air"))) { ok(value) => value, err(_) => {
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Cannot read the requested project snapshot")
         continue }, }
       let boundary: u64 = match str.find(str.view(data),"\n") {some(value)=>value,none=>{
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot header")
         continue},}
       let header: str = str.slice(str.view(data),0,boundary)
       let separator: u64 = match str.find(header,"\t") {some(value)=>value,none=>{
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid preview snapshot generation")
         continue},}
       let carried_id: u64 = match text.parse_u64(str.slice(header,0,separator)) {some(value)=>value,none=>0,}
       if carried_id != base {continue}
       geometry = string.copy(str.slice(header,separator+1,boundary))
       let document: editor.Document = match editor_io.decode(str.slice(str.view(data),boundary+1,str.len(str.view(data)))) {
         ok(value) => value, err(_) => {
-          let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
+          let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Cannot decode the requested project snapshot")
           continue }, }
-      if number(str.view(root), "request.id") != id { continue }
+      if not match window_current(array.borrow(wake,0),str.view(root),id) {ok(v)=>v,err(problem)=>{
+        terminal_failure(str.view(root),id,base,problem)
+        break},} {continue}
+      if owned.pixel_stream and snapshot_generation!=0 {
+        provider.restart(struct.borrow(state,field=provider))
+      }
       let _ = struct.replace(state, document, field=document)
       // Sent Source bytes may still be unreceived when an epoch is retired.
       // Only moving windows within this immutable snapshot may hold that key.
@@ -1109,24 +1266,40 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       snapshot_generation=base
       let _ = ref.swap(snapshot_geometry,string.copy(geometry))
     }
-    if number(str.view(root), "request.id") != id {continue}
+    if not match window_current(array.borrow(wake,0),str.view(root),id) {ok(v)=>v,err(problem)=>{
+        terminal_failure(str.view(root),id,base,problem)
+        break},} {continue}
     seen = id
     let _ = struct.replace(struct.borrow(state, field=provider), string.new(), field=last_error)
     var dimensions: array<string> = text.split(str.view(geometry), "\t")
     let width: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 3))) {some(value) => cast.sat(value), none => 480,} } else { 480 }
     let height: u32 = if array.len(dimensions) >= 5 { match text.parse_u64(str.view(array.borrow(dimensions, 4))) {some(value) => cast.sat(value), none => 270,} } else { 270 }
     let revision: u64 = if array.len(dimensions) >= 6 { match text.parse_u64(str.view(array.borrow(dimensions, 5))) {some(value) => value, none => 0,} } else { 0 }
+    struct.set(state,0,field=runtime_program_end)
+    if array.len(dimensions)>9 and not owned.strips_only {
+      if array.len(dimensions)!=13 or not str.eq(array.borrow(dimensions,9),"END1") {
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Invalid runtime endpoint bounds")
+        continue}
+      let total:i64=match text.parse_i64(array.borrow(dimensions,10)) {some(v)=>v,none=>-1,}
+      let accepted:u64=match text.parse_u64(array.borrow(dimensions,11)) {some(v)=>v,none=>0,}
+      let owner:u64=match text.parse_u64(array.borrow(dimensions,12)) {some(v)=>v,none=>0,}
+      if not endpoint_program_bound(struct.borrow(state,field=document),total,accepted,owner) {
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Runtime endpoint identity or bound differs")
+        continue}
+      struct.set(state,total,field=runtime_program_end)
+    }
+    let presentation:i64=app.presentation_duration(state)
     if tick {
       if tick_revision != revision {
-        let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_REQUEST] Frame media revision differs from its snapshot")
+        let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_REQUEST] Frame media revision differs from its snapshot")
         continue
       }
-      if batch and not window_positions(struct.borrow(state,field=document),program_frame,source_frame,
-          window.last-window.first+1,window.source_playing) {
-        fail_window(wake,str.view(root),id,window.first,"[GA_PREVIEW_REQUEST] Decode window exceeds its transport bounds")
+      if batch and not window_positions_until(struct.borrow(state,field=document),program_frame,source_frame,
+          window.last-window.first+1,window.source_playing,presentation) {
+        fail_window(array.borrow(wake,0),str.view(root),id,window.first,"[GA_PREVIEW_REQUEST] Decode window exceeds its transport bounds")
         continue
       }
-      let _ = editor.seek(struct.borrow(state,field=document),program_frame)
+      let _ = editor.seek_until(struct.borrow(state,field=document),program_frame,presentation)
       let _ = editor.seek_monitor(struct.borrow(state,field=document),source_frame)
     }
     if revision != media_revision {
@@ -1139,7 +1312,7 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
       some(value)=>value,none=>0,}}else{0},field=document_revision)
     // This mailbox accepts monitor sizes, not arbitrary export-sized allocations.
     if width == 0 or height == 0 or width > 1280 or height > 720 {
-      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
+      let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_GEOMETRY] Preview dimensions must be within 1280x720")
       continue
     }
     let request_ns: u64 = if owned.profile {time.monotonic_ns()-request_begin}else{0}
@@ -1153,40 +1326,47 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     }
     if owned.strips_only {
       let viewport: StripGeometry = match strip_geometry(str.view(geometry)) {
-        err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
+        err(problem)=>{let _ = fail_current(array.borrow(wake,0),str.view(root),id,problem)
           continue},ok(value)=>value,
       }
-      match waveforms_in_range(state,str.view(root),id,true,viewport.start,viewport.start+viewport.span,viewport.lanes) {
-        ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
+      if viewport.visual {struct.set(state,viewport.project,field=project_epoch)}
+      let waves:result<u64,string> =if viewport.visual {
+        visual_waveforms_for_viewport(state,str.view(root),id,viewport.start,viewport.start+viewport.span,viewport.lanes)
+      }else{waveforms_in_range(state,str.view(root),id,true,viewport.start,viewport.start+viewport.span,viewport.lanes)}
+      match waves {
+        ok(_)=>{},err(problem)=>{let _ = fail_current(array.borrow(wake,0),str.view(root),id,problem)
           continue},
       }
       if number(str.view(root),"request.id") != id {continue}
       if not publish_checked(str.view(root),"waveforms.id","0") {
-        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot reserve waveform generation")
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot reserve waveform generation")
         continue
       }
-      match write_strip_waveforms(state,str.view(root),viewport) {ok(_)=>{},err(problem)=>{
-        let _=fail_current(wake,str.view(root),id,problem)
+      match write_strip_waveforms(state,str.view(root),viewport,id) {ok(_)=>{},err(problem)=>{
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,problem)
         continue},}
       if number(str.view(root),"request.id") != id {continue}
       if not publish_checked(str.view(root),"waveforms.id",str.view(string.from_int(id))) {
-        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot commit waveform generation")
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot commit waveform generation")
         continue
       }
-      if not link.notify(wake,2,id) {break}
+      if not link.notify(array.borrow(wake,0),2,id) {break}
       match write_thumbnails(state,str.view(root),id,str.view(geometry)) {
-        err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
+        err(problem)=>{let _ = fail_current(array.borrow(wake,0),str.view(root),id,str.view(problem))
           continue},ok(_)=>{},
       }
-      if not link.notify(wake,3,number(str.view(root),"thumbnails.id")) {break}
+      if not link.notify(array.borrow(wake,0),3,number(str.view(root),"thumbnails.id")) {break}
       continue
     }
     let previous_source: string = if owned.pixel_stream {string.copy(str.view(held_source))}else{string.new()}
+    if owned.pixel_stream {provider.begin_picture_control(struct.borrow(state,field=provider),option.unwrap(array.pop(wake)),id)}
     var measured: Images = images_with_source(state,width,height,owned.profile,str.view(previous_source))
+    if owned.pixel_stream {array.push(wake,provider.end_picture_control(struct.borrow(state,field=provider)))
+      if not match window_current(array.borrow(wake,0),str.view(root),id) {ok(v)=>v,err(_)=>false,} {continue}}
     let media_error: string = provider.last_error(struct.borrow(state,field=provider))
     if str.len(media_error) != 0 {
       publish(str.view(root),"error.txt",media_error)
-      let _ = fail_current(wake,str.view(root),id,media_error)
+      let _ = fail_current(array.borrow(wake,0),str.view(root),id,media_error)
       continue
     }
     let source_ns: u64 = measured.source_ns
@@ -1198,25 +1378,25 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     var source: draw.Surface = match array.pop(rendered) { some(value) => value, none => draw.empty_surface(), }
     if owned.pixel_stream {
       let timing: link.FrameTiming = link.FrameTiming {generation:id,request_ns:request_ns,source_ns:source_ns,
-        plan_ns:plan_ns,program_ns:program_ns,publish_ns:0,coalesce_ns:wake.last_drain_ns}
-      match link.notify_pixels(wake,str.view(root),source,program,
+        plan_ns:plan_ns,program_ns:program_ns,publish_ns:0,coalesce_ns:struct.get(array.borrow(wake,0),field=last_drain_ns)}
+      match link.notify_pixels(array.borrow(wake,0),str.view(root),source,program,
           str.view(provider.last_error(struct.borrow(state,field=provider))),measured.source_held,timing,
           link.FramePosition {source_frame:measured.source_frame,program_frame:measured.program_frame,revision:revision},publish_begin) {
         ok(delivered)=>{if not delivered {continue}
           let _ = ref.swap(held_source,string.copy(str.view(struct.borrow(measured,field=source_key))))},
         err(problem)=>{terminal_failure(str.view(root),id,base,problem)
-          let _ = fail_current(wake,str.view(root),id,str.view(problem))
+          let _ = fail_current(array.borrow(wake,0),str.view(root),id,str.view(problem))
           break},
       }
     } else {
     let marker: string = text.concat("frame",text.concat(str.view(string.from_int(id % 2)),".id"))
     if not publish_checked(str.view(root),str.view(marker),"0") {
-      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot reserve the next frame slot")
+      let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot reserve the next frame slot")
       continue
     }
     if not write_image(str.view(root),id,"source",source) or
         not write_image(str.view(root),id,"program",program) {
-      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot publish preview pixels")
+      let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot publish preview pixels")
       continue
     }
     publish(str.view(root), "error.txt", str.view(provider.last_error(struct.borrow(state, field=provider))))
@@ -1225,43 +1405,237 @@ pub fn run(config: Config own) -> bool effects {alloc, fs.meta, fs.read, fs.writ
     let generation_text: string = string.from_int(id)
     if not publish_checked(str.view(root),str.view(size_name),str.view(size_text)) or
         not publish_checked(str.view(root),str.view(marker),str.view(generation_text)) {
-      let _ = fail_current(wake,str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot commit preview dimensions and generation")
+      let _ = fail_current(array.borrow(wake,0),str.view(root),id,"[GA_PREVIEW_PUBLISH] Cannot commit preview dimensions and generation")
       continue
     }
     publish(str.view(root), "ready.id", str.view(generation_text))
+    let drained_ns:u64=struct.get(array.borrow(wake,0),field=last_drain_ns)
     let delivered: bool = if owned.profile {
-      link.notify_frame(wake,id,request_ns,source_ns,plan_ns,program_ns,time.monotonic_ns()-publish_begin,wake.last_drain_ns)
-    }else{link.notify(wake,1,id)}
+      link.notify_frame(array.borrow(wake,0),id,request_ns,source_ns,plan_ns,program_ns,time.monotonic_ns()-publish_begin,drained_ns)
+    }else{link.notify(array.borrow(wake,0),1,id)}
     if not delivered { break }
     }
     if not owned.pixel_stream and not editor.playing(struct.borrow(state, field=document)) and
         not struct.get(struct.borrow(struct.borrow(state, field=document), field=monitor), field=playing) {
       match waveforms_for_request(state,str.view(root),id) {
-        ok(_)=>{},err(problem)=>{let _ = fail_current(wake,str.view(root),id,problem)
+        ok(_)=>{},err(problem)=>{let _ = fail_current(array.borrow(wake,0),str.view(root),id,problem)
           continue},
       }
       if not publish_checked(str.view(root),"waveforms.id","0") {
-        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot reserve waveform generation")
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot reserve waveform generation")
         continue
       }
       var selected: array<u64> = array.new()
       match write_selected_waveforms(state,str.view(root),false,selected) {ok(_)=>{},err(problem)=>{
-        let _=fail_current(wake,str.view(root),id,problem)
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,problem)
         continue},}
       if number(str.view(root),"request.id") != id {continue}
       if not publish_checked(str.view(root),"waveforms.id",str.view(string.from_int(id))) {
-        let _=fail_current(wake,str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot commit waveform generation")
+        let _=fail_current(array.borrow(wake,0),str.view(root),id,"[GA_TIMELINE_PUBLISH] Cannot commit waveform generation")
         continue
       }
-      if not link.notify(wake,2,id) { break }
+      if not link.notify(array.borrow(wake,0),2,id) { break }
       match write_thumbnails(state,str.view(root),id,str.view(geometry)) {
-        err(problem)=>{let _ = fail_current(wake,str.view(root),id,str.view(problem))
+        err(problem)=>{let _ = fail_current(array.borrow(wake,0),str.view(root),id,str.view(problem))
           continue},ok(_)=>{},
       }
-      if not link.notify(wake,3,number(str.view(root),"thumbnails.id")) { break }
+      if not link.notify(array.borrow(wake,0),3,number(str.view(root),"thumbnails.id")) { break }
     }
   }
   provider.shutdown(struct.borrow(state, field=provider))
-  link.finish(wake,seen)
+  link.finish(array.borrow(wake,0),seen)
   true
+}
+
+fn request_endpoint_snapshot(state:ref<app.App>,root:str,document:str,id:u64,width:u32,height:u32) -> bool effects {alloc,fs.write} {
+  if not app.endpoint_current(state) {return request_document_revision(root,document,id,0,2.4,450,width,height,state.media_revision,state.document_revision)}
+  let total:i64=app.presentation_duration(state)
+  let generation:u64=match struct.borrow(state,field=accepted_audio) {some(v)=>v.generation,none=>0,}
+  // Empty/no-audio graphs have no worker generation and require no extended bounds.
+  if generation==0 {return request_document_revision(root,document,id,0,2.4,450,width,height,state.media_revision,state.document_revision)}
+  var fields:array<string> =["0","46","END1",string.from_int(total),string.from_int(generation),string.from_int(state.document.active)]
+  request_geometry(root,document,id,0,2.4,450,width,height,state.media_revision,state.document_revision,str.view(text.join(fields,"\t")))
+}
+
+// Bounds only: accepted generation remains host-owned and part of immutable snapshot identity.
+pub fn endpoint_program_bound(document:ref<editor.Document>,total:i64,generation:u64,owner:u64) -> bool effects {} {
+  let authored:i64=editor.duration(document)
+  if owner!=document.active or generation==0 or authored<0 or total<authored {return false}
+  let fps:f64=editor.sequence_fps(document,document.active)
+  if not math.is_finite(fps) or fps<=0.0 or fps>1000.0 {return false}
+  let extra:f64=cast.float(total-authored)
+  extra<=math.ceil(fps*5.0)+1.0
+}
+
+fn write_visual_waveforms(state:ref<app.App>,root:str,wanted:ref<array<u64>>,id:u64)->result<unit,string> effects {alloc,fs.write} {
+  var content:string=text.concat("VISUAL-WAVEFORMS 1\t",string.from_int(state.document_revision))
+  string.append(content,text.concat("\t",string.from_int(state.media_revision)))
+  string.append(content,text.concat("\t",string.from_int(state.project_epoch)))
+  string.append(content,text.concat("\t",string.from_int(id)))
+  string.append(content,"\n")
+  var at:u64=0
+  loop {if at>=array.len(wanted) {break}
+    let clip:u64=array.get(wanted,at)
+    let slot:u64=match app.visual_waveform_slot(state,clip) {none=>{return result.err("[GA_WAVEFORM_REFERENCE] Missing display cache")},some(v)=>v,}
+    let value:ref<app.VisualWaveform> =array.borrow(struct.borrow(state,field=visual_waveforms),slot)
+    var fields:array<string> =[string.from_int(clip),string.from_int(value.source),string.from_int(value.nested),
+      string.from_int(value.length),string.copy(struct.borrow(value,field=key))]
+    var p:u64=0
+    loop {if p>=array.len(struct.borrow(value,field=peaks)) {break}
+      array.push(fields,string.from_float(array.get(struct.borrow(value,field=peaks),p)))
+      p=p+1}
+    string.append(content,text.join(fields,"\t"))
+    string.append(content,"\n")
+    at=at+1}
+  if not publish_checked(root,"waveforms.tsv",str.view(content)) {return result.err("[GA_TIMELINE_PUBLISH] Cannot publish display reference")}
+  result.ok(())
+}
+fn visual_receipt_current(state:ref<app.App>,wanted:ref<array<u64>>,document:ref<editor.Document>)->bool effects {alloc} {
+  if app.waveform_peak_count(state)>app.waveform_peak_budget() {return false}
+  if state.visual_receipt_epoch!=state.visual_cache_epoch or
+      state.visual_receipt_document!=state.document_revision or
+      state.visual_receipt_media!=state.media_revision or state.visual_receipt_project!=state.project_epoch or
+      array.len(wanted)!=array.len(struct.borrow(state,field=visual_receipt_clips)) {return false}
+  var at:u64=0
+  var total:u64=0
+  loop {if at>=array.len(wanted) {break}
+    let id:u64=array.get(wanted,at)
+    if id!=array.get(struct.borrow(state,field=visual_receipt_clips),at) {return false}
+    let clip:editor.Clip=match editor.clip(document,id) {none=>{return false},some(v)=>v,}
+    if not strip_clip_matches(document,clip,false) {return false}
+    let buckets:u64=match waveform_buckets(clip.length,array.len(wanted)) {err(_)=>{return false},ok(v)=>v,}
+    total=total+buckets
+    if total>app.waveform_peak_budget() {return false}
+    let expected:string=match visual_reference_key(document,clip,buckets) {err(_)=>{return false},ok(v)=>v,}
+    let slot:u64=match app.visual_waveform_slot(state,id) {none=>{return false},some(v)=>v,}
+    let entry:ref<app.VisualWaveform> =array.borrow(struct.borrow(state,field=visual_waveforms),slot)
+    if entry.document_revision!=state.document_revision or entry.media!=state.media_revision or
+        entry.project!=state.project_epoch or entry.source!=clip.source or entry.nested!=clip.nested or
+        entry.length!=clip.length or not str.eq(struct.borrow(entry,field=key),str.view(expected)) or
+        array.len(struct.borrow(entry,field=peaks))!=buckets {return false}
+    at=at+1}
+  true
+}
+fn read_visual_waveforms(state:ref<app.App>,root:str,id:u64,content:str)->bool effects {alloc,fs.read} {
+  if id==0 or id!=state.waveform_pending {return false}
+  let header_end:u64=match str.find(content,"\n") {none=>{return false},some(v)=>v,}
+  var header:array<string> =text.split(str.slice(content,0,header_end),"\t")
+  if array.len(header)!=5 {return false}
+  if match text.parse_u64(array.borrow(header,3)) {none=>true,some(v)=>v!=state.project_epoch,} or
+      match text.parse_u64(array.borrow(header,4)) {none=>true,some(v)=>v!=id,} {return false}
+  if match text.parse_u64(array.borrow(header,1)) {none=>true,some(v)=>v!=state.document_revision,} or
+      match text.parse_u64(array.borrow(header,2)) {none=>true,some(v)=>v!=state.media_revision,} {return false}
+  // Read the immutable request's viewport to require every target, not merely
+  // whatever rows a partial publication happened to include.
+  let snapshot:string=match files.read_text(path.join(root,"request.air")) {err(_)=>{return false},ok(v)=>v,}
+  var snapshot_rows:array<string> =text.split(snapshot,"\n")
+  var snapshot_fields:array<string> =text.split(array.borrow(snapshot_rows,0),"\t")
+  if array.len(snapshot_fields)!=12 or match text.parse_u64(array.borrow(snapshot_fields,0)) {none=>true,some(v)=>v!=id,} {return false}
+  var geometry_fields:array<string> =array.new()
+  var g:u64=1
+  loop {if g>=array.len(snapshot_fields) {break}
+    array.push(geometry_fields,string.copy(array.borrow(snapshot_fields,g)))
+    g=g+1}
+  let viewport:StripGeometry=match strip_geometry(text.join(geometry_fields,"\t")) {err(_)=>{return false},ok(v)=>v,}
+  if not viewport.visual or viewport.project!=state.project_epoch {return false}
+  var wanted:array<u64> =match strip_targets(state,viewport.start,viewport.start+viewport.span,true,viewport.lanes,false) {err(_)=>{return false},ok(v)=>v,}
+  var document:editor.Document=visual_reference_document(struct.borrow(state,field=document))
+  // A new viewport often republishes the exact same whole-clip reference. Reuse
+  // only a byte-identical, fully validated body while its owned cache and all
+  // authored identities remain unchanged. Changed data still takes the complete
+  // parser, neutral descriptor, finite-value and capacity checks below.
+  let body:str=str.slice(content,header_end+1,str.len(content))
+  var digest:bytes=hash.sha256(str.bytes(body))
+  let fingerprint:string=bytes.hex(bytes.view(digest))
+  if str.eq(str.view(fingerprint),struct.borrow(state,field=visual_receipt_body)) and
+      visual_receipt_current(state,wanted,document) {
+    if number(root,"waveforms.id")!=id or number(root,"request.id")!=id {return false}
+    app.waveform_complete(state,id)
+    return true
+  }
+  var rows:array<string> =text.split(content,"\n")
+  var incoming:array<app.VisualWaveform> =array.new()
+  var total:u64=0
+  var at:u64=1
+  loop {if at>=array.len(rows) {break}
+    let row:str=array.borrow(rows,at)
+    at=at+1
+    if str.len(row)==0 {continue}
+    var fields:array<string> =text.split(row,"\t")
+    if array.len(fields)<13 or array.len(fields)>app.waveform_bucket_limit()+5 {return false}
+    let clip:u64=match text.parse_u64(array.borrow(fields,0)) {none=>{return false},some(v)=>v,}
+    let source:u64=match text.parse_u64(array.borrow(fields,1)) {none=>{return false},some(v)=>v,}
+    let nested:u64=match text.parse_u64(array.borrow(fields,2)) {none=>{return false},some(v)=>v,}
+    let length:i64=match text.parse_i64(array.borrow(fields,3)) {none=>{return false},some(v)=>v,}
+    let current:editor.Clip=match editor.clip(document,clip) {none=>{return false},some(v)=>v,}
+    if not strip_clip_matches(document,current,false) or source!=current.source or nested!=current.nested or length!=current.length {return false}
+    var earlier:u64=0
+    loop {if earlier>=array.len(incoming) {break}
+      if struct.get(array.borrow(incoming,earlier),field=clip)==clip {return false}
+      earlier=earlier+1}
+    var selected:bool=false
+    var w:u64=0
+    loop {if w>=array.len(wanted) {break}
+      if array.get(wanted,w)==clip {selected=true}
+      w=w+1}
+    if not selected {return false}
+    let buckets:u64=match waveform_buckets(current.length,array.len(wanted)) {err(_)=>{return false},ok(v)=>v,}
+    if array.len(fields)-5!=buckets {return false}
+    let key:str=array.borrow(fields,4)
+    let expected:string=match visual_reference_key(document,current,buckets) {err(_)=>{return false},ok(v)=>v,}
+    if not str.eq(key,str.view(expected)) {return false}
+    var peaks:array<f64> =array.new()
+    var k:u64=5
+    loop {if k>=array.len(fields) {break}
+      let value:f64=match text.parse_f64(array.borrow(fields,k)) {none=>{return false},some(v)=>v,}
+      if not math.is_finite(value) or value<0.0 {return false}
+      array.push(peaks,value)
+      k=k+1}
+    total=total+array.len(peaks)
+    if total>app.waveform_peak_budget() {return false}
+    array.push(incoming,app.VisualWaveform {clip:clip,source:source,nested:nested,length:length,
+      media:state.media_revision,project:state.project_epoch,document_revision:state.document_revision,key:string.copy(key),peaks:peaks})}
+  if array.len(incoming)!=array.len(wanted) or number(root,"waveforms.id")!=id or number(root,"request.id")!=id {return false}
+  // Validate all rows and protect already valid hits before any miss may evict.
+  at=0
+  loop {if at>=array.len(incoming) {break}
+    let entry:ref<app.VisualWaveform> =array.borrow(incoming,at)
+    let clip:editor.Clip=option.unwrap(editor.clip(document,entry.clip))
+    if visual_reference_current(state,clip,struct.borrow(entry,field=key),array.len(struct.borrow(entry,field=peaks))) {app.touch_visual_waveform(state,entry.clip)}
+    at=at+1}
+  at=0
+  loop {if at>=array.len(incoming) {break}
+    let entry:ref<app.VisualWaveform> =array.borrow(incoming,at)
+    let clip_id:u64=entry.clip
+    var key:string=string.copy(struct.borrow(entry,field=key))
+    var peaks:array<f64> =struct.replace(entry,array.new(),field=peaks)
+    if not app.set_visual_waveform(state,clip_id,str.view(key),peaks) {return false}
+    at=at+1}
+  let _=struct.replace(state,string.copy(str.view(fingerprint)),field=visual_receipt_body)
+  let _=struct.replace(state,wanted,field=visual_receipt_clips)
+  struct.set(state,state.visual_cache_epoch,field=visual_receipt_epoch)
+  struct.set(state,state.document_revision,field=visual_receipt_document)
+  struct.set(state,state.media_revision,field=visual_receipt_media)
+  struct.set(state,state.project_epoch,field=visual_receipt_project)
+  app.waveform_complete(state,id)
+  true
+}
+
+// Paint-only state; no peak normalization or inferred audio meter output.
+pub fn visual_waveform_label(state:ref<app.App>,clip:editor.Clip,current:bool)->string effects {alloc} {
+  let document:ref<editor.Document> =struct.borrow(state,field=document)
+  if clip.source!=0 and not editor.source_online(document,clip.source) {return string.copy("Unavailable")}
+  if not current {return string.copy(if state.waveform_pending!=0 {"Loading waveform..."}else{"Unavailable"})}
+  var label:string=string.new()
+  if not clip.enabled {label=string.copy("Disabled")}
+  else if timeline_media.effective_speed(document,clip)==0.0 {label=string.copy("Held")}
+  else if not editor.track_audible(document,clip.track) {
+    let muted:bool=match editor.track_slot(document,clip.track) {none=>true,some(slot)=>{
+      struct.get(array.borrow(struct.borrow(document,field=tracks),slot),field=muted)},}
+    label=string.copy(if muted {"Muted"}else{"Solo excluded"})}
+  else if editor.track_gain(document,clip.track)==0.0 {label=string.copy("Gain 0")}
+  if state.waveform_pending!=0 {
+    if str.len(label)!=0 {string.append(label," / ")}
+    string.append(label,"Loading waveform...")}
+  label
 }

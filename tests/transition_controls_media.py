@@ -344,8 +344,8 @@ def main():
                     audition_codes16=1,master_pcm_absolute=1/8388608,
                     hard_mask_boundary="OpenCL Full Profile float interval; complete authored A or B triplet only",
                     numerical_spec="https://registry.khronos.org/OpenCL/specs/unified/html/OpenCL_C.html",
-                    master_audio_count="ceil(range duration*48000); every allocated sample checked",
-                    sample_selection="rounded absolute range start; legacy context-free native sample duration"),
+                    master_audio_count="rounded absolute S(end)-S(begin); every selected sample checked",
+                    sample_selection="exact original PCM slice at rounded absolute range endpoints"),
                   cases=[])
     immutable = {}
     try:
@@ -424,12 +424,10 @@ def main():
                 assert error <= 2, ("Lossless RGB48 transition error",error)
                 fps = doc["sequences"][0]["fps"]
                 first, last = sample(begin,fps), sample(end,fps)
-                # OPEN has always allocated ceil(duration*48000), independently
-                # of rounded absolute timeline endpoints. Preserve and inspect
-                # that declared encoder count, including its fractional final
-                # sample; picture transitions must not change any sample.
-                master_count = math.ceil(Fraction(end-begin)*SR/rational(fps))
-                target = pcm[first*2:(first+master_count)*2]
+                # Exact-count export uses rounded absolute half-open endpoints.
+                # Expected media remains the independently authored original PCM.
+                master_count = last-first
+                target = pcm[first*2:last*2]
                 master = array("f",run([ffmpeg,"-nostdin","-v","error","-i",movie,"-map","0:a:0",
                                          "-f","f32le","pipe:1"]))
                 assert len(master)==len(target), ("Exact allocated master stereo sample count",len(master)//2,len(target)//2)

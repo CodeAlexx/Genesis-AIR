@@ -310,7 +310,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  }
  
  // ---------------------------------------------------------------------------
-@@ -1129,28 +1309,417 @@
+@@ -1129,28 +1309,547 @@
  // / `ripple_trim_end` / `ripple_delete`, whose ripple-current-track-only rule is Shotcut's
  // default and is kept here.
  
@@ -396,6 +396,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  let ctx:AudioContext=match value.audio_context {none=>{return true},some(saved)=>saved,}
 +  if not audio_context_geometry(doc,value,ctx) {return false}
 +  let rate:f64=playback_rate_scalar(doc,value)
++  if audio_tail_present(doc,value) and not audio_tail_context_supported_scalar(doc,value) {return false}
 +  // A held clip retains its context as dormant metadata; resuming transforms it.
 +  if rate == 0.0 {return true}
 +  if not math.is_finite(rate) or rate != ctx.rate or value.reverse != ctx.reverse {return false}
@@ -453,6 +454,125 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +    at=at+1}
 +  true
 +}
++// The direct tail renderer retains the complete original graph and its actual
++// EOF suffix. Only this proven source/time domain may bypass the echo edit guard.
++fn audio_tail_filter(kind:str) -> bool effects {} {
++  str.eq(kind,"volume") or str.eq(kind,"mute") or str.eq(kind,"pan") or
++  str.eq(kind,"eq_3band") or str.eq(kind,"eq_10band") or
++  str.eq(kind,"compressor") or str.eq(kind,"gate") or str.eq(kind,"limiter") or
++  str.eq(kind,"delay") or str.eq(kind,"reverb")
++}
++fn audio_tail_present(doc:ref<Document>,value:Clip) -> bool effects {} {
++  if not clip_has_audio(value) {return false}
++  var at:u64=0
++  loop {if at >= array.len(struct.borrow(doc,field=filters)) {break}
++    let f:ref<Filter> =array.borrow(struct.borrow(doc,field=filters),at)
++    if f.clip == value.id and f.enabled and
++        (str.eq(struct.borrow(f,field=kind),"delay") or str.eq(struct.borrow(f,field=kind),"reverb")) {return true}
++    at=at+1}
++  false
++}
++type AudioTailKey = struct {blocked:bool,kind:u32,scoped:bool,identity:u64}
++fn audio_tail_kind(kind:str) -> u32 effects {} {
++  if str.eq(kind,"speed") {return 1}
++  if str.eq(kind,"volume") {return 2}
++  if str.eq(kind,"mute") {return 3}
++  if str.eq(kind,"pan") {return 4}
++  if str.eq(kind,"eq_3band") {return 5}
++  if str.eq(kind,"eq_10band") {return 6}
++  if str.eq(kind,"compressor") {return 7}
++  if str.eq(kind,"gate") {return 8}
++  if str.eq(kind,"limiter") {return 9}
++  if str.eq(kind,"delay") {return 10}
++  if str.eq(kind,"reverb") {return 11}
++  0
++}
++fn audio_tail_key_family(named:str,scoped:bool,identity:u64) -> AudioTailKey effects {} {
++  let dot:u64=match str.find(named,".") {none=>{return AudioTailKey {blocked:false,kind:0,scoped:scoped,identity:identity}},some(n)=>n,}
++  AudioTailKey {blocked:false,kind:audio_tail_kind(str.slice(named,0,dot)),scoped:scoped,identity:identity}
++}
++fn audio_tail_key_policy(named:str) -> AudioTailKey effects {} {
++  if str.eq(named,"pan") or str.eq(named,"speed") or
++      str.eq(named,"fade_in") or str.eq(named,"fade_out") {return AudioTailKey {blocked:true,kind:0,scoped:false,identity:0}}
++  if str.starts_with(named,"filter.") {
++    let rest:str=str.slice(named,7,str.len(named))
++    let dot:u64=match str.find(rest,".") {none=>{return AudioTailKey {blocked:false,kind:0,scoped:true,identity:0}},some(n)=>n,}
++    let identity:u64=match text.parse_u64(str.slice(rest,0,dot)) {none=>0,some(n)=>n,}
++    return audio_tail_key_family(str.slice(rest,dot+1,str.len(rest)),true,identity)
++  }
++  audio_tail_key_family(named,false,0)
++}
++fn audio_tail_key_supported(doc:ref<Document>,value:Clip,key:AudioTailKey) -> bool effects {} {
++  if key.blocked {return false}
++  if key.kind == 0 {return true}
++  var index:u64=0
++  loop {if index >= array.len(struct.borrow(doc,field=filters)) {break}
++    let f:ref<Filter> =array.borrow(struct.borrow(doc,field=filters),index)
++    index=index+1
++    if f.clip == value.id and f.enabled and audio_tail_kind(struct.borrow(f,field=kind)) == key.kind and
++        (not key.scoped or f.id == key.identity) {return false}
++  }
++  true
++}
++fn audio_tail_context_supported_scalar(doc:ref<Document>,value:Clip) -> bool effects {} {
++  let rate:f64=playback_rate_scalar(doc,value)
++  if not clip_has_audio(value) or value.source == 0 or value.nested != 0 or value.reverse or
++      (rate != 1.0 and rate != 0.0) {return false}
++  let ctx:AudioContext=audio_context_for_scalar(doc,value)
++  let body_anchor:f64=cast.float(value.source_in)
++  let context_anchor:f64=cast.float(ctx.source_in)+cast.float(ctx.offset)
++  if option.is_some(ctx.extent) or ctx.rate != 1.0 or ctx.reverse or
++      not audio_context_geometry(doc,value,ctx) or
++      body_anchor != context_anchor or
++      ctx.output_frames == 0 or ctx.output_frames > 1036800000 {return false}
++  let samples:f64=48000.0/ctx.fps
++  // Private admission: exact owner endpoint arithmetic, never local rounded durations.
++  let admitted_phase:bool=ctx.fps == 24.0 or ctx.fps == 30.0 or ctx.fps == 60.0 or
++    ctx.fps == 24000.0/1001.0 or ctx.fps == 30000.0/1001.0 or ctx.fps == 60000.0/1001.0
++  if not math.is_finite(samples) or samples < 1.0 {return false}
++  let slot:u64=match source_slot(doc,value.source) {none=>{return false},some(n)=>n,}
++  let source:ref<Source> =array.borrow(struct.borrow(doc,field=sources),slot)
++  let legacy_integral:bool=source.audio_rate == 48000 and samples == math.floor(samples)
++  if not legacy_integral and not admitted_phase {return false}
++  let available:f64=cast.float(source.frames)*(ctx.fps/source.fps)
++  let requested:f64=cast.float(ctx.source_in)+cast.float(ctx.length)
++  if not source.has_audio or (source.audio_rate != 48000 and source.audio_rate != 44100) or
++      not math.is_finite(available) or requested > available {return false}
++  var echo:bool=false
++  var at:u64=0
++  loop {if at >= array.len(struct.borrow(doc,field=filters)) {break}
++    let filter:ref<Filter> =array.borrow(struct.borrow(doc,field=filters),at)
++    at=at+1
++    if filter.clip != value.id or not filter.enabled {continue}
++    let identity:u64=filter.id
++    let speed:bool=str.eq(struct.borrow(filter,field=kind),"speed")
++    let supported:bool=audio_context_picture_filter(struct.borrow(filter,field=kind)) or audio_tail_filter(struct.borrow(filter,field=kind))
++    let has_echo:bool=str.eq(struct.borrow(filter,field=kind),"delay") or str.eq(struct.borrow(filter,field=kind),"reverb")
++    if speed {
++      if filter_param(doc,identity,"rate",1.0) != 1.0 {return false}
++    }else if not supported {return false}
++    if has_echo {echo=true}
++  }
++  if not echo {return false}
++  at=0
++  loop {if at >= array.len(struct.borrow(doc,field=keys)) {break}
++    let key:Key=array.get(struct.borrow(doc,field=keys),at)
++    at=at+1
++    if key.clip != value.id {continue}
++    if key.param == 0 or key.param > array.len(struct.borrow(doc,field=names)) {return false}
++    let policy:AudioTailKey=audio_tail_key_policy(array.borrow(struct.borrow(doc,field=names),key.param-1))
++    if not audio_tail_key_supported(doc,value,policy) {return false}
++  }
++  true
++}
++// Potential interval planning must still expose an offline original-end suffix
++// to the source-availability preflight instead of silently treating it as silence.
++pub fn audio_tail_context_potential(doc:ref<Document>,value:Clip) -> bool effects {alloc} {
++  playback_rate_scalar(doc,value) == 1.0 and audio_tail_context_supported_scalar(doc,value)
++}
++pub fn audio_tail_context_supported(doc:ref<Document>,value:Clip) -> bool effects {alloc} {
++  source_online(doc,value.source) and audio_tail_context_potential(doc,value)
++}
 +type AudioContextWalk = struct {scans:u64}
 +fn audio_context_descendant(doc:ref<Document>,value:Clip,depth:u64,budget:ref<AudioContextWalk>) -> bool effects {} {
 +  if not clip_has_audio(value) {return false}
@@ -496,6 +616,8 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  var answer:Clip=next
 +  var ctx:AudioContext=original
 +  let shifted:i64=add.sat(ctx.offset,delta)
++  if audio_tail_present(doc,next) and
++      (shifted < 0 or shifted > ctx.length or next.length > ctx.length-shifted) {return option.none()}
 +  if shifted < 0 {
 +    let extra:i64=-shifted
 +    let anchor:f64=cast.float(ctx.source_in)-if ctx.reverse {0.0}else{cast.float(extra)*ctx.rate}
@@ -532,6 +654,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  },}
 +  struct.set(answer,option.some(ctx),field=audio_context)
 +  if not audio_context_geometry(doc,answer,ctx) {return option.none()}
++  if audio_tail_present(doc,answer) and not audio_tail_context_supported_scalar(doc,answer) {return option.none()}
 +  option.some(answer)
 +}
 +// Explicit retime/slip preserves the complete span and its original sample phase.
@@ -539,11 +662,16 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  var answer:Clip=next
 +  var ctx:AudioContext=match next.audio_context {none=>{return option.some(answer)},some(saved)=>saved,}
 +  if not math.is_finite(rate) or rate < 0.0 {return option.none()}
-+  if rate == 0.0 {return option.some(answer)}
++  if rate == 0.0 {
++    if audio_tail_present(doc,answer) and not audio_tail_context_supported_scalar(doc,answer) {return option.none()}
++    return option.some(answer)
++  }
 +  let retimed:bool=ctx.rate != rate or ctx.reverse != next.reverse
 +  let steps:i64=if next.reverse {ctx.length-ctx.offset-next.length}else{ctx.offset}
 +  let anchor:f64=cast.float(next.source_in)-cast.float(steps)*rate
 +  if not math.is_finite(anchor) or anchor < 0.0 or anchor > 9007199254740991.0 or anchor != math.floor(anchor) {return option.none()}
++  let saved_anchor:f64=cast.float(ctx.source_in)
++  if audio_tail_present(doc,next) and (rate != 1.0 or next.reverse or anchor != saved_anchor) {return option.none()}
 +  struct.set(ctx,cast.sat(anchor),field=source_in)
 +  struct.set(ctx,rate,field=rate)
 +  struct.set(ctx,next.reverse,field=reverse)
@@ -572,6 +700,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  }
 +  struct.set(answer,option.some(ctx),field=audio_context)
 +  if not audio_context_geometry(doc,answer,ctx) {return option.none()}
++  if audio_tail_present(doc,answer) and not audio_tail_context_supported_scalar(doc,answer) {return option.none()}
 +  option.some(answer)
 +}
 +
@@ -604,10 +733,11 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +    let filter: ref<Filter> = array.borrow(struct.borrow(doc,field=filters),i)
 +    if filter.clip == id and filter.enabled {
 +      let kind: ref<string> = struct.borrow(filter,field=kind)
-+      // A cloned timer restarts local time; echo graphs lose the original delay
-+      // history. Refuse until a preserved time/state context is represented.
++      // Timers still restart local picture time. Echo edits require the exact
++      // direct full-history/EOF-tail renderer, rather than a cloned local graph.
 +      if (str.eq(kind,"timer") and clip_has_video(old)) or
-+          ((str.eq(kind,"delay") or str.eq(kind,"reverb")) and clip_has_audio(old)) {return false}
++          ((str.eq(kind,"delay") or str.eq(kind,"reverb")) and clip_has_audio(old) and
++            not audio_tail_context_supported(doc,old)) {return false}
 +    }
 +    i=i+1}
 +  i=0
@@ -739,7 +869,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        option.some(right)
      },
      none => option.none(),
-@@ -1165,7 +1734,8 @@
+@@ -1165,7 +1864,8 @@
    loop {
      if index >= array.len(struct.borrow(doc, field=clips)) { break }
      let value: Clip = array.get(struct.borrow(doc, field=clips), index)
@@ -749,7 +879,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        array.push(targets, value.id)
      }
      index = index + 1
-@@ -1180,56 +1750,261 @@
+@@ -1180,56 +1880,262 @@
    cuts
  }
  
@@ -821,7 +951,8 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +    if delta != 0 and filter.clip == old.id and filter.enabled {
 +      let kind: ref<string> = struct.borrow(filter,field=kind)
 +      if (str.eq(kind,"timer") and clip_has_video(old)) or
-+          ((str.eq(kind,"delay") or str.eq(kind,"reverb")) and clip_has_audio(old)) {return false}
++          ((str.eq(kind,"delay") or str.eq(kind,"reverb")) and clip_has_audio(old) and
++            not audio_tail_context_supported(doc,old)) {return false}
 +    }
 +    i=i+1}
 +  i=0
@@ -1049,7 +1180,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        if not trim_start(doc, id, new_start) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1239,7 +2014,7 @@
+@@ -1239,7 +2145,7 @@
              nested: moved.nested, source_in: moved.source_in, length: moved.length,
              start: was_start, track: moved.track, group: moved.group, enabled: moved.enabled,
              selected: moved.selected, fade_in: moved.fade_in, fade_out: moved.fade_out,
@@ -1058,7 +1189,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
            shift_after(doc, track, was_end, 0 - delta, id)
            true
          },
-@@ -1252,13 +2027,15 @@
+@@ -1252,13 +2158,15 @@
  
  // RIPPLE TRIM the tail: trim, then shift the later same-track clips by the length actually
  // applied, so shortening closes the gap and lengthening opens one. Genesis `ripple_trim_end`.
@@ -1075,7 +1206,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        if not trim_end(doc, id, new_length) { return false }
        match clip_slot(doc, id) {
          some(now) => {
-@@ -1276,7 +2053,10 @@
+@@ -1276,7 +2184,10 @@
  // LIFT: remove the clip and leave the hole. Genesis `delete_clip`.
  pub fn lift(doc: ref<Document>, id: u64) -> bool effects {alloc} {
    match clip_slot(doc, id) {
@@ -1087,7 +1218,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true },
      none => false,
    }
-@@ -1288,6 +2068,7 @@
+@@ -1288,6 +2199,7 @@
      some(slot) => {
        let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
        let track: u64 = old.track
@@ -1095,7 +1226,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        let finish: i64 = clip_end(old)
        let length: i64 = old.length
        remove_clip_slot(doc, slot)
-@@ -1303,56 +2084,62 @@
+@@ -1303,56 +2215,62 @@
  // overlap is trimmed back. A remnant shorter than `min_clip` is dropped rather than clamped
  // up, because a clamped remnant would spill back into the range and never clear.
  // Genesis `lift_range`.
@@ -1206,7 +1337,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    ()
  }
  
-@@ -1389,7 +2176,7 @@
+@@ -1389,7 +2307,7 @@
          start: if moved < 0 { 0 } else { moved }, track: old.track, group: old.group,
          enabled: old.enabled, selected: old.selected, fade_in: old.fade_in,
          fade_out: old.fade_out, gain: old.gain, pan: old.pan, speed: old.speed,
@@ -1215,7 +1346,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1411,12 +2198,13 @@
+@@ -1411,12 +2329,13 @@
        // A move across sequences would need to rescale the clip's in-point, length,
        // fades and local keyframes. Keep a drag within one frame unit system.
        if owner != old.owner { return false }
@@ -1230,7 +1361,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1428,7 +2216,7 @@
+@@ -1428,7 +2347,7 @@
  // seam stays a single cut. The effective delta is the most both sides can take under the
  // `min_clip` floors and the right clip's source floor. Returns the delta actually applied.
  // Genesis `roll_edit`.
@@ -1239,7 +1370,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    if left_id == right_id { return 0 }
    let left: Clip = match clip(doc, left_id) { some(found) => found, none => { return 0 }, }
    let right: Clip = match clip(doc, right_id) { some(found) => found, none => { return 0 }, }
-@@ -1444,23 +2232,20 @@
+@@ -1444,23 +2363,20 @@
      none => { },
    }
    if d == 0 { return 0 }
@@ -1272,7 +1403,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    var left: u64 = 0
    var right: u64 = 0
    var index: u64 = 0
-@@ -1482,7 +2267,7 @@
+@@ -1482,7 +2398,7 @@
  // follows its right edge, so the track's total length is invariant. All-or-nothing: a missing
  // or non-abutting neighbour, or a move that would collapse one, mutates nothing.
  // Genesis `slide`.
@@ -1281,7 +1412,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    let value: Clip = match clip(doc, id) { some(found) => found, none => { return false }, }
    if delta == 0 { return true }
    let start: i64 = value.start
-@@ -1515,23 +2300,20 @@
+@@ -1515,23 +2431,20 @@
      some(limit) => { if after_in + after_length > limit { return false } },
      none => { },
    }
@@ -1319,7 +1450,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  }
  
  // ---------------------------------------------------------------------------
-@@ -1545,7 +2327,7 @@
+@@ -1545,7 +2458,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: value,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
@@ -1328,7 +1459,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1562,7 +2344,7 @@
+@@ -1562,7 +2475,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: false,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
@@ -1337,7 +1468,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
      }
      index = index + 1
    }
-@@ -1645,7 +2427,7 @@
+@@ -1645,7 +2558,7 @@
            nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
            track: old.track, group: id, enabled: old.enabled, selected: old.selected,
            fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
@@ -1346,7 +1477,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        },
        none => { },
      }
-@@ -1667,7 +2449,7 @@
+@@ -1667,7 +2580,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: 0, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
@@ -1355,7 +1486,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
      }
      index = index + 1
    }
-@@ -1717,7 +2499,7 @@
+@@ -1717,7 +2630,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length,
          start: old.start + d, track: old.track, group: old.group, enabled: old.enabled,
          selected: old.selected, fade_in: old.fade_in, fade_out: old.fade_out,
@@ -1364,7 +1495,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
      }
      index = index + 1
    }
-@@ -1740,11 +2522,13 @@
+@@ -1740,11 +2653,13 @@
        if frames > 0 and old.source_in + old.length > frames {
          if doc.source_bounds == bounds_reject() { return false }
        }
@@ -1380,7 +1511,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        let _ = set_range(doc, slot, old.source_in, old.length)
        true
      },
-@@ -1754,7 +2538,7 @@
+@@ -1754,7 +2669,7 @@
  
  // DETACH AUDIO: clone the clip onto an audio track at the same place and silence the
  // original's audio, so its video is unchanged and its sound now plays from the clone.
@@ -1389,7 +1520,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  pub fn detach_audio(doc: ref<Document>, id: u64) -> option<u64> effects {alloc} {
    let old: Clip = match clip(doc, id) { some(found) => found, none => { return option.none() }, }
    var target: u64 = 0
-@@ -1772,9 +2556,9 @@
+@@ -1772,9 +2687,9 @@
    let clone: u64 = fresh_id(doc)
    array.push(struct.borrow(doc, field=clips), Clip {id: clone, owner: old.owner,
      source: old.source, nested: old.nested, source_in: old.source_in, length: old.length,
@@ -1401,7 +1532,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    match clip_slot(doc, id) {
      some(slot) => {
        let current: Clip = array.get(struct.borrow(doc, field=clips), slot)
-@@ -1783,7 +2567,7 @@
+@@ -1783,7 +2698,7 @@
          start: current.start, track: current.track, group: current.group,
          enabled: current.enabled, selected: current.selected, fade_in: current.fade_in,
          fade_out: current.fade_out, gain: 0.0, pan: current.pan, speed: current.speed,
@@ -1410,7 +1541,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
      },
      none => { },
    }
-@@ -1803,7 +2587,7 @@
+@@ -1803,7 +2718,7 @@
    array.push(struct.borrow(doc, field=clips), Clip {id: still, owner: old.owner,
      source: old.source, nested: old.nested, source_in: held, length: length, start: frame,
      track: old.track, group: 0, enabled: true, selected: false, fade_in: 0, fade_out: 0,
@@ -1419,7 +1550,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    option.some(still)
  }
  
-@@ -1819,7 +2603,7 @@
+@@ -1819,7 +2734,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: want, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
@@ -1428,7 +1559,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1834,7 +2618,7 @@
+@@ -1834,7 +2749,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: want, gain: old.gain, pan: old.pan,
@@ -1437,7 +1568,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1848,7 +2632,7 @@
+@@ -1848,7 +2763,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: old.enabled, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: math.max(0.0, value),
@@ -1446,7 +1577,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1874,15 +2658,17 @@
+@@ -1874,15 +2789,17 @@
  // Negative rates are refused rather than clamped — `reverse` is the separate flag that says
  // which way a clip runs, and a negative rate would be a second, disagreeing way to say it.
  pub fn set_clip_speed(doc: ref<Document>, id: u64, value: f64) -> bool effects {} {
@@ -1467,7 +1598,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1893,11 +2679,13 @@
+@@ -1893,11 +2810,13 @@
    match clip_slot(doc, id) {
      some(slot) => {
        let old: Clip = array.get(struct.borrow(doc, field=clips), slot)
@@ -1483,7 +1614,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -1912,7 +2700,7 @@
+@@ -1912,7 +2831,7 @@
          nested: old.nested, source_in: old.source_in, length: old.length, start: old.start,
          track: old.track, group: old.group, enabled: value, selected: old.selected,
          fade_in: old.fade_in, fade_out: old.fade_out, gain: old.gain, pan: old.pan,
@@ -1492,7 +1623,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
        true
      },
      none => false,
-@@ -2131,9 +2919,8 @@
+@@ -2131,9 +3050,8 @@
  // Keyframes
  //
  // One flat, sorted store animates every parameter of every clip, plus the sequence-wide ones
@@ -1504,7 +1635,20 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  //
  // Parameters are named by the application and interned, so this module carries no registry of
  // what may be animated. The curve shapes come from `std.curve`, which holds the MLT-parity
-@@ -2468,6 +3255,17 @@
+@@ -2150,7 +3068,11 @@
+ pub fn set_key(doc: ref<Document>, clip_id: u64, param: str, frame: i64, value: f64, interp: u32) -> bool effects {alloc} {
+   var owner: u64 = doc.active
+   if clip_id != 0 {
+-    match clip(doc, clip_id) { some(found) => { owner = found.owner }, none => { return false }, }
++    match clip(doc, clip_id) { some(found) => {
++      if option.is_some(found.audio_context) and audio_tail_present(doc,found) and
++          not audio_tail_key_supported(doc,found,audio_tail_key_policy(param)) {return false}
++      owner = found.owner
++    }, none => { return false }, }
+   }
+   let named: u64 = name_id(doc, param)
+   let entry: Key = Key {clip: clip_id, owner: owner, param: named, frame: frame,
+@@ -2468,6 +3390,17 @@
  // named stack is the reusable shape; the catalog of what a filter DOES belongs to a renderer.
  
  pub fn add_filter(doc: ref<Document>, clip_id: u64, kind: str) -> option<u64> effects {alloc} {
@@ -1522,7 +1666,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    match clip_slot(doc, clip_id) { some(found) => { }, none => { return option.none() }, }
    var order: u32 = 0
    var index: u64 = 0
-@@ -2537,12 +3335,31 @@
+@@ -2537,12 +3470,31 @@
      none => false,
    }
  }
@@ -1560,7 +1704,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
  }
  pub fn filter_order(doc: ref<Document>, id: u64) -> u32 effects {} {
    match filter_slot(doc, id) {
-@@ -2553,7 +3370,7 @@
+@@ -2553,7 +3505,7 @@
  
  // Move a filter to a new position in its clip's stack, renumbering the rest so the stack
  // stays a dense 0..n-1 sequence.
@@ -1569,7 +1713,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    let slot: u64 = match filter_slot(doc, id) { some(found) => found, none => { return false }, }
    let clip_id: u64 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=clip)
    let count: u32 = cast.sat(filter_count(doc, clip_id))
-@@ -2579,7 +3396,7 @@
+@@ -2579,7 +3531,7 @@
    true
  }
  
@@ -1578,7 +1722,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    let slot: u64 = match filter_slot(doc, id) { some(found) => found, none => { return false }, }
    let clip_id: u64 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=clip)
    let gone: u32 = struct.get(array.borrow(struct.borrow(doc, field=filters), slot), field=order)
-@@ -2606,13 +3423,13 @@
+@@ -2606,13 +3558,13 @@
  }
  
  // Remove every filter from a clip: the stack RESET.
@@ -1594,7 +1738,7 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
    match filter_slot(doc, filter) { some(found) => { }, none => { return false }, }
    var index: u64 = 0
    loop {
-@@ -3143,3 +3960,50 @@
+@@ -3143,3 +4095,74 @@
      none => false,
    }
  }
@@ -1644,4 +1788,28 @@ diff --git a/stdlib/editor.ai b/stdlib/editor.ai
 +  if not audio_context_reconcile(candidate) {return 0}
 +  let _=ref.swap(doc,candidate)
 +  answer
++}
++
++// Runtime presentation bounds supplied by a validated accepted audio endpoint.
++// These helpers do not change clip/sequence geometry or serialize a duration.
++pub fn program_action_until(doc:ref<Document>,action:u32,total:i64) -> Transport effects {} {
++  let last:i64=if total>0 {total-1}else{0}
++  let next:Transport=apply_transport(doc.program,action,last)
++  struct.set(doc,next,field=program)
++  next
++}
++pub fn seek_until(doc:ref<Document>,frame:i64,total:i64) -> i64 effects {} {
++  let last:i64=if total>0 {total-1}else{0}
++  let want:i64=if frame<0 {0}else{if frame>last {last}else{frame}}
++  let old:Transport=doc.program
++  struct.set(doc,Transport {playing:old.playing,frame:want,mark_in:old.mark_in,mark_out:old.mark_out,rate:old.rate,looping:old.looping},field=program)
++  want
++}
++pub fn export_range_until(doc:ref<Document>,total:i64) -> Transport effects {} {
++  let old:Transport=doc.program
++  let start:i64=if old.mark_in>=0 {old.mark_in}else{0}
++  var finish:i64=if old.mark_out>=0 {old.mark_out}else{total}
++  if finish>total {finish=total}
++  if finish<start {finish=start}
++  Transport {playing:false,frame:old.frame,mark_in:start,mark_out:finish,rate:old.rate,looping:old.looping}
 +}

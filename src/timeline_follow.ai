@@ -1,0 +1,16 @@
+// Page-follow the completed Program picture without per-frame strip churn.
+module genesis.timeline_follow
+// While playing, only a completed picture with current epoch identity can pan.
+pub fn allowed(enabled:bool,source_playing:bool,gesture_active:bool,pending_endpoint:bool,
+    playing:bool,shown:i64,current_picture:bool) -> bool effects {} {
+  enabled and not source_playing and not gesture_active and not pending_endpoint and
+    (not playing or (shown>=0 and current_picture))
+}
+pub fn page(frame:i64,scroll:i64,span:i64,enabled:bool,source_playing:bool) -> i64 effects {} {
+  if not enabled or source_playing or frame<0 or scroll<0 or span<=0 {return scroll}
+  if frame<scroll {return frame-frame%span}
+  let offset:i64=frame-scroll
+  if offset<span {return scroll}
+  // Subtraction stays within the signed domain even near its final frame.
+  frame-offset%span
+}

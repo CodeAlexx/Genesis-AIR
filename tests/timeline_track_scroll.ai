@@ -16,6 +16,8 @@ import "../src/commands.ai" as commands
 import "../src/input.ai" as input
 import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
+import "../src/preview.ai" as preview
+import "../src/timeline_follow.ai" as follow
 import "../src/view.ai" as painter
 
 fn encoded(state: ref<app.App>) -> string effects {alloc} {
@@ -73,8 +75,12 @@ fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process
   app.mark_dirty(state,false)
   var peaks: array<f64> = [0.8,0.8,0.8,0.8,0.8,0.8]
   app.set_waveform(state,5,peaks,0,59,state.media_revision)
-  var audio_peaks: array<f64> = [0.8,0.8,0.8,0.8,0.8,0.8]
-  app.set_waveform(state,7,audio_peaks,0,59,state.media_revision)
+  // The GUI A-lane paints a neutral-mixer visual reference; legacy V cache stays
+  // above to prove it cannot overlay frame strips. No real decode is needed here.
+  let audio_clip:editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),7))
+  var neutral:editor.Document=preview.visual_reference_document(struct.borrow(state,field=document))
+  let audio_key:string=match preview.visual_reference_key(neutral,audio_clip,8) {ok(value)=>value,err(_)=>string.new(),}
+  let _=app.set_visual_waveform(state,7,str.view(audio_key),array.repeat(0.8,8))
   let media_revision: u64=state.media_revision
   let document_revision: u64=state.document_revision
   array.push(struct.borrow(state,field=thumbnails),app.Thumbnail {clip:5,frame:0,source:3,
@@ -258,7 +264,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.check(suite,pixel(image,frame.timeline.left+30.0,y+40.0,draw.rgb(12,240,30)),"Cached thumbnail paints in the reached bottom lane")
   let _=test.check(suite,not pixel(image,frame.timeline.left+96.0,y+23.0,draw.rgb(150,224,196)),"Legacy V-lane waveform cache never overlays frame strips")
   let audio_y: f64=timeline.track_top(model,22)
-  let _=test.check(suite,pixel(image,frame.timeline.left+96.0,audio_y+23.0,draw.rgb(150,224,196)),"Cached stereo peaks paint on the independently authored A lane")
+  let _=test.check(suite,pixel(image,frame.timeline.left+96.0,audio_y+23.0,draw.rgb(215,255,236)),"Validated visual reference paints on the independently authored A lane")
   let _=test.check(suite,pixel(image,timeline.frame_to_x(model,60),y+23.0,draw.rgb(206,122,74)),"Transition seam paints over its authored lane")
   let header_body: f64=frame.timeline.bottom
   let colors: painter.Theme = painter.theme(state)
@@ -385,5 +391,123 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   let _=test.check(suite,app.zoom(long_state)==boundary_zoom and app.track_scroll(long_state)==boundary_lane,"Endpoint panning preserves zoom and lane offset")
   let _=test.eq_str(suite,authored(long_state),boundary_authored,"Endpoint panning preserves complete document, revision, dirty, selection and history")
   let _=test.done(suite)
-  test.conclude(suite,path.join(root,"timeline-track-scroll-tests.json"),8)
+  let _=test.start(suite,"Program page following retains a page and respects manual and Source ownership")
+  let _=test.eq_i64(suite,follow.page(359,0,360,true,false),0,"Every presented frame inside one page keeps strips unchanged")
+  let _=test.eq_i64(suite,follow.page(360,0,360,true,false),360,"The first frame outside the right edge opens the next page")
+  let _=test.eq_i64(suite,follow.page(1860,0,360,true,false),1800,"A distant Program time advances directly to its containing page")
+  let _=test.eq_i64(suite,follow.page(1861,1800,360,true,false),1800,"Subsequent frames do not cause per-frame strip requests")
+  let _=test.eq_i64(suite,follow.page(0,1800,360,true,false),0,"Start returns the timeline to its first page")
+  let _=test.eq_i64(suite,follow.page(1081,1800,360,true,false),1080,"Backward navigation opens its containing page")
+  let _=test.eq_i64(suite,follow.page(1860,12,360,false,false),12,"Manual panning is retained until following is rearmed")
+  let _=test.eq_i64(suite,follow.page(1860,12,360,true,true),12,"Source playback cannot move the Program timeline")
+  let _=test.eq_i64(suite,follow.page(1860,12,0,true,false),12,"No usable geometry means no viewport request")
+  let _=test.eq_i64(suite,follow.page(-1,12,360,true,false),12,"Unavailable picture does not move the timeline")
+  let _=test.eq_i64(suite,follow.page(9223372036854775807,9223372036854775800,7,true,false),9223372036854775807,"Page arithmetic at the signed endpoint cannot overflow")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Follow is discoverable and real input preserves manual pause and Source behavior")
+  var followed_state:app.App=fixture(root)
+  let follow_before:string=authored(followed_state)
+  let _=test.check(suite,followed_state.timeline_follow_program,"Program follows by default")
+  var follow_controls:array<chrome.Control> =chrome.timeline_bar(frame,followed_state)
+  var follow_area:layout.Rect=layout.rect(0.0,0.0,0.0,0.0)
+  var follow_on:bool=false
+  var follow_index:u64=0
+  loop {if follow_index>=array.len(follow_controls) {break}
+    let entry:ref<chrome.Control> =array.borrow(follow_controls,follow_index)
+    if entry.action==chrome.act_follow() {follow_area=entry.area
+      follow_on=entry.on and entry.style==chrome.style_toggle() and entry.enabled}
+    follow_index=follow_index+1}
+  let _=test.check(suite,layout.width_of(follow_area)>0.0 and follow_on,"Timeline builds a highlighted enabled Follow toggle")
+  let _=input.pointer_down(followed_state,1600.0,980.0,(follow_area.left+follow_area.right)*0.5,(follow_area.top+follow_area.bottom)*0.5)
+  let _=test.check(suite,not followed_state.timeline_follow_program,"Shared Follow hit-testing disables following")
+  let _=test.eq_str(suite,authored(followed_state),follow_before,"Follow toggle preserves authored graph, history and revisions")
+  app.set_open_menu(followed_state,chrome.menu_view())
+  var follow_menu:array<chrome.Control> =chrome.menu_popup(frame,followed_state)
+  var found_follow:bool=false
+  follow_index=0
+  loop {if follow_index>=array.len(follow_menu) {break}
+    let entry:ref<chrome.Control> =array.borrow(follow_menu,follow_index)
+    if entry.action==chrome.act_follow() {found_follow=entry.enabled and not entry.on}
+    follow_index=follow_index+1}
+  let _=test.check(suite,found_follow,"View menu reflects suspended Follow state")
+  app.set_open_menu(followed_state,chrome.menu_none())
+  struct.set(followed_state,true,field=timeline_follow_program)
+  let _=input.wheel(followed_state,1600.0,980.0,frame.timeline.left+20.0,frame.timeline.top+10.0,true,1,false)
+  let _=test.check(suite,app.scroll(followed_state)==12 and not followed_state.timeline_follow_program,"Actual horizontal pan visibly suspends Follow")
+  let _=editor.program_action(struct.borrow(followed_state,field=document),editor.play())
+  app.set_focus(followed_state,app.panel_program())
+  let _=input.key(followed_state,widgets.key_space(),false,false)
+  let _=test.check(suite,not followed_state.timeline_follow_program and not editor.playing(struct.borrow(followed_state,field=document)),"Pause retains manual viewport ownership")
+  let _=input.key(followed_state,widgets.key_space(),false,false)
+  let _=test.check(suite,followed_state.timeline_follow_program,"Explicit Program Play rearms Follow")
+  struct.set(followed_state,false,field=timeline_follow_program)
+  let _=input.key(followed_state,widgets.key_home(),false,false)
+  let _=test.check(suite,followed_state.timeline_follow_program and editor.playhead(struct.borrow(followed_state,field=document))==0,"Start rearms Follow at the actual beginning")
+  struct.set(followed_state,false,field=timeline_follow_program)
+  let _=input.key(followed_state,widgets.key_end(),false,false)
+  let _=test.check(suite,followed_state.timeline_follow_program and followed_state.endpoint_end_requested,"End rearms but remains deferred until endpoint acceptance")
+  struct.set(followed_state,false,field=timeline_follow_program)
+  var stop_controls:array<chrome.Control> =chrome.monitor_controls(frame,followed_state,false)
+  var stop_area:layout.Rect=layout.rect(0.0,0.0,0.0,0.0)
+  follow_index=0
+  loop {if follow_index>=array.len(stop_controls) {break}
+    let entry:ref<chrome.Control> =array.borrow(stop_controls,follow_index)
+    if entry.action==chrome.act_stop() {stop_area=entry.area}
+    follow_index=follow_index+1}
+  let _=input.pointer_down(followed_state,1600.0,980.0,(stop_area.left+stop_area.right)*0.5,(stop_area.top+stop_area.bottom)*0.5)
+  let _=test.check(suite,layout.width_of(stop_area)>0.0 and not followed_state.timeline_follow_program and not editor.playing(struct.borrow(followed_state,field=document)),"Actual Stop retains manual viewport ownership")
+  let _=input.pointer_down(followed_state,1600.0,980.0,frame.ruler.left+96.0,(frame.ruler.top+frame.ruler.bottom)*0.5)
+  let _=input.pointer_up(followed_state,1600.0,980.0,frame.ruler.left+96.0,(frame.ruler.top+frame.ruler.bottom)*0.5)
+  let _=test.check(suite,followed_state.timeline_follow_program and editor.playhead(struct.borrow(followed_state,field=document))>0 and not app.endpoint_requested(followed_state),"Actual Program ruler seek rearms Follow and lands before authored end")
+  struct.set(followed_state,false,field=timeline_follow_program)
+  let source_open:commands.Result=commands.open_source(followed_state,3)
+  let _=test.check(suite,source_open.ok,"Source navigation fixture opens its actual authored source")
+  app.set_focus(followed_state,app.panel_source())
+  let _=input.key(followed_state,widgets.key_space(),false,false)
+  let _=test.check(suite,not followed_state.timeline_follow_program and struct.get(struct.borrow(struct.borrow(followed_state,field=document),field=monitor),field=playing),"Actual Source Play never rearms Program following")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Timeline following uses the shared completed-picture coordinate")
+  let _=test.check(suite,follow.allowed(true,false,false,false,true,17,true),"Current completed Program picture owns page following")
+  let _=test.check(suite,not follow.allowed(true,false,false,false,true,-1,true),"Matching zero revisions cannot pan before an actual picture")
+  let _=test.check(suite,not follow.allowed(true,false,false,false,true,17,false),"Retired picture revision cannot pan a new document")
+  let _=test.check(suite,follow.allowed(true,false,false,false,false,-1,false),"Paused actual navigation does not require an asynchronous completed picture")
+  let _=test.check(suite,not follow.allowed(true,false,true,false,false,17,true) and not follow.allowed(true,false,false,true,false,17,true),"Active pointer and pending endpoint retain viewport ownership")
+  let _=test.check(suite,not follow.allowed(true,true,false,false,false,17,true) and not follow.allowed(false,false,false,false,false,17,true),"Source and explicit manual state never permit page following")
+  var positioned:app.App=fixture(root)
+  let _=editor.seek(struct.borrow(positioned,field=document),31)
+  let _=editor.program_action(struct.borrow(positioned,field=document),editor.play())
+  struct.set(positioned,17,field=presented_program_frame)
+  let _=test.eq_i64(suite,app.timeline_frame(positioned),17,"Playing timeline shares completed Program picture rather than requested clock frame")
+  let _=test.eq_i64(suite,follow.page(app.timeline_frame(positioned),0,20,true,false),0,"Decode ahead cannot prematurely pan the page")
+  struct.set(positioned,21,field=presented_program_frame)
+  let _=test.eq_i64(suite,follow.page(app.timeline_frame(positioned),0,20,true,false),20,"A completed Program crossing pans exactly once")
+  let _=editor.program_action(struct.borrow(positioned,field=document),editor.pause())
+  let _=test.eq_i64(suite,app.timeline_frame(positioned),31,"Paused navigation uses actual Program transport position")
+  let nav_edit:commands.Result=commands.set_clip_field(positioned,5,"gain",0.5)
+  let nav_undo:commands.Result=commands.undo(positioned)
+  let _=test.check(suite,nav_edit.ok and nav_undo.ok and array.len(struct.borrow(struct.borrow(positioned,field=history),field=redo))>0,"Painted marker navigation starts with a real Redo ledger")
+  let _=editor.seek(struct.borrow(positioned,field=document),31)
+  let _=editor.program_action(struct.borrow(positioned,field=document),editor.play())
+  struct.set(positioned,17,field=presented_program_frame)
+  let navigation_before:string=authored(positioned)
+  var marker_model:timeline.Timeline=painter.timeline_model(positioned,frame.timeline)
+  let marker_x:f64=timeline.frame_to_x(marker_model,marker_model.playhead)
+  let marker_y:f64=frame.timeline.top+20.0
+  let _=input.pointer_down(positioned,1600.0,980.0,marker_x,marker_y)
+  let _=test.check(suite,app.gesture_kind(positioned)==app.drag_scrub() and editor.playhead(struct.borrow(positioned,field=document))==17 and not editor.playing(struct.borrow(positioned,field=document)),"Clicking the painted17 marker scrubs17 rather than the requested31 clip")
+  let _=input.pointer_up(positioned,1600.0,980.0,marker_x,marker_y)
+  let _=test.check(suite,app.gesture_kind(positioned)==app.drag_none() and editor.playhead(struct.borrow(positioned,field=document))==17,"Painted marker release retires its gesture at the exact landed frame")
+  // Normalize only the expected transport navigation before full authored comparison.
+  let _=editor.seek(struct.borrow(positioned,field=document),31)
+  let _=editor.program_action(struct.borrow(positioned,field=document),editor.play())
+  let _=test.eq_str(suite,authored(positioned),navigation_before,"Painted marker seeking preserves exact graph, revisions, dirty, selection and Undo/Redo")
+  let _=commands.open_source(positioned,3)
+  app.set_focus(positioned,app.panel_source())
+  let _=input.key(positioned,widgets.key_space(),false,false)
+  let _=test.check(suite,not editor.playing(struct.borrow(positioned,field=document)) and app.timeline_frame(positioned)==31 and positioned.presented_program_frame==17,"Source Play pauses Program; paused timeline uses authored position while held Program picture remains explicit")
+  let _=test.check(suite,not follow.allowed(true,true,false,false,false,17,true),"Source ownership suppresses viewport follow during that paused-coordinate distinction")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"timeline-track-scroll-tests.json"),11)
 }

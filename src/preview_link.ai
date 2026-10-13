@@ -22,7 +22,7 @@ fn empty_timing() -> FrameTiming effects {} {
 pub type Link = struct {
   events: channel.Receiver, commands: array<channel.Sender>,
   ready: u64, waveforms: u64, thumbnails: u64, closed: bool, error: string, error_generation: u64, timing: FrameTiming,
-  pixel_stream: bool, snapshot_generation: u64, snapshot_key: string,
+  pixel_stream: bool, command_retirement:bool, snapshot_generation: u64, snapshot_key: string,
   pending_pixels: channel.ChunkBuffer, pending_info: array<u64>,
   pixel_info: array<u64>, pixel_data: bytes, pixel_error: string,
   window_first:u64,window_last:u64,window_received:u64,retired_through:u64,packets:array<Packet>,pending_discard:bool,
@@ -31,7 +31,9 @@ pub type Link = struct {
   source_data: bytes, source_width: u32, source_height: u32, source_generation: u64, source_taken: u64, source_held: bool
 }
 pub type Peer = struct {events: channel.Sender, commands: channel.Receiver, last_drain_ns: u64,
-  command_kind:u64, command:string}
+  command_kind:u64, command:string,
+  control_enabled:bool,control_mode:bool,current_generation:u64,pending_kind:u64,pending_command:string,
+  pending_control:bool,stopped:bool,retired_generation:u64}
 fn problem(detail: str) -> string effects {alloc} { text.concat("[GA_PREVIEW_CHANNEL] ", detail) }
 pub fn open() -> result<Link,string> effects {alloc,net,time} {
   open_mode(false)
@@ -49,7 +51,7 @@ fn open_mode(pixels: bool) -> result<Link,string> effects {alloc,net,time} {
   }
   result.ok(Link {events:events,commands:array.new(),ready:0,waveforms:0,
     thumbnails:0,closed:false,error:string.new(),error_generation:0,timing:empty_timing(),
-    pixel_stream:pixels,snapshot_generation:0,snapshot_key:string.new(),
+    pixel_stream:pixels,command_retirement:false,snapshot_generation:0,snapshot_key:string.new(),
     pending_pixels:channel.chunk_buffer(7376896),pending_info:array.new(),
     pixel_info:array.new(),pixel_data:bytes.copy(b""),pixel_error:string.new(),source_data:bytes.copy(b""),
     window_first:0,window_last:0,window_received:0,retired_through:0,packets:array.new(),pending_discard:false,
@@ -70,7 +72,8 @@ pub fn peer(carried: ref<channel.Ticket>) -> result<Peer,string> effects {alloc,
   var commands: channel.Receiver = match channel.open_command_lane(events,0,4096,128,deadline) {
     ok(value) => value, err(error) => { return result.err(problem(str.view(channel.message(error)))) },
   }
-  result.ok(Peer {events:events,commands:commands,last_drain_ns:0,command_kind:0,command:string.new()})
+  result.ok(Peer {events:events,commands:commands,last_drain_ns:0,command_kind:0,command:string.new(),control_enabled:false,control_mode:false,current_generation:0,
+    pending_kind:0,pending_command:string.new(),pending_control:false,stopped:false,retired_generation:0})
 }
 pub fn connect(link: ref<Link>) -> result<unit,string> effects {alloc,net,time} {
   let deadline: u64 = time.monotonic_ns()+3000000000
@@ -166,32 +169,140 @@ pub fn select_completed(link:ref<Link>,id:u64) -> bool effects {alloc} {
   let _=struct.replace(link,struct.replace(packet,array.new(),field=info),field=pixel_info)
   true
 }
-// Wait for work, then consume the queued burst. One decode reads the newest
-// committed document; a final Stop is never hidden by a later wake. The one-second
-// idle deadline permits cancellation if startup or command delivery failed; it
-// does not delay a request, which wakes the blocking receive immediately.
+// Validate cancellation authority before it can retire a running window. All
+// messages are owned by Peer; polling never consumes a replacement without saving it.
+pub fn window_command_id(command:str) -> result<u64,str> effects {alloc} {
+  var fields:array<string> = text.split(command,"\t")
+  if array.len(fields)!=7 {return result.err("[GA_PREVIEW_REQUEST] Invalid decode window")}
+  let first:u64=match text.parse_u64(array.borrow(fields,0)) {some(v)=>v,none=>0,}
+  let last:u64=match text.parse_u64(array.borrow(fields,1)) {some(v)=>v,none=>0,}
+  let snapshot:u64=match text.parse_u64(array.borrow(fields,2)) {some(v)=>v,none=>0,}
+  let program:i64=match text.parse_i64(array.borrow(fields,3)) {some(v)=>v,none=>-1,}
+  let source:i64=match text.parse_i64(array.borrow(fields,4)) {some(v)=>v,none=>-1,}
+  let revision_ok:bool=option.is_some(text.parse_u64(array.borrow(fields,5)))
+  let mode:u64=match text.parse_u64(array.borrow(fields,6)) {some(v)=>v,none=>2,}
+  if first==0 or last<first or last-first>1 or snapshot==0 or snapshot>first or
+      program<0 or source<0 or not revision_ok or mode>1 {
+    return result.err("[GA_PREVIEW_REQUEST] Invalid decode window bounds")}
+  result.ok(last)
+}
+fn control_failure(peer:ref<Peer>,detail:str) -> unit effects {alloc} {
+  struct.set(peer,true,field=pending_control)
+  struct.set(peer,12,field=pending_kind)
+  let _=struct.replace(peer,string.copy(detail),field=pending_command)
+  ()
+}
+fn save_control(peer:ref<Peer>,message:channel.Message own) -> unit effects {alloc,net,time} {
+  var owned:channel.Message=message
+  if peer.stopped {return ()}
+  if owned.kind==9 {struct.set(peer,true,field=stopped)
+    struct.set(peer,false,field=pending_control)
+    let _=struct.replace(peer,string.new(),field=pending_command)
+    return ()}
+  let value:string=match channel.text_of(owned) {some(v)=>v,none=>{
+    control_failure(peer,"[GA_PREVIEW_REQUEST] Invalid command text")
+    return ()},}
+  if owned.kind==10 and peer.control_enabled {
+    // Even a refused envelope can identify its caller's new request. Preserve
+    // the coded refusal; it cannot be silently coalesced into a later command.
+    var fields:array<string> = text.split(value,"\t")
+    let claimed:u64=if array.len(fields)>1 {match text.parse_u64(array.borrow(fields,1)) {some(v)=>v,none=>0,}}else{0}
+    let last:u64=match window_command_id(value) {ok(v)=>v,err(detail)=>{
+      // Validate even retired envelopes. Their coded refusal retains the old
+      // claimed identity and cannot cancel or relabel a newer valid window.
+      if claimed!=0 and claimed<=peer.current_generation {
+        fail(peer,claimed,string.copy(detail))
+        return ()
+      }
+      if claimed>peer.current_generation {struct.set(peer,claimed,field=current_generation)}
+      struct.set(peer,true,field=control_mode)
+      control_failure(peer,detail)
+      return ()},}
+    if last<=peer.current_generation {return ()}
+    struct.set(peer,true,field=control_mode)
+    struct.set(peer,last,field=current_generation)
+  }else if owned.kind==11 and peer.control_enabled {
+    let last:u64=match text.parse_u64(value) {some(v)=>v,none=>0,}
+    if last==0 {control_failure(peer,"[GA_PREVIEW_REQUEST] Invalid retirement identity")
+      return ()}
+    if last<=peer.current_generation {return ()}
+    // Retirement remains monotonic even when a newer window coalesces the
+    // pending command during this same bounded drain.
+    struct.set(peer,last,field=retired_generation)
+    struct.set(peer,true,field=control_mode)
+    struct.set(peer,last,field=current_generation)
+  }else if owned.kind==1 or owned.kind==8 {
+    // Paused/headless callers retain file-marker authority. A queued single
+    // request also retires a running command window before its next frame.
+    struct.set(peer,false,field=control_mode)
+  }else if peer.control_mode or owned.kind!=10 {
+    control_failure(peer,"[GA_PREVIEW_REQUEST] Unexpected preview command kind")
+    return ()
+  }
+  struct.set(peer,owned.kind,field=pending_kind)
+  let _=struct.replace(peer,value,field=pending_command)
+  struct.set(peer,true,field=pending_control)
+  ()
+}
+// Bounded true-nonblocking reads. At most the existing 128 command credits are
+// drained per check; replacement/retirement is retained and Stop is sticky.
+pub fn poll_commands(peer:ref<Peer>) -> result<unit,string> effects {alloc,net,time} {
+  if peer.stopped or (peer.pending_control and peer.pending_kind==12) {return result.ok(())}
+  var count:u64=0
+  let begin:u64=time.monotonic_ns()
+  loop {if count>=128 {break}
+    match channel.recv_now(struct.borrow(peer,field=commands),time.monotonic_ns()) {
+      ok(value)=>match value {some(message)=>{save_control(peer,message)},none=>{
+        return result.err(problem("Preview command lane ended unexpectedly"))},},
+      err(error)=>{if error.code==channel.code_empty() {break}
+        return result.err(problem(str.view(channel.message(error))))},
+    }
+    count=count+1
+    if peer.stopped or (peer.pending_control and peer.pending_kind==12) {break}
+  }
+  struct.set(peer,time.monotonic_ns()-begin,field=last_drain_ns)
+  result.ok(())
+}
+pub fn window_current(peer:ref<Peer>,id:u64) -> result<bool,string> effects {alloc,net,time} {
+  try poll_commands(peer)
+  result.ok(not peer.stopped and peer.control_mode and peer.current_generation==id and
+    not (peer.pending_control and peer.pending_kind==12))
+}
+pub fn retire_command(link:ref<Link>,id:u64) -> result<unit,string> effects {alloc,net,time} {
+  if id==0 or id<=link.ready or id<=link.window_last or id<=link.retired_through or
+      id<=link.snapshot_generation or array.len(struct.borrow(link,field=commands))==0 or link.closed {
+    return result.err(problem("Invalid retirement identity or closed command lane"))}
+  match channel.send(array.borrow(struct.borrow(link,field=commands),0),11,
+      str.bytes(string.from_int(id)),time.monotonic_ns()+100000000) {
+    ok(_)=>{},err(error)=>{return result.err(problem(str.view(channel.message(error))))},
+  }
+  retire_window(link)
+  struct.set(link,id,field=retired_through)
+  struct.set(link,0,field=snapshot_generation)
+  let _=struct.replace(link,string.new(),field=snapshot_key)
+  result.ok(())
+}
+// Consume saved replacement before blocking. An idle timeout is not a new command.
 pub fn next_checked(peer: ref<Peer>) -> result<bool,string> effects {alloc,net,time} {
   struct.set(peer,0,field=command_kind)
-  let _ = struct.replace(peer,string.new(),field=command)
-  var message: channel.Message = match channel.recv(struct.borrow(peer,field=commands),time.monotonic_ns()+1000000000) {
-    ok(value)=>match value {some(value)=>value,none=>{return result.err(problem("Preview command lane ended unexpectedly"))},},
-    err(error)=>{if error.code == channel.code_empty() {return result.ok(true)}
-      return result.err(problem(str.view(channel.message(error))))},
-  }
-  if message.kind == 9 { return result.ok(false) }
-  let drain_begin: u64 = time.monotonic_ns()
-  loop {
-    match channel.recv_now(struct.borrow(peer,field=commands),time.monotonic_ns()) {
-      ok(value)=>match value {some(value)=>{message=value
-        if message.kind == 9 { return result.ok(false) }},none=>{return result.err(problem("Preview command lane ended unexpectedly"))},},
-      err(error)=>{if error.code == channel.code_empty(){break}else{
-        return result.err(problem(str.view(channel.message(error))))}},
+  let _=struct.replace(peer,string.new(),field=command)
+  try poll_commands(peer)
+  if peer.stopped {return result.ok(false)}
+  if not peer.pending_control {
+    let _=match channel.recv(struct.borrow(peer,field=commands),time.monotonic_ns()+1000000000) {
+      ok(value)=>match value {some(message)=>save_control(peer,message),none=>{
+        return result.err(problem("Preview command lane ended unexpectedly"))},},
+      err(error)=>{if error.code==channel.code_empty() {return result.ok(true)}
+        return result.err(problem(str.view(channel.message(error))))},
     }
+    let _=try poll_commands(peer)
   }
-  struct.set(peer,time.monotonic_ns()-drain_begin,field=last_drain_ns)
-  struct.set(peer,message.kind,field=command_kind)
-  let value: string = match channel.text_of(message) {some(value)=>value,none=>string.new(),}
-  let _ = struct.replace(peer,value,field=command)
+  if peer.stopped {return result.ok(false)}
+  if peer.pending_control {
+    struct.set(peer,peer.pending_kind,field=command_kind)
+    let _=struct.replace(peer,struct.replace(peer,string.new(),field=pending_command),field=command)
+    struct.set(peer,false,field=pending_control)
+  }
   result.ok(true)
 }
 pub fn next(peer: ref<Peer>) -> bool effects {alloc,net,time} {
@@ -228,7 +339,9 @@ fn send_pixels_part(peer: ref<Peer>, root: str, id: u64, bounded:bool, kind: u64
   let began:u64=time.monotonic_ns()
   let window_deadline:u64=began+2000000000
   loop {
-    if bounded and str.len(root) != 0 {
+    if bounded and peer.control_mode {
+      if not try window_current(peer,id) {return result.ok(false)}
+    }else if bounded and str.len(root) != 0 {
       if tasks.requested_at(path.join(root,"stop")) {return result.ok(false)}
       let current:string=match files.read_text(path.join(root,"request.id")) {
         ok(value)=>value,err(_)=>{return result.err("[GA_PREVIEW_REQUEST] Cannot read the pixel request marker")},
@@ -245,7 +358,9 @@ fn send_pixels_part(peer: ref<Peer>, root: str, id: u64, bounded:bool, kind: u64
       ok(_)=>{return result.ok(true)},
       err(error)=>{
         if error.code != channel.code_full() {return result.err(problem(str.view(channel.message(error))))}
-        if str.len(root) != 0 {
+        if bounded and peer.control_mode {
+          if not try window_current(peer,id) {return result.ok(false)}
+        }else if str.len(root) != 0 {
           if tasks.requested_at(path.join(root,"stop")) {return result.ok(false)}
           let current: string = match files.read_text(path.join(root,"request.id")) {
             ok(value)=>value,err(_)=>{return result.err("[GA_PREVIEW_REQUEST] Cannot read the pixel request marker")},

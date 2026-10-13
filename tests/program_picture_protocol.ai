@@ -1,0 +1,69 @@
+module genesis.private.program_protocol
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/provider.ai" as provider
+
+fn line(source:str) -> string effects {alloc} {
+  var fields:array<string> = ["-","-","0","0","1","0","0","0","1","1","0","1","1","0","0","-","-1","0","4","-","0","0","1","1","0","0","0","1","1","1","1","1","1","0","1","0","0","0","1","0",".4",".1","0",".25",".5",".75","1","0","0","0","0","0","1","0","0","1","1","0","0","0","0","0","1","1","1","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","90","0",".5",".5","1","1","0","0","0","0","0","0","0","0","1","0","0","1","0","0","0","1",".5","0"]
+  let _=ref.swap(array.borrow(fields,0),text.concat("FLOATDIM:16:16:",provider.wire_path(source)))
+  text.concat("PREVIEW ",text.concat(text.join(fields," ")," -"))
+}
+fn exact(frame:ref<provider.Frame>,invert:bool) -> bool effects {} {
+  if not frame.ok or frame.width!=16 or frame.height!=16 {return false}
+  let pixels:ref<array<byte>> =struct.borrow(struct.borrow(frame,field=pixels),field=pixels)
+  if array.len(pixels)!=1024 {return false}
+  let opaque:u8=255
+  var y:u64=0
+  loop {if y>=16 {break}
+    var x:u64=0
+    loop {if x>=16 {break}
+      let white:bool=((x+y)%2==0)!=invert
+      let v:u8=if white {255}else{0}
+      let at:u64=(y*16+x)*4
+      if array.get(pixels,at)!=cast.bits(v) or array.get(pixels,at+1)!=cast.bits(v) or array.get(pixels,at+2)!=cast.bits(v) or array.get(pixels,at+3)!=cast.bits(opaque) {return false}
+      x=x+1
+    }
+    y=y+1
+  }
+  true
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  if view.len(args)<5 {return 2}
+  let root:str=view.get(args,3)
+  let mode:str=view.get(args,4)
+  let _=files.mkdirs(root)
+  var a:provider.Provider=provider.gcompose(view.get(args,1),root)
+  provider.use_program_stream(a,not str.starts_with(mode,"legacy-"))
+  provider.set_canvas(a,16,16)
+  let command:string=line(view.get(args,2))
+  let mode_file:string=path.join(root,"mode.txt")
+  let _=files.write_text(mode_file,mode)
+  var first:provider.Frame=provider.program_command(a,command,16,16)
+  let first_token:u64=a.picture_token
+  let first_ok:bool=first.ok
+  let first_error:string=provider.last_error(a)
+  let want_good:bool=str.eq(mode,"valid") or str.eq(mode,"delayed-extra") or str.eq(mode,"legacy-valid")
+  var good:bool=first_ok==want_good
+  if first_ok {good=exact(first,false) and good}
+  if not first_ok {good=first.width==0 and view.len(bytes.view(struct.borrow(a,field=program_pixels)))==0 and array.len(struct.borrow(a,field=picture_socket))==0 and str.starts_with(first_error,"[GA_") and good}
+  if str.eq(mode,"delayed-extra") {
+    var second:provider.Frame=provider.program_command(a,command,16,16)
+    good=not second.ok and view.len(bytes.view(struct.borrow(a,field=program_pixels)))==0 and good
+  }
+  let _=files.write_text(mode_file,if str.starts_with(mode,"legacy-") {"legacy-valid"}else{"valid"})
+  let _=struct.replace(a,string.new(),field=last_error)
+  var recovered:provider.Frame=provider.program_command(a,command,16,16)
+  good=exact(recovered,false) and good
+  if not want_good or str.eq(mode,"delayed-extra") {good=provider.worker_starts(a)==2 and good
+    if not str.starts_with(mode,"legacy-") {good=a.picture_token!=first_token and good}}
+  var values:array<string> =[string.copy(mode),string.from_int(if first_ok {1}else{0}),string.copy(first_error),string.from_int(a.starts),string.from_int(if good {1}else{0})]
+  provider.shutdown(a)
+  let _=files.write_text(path.join(root,"protocol.tsv"),text.concat(text.join(values,"\t"),"\n"))
+  if good {0}else{10}
+}
+
+
+
+

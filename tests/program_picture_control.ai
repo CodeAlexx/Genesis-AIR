@@ -1,0 +1,104 @@
+module genesis.private.program_cancellation
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.text as text
+import "../src/provider.ai" as provider
+import "../src/preview_link.ai" as link
+import std.channel as channel
+import std.tasks as tasks
+fn line(source:str) -> string effects {alloc} {
+  var fields:array<string> = ["-","-","0","0","1","0","0","0","1","1","0","1","1","0","0","-","-1","0","4","-","0","0","1","1","0","0","0","1","1","1","1","1","1","0","1","0","0","0","1","0",".4",".1","0",".25",".5",".75","1","0","0","0","0","0","1","0","0","1","1","0","0","0","0","0","1","1","1","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","90","0",".5",".5","1","1","0","0","0","0","0","0","0","0","1","0","0","1","0","0","0","1",".5","0"]
+  let _=ref.swap(array.borrow(fields,0),text.concat("FLOATDIM:16:16:",provider.wire_path(source)))
+  text.concat("PREVIEW ",text.concat(text.join(fields," ")," -"))
+}
+fn exact(frame:ref<provider.Frame>,invert:bool) -> bool effects {} {
+  if not frame.ok or frame.width!=16 or frame.height!=16 {return false}
+  let pixels:ref<array<byte>> =struct.borrow(struct.borrow(frame,field=pixels),field=pixels)
+  if array.len(pixels)!=1024 {return false}
+  let opaque:u8=255
+  var y:u64=0
+  loop {if y>=16 {break}
+    var x:u64=0
+    loop {if x>=16 {break}
+      let white:bool=((x+y)%2==0)!=invert
+      let v:u8=if white {255}else{0}
+      let at:u64=(y*16+x)*4
+      if array.get(pixels,at)!=cast.bits(v) or array.get(pixels,at+1)!=cast.bits(v) or array.get(pixels,at+2)!=cast.bits(v) or array.get(pixels,at+3)!=cast.bits(opaque) {return false}
+      x=x+1
+    }
+    y=y+1
+  }
+  true
+}
+type Work=struct {ticket:channel.Ticket,root:string,worker:string,mode:string}
+fn produce(carried:Work own) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,time} {
+  var w:Work=carried
+  var peer:link.Peer=match link.peer(struct.borrow(w,field=ticket)) {ok(v)=>v,err(_)=>{return false},}
+  struct.set(peer,true,field=control_enabled)
+  if not match link.next_checked(peer) {ok(v)=>v,err(_)=>false,} or peer.current_generation!=1 {return false}
+  var engine:provider.Provider=provider.gcompose(struct.borrow(w,field=worker),struct.borrow(w,field=root))
+  provider.use_program_stream(engine,true)
+  provider.set_canvas(engine,16,16)
+  provider.begin_picture_control(engine,peer,1)
+  let before:u64=time.monotonic_ns()
+  var frame:provider.Frame=provider.program_command(engine,line("-"),16,16)
+  let took:u64=time.monotonic_ns()-before
+  peer=provider.end_picture_control(engine)
+  let mode:str=struct.borrow(w,field=mode)
+  var good:bool=false
+  if str.eq(mode,"retire") {good=not frame.ok and peer.pending_control and peer.pending_kind==11 and peer.current_generation==2 and took<1000000000}
+  else if str.eq(mode,"stop") {good=not frame.ok and peer.stopped and took<1000000000}
+  else if str.eq(mode,"replacement") {good=exact(frame,false) and peer.pending_control and peer.pending_kind==10 and peer.current_generation==65
+    good=match link.next_checked(peer) {ok(v)=>v,err(_)=>false,} and good
+    good=peer.command_kind==10 and peer.current_generation==65 and good}
+  else if str.eq(mode,"retire-replace") {good=not frame.ok and peer.pending_control and peer.pending_kind==10 and peer.current_generation==66 and took<1000000000
+    good=match link.next_checked(peer) {ok(v)=>v,err(_)=>false,} and good
+    good=peer.command_kind==10 and peer.current_generation==66 and good}
+  else if str.eq(mode,"malformed") {good=not frame.ok and peer.pending_control and peer.pending_kind==12 and peer.current_generation==1}
+  let detail:string=provider.last_error(engine)
+  var row:array<string> = [string.copy(mode),string.from_int(if good {1}else{0}),string.from_int(if frame.ok {1}else{0}),string.from_int(peer.current_generation),string.from_int(peer.pending_kind),string.from_int(took),detail]
+  provider.shutdown(engine)
+  link.finish(peer,1)
+  let _=files.write_text(path.join(struct.borrow(w,field=root),"control.tsv"),text.concat(text.join(row,"\t"),"\n"))
+  good
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args)<4 {return 2}
+  let root:str=view.get(args,2)
+  let mode:str=view.get(args,3)
+  let _=files.mkdirs(root)
+  let _=files.write_text(path.join(root,"mode.txt"),if str.eq(mode,"replacement") {"slow-valid"}else{"partial"})
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return 3},}
+  let work:Work=Work {ticket:link.ticket(transport),root:string.copy(root),worker:string.copy(view.get(args,1)),mode:string.copy(mode)}
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> = [task.spawn(work,fn=produce)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=match link.window_frame(transport,1,1,1,0,0,1,false) {ok(_)=>true,err(_)=>false,} and good
+    let deadline:u64=time.monotonic_ns()+3000000000
+    loop {if match files.exists(path.join(root,"witness.tsv")) {ok(v)=>v,err(_)=>false,} {break}
+      if time.monotonic_ns()>=deadline {good=false
+        break}
+      time.sleep_ms(1)}
+    if str.eq(mode,"retire") {good=match link.retire_command(transport,2) {ok(_)=>true,err(_)=>false,} and good}
+    else if str.eq(mode,"stop") {good=match link.wake(transport,true) {ok(_)=>true,err(_)=>false,} and good}
+    else if str.eq(mode,"malformed") {good=match channel.send(array.borrow(struct.borrow(transport,field=commands),0),11,b"invalid",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,} and good}
+    else if str.eq(mode,"replacement") or str.eq(mode,"retire-replace") {
+      // An old retirement is ignored; 64 replacement windows stay bounded and
+      // coalesce by the existing sole control validator while record1 drains.
+      good=match channel.send(array.borrow(struct.borrow(transport,field=commands),0),11,b"1",time.monotonic_ns()+100000000) {ok(_)=>true,err(_)=>false,} and good
+      let retire_new:bool=str.eq(mode,"retire-replace")
+      if retire_new {good=match link.retire_command(transport,2) {ok(_)=>true,err(_)=>false,} and good}
+      var id:u64=if retire_new {3}else{2}
+      let last:u64=if retire_new {66}else{65}
+      loop {if id>last {break}
+        good=match link.window_frame(transport,id,id,1,cast.sat(id),0,1,false) {ok(_)=>true,err(_)=>false,} and good
+        id=id+1}
+    }
+    good=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,} and good
+  }
+  link.close_commands(transport)
+  if good {0}else{10}
+}
+

@@ -247,6 +247,9 @@ fn refused(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time}
     if variant >= 7 and variant <= 9 {
       let kind: string = if variant == 7 {string.copy("timer")}else if variant == 8 {string.copy("delay")}else{string.copy("reverb")}
       let _ = editor.add_filter(doc,id,kind)
+      // Native 48k unit-forward echo histories now have a retained-tail renderer.
+      // These refusals retain an unproved32k native domain;44.1k30FPS is now admitted.
+      if variant == 8 or variant == 9 {let _=editor.describe_source(doc,source,1920,1080,true,true,32000,2)}
     }
     if variant == 10 {let _ = editor.set_track_lock(doc,track,true)}
     if variant == 11 {let _ = editor.set_key(doc,id,"gain",-9223372036854775807,0.2,curve.linear())}

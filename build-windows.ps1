@@ -75,6 +75,18 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CHANNEL_PATCH_APPLY] Could not apply the shared channel deadline overlay.' }
   }
 } finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
+$channelReadPatch = Join-Path $here 'patches/air-channel-read-first.patch'
+if (-not (Test-Path -LiteralPath $channelReadPatch)) { throw '[GA_SDK_CHANNEL_READ_PATCH_MISSING] The shared channel terminal delivery overlay is missing.' }
+try {
+  $PSNativeCommandUseErrorActionPreference = $false
+  $null = & git -C $sdk apply --reverse --check $channelReadPatch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $null = & git -C $sdk apply --check $channelReadPatch 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CHANNEL_READ_PATCH_BASE] The channel terminal delivery overlay does not match this AIR SDK; existing changes preserved.' }
+    & git -C $sdk apply $channelReadPatch
+    if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CHANNEL_READ_PATCH_APPLY] Could not apply the shared channel terminal delivery overlay.' }
+  }
+} finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
 $processPatch = Join-Path $here 'patches/air-process-wait-windows.patch'
 $loopbackPatch = Join-Path $here 'patches/air-net-loopback-windows.patch'
 if (-not (Test-Path -LiteralPath $loopbackPatch)) { throw '[GA_SDK_LOOPBACK_PATCH_MISSING] The Windows loopback transport overlay is missing.' }
@@ -161,6 +173,8 @@ if ($RunTests) { $sources += ,@('nested-waveforms', 'tests/nested_waveforms.ai')
 if ($RunTests) { $sources += ,@('direct-waveforms', 'tests/direct_waveforms.ai') }
 if ($RunTests) { $sources += ,@('timeline-track-scroll', 'tests/timeline_track_scroll.ai') }
 if ($RunTests) { $sources += ,@('waveform-view', 'tests/waveform_view.ai') }
+if ($RunTests) { $sources += ,@('waveform-visual', 'tests/waveform_visual.ai') }
+if ($RunTests) { $sources += ,@('waveform-visual-media', 'tests/waveform_visual_media.ai') }
 if ($RunTests) { $sources += ,@('waveform-detail', 'tests/waveform_detail.ai') }
 if ($RunTests) { $sources += ,@('strip-viewport', 'tests/strip_viewport.ai') }
 if ($RunTests) { $sources += @(@('clip-clipboard', 'tests/clip_clipboard.ai'), @('clip-clipboard-media', 'tests/clip_clipboard_media.ai')) }
@@ -170,6 +184,19 @@ if ($RunTests) { $sources += ,@('audio-plan-preflight', 'tests/audio_plan_prefli
 if ($RunTests) { $sources += ,@('linked-media', 'tests/linked_media.ai') }
 if ($RunTests) { $sources += ,@('audio-context', 'tests/audio_context.ai') }
 if ($RunTests) { $sources += ,@('audio-context-retime', 'tests/audio_context_retime.ai') }
+if ($RunTests) { $sources += ,@('audio-tail-context', 'tests/audio_tail_context.ai') }
+if ($RunTests) { $sources += ,@('audio-tail-history', 'tests/audio_tail_history.ai') }
+if ($RunTests) { $sources += ,@('standalone-endpoint-controller', 'tests/standalone_endpoint_controller_lifecycle.ai') }
+if ($RunTests) { $sources += ,@('standalone-endpoint-preview', 'tests/standalone_endpoint_preview.ai') }
+if ($RunTests) { $sources += ,@('standalone-endpoint-media', 'tests/standalone_endpoint_media.ai') }
+if ($RunTests) { $sources += ,@('standalone-endpoint-actor', 'tests/standalone_endpoint_actor_lifecycle.ai') }
+if ($RunTests) { $sources += ,@('standalone-endpoint-cancel', 'tests/standalone_endpoint_cancel.ai') }
+if ($RunTests) { $sources += ,@('standalone-endpoint-timing', 'tests/standalone_endpoint_timing.ai') }
+if ($RunTests) { $sources += ,@('program-picture-persistent', 'tests/program_picture_persistent.ai') }
+if ($RunTests) { $sources += ,@('program-picture-protocol', 'tests/program_picture_protocol.ai') }
+if ($RunTests) { $sources += ,@('program-picture-control', 'tests/program_picture_control.ai') }
+if ($RunTests) { $sources += ,@('program-picture-epoch', 'tests/program_picture_epoch.ai') }
+if ($RunTests) { $sources += ,@('program-picture-profile', 'tests/program_picture_profile.ai') }
 if ($RunTests) { $sources += ,@('audio-edit-context', 'tests/audio_edit_context.ai') }
 if ($RunTests) { $sources += ,@('audio-nested-edit-context', 'tests/audio_nested_edit_context.ai') }
 if ($RunTests) { $sources += ,@('keyframe-controls', 'tests/keyframe_controls.ai') }
@@ -178,6 +205,7 @@ if ($RunTests) { $sources += ,@('transition-controls', 'tests/transition_control
 if ($RunTests) { $sources += ,@('transition-controls-media', 'tests/transition_controls_media.ai') }
 if ($RunTests) { $sources += ,@('filter-transactions', 'tests/filter_transactions.ai') }
 if ($RunTests) { $sources += ,@('channel-deadlines', 'tests/channel_deadlines.ai') }
+if ($RunTests) { $sources += ,@('channel-read-first', 'tests/channel_read_first.ai') }
 foreach ($entry in $sources) {
   $inputLinux = WslPath (Join-Path $here $entry[1])
   $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
@@ -215,6 +243,7 @@ if ($RunTests) { $targets += @('genesis-nested-waveforms') }
 if ($RunTests) { $targets += @('genesis-direct-waveforms') }
 if ($RunTests) { $targets += @('genesis-timeline-track-scroll') }
 if ($RunTests) { $targets += @('genesis-waveform-view') }
+if ($RunTests) { $targets += @('genesis-waveform-visual', 'genesis-waveform-visual-media') }
 if ($RunTests) { $targets += @('genesis-waveform-detail') }
 if ($RunTests) { $targets += @('genesis-strip-viewport') }
 if ($RunTests) { $targets += @('genesis-clip-clipboard', 'genesis-clip-clipboard-media') }
@@ -223,6 +252,7 @@ if ($RunTests) { $targets += @('genesis-preview-batch', 'genesis-preview-fifo') 
 if ($RunTests) { $targets += @('genesis-audio-plan-preflight') }
 if ($RunTests) { $targets += @('genesis-linked-media') }
 if ($RunTests) { $targets += @('genesis-channel-deadlines') }
+if ($RunTests) { $targets += @('genesis-channel-read-first') }
 if ($RunTests) { $targets += @('genesis-net-loopback-classifier', 'genesis-net-loopback-policy', 'genesis-net-loopback-resource') }
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
@@ -230,6 +260,9 @@ if ($RunTests) { $targets += @('genesis-native-u16-upload') }
 if ($RunTests) { $targets += @('genesis-export-ownership-worker') }
 if ($RunTests) { $targets += @('genesis-audio-context') }
 if ($RunTests) { $targets += @('genesis-audio-context-retime') }
+if ($RunTests) { $targets += @('genesis-audio-tail-context', 'genesis-audio-tail-history') }
+if ($RunTests) { $targets += @('genesis-standalone-endpoint-controller', 'genesis-standalone-endpoint-preview', 'genesis-standalone-endpoint-media', 'genesis-standalone-endpoint-actor', 'genesis-standalone-endpoint-cancel', 'genesis-standalone-endpoint-timing') }
+if ($RunTests) { $targets += @('genesis-program-picture-persistent', 'genesis-program-picture-protocol', 'genesis-program-picture-control', 'genesis-program-picture-epoch', 'genesis-program-picture-profile', 'genesis-program-picture-mock') }
 if ($RunTests) { $targets += @('genesis-audio-edit-context') }
 if ($RunTests) { $targets += @('genesis-audio-nested-edit-context') }
 if ($RunTests) { $targets += @('genesis-keyframe-controls') }

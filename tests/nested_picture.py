@@ -471,29 +471,64 @@ def workspace(report):
 
 
 def pcm_identity(ffmpeg, movie, doc):
-    payload=run([ffmpeg,"-nostdin","-v","error","-i",movie,"-map","0:a:0",
-                 "-ac","2","-ar",str(SR),"-f","f32le","pipe:1"]).stdout
-    values=array("f")
+    # This authored fixture has one static unit-rate audible compound root.
+    # Derive its actual audio extent separately from the16-picture background.
+    roots=[c for c in doc['clips'] if c['owner']==doc['active'] and c['enabled'] and c['nested']]
+    assert len(roots)==1 and not doc['filters'] and not doc['keys'], 'Unsupported PCM identity graph'
+    parent=roots[0]
+    children=[c for c in doc['clips'] if c['owner']==parent['nested'] and c['enabled']]
+    assert len(children)==1, 'Expected one authored audible child'
+    child=children[0]
+    source=next(s for s in doc['sources'] if s['id']==child['source'])
+    assert source['has_audio'] and source['audio_rate']==SR and not child['nested']
+    for c in (parent,child):
+        lane=next(t for t in doc['tracks'] if t['id']==c['track'])
+        assert not lane['muted'] and not lane['solo'] and lane['gain']==1 and lane['pan']==0
+        assert c['speed']==1 and not c['reverse'] and c['gain']==1 and c['pan']==0
+        assert c['fade_in']==c['fade_out']==0
+    parent_fps=next(s['fps'] for s in doc['sequences'] if s['id']==parent['owner'])
+    child_fps=next(s['fps'] for s in doc['sequences'] if s['id']==child['owner'])
+    assert parent_fps==child_fps==source['fps']==30, 'Fixed authored sample phase differs'
+    selected_begin=parent['source_in']
+    selected_end=selected_begin+parent['length']
+    assert child['start']<=selected_begin<selected_end<=child['start']+child['length']
+    source_begin=child['source_in']+selected_begin-child['start']
+    source_end=source_begin+parent['length']
+    assert 0<=source_begin<source_end<=source['frames']
+    audio_start=sample(parent['start'],parent_fps)
+    audio_end=sample(parent['start']+parent['length'],parent_fps)
+    native_start=sample(source_begin,source['fps'])
+    native_end=sample(source_end,source['fps'])
+    assert native_end-native_start==audio_end-audio_start
+    # Decode the original source independently. source() already proves its
+    # declared frame-coded PCM; no Genesis output becomes reference material.
+    original=array('f')
+    original.frombytes(run([ffmpeg,'-nostdin','-v','error','-i',source['path'],'-map','0:a:0',
+                           '-ac','2','-ar',str(SR),'-f','f32le','pipe:1']).stdout)
+    assert len(original)==sample(source['frames'],source['fps'])*2
+    payload=run([ffmpeg,'-nostdin','-v','error','-i',movie,'-map','0:a:0',
+                 '-ac','2','-ar',str(SR),'-f','f32le','pipe:1']).stdout
+    values=array('f')
     values.frombytes(payload)
-    assert len(values)==sample(16,30)*2,("A/V exact endpoint",len(values))
+    assert len(values)==audio_end*2, ('Exact authored audible EOF',len(values),audio_end*2)
     worst=0.
     worst_at=None
-    for n in range(sample(16,30)):
-        frame=n//1600
-        selected=frame+5
-        expected=(1000+selected*20,-1500-selected*17) if 2<=frame<14 else (0,0)
+    for n in range(audio_end):
         for channel in (0,1):
             actual=values[n*2+channel]
             assert math.isfinite(actual)
-            error=abs(actual-expected[channel]/32768)
+            expected=original[(native_start+n-audio_start)*2+channel] if n>=audio_start else 0.
+            error=abs(actual-expected)
             if error>worst:
                 worst=error
-                worst_at=dict(sample=n,channel=channel,actual=actual,expected=expected[channel]/32768)
-    assert worst<=2/8388608,("Authored PCM and video share exact nested source/placement",worst,worst_at,
-                          [list(values[sample(frame,30)*2:sample(frame,30)*2+2]) for frame in range(16)])
+                worst_at=dict(sample=n,channel=channel,actual=actual,expected=expected)
+    assert worst<=2/8388608, ('Authored PCM and video share exact nested source/placement',worst,worst_at)
     return dict(sample_frames=len(values)//2,worst_float_error=worst,
-                source_frame_for_active_picture="parent_frame+5",scope="saved lossless A/V identity; no device cadence claim")
-
+                authored_picture_frames=16,audio_active_samples=[audio_start,audio_end],
+                original_source_samples=[native_start,native_end],
+                source_frame_for_active_picture='parent_frame+5',
+                count_policy='Exact authored audible EOF; no trailing PCM allocation through longer picture end',
+                scope='saved lossless A/V identity; no device cadence claim')
 
 def refusal_cases(base):
     result=[]

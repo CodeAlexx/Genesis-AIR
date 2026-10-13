@@ -1,0 +1,262 @@
+// Authored model oracle for the direct original-history/EOF-tail editing domain.
+module genesis.tests.audio_tail_context
+import std.editor as editor
+import std.editor_io as store
+import std.testing as test
+import std.files as files
+import std.path as path
+import std.text as text
+
+fn encoded(doc:ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(s)=>s,err(_)=>string.copy("invalid"),}
+}
+fn seed(fps:f64,kind:str) -> editor.Document effects {alloc} {
+  var doc:editor.Document=editor.document(fps,64,36)
+  let src:u64=editor.add_source(doc,"authored.wav","Authored stereo48k",600,fps)
+  let _=editor.describe_source(doc,src,0,0,false,true,48000,2)
+  let track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id:u64=option.unwrap(editor.place(doc,track,src,30,60,10))
+  let _=editor.set_clip_streams(doc,id,editor.streams_audio())
+  let _=editor.add_filter(doc,id,kind)
+  doc
+}
+fn first(doc:ref<editor.Document>) -> editor.Clip effects {} {array.get(struct.borrow(doc,field=clips),0)}
+fn context(s:ref<test.Suite>,doc:ref<editor.Document>,id:u64,offset:i64,body:i64,tail:bool) -> unit effects {alloc} {
+  let clip:editor.Clip=option.unwrap(editor.clip(doc,id))
+  let _=test.check(s,option.is_some(clip.audio_context),"Accepted cut owns a durable complete graph context")
+  let ctx:editor.AudioContext=match clip.audio_context {none=>{return ()},some(c)=>c,}
+  let _=test.eq_i64(s,ctx.source_in,30,"Original input anchor is unchanged")
+  let _=test.eq_i64(s,ctx.length,60,"Original processing span is unchanged")
+  let _=test.eq_i64(s,ctx.origin,10,"Original sample phase is unchanged")
+  let _=test.eq_i64(s,ctx.offset,offset,"Authored crop offset is exact")
+  let _=test.eq_i64(s,clip.length,body,"Visible body geometry is exact")
+  let _=test.eq_u64(s,ctx.crop_start,cast.sat(offset*1600),"Crop is independently authored at30fps")
+  let _=test.eq_u64(s,ctx.output_frames,96000,"Complete original output remains96000 frames")
+  let _=test.check(s,ctx.rate==1.0 and not ctx.reverse and not option.is_some(ctx.extent),"Unit forward full-source context has no new input extent")
+  let _=test.check(s,(ctx.offset+clip.length==ctx.length)==tail,"Only original-end survivor owns original EOF suffix")
+  let _=test.check(s,editor.audio_context_valid(doc,clip) and editor.audio_tail_context_supported(doc,clip),"Stored context and renderer eligibility agree")
+  ()
+}
+fn split_and_recombine(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Whole split repeated cuts and recombination preserve original span and one tail owner")
+  var variant:u64=0
+  loop {if variant>=2 {break}
+    var doc:editor.Document=seed(30.0,if variant==0 {"delay"}else{"reverb"})
+    let id:u64=first(doc).id
+    let before:string=encoded(doc)
+    let _=test.check(s,editor.audio_tail_context_supported(doc,first(doc)),"Original static48k echo graph is eligible before context creation")
+    let _=test.check(s,not option.is_some(first(doc).audio_context),"Eligibility query never changes original project")
+    let _=test.eq_str(s,encoded(doc),before,"Whole-graph preflight is byte exact")
+    let right:u64=option.unwrap(editor.split(doc,id,30))
+    context(s,doc,id,0,20,false)
+    context(s,doc,right,20,40,true)
+    let last:u64=option.unwrap(editor.split(doc,right,50))
+    context(s,doc,right,20,20,false)
+    context(s,doc,last,40,20,true)
+    let _=test.check(s,editor.lift(doc,right) and editor.lift(doc,last),"Removed pieces retire their own authored graph records")
+    let _=test.check(s,editor.trim_end(doc,id,60),"Recombining within retained original window is representable")
+    context(s,doc,id,0,60,true)
+    variant=variant+1}
+  let _=test.done(s)
+  ()
+}
+fn trims_and_move(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Head tail interior and moved bodies retain the complete original graph")
+  var variant:u64=0
+  loop {if variant>=2 {break}
+    var head:editor.Document=seed(30.0,if variant==0 {"delay"}else{"reverb"})
+    let id:u64=first(head).id
+    let _=test.check(s,editor.trim_start(head,id,30),"Head trim preserves original history and original end")
+    context(s,head,id,20,40,true)
+    let _=test.check(s,editor.move_clip(head,id,first(head).track,100),"Move changes placement without reanchoring input or context phase")
+    context(s,head,id,20,40,true)
+    let _=test.eq_i64(s,first(head).start,100,"Move applies authored destination")
+    let _=test.check(s,editor.trim_end(head,id,20),"Removing original end deliberately removes its tail ownership")
+    context(s,head,id,20,20,false)
+    let _=test.check(s,editor.trim_start(head,id,105),"Repeated inward head trim remains legal")
+    context(s,head,id,25,15,false)
+    let before:string=encoded(head)
+    let _=test.check(s,not editor.trim_end(head,id,40),"Outward growth beyond immutable original span remains refused")
+    let _=test.eq_str(s,encoded(head),before,"Outward refusal preserves all authored bytes")
+    variant=variant+1}
+  let _=test.done(s)
+  ()
+}
+fn persistence(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Save Open snapshots Undo and Redo preserve complete tail context")
+  var doc:editor.Document=seed(30.0,"delay")
+  let id:u64=first(doc).id
+  let before:string=encoded(doc)
+  var history:editor.History=editor.history(8)
+  editor.capture(history,doc)
+  let right:u64=option.unwrap(editor.split(doc,id,30))
+  let saved:string=encoded(doc)
+  let _=test.check(s,not str.eq(saved,"invalid") and option.is_some(str.find(saved,"\"revision\":3")),"Accepted tail cut uses the existing durable revision3 shape")
+  var loaded:editor.Document=match store.decode(saved) {ok(d)=>d,err(_)=>{let _=test.check(s,false,"Saved tail graph opens")
+    return ()},}
+  let _=test.eq_str(s,encoded(loaded),saved,"Codec roundtrip preserves full graph without field dropping")
+  context(s,loaded,id,0,20,false)
+  context(s,loaded,right,20,40,true)
+  let _=test.check(s,editor.undo(history,doc),"Cut has Undo")
+  let _=test.eq_str(s,encoded(doc),before,"Undo restores original context-free bytes")
+  let _=test.check(s,editor.redo(history,doc),"Cut has Redo")
+  let _=test.eq_str(s,encoded(doc),saved,"Redo restores exact complete graph and contexts")
+  var snapshot:editor.ClipSnapshot=option.unwrap(editor.clip_snapshot(doc,right))
+  let pasted:u64=match editor.paste_clip_snapshot(loaded,snapshot,first(loaded).track,200) {ok(n)=>n,err(_)=>{let _=test.check(s,false,"Tail piece snapshot pastes")
+    return ()},}
+  context(s,loaded,pasted,20,40,true)
+  let _=test.done(s)
+  ()
+}
+fn refusal_domain(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Unproved source time direction enabled graphs and automation refuse before mutation")
+  var mode:u64=0
+  loop {if mode>=14 {break}
+    var doc:editor.Document=seed(if mode==0 {59.94}else if mode==1 {25.0}else{30.0},"delay")
+    let original:editor.Clip=first(doc)
+    let id:u64=original.id
+    let f:u64=option.unwrap(editor.filter_at(doc,id,0))
+    if mode==1 {let _=editor.describe_source(doc,original.source,0,0,false,true,44100,2)}
+    if mode==2 {let _=editor.set_clip_speed(doc,id,2.0)}
+    if mode==3 {let _=editor.set_clip_reverse(doc,id,true)}
+    if mode==4 {let _=editor.set_source_offline(doc,original.source)}
+    if mode==5 {let _=editor.add_filter(doc,id,"unknown_audio")}
+    if mode==6 {let _=editor.add_filter(doc,id,"pitch")}
+    if mode==7 {let _=editor.set_key(doc,id,"pan",-2,0.2,0)}
+    if mode==8 {let _=editor.set_key(doc,id,"fade_in",2,4.0,0)}
+    if mode==9 {let _=editor.set_key(doc,id,"delay.time",-2,100.0,0)}
+    if mode==10 {let _=editor.set_key(doc,id,text.concat("filter.",text.concat(string.from_int(f),".delay.time")),2,100.0,0)}
+    if mode==11 {let _=editor.set_key(doc,id,"speed",2,1.0,0)}
+    if mode==12 {let _=editor.set_key(doc,id,"fade_out",2,4.0,0)}
+    if mode==13 {let _=editor.describe_source(doc,original.source,64,36,true,true,48000,2)
+      let _=editor.set_clip_streams(doc,id,editor.streams_both())
+      let _=editor.add_filter(doc,id,"timer")}
+    let before:string=encoded(doc)
+    if mode!=13 {let _=test.check(s,not editor.audio_tail_context_supported(doc,first(doc)),"Eligibility excludes each unproved authored context")}
+    let _=test.check(s,not editor.split_possible(doc,id,30) and not option.is_some(editor.split(doc,id,30)),"Unsupported cut remains a real refusal")
+    let _=test.eq_str(s,encoded(doc),before,"Refused Split preserves complete document")
+    let _=test.check(s,not editor.trim_start(doc,id,30),"Unsupported head trim remains a real refusal")
+    let _=test.eq_str(s,encoded(doc),before,"Refused head trim preserves complete document")
+    mode=mode+1}
+  let _=test.done(s)
+  ()
+}
+fn supported_keys_and_filters(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Static ordered audio stacks and dormant or picture keys retain exact eligibility")
+  var doc:editor.Document=seed(30.0,"delay")
+  let id:u64=first(doc).id
+  let compressor:u64=option.unwrap(editor.add_filter(doc,id,"compressor"))
+  let eq:u64=option.unwrap(editor.add_filter(doc,id,"eq_3band"))
+  let _=editor.reorder_filter(doc,eq,0)
+  let dormant:u64=option.unwrap(editor.add_filter(doc,id,"reverb"))
+  let _=editor.set_filter_enabled(doc,dormant,false)
+  let _=editor.set_key(doc,id,text.concat("filter.",text.concat(string.from_int(dormant),".reverb.amount")),0,0.5,0)
+  let _=editor.set_key(doc,id,"gain",-4,0.3,0)
+  let _=editor.set_key(doc,id,"brightness.level",0,1.2,0)
+  let _=test.check(s,editor.audio_tail_context_supported(doc,first(doc)),"Dormant instance keys and supported gain/picture keys do not block audio cuts")
+  let right:u64=option.unwrap(editor.split(doc,id,30))
+  context(s,doc,right,20,40,true)
+  let before:string=encoded(doc)
+  let _=test.check(s,not editor.set_filter_enabled(doc,dormant,true),"Enabling authored animated audio graph refuses transactionally")
+  let _=test.eq_str(s,encoded(doc),before,"Enable refusal preserves authored disabled keys and graph")
+  let _=test.eq_u64(s,option.unwrap(editor.filter_at(doc,id,0)),eq,"Static filter order remains authored")
+  let _=test.eq_u64(s,editor.filter_count(doc,id),4,"Every ordered and dormant filter survives split")
+  let _=test.check(s,editor.filter_enabled(doc,compressor),"Original compressor remains enabled")
+  let _=test.done(s)
+  ()
+}
+fn retained_mutations(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Retained tail contexts cannot mutate into a silently capped unsupported graph")
+  var doc:editor.Document=seed(30.0,"reverb")
+  let id:u64=first(doc).id
+  let _=editor.trim_start(doc,id,30)
+  let before:string=encoded(doc)
+  let _=test.check(s,not editor.set_clip_speed(doc,id,2.0),"New retained tail rate is unproved")
+  let _=test.check(s,not editor.set_clip_reverse(doc,id,true),"New retained tail direction is unproved")
+  let _=test.check(s,not editor.slip(doc,id,1),"New retained tail input reanchor is unproved")
+  let _=test.check(s,not option.is_some(editor.add_filter(doc,id,"pitch")),"Unsupported enabled graph addition refuses")
+  let _=test.check(s,not option.is_some(editor.add_filter(doc,id,"normalize")),"Unproved full-EOF Normalize ordering remains refused")
+  let _=test.check(s,not editor.set_key(doc,id,"pan",0,0.5,0),"Unsupported key insertion refuses before interning names")
+  let _=test.eq_str(s,encoded(doc),before,"All lifecycle refusals preserve complete authored bytes")
+  let _=test.check(s,editor.set_clip_speed(doc,id,0.0),"Held scalar rate keeps dormant valid context")
+  let _=test.check(s,editor.audio_context_valid(doc,first(doc)) and not editor.audio_tail_context_supported(doc,first(doc)),"Held tail contributes silence without dropping metadata")
+  let _=test.check(s,editor.set_clip_speed(doc,id,1.0),"Returning to original rate restores eligible history")
+  let _=test.eq_str(s,encoded(doc),before,"Held resume roundtrip is byte exact")
+  let _=test.check(s,editor.set_source_offline(doc,first(doc).source),"Offline metadata remains an authored source edit")
+  let _=test.check(s,editor.audio_context_valid(doc,first(doc)) and not editor.audio_tail_context_supported(doc,first(doc)),"Offline retains valid history while live tail eligibility refuses")
+  let _=test.check(s,editor.audio_tail_context_potential(doc,first(doc)),"Offline original-end potential interval still reaches coded source preflight")
+  let offline:string=encoded(doc)
+  let _=test.check(s,not str.eq(offline,"invalid"),"Offline retained context remains Save-able")
+  let _=test.check(s,match store.decode(offline) {ok(loaded)=>str.eq(encoded(loaded),offline),err(_)=>false,},"Offline codec roundtrip preserves metadata and complete context")
+  let _=test.done(s)
+  ()
+}
+fn admitted_phases(s:ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(s,"Native44k and exact fractional owners retain original absolute sample phase")
+  let owners:array<f64> = [24.0,30.0,60.0,24000.0/1001.0,30000.0/1001.0,60000.0/1001.0]
+  let bodies:array<u64> = [122000,97600,48800,122122,97697,48849]
+  let crops:array<u64> = [4000,3200,1600,4004,3203,1601]
+  var native:u64=0
+  loop {if native>=2 {break}
+    var i:u64=0
+    loop {if i>=array.len(owners) {break}
+      let fps:f64=array.get(owners,i)
+      var doc:editor.Document=editor.document(fps,64,36)
+      let source:u64=editor.add_source(doc,"authored.wav","Native phase source",600,fps)
+      let _=editor.describe_source(doc,source,0,0,false,true,if native==0 {44100}else{48000},2)
+      let track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+      let id:u64=option.unwrap(editor.place(doc,track,source,1,61,1))
+      let _=editor.set_clip_streams(doc,id,editor.streams_audio())
+      let _=editor.add_filter(doc,id,"delay")
+      let _=test.check(s,editor.audio_tail_context_supported(doc,first(doc)),"Proven native and exact owner FPS is admitted")
+      let _=test.check(s,editor.trim_start(doc,id,3),"Head edit preserves full source and owner phase")
+      let ctx:editor.AudioContext=option.unwrap(first(doc).audio_context)
+      let _=test.eq_u64(s,ctx.output_frames,array.get(bodies,i),"Independent absolute original endpoints define N")
+      let _=test.eq_u64(s,ctx.crop_start,array.get(crops,i),"Independent original-owner crop is never rounded local duration")
+      let _=test.check(s,ctx.origin==1 and ctx.source_in==1 and ctx.length==61 and ctx.offset==2,"Full authored context identity survives inward edit")
+      let saved:string=encoded(doc)
+      let _=test.check(s,match store.decode(saved) {ok(loaded)=>str.eq(encoded(loaded),saved),err(_)=>false,},"Admitted phase Save Open preserves exact original context")
+      let _=test.check(s,not editor.set_clip_speed(doc,id,2.0) and not editor.set_clip_reverse(doc,id,true),"Admission does not enable unproved retime or reverse")
+      let _=test.eq_str(s,encoded(doc),saved,"Refused direction/rate edits remain byte exact")
+      i=i+1}
+    native=native+1}
+  let _=test.done(s)
+  let _=test.start(s,"Legacy native48k integral owners stay admitted while44k unproved owners stay atomic")
+  let fpses:array<f64> = [25.0,50.0,120.0]
+  native=0
+  loop {if native>=2 {break}
+    var i:u64=0
+    loop {if i>=array.len(fpses) {break}
+      var doc:editor.Document=seed(array.get(fpses,i),"reverb")
+      let id:u64=first(doc).id
+      let _=editor.describe_source(doc,first(doc).source,0,0,false,true,if native==0 {48000}else{44100},2)
+      let before:string=encoded(doc)
+      let _=test.check(s,editor.audio_tail_context_supported(doc,first(doc))==(native==0),"Legacy48k admission does not broaden44k unsupported FPS")
+      let right:option<u64> =editor.split(doc,id,30)
+      let _=test.check(s,option.is_some(right)==(native==0),"Actual Split agrees with native source phase admission")
+      if native==1 {
+        let _=test.check(s,not editor.trim_start(doc,id,30),"Unproved44k owner head trim refuses")
+        let _=test.eq_str(s,encoded(doc),before,"Unsupported Split and trim preserve all authored bytes")
+      }else{
+        let saved:string=encoded(doc)
+        let _=test.check(s,match store.decode(saved) {ok(loaded)=>str.eq(encoded(loaded),saved),err(_)=>false,},"Previously supported48k owner retains codec graph")
+      }
+      i=i+1}
+    native=native+1}
+  let _=test.done(s)
+  ()
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,time,io.write} {
+  if view.len(args)<2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("Direct original-history audio tail context",false)
+  split_and_recombine(suite)
+  trims_and_move(suite)
+  persistence(suite)
+  refusal_domain(suite)
+  supported_keys_and_filters(suite)
+  retained_mutations(suite)
+  admitted_phases(suite)
+  test.conclude(suite,path.join(root,"audio-tail-context-tests.json"),8)
+}

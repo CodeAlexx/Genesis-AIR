@@ -19,7 +19,7 @@ pub type Row = struct {
   window_first_id:u64,window_last_id:u64,window_first_frame:i64,window_last_frame:i64,
   window_count:u64,owned_credit:u64,reserved_credit:u64
 }
-pub type Profile = struct {enabled: bool, path: string, pending: string, rows: u64, buffered: u64, previous_ns: u64, retained: bool, last: Row}
+pub type Profile = struct {enabled: bool, path: string, pending: string, chunks: array<string>, rows: u64, buffered: u64, previous_ns: u64, retained: bool, last: Row}
 pub fn row() -> Row effects {} {
   Row {begin:0,present_begin:0,present_end:0,end:0,signature:0,paint:0,present:0,wait:0,
     program:-1,source:-1,heard_before:-1,heard_after:-1,samples_before:0,samples_after:0,
@@ -43,7 +43,7 @@ pub fn context(row: ref<Row>, source_mode: bool, playing: bool, origin: i64,
   ()
 }
 pub fn idle() -> Profile effects {alloc} {
-  Profile {enabled:false,path:string.new(),pending:string.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()}
+  Profile {enabled:false,path:string.new(),pending:string.new(),chunks:array.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()}
 }
 pub fn header() -> str effects {} { "loop_begin_ns\tpresent_begin_ns\tpresent_end_ns\tloop_end_ns\tsignature_ns\tpaint_ns\tpresent_ns\twait_ns\tprogram_shown\tsource_shown\theard_before\theard_after\tsamples_before\tsamples_after\tqueued_before\tqueued_after\taudio_origin\tfps\tsource_mode\tplaying\tclock_ok\tpresent_ok\tdocument_revision\tmedia_revision\twidth\theight\tprepared_frames\tsnapshot_generation\taudio_cache_rebuilds\tstrip_requests\tinput_events\tdiagnostic_previous_ns\tprepared_first_frame\tprepared_last_frame\tlast_requested_frame\tin_flight_request\treceived_request\tcompleted_packets\toverwritten_packets\twindow_first_id\twindow_last_id\twindow_first_frame\twindow_last_frame\twindow_count\towned_picture_credit\treserved_picture_credit\n" }
 // Startup targets retain their historical replace behavior; menu traces always
@@ -60,7 +60,7 @@ pub fn start_at(target:str,exclusive:bool) -> result<Profile,string> effects {al
     match files.write_text(target,header()) {ok(_)=>{},err(_)=>{
       return result.err(text.concat("[GA_WINDOW_PROFILE_WRITE] Cannot write timing header: ",target))},}
   }
-  result.ok(Profile {enabled:true,path:string.copy(target),pending:string.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()})
+  result.ok(Profile {enabled:true,path:string.copy(target),pending:string.new(),chunks:array.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()})
 }
 pub fn startup() -> result<Profile,string> effects {alloc,env,fs.write} {
   let target:string=match env.get("GENESIS_WINDOW_PROFILE") {some(value)=>value,none=>string.new(),}
@@ -87,7 +87,7 @@ pub fn start_local(root:str) -> result<Profile,string> effects {alloc,fs.meta,fs
       return result.err(text.concat("[GA_WINDOW_PROFILE_CREATE] Cannot reserve timing trace: ",target))},}
     match fs.write_all(output,str.bytes(header())) {ok(_)=>{},err(_)=>{
       return result.err(text.concat("[GA_WINDOW_PROFILE_WRITE] Cannot write timing header: ",target))},}
-    return result.ok(Profile {enabled:true,path:target,pending:string.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()})
+    return result.ok(Profile {enabled:true,path:target,pending:string.new(),chunks:array.new(),rows:0,buffered:0,previous_ns:0,retained:false,last:row()})
   }
   result.err(text.concat("[GA_WINDOW_PROFILE_CREATE] Timing name collision limit: ",directory))
 }
@@ -119,18 +119,47 @@ fn integer(out: ref<string>, value: i64) -> unit effects {alloc} {
   string.append(out,"\t")
   ()
 }
+// Shared native policy: logical playback also covers silent/preparing epochs.
+pub fn buffered_playback(program_playing:bool,source_playing:bool,audio_active:bool,running:bool) -> bool effects {} {
+  program_playing or source_playing or audio_active or not running
+}
+pub fn flush_ready(program_playing:bool,source_playing:bool,audio_active:bool) -> bool effects {} {
+  not program_playing and not source_playing and not audio_active
+}
+pub fn flush_transition(previous_playing:bool,playing:bool,running:bool) -> bool effects {} {
+  (previous_playing and not playing) or not running
+}
+pub fn finish_cap(rows:u64,program_playing:bool,source_playing:bool,audio_active:bool) -> bool effects {} {
+  rows>=50000 and flush_ready(program_playing,source_playing,audio_active)
+}
+fn append_failed(profile:ref<Profile>) -> result<unit,string> effects {alloc} {
+  struct.set(profile,false,field=enabled)
+  // An open/write/close failure can have left a partial prefix. Retire every
+  // owned block; a later flush must never duplicate any committed prefix.
+  let _=struct.replace(profile,string.new(),field=pending)
+  let _=struct.replace(profile,array.new(),field=chunks)
+  struct.set(profile,0,field=buffered)
+  result.err(text.concat("[GA_WINDOW_PROFILE_WRITE] Timing append failed; trace may be partial: ",
+    struct.borrow(profile,field=path)))
+}
 pub fn flush_checked(profile:ref<Profile>) -> result<unit,string> effects {alloc,fs.write} {
   if profile.enabled and profile.buffered>0 {
-    match files.append_text(struct.borrow(profile,field=path),struct.borrow(profile,field=pending)) {
-      ok(_)=>{},err(_)=>{
-        struct.set(profile,false,field=enabled)
-        // A partial filesystem write cannot safely be retried without duplicating
-        // rows. Leave the on-disk prefix as evidence and retire this recorder.
-        let _=struct.replace(profile,string.new(),field=pending)
-        struct.set(profile,0,field=buffered)
-        return result.err(text.concat("[GA_WINDOW_PROFILE_WRITE] Timing append failed; trace may be partial: ",
-          struct.borrow(profile,field=path)))},}
+    var output:File=match fs.open(struct.borrow(profile,field=path),mode=append) {
+      ok(value)=>value,err(_)=>{return append_failed(profile)},}
+    var failed:bool=false
+    var at:u64=0
+    loop {if at>=array.len(struct.borrow(profile,field=chunks)) {break}
+      match fs.write(output,str.bytes(array.borrow(struct.borrow(profile,field=chunks),at))) {
+        ok(_)=>{},err(_)=>{failed=true
+          break},}
+      at=at+1}
+    if not failed {
+      match fs.write(output,str.bytes(struct.borrow(profile,field=pending))) {ok(_)=>{},err(_)=>{failed=true},}
+    }
+    match fs.close(output) {ok(_)=>{},err(_)=>{failed=true},}
+    if failed {return append_failed(profile)}
     let _=struct.replace(profile,string.new(),field=pending)
+    let _=struct.replace(profile,array.new(),field=chunks)
     struct.set(profile,0,field=buffered)
   }
   result.ok(())
@@ -249,7 +278,7 @@ fn retain(profile:ref<Profile>,value:ref<Row>) -> bool effects {} {
   if value.end<=prior.end {return true}
   value.end-prior.end>=16000000
 }
-pub fn record_buffered_checked(profile: ref<Profile>, row: ref<Row>) -> result<unit,string> effects {alloc,fs.write,time} {
+pub fn record_buffered_checked(profile: ref<Profile>, row: ref<Row>) -> result<unit,string> effects {alloc,time} {
   if not profile.enabled or profile.rows >= 50000 {return result.ok(())}
   if not retain(profile,row) {return result.ok(())}
   let began: u64 = time.monotonic_ns()
@@ -286,6 +315,12 @@ pub fn record_buffered_checked(profile: ref<Profile>, row: ref<Row>) -> result<u
   struct.set(profile,true,field=retained)
   struct.set(profile,profile.rows+1,field=rows)
   struct.set(profile,profile.buffered+1,field=buffered)
+  // Move at most128 rows rather than growing/copying the whole retained trace.
+  // No file is opened here; flush_checked publishes owned blocks in order.
+  if profile.buffered%128==0 {
+    let block:string=struct.replace(profile,string.new(),field=pending)
+    array.push(struct.borrow(profile,field=chunks),block)
+  }
   struct.set(profile,time.monotonic_ns()-began,field=previous_ns)
   result.ok(())
 }

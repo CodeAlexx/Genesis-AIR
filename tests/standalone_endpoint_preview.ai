@@ -1,0 +1,196 @@
+// CPU-only real persistent preview task: two independent timed completions from
+// one command. The fake decoder encodes frame number in its corner pixel.
+module test.standalone_endpoint_preview
+import std.channel as channel
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.tasks as tasks
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/preview.ai" as preview
+import "../src/preview_link.ai" as link
+import "../src/provider.ai" as provider
+import "../src/audio_endpoint.ai" as endpoint
+
+fn fixture(root: str, source_playing: bool) -> app.App effects {alloc} {
+  var state: app.App = app.app(provider.fake(root))
+  var doc: editor.Document = editor.document(60.0,32,18)
+  let source: u64 = editor.add_source(doc,"batch-coded.mov","Frame-coded source",120,60.0)
+  let _ = editor.describe_source(doc,source,32,18,true,true,48000,2)
+  let lane: u64 = editor.add_track(doc,doc.active,editor.track_video(),"Video")
+  let _ = editor.place(doc,lane,source,0,60,0)
+  struct.set(doc,source,field=monitor_source)
+  commands.replace_project(state,doc)
+  if source_playing {let _ = editor.monitor_action(struct.borrow(state,field=document),editor.play())}
+  else {let _ = editor.program_action(struct.borrow(state,field=document),editor.play())}
+  struct.set(state,7,field=media_revision)
+  state
+}
+fn read(root: str, file: str) -> string effects {alloc,fs.read} {
+  match files.read_text(path.join(root,file)) {ok(value)=>value,err(_)=>string.new(),}
+}
+fn await_pair(transport: ref<link.Link>, last: u64) -> bool effects {alloc,io.write,net,time} {
+  match link.await_ready(transport,last,time.monotonic_ns()+5000000000) {ok(_)=>true,err(problem)=>{
+    io.write(text.concat(problem,"\n"))
+    var fields:array<string> = [string.from_int(last),string.from_int(transport.ready),
+      string.from_int(transport.error_generation),string.from_int(transport.completed_total),
+      if transport.closed {"closed"}else{"open"},string.copy(struct.borrow(transport,field=error))]
+    io.write(text.concat("preview failure state: ",text.concat(text.join(fields,"\t"),"\n")))
+    false},}
+}
+fn corner(surface: ref<draw.Surface>, frame: i64) -> bool effects {} {
+  let positive: u64 = cast.sat(frame)
+  match draw.surface_pixel(surface,0,0) {none=>false,some(color)=>{
+    color.r == cast.sat((positive%128)*2) and color.g == 255},
+  }
+}
+fn check_packet(suite: ref<test.Suite>, transport: ref<link.Link>, id: u64, program: i64, source: i64)
+    -> bool effects {alloc} {
+  let selected: bool = link.select_completed(transport,id)
+  let _ = test.check(suite,selected,"FIFO permits selecting the exact individual request")
+  if not selected {return false}
+  let _ = test.eq_u64(suite,transport.timing.generation,id,"Individual timing retains original request ID")
+  let _ = test.eq_i64(suite,transport.position.program_frame,program,"Program timestamp is the authored requested frame")
+  let _ = test.eq_i64(suite,transport.position.source_frame,source,"Source timestamp preserves playing or parked time")
+  let _ = test.eq_u64(suite,transport.position.revision,7,"Media revision is stamped on each completion")
+  var pixels: array<draw.Surface> = link.take_images(transport,id)
+  let _ = test.eq_u64(suite,array.len(pixels),2,"Each completion owns both monitor slots")
+  if array.len(pixels) != 2 {return false}
+  var program_pixels: draw.Surface = option.unwrap(array.pop(pixels))
+  var source_pixels: draw.Surface = option.unwrap(array.pop(pixels))
+  if source_pixels.width == 0 {source_pixels=link.restore_source(transport)}
+  let _ = test.check(suite,corner(program_pixels,program),"Program corner independently encodes its frame number")
+  let _ = test.check(suite,corner(source_pixels,source),"Source corner independently encodes its frame number")
+  true
+}
+fn endpoint_pair(suite:ref<test.Suite>,root:str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  match files.mkdirs(root) {ok(_)=>{},err(_)=>{io.write("[GA_TEST_ROOT_CREATE] Cannot create endpoint task directory\n")
+    return false},}
+  preview.reset(root)
+  var state:app.App=fixture(root,false)
+  var end:endpoint.End=endpoint.empty()
+  struct.set(end,5,field=generation)
+  struct.set(end,48000,field=authored)
+  struct.set(end,56800,field=actual)
+  struct.set(end,71,field=frames)
+  struct.set(end,60.0,field=fps)
+  let owner:u64=state.document.active
+  let _=test.check(suite,app.accept_endpoint(state,end,9,state.document_revision,state.media_revision,owner),"Accepted immutable endpoint installed")
+  let before:string=match editor_io.encode(struct.borrow(state,field=document)) {ok(v)=>v,err(_)=>string.new(),}
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    good=preview.request_window(state,root,transport,1,2,"actual tail",64,20,32,18,false) and good
+    let snapshot:string=read(root,"request.air")
+    let _=test.check(suite,text.contains(str.view(snapshot),"END1"),"Endpoint bound travels in immutable snapshot")
+    good=await_pair(transport,2) and good
+    var id:u64=1
+    loop {if id>2 {break}
+      let _=test.check(suite,link.select_completed(transport,id),"Postbody completion owns exact FIFO identity")
+      let _=test.eq_i64(suite,transport.position.program_frame,63+cast.wrap(id),"Postbody frame is not clamped to authored End")
+      let _=test.eq_i64(suite,transport.position.source_frame,20,"Parked Source stays independent")
+      var surfaces:array<draw.Surface> =link.take_images(transport,id)
+      var program:draw.Surface=option.unwrap(array.pop(surfaces))
+      var source:draw.Surface=option.unwrap(array.pop(surfaces))
+      if source.width==0 {source=link.restore_source(transport)}
+      let _=test.check(suite,corner(source,20),"Independent Source bytes remain at frame20")
+      let _=test.check(suite,match draw.surface_pixel(program,0,0) {some(c)=>c.r==10 and c.g==11 and c.b==14,none=>false,},"CPU fake empty timeline preserves neutral no-clip surface; real export separately proves black")
+      id=id+1
+    }
+    let _=test.check(suite,not preview.request_window(state,root,transport,3,2,"tail past EOF",70,20,32,18,false),"Window cannot exceed accepted presentation ceiling")
+    let _=test.eq_u64(suite,transport.completed_total,2,"Refused range acquires no partial completion")
+    good=preview.retire_request(root,transport,3) and good
+    app.retire_endpoint(state)
+    let _=test.check(suite,not preview.request_window(state,root,transport,4,1,"retired tail",64,20,32,18,false),"Retired endpoint cannot authorize postbody request")
+    let after:string=match editor_io.encode(struct.borrow(state,field=document)) {ok(v)=>v,err(_)=>string.new(),}
+    let _=test.eq_str(suite,after,before,"Transport bounds never alter authored graph")
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2500) {some(v)=>v,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+fn cold_source_pair(suite:ref<test.Suite>,root:str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  match files.mkdirs(root) {ok(_)=>{},err(_)=>{io.write("[GA_TEST_ROOT_CREATE] Cannot create Source task directory\n")
+    return false},}
+  preview.reset(root)
+  var state:app.App=fixture(root,true)
+  struct.set(struct.borrow(struct.borrow(state,field=document),field=program),70,field=frame)
+  let _=app.request_endpoint_seek(state,64)
+  var transport:link.Link=match link.open_pixels() {ok(v)=>v,err(_)=>{return false},}
+  var config:preview.Config=preview.config(state,root,link.ticket(transport))
+  struct.set(config,true,field=pixel_stream)
+  var good:bool=true
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=preview.run)]
+    good=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    let _=test.check(suite,not preview.request_window(state,root,transport,1,2,"unvalidated parked Program",70,20,32,18,true),"Source window cannot serialize or clamp unvalidated saved Program")
+    let _=test.eq_u64(suite,transport.snapshot_generation,0,"Blocked window publishes no snapshot identity")
+    let _=test.eq_str(suite,read(root,"request.air"),"","Blocked window writes no clamped snapshot")
+    let _=test.eq_i64(suite,editor.playhead(struct.borrow(state,field=document)),70,"Blocked Source request preserves saved transport coordinate")
+    var end:endpoint.End=endpoint.empty()
+    struct.set(end,5,field=generation)
+    struct.set(end,48000,field=authored)
+    struct.set(end,56800,field=actual)
+    struct.set(end,71,field=frames)
+    struct.set(end,60.0,field=fps)
+    good=app.accept_endpoint(state,end,9,state.document_revision,state.media_revision,state.document.active) and good
+    good=app.complete_endpoint_navigation(state) and good
+    good=preview.request_window(state,root,transport,1,2,"validated parked Program",64,20,32,18,true) and good
+    good=await_pair(transport,2) and good
+    let _=test.check(suite,text.contains(str.view(read(root,"request.air")),"END1"),"Accepted Source packet carries exact endpoint bound in immutable snapshot")
+    var id:u64=1
+    loop {if id>2 {break}
+      let _=test.check(suite,link.select_completed(transport,id),"Independent Source completion has exact FIFO identity")
+      let _=test.eq_i64(suite,transport.position.program_frame,64,"Source completion keeps validated Program tail parked")
+      let _=test.eq_i64(suite,transport.position.source_frame,19+cast.wrap(id),"Source time advances independently after acceptance")
+      var surfaces:array<draw.Surface> =link.take_images(transport,id)
+      var program:draw.Surface=option.unwrap(array.pop(surfaces))
+      var source:draw.Surface=option.unwrap(array.pop(surfaces))
+      let _=test.check(suite,corner(source,19+cast.wrap(id)),"Actual Source pixels independently encode moving Source time")
+      let _=test.check(suite,match draw.surface_pixel(program,0,0) {some(c)=>c.r==10 and c.g==11 and c.b==14,none=>false,},"Postbody parked Program remains empty rather than substituted video")
+      id=id+1
+    }
+    preview.stop(root)
+    let _=link.wake(transport,true)
+    good=match tasks.join_next<bool>(jobs,2500) {some(v)=>v,none=>false,} and good
+    link.close_commands(transport)
+  }
+  good
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args)!=2 {io.write("[GA_TEST_ARGUMENTS] Expected exclusive OUT_DIR\n")
+    return 2}
+  let root:str=view.get(args,1)
+  // Windows supplies a fresh child; Unix supplies an owned TemporaryDirectory.
+  match files.mkdirs(root) {ok(_)=>{},err(_)=>{io.write("[GA_TEST_ROOT_CREATE] Cannot create OUT_DIR\n")
+    return 2},}
+  var suite:test.Suite=test.suite("Standalone endpoint preview authority",true)
+  var state:app.App=fixture(root,false)
+  let doc:ref<editor.Document> =struct.borrow(state,field=document)
+  let _=test.start(suite,"Endpoint snapshot bounds reject malformed identities before signed subtraction")
+  let _=test.check(suite,preview.endpoint_program_bound(doc,71,5,doc.active),"Actual bounded tail accepted")
+  let _=test.check(suite,not preview.endpoint_program_bound(doc,59,5,doc.active),"Shorter than authored presentation refused")
+  let _=test.check(suite,not preview.endpoint_program_bound(doc,-9223372036854775808,5,doc.active),"Signed minimum refused without subtracting")
+  let _=test.check(suite,not preview.endpoint_program_bound(doc,9223372036854775807,5,doc.active),"Huge presentation refused")
+  let _=test.check(suite,not preview.endpoint_program_bound(doc,71,0,doc.active),"Zero accepted generation refused")
+  let _=test.check(suite,not preview.endpoint_program_bound(doc,71,5,doc.active+1),"Foreign owner refused")
+  let _=test.done(suite)
+  let _=test.start(suite,"Actual retained producer carries tail coordinates and parked Source")
+  let _=test.check(suite,endpoint_pair(suite,path.join(root,"task")),"Persistent task joins after endpoint retirement")
+  let _=test.done(suite)
+  let _=test.start(suite,"Cold reopen Source waits validated parked endpoint without publishing stale snapshots")
+  let _=test.check(suite,cold_source_pair(suite,path.join(root,"cold-source")),"Source producer joins after validated independent playback")
+  let _=test.done(suite)
+  test.conclude(suite,path.join(root,"preview-endpoint-tests.json"),3)
+}

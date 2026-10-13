@@ -387,6 +387,149 @@ fn recorder_stop_order(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs
   let _=test.done(suite)
   ()
 }
+
+// Actual recorder/file proof; native retirement is represented by the shared
+// policy arguments, not a physical device. Every retained row remains 46 columns.
+fn recorder_playback_blocks(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
+  let _=test.start(suite,"Automatic Program/Source recording buffers complete blocks until native retirement")
+  var mode:u64=0
+  loop {if mode>=16 {break}
+    let program:bool=mode%2==1
+    let source:bool=(mode/2)%2==1
+    let active:bool=(mode/4)%2==1
+    let running:bool=mode<8
+    let _=test.check(suite,profile.buffered_playback(program,source,active,running)==(program or source or active or not running),"Buffered policy covers logical Program, Source, silent/preparing and Close")
+    let _=test.check(suite,profile.flush_ready(program,source,active)==(not program and not source and not active),"Pending flush cannot run through logical playback or unretired native audio")
+    let _=test.check(suite,profile.finish_cap(50000,program,source,active)==(not program and not source and not active),"Automatic cap completion waits for both transports and native retirement")
+    mode=mode+1}
+  let _=test.check(suite,not profile.finish_cap(49999,false,false,false),"A paused uncapped recording remains armed")
+  let _=test.check(suite,not profile.flush_transition(false,true,true),"Starting playback cannot schedule repeated timer flushes")
+  let _=test.check(suite,not profile.flush_transition(true,true,true),"Continuing Program or Source playback cannot schedule repeated timer flushes")
+  let _=test.check(suite,profile.flush_transition(true,false,true),"Stop schedules a pending flush")
+  let _=test.check(suite,profile.flush_transition(false,false,false),"Close schedules final retirement-aware publication")
+  var measure:profile.Profile=match profile.start_local(root) {ok(value)=>value,err(_)=>profile.idle(),}
+  let target:string=string.copy(struct.borrow(measure,field=path))
+  var row:profile.Row=profile.row()
+  struct.set(row,true,field=playing)
+  struct.set(row,true,field=source_mode)
+  var at:u64=0
+  var recorded:bool=true
+  loop {if at>=513 {break}
+    struct.set(row,cast.wrap(at),field=program)
+    struct.set(row,cast.wrap(at+1000),field=source)
+    if profile.buffered_playback(false,true,false,true) {
+      match profile.record_buffered_checked(measure,row) {ok(_)=>{},err(_)=>{recorded=false},}
+    }else{match profile.record_checked(measure,row) {ok(_)=>{},err(_)=>{recorded=false},}}
+    if at==126 or at==127 or at==255 or at==512 {
+      let disk:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+      let _=test.eq_str(suite,disk,profile.header(),"Source-only silent playback keeps only the header on disk across 128-row block boundaries")}
+    at=at+1}
+  let _=test.check(suite,recorded and measure.rows==513 and measure.buffered==513,"All distinct observations remain owned in RAM")
+  let _=test.check(suite,array.len(struct.borrow(measure,field=chunks))==4 and str.len(struct.borrow(measure,field=pending))>0,"Four complete 128-row blocks and one final row are retained separately")
+  let _=test.check(suite,not profile.flush_ready(false,false,true),"Stop with native audio still active cannot flush")
+  let _=test.check(suite,not profile.flush_ready(true,false,false) and not profile.flush_ready(false,true,false),"A pending Stop followed by Program re-Play or Source switch stays deferred")
+  struct.set(row,false,field=playing)
+  struct.set(row,9999,field=program)
+  struct.set(row,7777,field=source)
+  struct.set(row,1,field=inputs)
+  let _=profile.record_buffered_checked(measure,row)
+  let flushed:bool=if profile.flush_ready(false,false,false) {match profile.flush_checked(measure) {ok(_)=>true,err(_)=>false,}}else{false}
+  let trace:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  var lines:array<string> =text.split(trace,"\n")
+  let _=test.check(suite,flushed and measure.enabled and measure.buffered==0 and array.len(lines)==516,"One flush after simulated retirement writes all four blocks, remainder and Stop row")
+  var columns_ok:bool=array.len(lines)==516
+  var identity_ok:bool=columns_ok
+  var stop_ok:bool=false
+  at=0
+  loop {if at>=514 or at+1>=array.len(lines) {break}
+    var cells:array<string> =text.split(array.borrow(lines,at+1),"\t")
+    if array.len(cells)!=46 {columns_ok=false
+      identity_ok=false
+    }else{if at<513 {
+      if not str.eq(array.borrow(cells,8),string.from_int(at)) or not str.eq(array.borrow(cells,9),string.from_int(at+1000)) {identity_ok=false}
+    }else{stop_ok=str.eq(array.borrow(cells,8),"9999") and str.eq(array.borrow(cells,9),"7777") and str.eq(array.borrow(cells,19),"0") and str.eq(array.borrow(cells,30),"1")}}
+    at=at+1}
+  let _=test.check(suite,columns_ok,"Every row across every block still has exactly 46 columns")
+  let _=test.check(suite,identity_ok,"All 513 emitted Program/Source identities preserve exact order across blocks")
+  let _=test.check(suite,stop_ok,"Final Stop input and stopped state survive complete-block publication")
+  let _=profile.flush_checked(measure)
+  let again:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.eq_str(suite,again,trace,"Repeated pending service cannot duplicate a previously flushed block")
+  let stopped:bool=match profile.stop(measure) {ok(_)=>true,err(_)=>false,}
+  let _=test.check(suite,stopped and not measure.enabled,"Explicit Help-off stops an otherwise armed recorder")
+  let _=test.done(suite)
+  ()
+}
+fn recorder_complete_cap(suite:ref<test.Suite>,root:str) -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
+  let _=test.start(suite,"All 50000 retained rows publish once in bounded blocks and write failures fail-stop")
+  var measure:profile.Profile=match profile.start_local(root) {ok(value)=>value,err(_)=>profile.idle(),}
+  let target:string=string.copy(struct.borrow(measure,field=path))
+  var row:profile.Row=profile.row()
+  struct.set(row,true,field=playing)
+  var at:u64=0
+  var recorded:bool=true
+  loop {if at>=50500 {break}
+    struct.set(row,cast.wrap(at),field=program)
+    match profile.record_buffered_checked(measure,row) {ok(_)=>{},err(_)=>{recorded=false},}
+    at=at+1}
+  let _=test.check(suite,recorded and measure.enabled and measure.rows==50000 and measure.buffered==50000,"Fixed cap retains exactly 50000 rows and ignores subsequent observations without auto-flushing")
+  let _=test.eq_u64(suite,array.len(struct.borrow(measure,field=chunks)),390,"Cap holds 390 complete blocks plus its 80-row remainder")
+  var pending_lines:array<string> =text.split(struct.borrow(measure,field=pending),"\n")
+  let _=test.eq_u64(suite,array.len(pending_lines),81,"Cap remainder contains exactly 80 ordered rows")
+  var blocks_ok:bool=true
+  var bytes:u64=str.len(struct.borrow(measure,field=pending))
+  at=0
+  loop {if at>=array.len(struct.borrow(measure,field=chunks)) {break}
+    let block:ref<string> =array.borrow(struct.borrow(measure,field=chunks),at)
+    var block_lines:array<string> =text.split(block,"\n")
+    if array.len(block_lines)!=129 or str.len(block)>124160 {blocks_ok=false}
+    bytes=bytes+str.len(block)
+    at=at+1}
+  let _=test.check(suite,blocks_ok and bytes<=48500000,"Every owned block respects 128 rows and the conservative 970-byte per-row bound")
+  let disk:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.eq_str(suite,disk,profile.header(),"Reaching the cap during logical playback performs no automatic append")
+  let _=test.check(suite,not profile.finish_cap(measure.rows,true,false,false) and not profile.finish_cap(measure.rows,false,true,false) and not profile.finish_cap(measure.rows,false,false,true),"Cap remains requested while Program, Source or native retirement is active")
+  let _=test.check(suite,profile.finish_cap(measure.rows,false,false,false),"Paused native-retired cap is eligible for finalization")
+  let stopped:bool=match profile.stop(measure) {ok(_)=>true,err(_)=>false,}
+  let trace:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  var lines:array<string> =text.split(trace,"\n")
+  let _=test.check(suite,stopped and not measure.enabled and measure.buffered==0 and array.len(struct.borrow(measure,field=chunks))==0 and str.len(struct.borrow(measure,field=pending))==0 and array.len(lines)==50002,"One append handle publishes all 50000 rows and retires all owned RAM")
+  var all_ordered:bool=array.len(lines)==50002
+  var all_columns:bool=all_ordered
+  at=0
+  loop {if at>=50000 or at+1>=array.len(lines) {break}
+    var cells:array<string> =text.split(array.borrow(lines,at+1),"\t")
+    if array.len(cells)!=46 {all_columns=false
+      all_ordered=false
+    }else{if not str.eq(array.borrow(cells,8),string.from_int(at)) {all_ordered=false}}
+    at=at+1}
+  let _=test.check(suite,all_ordered,"Every actual row 0..49999 is present once and in order")
+  let _=test.check(suite,all_columns,"Every actual capped row preserves the complete 46-column schema")
+  let _=profile.stop(measure)
+  let after_again:string=match files.read_text(target) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.eq_str(suite,after_again,trace,"Repeated cap finalization cannot replay blocks")
+  let directory:string=path.join(root,"chunked-append-refusal")
+  let _=files.mkdirs(directory)
+  let sentinel:string=path.join(directory,"foreign.txt")
+  let _=files.write_text(sentinel,"FOREIGN\n")
+  var broken:profile.Profile=profile_for_test(directory,true,0,0)
+  at=0
+  loop {if at>=263 {break}
+    struct.set(row,cast.wrap(at),field=program)
+    let _=profile.record_buffered_checked(broken,row)
+    at=at+1}
+  let _=test.check(suite,array.len(struct.borrow(broken,field=chunks))==2 and broken.buffered==263,"Actual open-error witness starts with multiple complete owned blocks and a remainder")
+  let refused:bool=match profile.stop(broken) {ok(_)=>false,err(problem)=>text.contains(problem,"[GA_WINDOW_PROFILE_WRITE]"),}
+  let _=test.check(suite,refused and not broken.enabled and broken.buffered==0 and array.len(struct.borrow(broken,field=chunks))==0 and str.len(struct.borrow(broken,field=pending))==0,"Open failure returns coded error and retires all chunks without retry")
+  let no_retry:bool=match profile.flush_checked(broken) {ok(_)=>true,err(_)=>false,}
+  let foreign:string=match files.read_text(sentinel) {ok(value)=>value,err(_)=>string.new(),}
+  let _=test.check(suite,no_retry and foreign=="FOREIGN\n","Fail-stop service is idempotent and preserves the foreign directory contents")
+  // This is an actual open-failure proof; partial-write and close-failure
+  // retirement are source-reviewed, not claimed as injected runtime faults.
+  let _=test.done(suite)
+  ()
+}
+
 pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
   if view.len(args) < 2 {return 2}
   let root: str = view.get(args,1)
@@ -571,5 +714,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   recorder_lifecycle(suite,root)
   recorder_stop_order(suite,root)
   recorder_retention(suite,root)
-  test.conclude(suite,path.join(root,"window-cache-tests.json"),12)
+  recorder_playback_blocks(suite,root)
+  recorder_complete_cap(suite,root)
+  test.conclude(suite,path.join(root,"window-cache-tests.json"),14)
 }

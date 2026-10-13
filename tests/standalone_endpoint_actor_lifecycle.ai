@@ -1,0 +1,112 @@
+module test.standalone_endpoint_actor_lifecycle
+import std.editor as editor
+import std.editor_io as codec
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/audio_endpoint.ai" as endpoint
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+import "../src/main.ai" as window
+fn ready(peer:ref<link.Link>,id:u64) -> result<unit,string> effects {alloc,net,time} {
+  try link.wake(peer,false)
+  link.await_ready(peer,id,time.monotonic_ns()+30000000000)
+}
+fn prepare(peer:ref<link.Link>,root:str,worker:str,doc:ref<editor.Document>,id:u64,generation:u64) -> result<endpoint.End,string> effects {alloc,fs.read,fs.write,net,time} {
+  if not playback.request_prepare_document(root,id,generation,doc,path.join(root,"unused.wav")) {return result.err("prepare publication")}
+  try ready(peer,id)
+  playback.read_endpoint(root)
+}
+fn pull(peer:ref<link.Link>,root:str,id:u64,generation:u64,prepared:u64,name:str,start:i64,count:u64) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  if not playback.request_pull(root,id,generation,prepared,path.join(root,name),start,count) {return result.err("pull publication")}
+  ready(peer,id)
+}
+fn expected_failure(peer:ref<link.Link>,root:str,id:u64,generation:u64,prepared:u64,start:i64,count:u64,code:str) -> bool effects {alloc,fs.write,net,time} {
+  match pull(peer,root,id,generation,prepared,"refused.wav",start,count) {ok(_)=>false,err(p)=>text.contains(str.view(p),code),}
+}
+fn run(worker:str,input:str,root:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time} {
+  let raw:string=match files.read_text(input) {ok(v)=>v,err(_)=>{return result.err("input read")},}
+  var doc:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
+  playback.reset(root)
+  var peer:link.Link=try link.open()
+  let config:playback.Config=playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var problem:string=string.new()
+  task.scope {
+    var jobs:array<task<bool>> =array.new()
+    array.push(jobs,task.spawn(config,fn=playback.run))
+    let observed:result<unit,string> =sequence(peer,root,worker,doc)
+    match observed {ok(_)=>{},err(p)=>{problem=p},}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    match tasks.join_next<bool>(jobs,2500) {none=>{problem="actor did not join"},some(v)=>{if not v {problem="actor returned false"}},}
+    link.close_commands(peer)
+  }
+  if str.len(problem)>0 {result.err(problem)}else{result.ok(())}
+}
+fn sequence(peer:ref<link.Link>,root:str,worker:str,doc:ref<editor.Document>) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,time} {
+  try link.connect(peer)
+  var first:endpoint.End=try prepare(peer,root,worker,doc,1,1)
+  if first.actual<=first.authored {return result.err("tail not independently witnessed")}
+  let _=files.write_text(path.join(root,"first-end.air"),endpoint.encode(first))
+  try pull(peer,root,2,1,1,"tail-first.wav",first.authored+17,4093)
+  var hit:endpoint.End=try prepare(peer,root,worker,doc,3,1)
+  if not str.eq(endpoint.encode(first),endpoint.encode(hit)) {return result.err("same retained graph changed accepted generation")}
+  if not expected_failure(peer,root,4,1,1,0,731,"GA_AUDIO_ENDPOINT_STALE") {return result.err("old preparation identity accepted")}
+  try pull(peer,root,5,1,3,"whole-first.wav",0,cast.wrap(hit.actual))
+  if not expected_failure(peer,root,6,1,3,hit.actual-7,8,"GA_AUDIO_ENDPOINT_RANGE") {return result.err("past EOF accepted")}
+  var recovery:endpoint.End=try prepare(peer,root,worker,doc,7,1)
+  try pull(peer,root,8,1,7,"recovered.wav",0,cast.wrap(recovery.actual))
+  if not playback.discard(root,9,2) {return result.err("discard publication")}
+  try ready(peer,9)
+  if not expected_failure(peer,root,10,2,7,0,731,"GA_AUDIO_ENDPOINT_STALE") {return result.err("discarded session revived")}
+  let clip:editor.Clip=option.unwrap(editor.clip_at(doc,0))
+  if not editor.set_clip_gain(doc,clip.id,0.5) {return result.err("gain edit failed")}
+  var changed:endpoint.End=try prepare(peer,root,worker,doc,11,3)
+  try pull(peer,root,12,3,11,"gain-edited.wav",0,cast.wrap(changed.actual))
+  if not editor.set_track_muted(doc,clip.track,true) {return result.err("mute edit failed")}
+  var silent:endpoint.End=try prepare(peer,root,worker,doc,13,4)
+  if silent.actual!=0 or silent.frames!=60 or array.len(struct.borrow(silent,field=roots))!=0 {return result.err("mute retained audible endpoint")}
+  let _=files.write_text(path.join(root,"muted-end.air"),endpoint.encode(silent))
+  if not playback.discard(root,14,5) {return result.err("final discard publication")}
+  try ready(peer,14)
+  if not editor.set_track_muted(doc,clip.track,false) or not editor.set_clip_gain(doc,clip.id,1.0) {return result.err("unmute failed")}
+  // Two complete replay epochs reuse the exact accepted graph; no device or GUI simulation is claimed.
+  var loop1:endpoint.End=try prepare(peer,root,worker,doc,15,6)
+  try pull(peer,root,16,6,15,"loop1.wav",0,cast.wrap(loop1.actual))
+  if not playback.discard(root,17,7) {return result.err("loop1 retire")}
+  try ready(peer,17)
+  var loop2:endpoint.End=try prepare(peer,root,worker,doc,18,8)
+  try pull(peer,root,19,8,18,"loop2.wav",0,cast.wrap(loop2.actual))
+  if loop1.actual!=loop2.actual {return result.err("loop endpoint drift")}
+  // Complete a real later chunk while the GUI-side link receives nothing.
+  if not playback.request_pull(root,20,8,18,path.join(root,"unreceived.wav"),0,731) {return result.err("owned output publication")}
+  try link.wake(peer,false)
+  let deadline:u64=time.monotonic_ns()+5000000000
+  loop {if match files.exists(path.join(root,"unreceived.wav")) {ok(v)=>v,err(_)=>false,} {break}
+    if time.monotonic_ns()>=deadline {return result.err("completion without receipt deadline")}
+    time.sleep_ms(1)
+  }
+  if not playback.discard(root,21,9) {return result.err("completed output retirement")}
+  var preroll:window.PcmPreroll=window.pcm_preroll()
+  window.release_playback_output(preroll,path.join(root,"unreceived.wav"))
+  try ready(peer,21)
+  if match files.exists(path.join(root,"unreceived.wav")) {ok(v)=>v,err(_)=>false,} {return result.err("unreceived output survived")}
+  // The independent Source route retires the Program accepted session.
+  struct.set(doc,clip.source,field=monitor_source)
+  var audition:media.AudioPlan=try media.source_audio_range(doc,worker,0,10,path.join(root,"source.wav"))
+  if not playback.request(root,22,10,audition) {return result.err("Source publication")}
+  try ready(peer,22)
+  if not expected_failure(peer,root,23,10,18,0,731,"GA_AUDIO_ENDPOINT_STALE") {return result.err("Program survived Source mode")}
+  var resumed:endpoint.End=try prepare(peer,root,worker,doc,24,11)
+  try pull(peer,root,25,11,24,"after-source.wav",0,cast.wrap(resumed.actual))
+  if not playback.discard(root,26,12) {return result.err("final lifecycle retire")}
+  try ready(peer,26)
+  result.ok(())
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time,io.write} {
+  if view.len(args)!=4 {return 2}
+  match run(view.get(args,1),view.get(args,2),view.get(args,3)) {ok(_)=>0,err(p)=>{io.write(str.view(p))
+    3},}
+}

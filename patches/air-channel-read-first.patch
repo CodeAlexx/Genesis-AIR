@@ -1,0 +1,31 @@
+--- a/stdlib/channel.ai
++++ b/stdlib/channel.ai
+@@ -758,8 +758,27 @@
+     // accept_peer can already have decoded frames that arrived with the greeting,
+     // so the queue is tested before anything blocks.
+     if queued(state) != 0 { return result.ok(take(state)) }
++    // Read already queued data/EOF before returning credit. Sending reverse
++    // credit after a completed producer closed can reset Winsock and discard
++    // the unread final frames. This preserves join-before-receive delivery.
++    var waiting: bool = false
++    let immediate: bool = match pump(state, deadline_ns, true) {
++      ok(value) => value,
++      err(error) => { var held: Error = error
++        if held.code == 3 { waiting = true
++          false } else {
++          return result.err(set_failure(state, held.code, str.view(struct.borrow(held, field=message)))) } },
++    }
++    if queued(state) != 0 { return result.ok(take(state)) }
++    if not waiting {
++      if not immediate { return result.ok(option.none()) }
++      // A partial framed message remains owned. Drain presently available
++      // bytes before granting, without blocking or inventing another budget.
++      continue
++    }
+     grant(state, deadline_ns)
+-    let more: bool = match pump(state, deadline_ns, polling) {
++    if polling { return result.err(fail(3, "channel has no decoded message")) }
++    let more: bool = match pump(state, deadline_ns, false) {
+       ok(value) => value,
+       err(error) => { var held: Error = error
+         if held.code == 3 { return result.err(held) }

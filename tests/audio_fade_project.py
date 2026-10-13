@@ -180,11 +180,10 @@ def main():
             run([binary, "export", movie, project], env)
             master = decode(worker, movie)
             full_target = expected(doc, 0)
-            # OPEN also preserves the legacy ceil(seconds*rate) allocation.
-            master_frames = math.ceil(finish/fps*SR)
-            assert len(master) == master_frames*2 and 0 <= len(master)-len(full_target) <= 2, (name, "master length", len(master), len(full_target))
-            assert not any(master[len(full_target):]), (name, "non-silent master padding")
-            maximum_master = max(abs(a-b) for a, b in zip(master[:len(full_target)], full_target))
+            # Exact-count export ends at the independent authored audio endpoint.
+            # Legacy audition WAVE allocation above retains its separate ceil rule.
+            assert len(master) == len(full_target), (name, "master length", len(master), len(full_target))
+            maximum_master = max(abs(a-b) for a, b in zip(master, full_target))
             assert maximum_master <= 1/8388608, (name, "master sample error", maximum_master)
             assert sha(project) == original, "Rendering changed authored project bytes"
             results.append(dict(name=name, audition_frames=len(actual)//2, audition_max_error_pcm=maximum_pcm,

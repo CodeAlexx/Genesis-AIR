@@ -1,0 +1,95 @@
+module genesis.private.program_epoch
+import std.editor as editor
+import std.editor_io as codec
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.text as text
+import std.tasks as tasks
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+import "../src/preview.ai" as preview
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+fn picture(p:ref<draw.Surface>,blue:bool,w:u32,h:u32)->bool effects {} {
+ if p.width!=w or p.height!=h {return false}
+ var y:u32=0
+ loop {if y>=h {break}
+  var x:u32=0
+  loop {if x>=w {break}
+   let c:draw.Color=match draw.surface_pixel(p,x,y){some(v)=>v,none=>{return false},}
+   if c.a!=255 or (if blue {c.b<250 or c.r>5 or c.g>5}else{c.r<250 or c.b>5 or c.g>5}) {return false}
+   x=x+1}
+  y=y+1}
+ true
+}
+pub fn main(args:view<str>)->i32 effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+ if view.len(args)!=4 {return 2}
+ let root:str=view.get(args,3)
+ let _=files.mkdirs(root)
+ preview.reset(root)
+ var state:app.App=app.app(provider.gcompose(view.get(args,1),root))
+ let imported:commands.Result=commands.import_media(state,view.get(args,2),"epoch source")
+ if not imported.ok {return 3}
+ // Metadata admission is a distinct owned worker, not a picture epoch.
+ let metadata_starts:u64=provider.worker_starts(struct.borrow(state,field=provider))
+ if metadata_starts!=1 {return 11}
+ let _=files.write_text(path.join(root,"worker-roles.tsv"),text.concat("metadata-before\t",text.concat(string.from_int(metadata_starts),"\n")))
+ let placed:commands.Result=commands.append_clip(state,app.default_video_track(state),imported.value,0,60)
+ if not placed.ok {return 4}
+ if not editor.set_clip_streams(struct.borrow(state,field=document),placed.value,editor.streams_video()) {return 5}
+ let grade:commands.Result=commands.add_filter(state,placed.value,"brightness")
+ let contrast:commands.Result=commands.add_filter(state,placed.value,"contrast")
+ if not grade.ok or not contrast.ok {return 6}
+ // Independent admission witness: this document requires internal picture
+ // passes; the actual producer must recreate their GPU snapshots after retire.
+ var cache:media.RenderCache=media.render_cache(struct.borrow(state,field=fonts))
+ media.configure_monitor_preview(struct.borrow(state,field=document),cache,64,36)
+ var plan:array<string> =match media.frame_plan(struct.borrow(state,field=document),0,"PREVIEW",path.join(root,"plan.rgba"),path.join(root,"plan"),cache){ok(v)=>v,err(_)=>{return 7},}
+ let passes:u64=array.len(plan)
+ if passes<3 {return 8}
+ let _=files.write_text(path.join(root,"authored-plan.txt"),text.join(plan,"\n"))
+ media.cleanup_plan(path.join(root,"plan"))
+ var transport:link.Link=match link.open_pixels(){ok(v)=>v,err(_)=>{return 9},}
+ var config:preview.Config=preview.config(state,root,link.ticket(transport))
+ struct.set(config,true,field=pixel_stream)
+ var good:bool=true
+ task.scope {
+  var jobs:array<task<bool>> = [task.spawn(config,fn=preview.run)]
+  good=match link.connect(transport){ok(_)=>true,err(_)=>false,}
+  var step:u64=0
+  loop {if step>=7 or not good {break}
+   let id:u64=if step==0 {1}else if step==1{3}else if step==2{4}else if step==3{5}else if step==4{6}else if step==5{7}else{9}
+   if step==1 or step==6 {good=preview.retire_request(root,transport,if step==1{2}else{8}) and good}
+   let frame:i64=if step%2==0{0}else{31}
+   let w:u32=if step==3{32}else{64}
+   let h:u32=if step==3{18}else{36}
+   if step>=4 {struct.set(state,1,field=media_revision)}
+   let _=editor.seek(struct.borrow(state,field=document),frame)
+   let key:string=preview.strips_signature(struct.borrow(state,field=document))
+   good=preview.request_window(state,root,transport,id,1,key,frame,0,w,h,false) and good
+   good=match link.await_ready(transport,id,time.monotonic_ns()+15000000000){ok(_)=>true,err(detail)=>{io.write(detail)
+    false},} and good
+   good=link.select_completed(transport,id) and good
+   var images:array<draw.Surface> = link.take_images(transport,id)
+   good=array.len(images)==2 and transport.position.program_frame==frame and good
+   if array.len(images)==2 {var p:draw.Surface=option.unwrap(array.pop(images))
+    good=picture(p,frame>=30,w,h) and good}
+   if step==1 {good=transport.snapshot_generation==3 and good}
+   if step==2 {good=transport.snapshot_generation==3 and good}
+   if step==6 {good=transport.snapshot_generation==9 and good}
+   var row:array<string> = [string.from_int(id),string.from_int(frame),string.from_int(w),string.from_int(h),string.from_int(transport.snapshot_generation),string.from_int(if good{1}else{0})]
+   let _=files.append_text(path.join(root,"epochs.tsv"),text.concat(text.join(row,"\t"),"\n"))
+   time.sleep_ms(80)
+   step=step+1}
+  preview.stop(root)
+  let _=link.wake(transport,true)
+  good=match tasks.join_next<bool>(jobs,2500){some(v)=>v,none=>false,} and good
+  link.close_commands(transport)
+ }
+ let _=files.append_text(path.join(root,"worker-roles.tsv"),text.concat("metadata-after\t",text.concat(string.from_int(provider.worker_starts(struct.borrow(state,field=provider))),"\n")))
+ provider.shutdown(struct.borrow(state,field=provider))
+ let _=files.write_text(path.join(root,"result.tsv"),text.concat(string.from_int(if good{1}else{0}),"\n"))
+ if good {0}else{10}
+}

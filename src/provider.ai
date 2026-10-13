@@ -14,6 +14,8 @@
 // transport, source probes, frame reads and waveform reads.
 module genesis.provider
 
+import std.channel as channel
+import "preview_link.ai" as link
 import std.draw as draw
 import std.files as files
 import std.image as image
@@ -56,7 +58,10 @@ pub type Provider = struct {
   starts: u64,
   profile: bool,
   program_input: option<File>,
-  program_pixels: bytes
+  program_pixels: bytes,
+  persistent_program: bool, picture_socket: array<Socket>, picture_port: u16,
+  picture_token: u64, picture_width: u32, picture_height: u32,
+  picture_peer: array<link.Peer>, picture_generation: u64
 }
 
 // What a probe learned about one source. `frames` 0 means the length is genuinely unknown,
@@ -108,7 +113,7 @@ pub fn fake(scratch: str) -> Provider effects {alloc} {
   Provider {kind: kind_fake(), worker: string.new(), scratch: string.copy(scratch), media_scratch: string.copy(scratch),
     ffprobe: string.new(), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b""),persistent_program:false,picture_socket:array.new(),picture_port:0,picture_token:0,picture_width:0,picture_height:0,picture_peer:array.new(),picture_generation:0}
 }
 
 // A gcompose provider. `worker` is the binary; the provider is `available` only when it is
@@ -119,7 +124,7 @@ pub fn gcompose(worker: str, scratch: str) -> Provider effects {alloc, fs.meta, 
   Provider {kind: kind_gcompose(), worker: string.copy(worker), scratch: string.copy(scratch), media_scratch: string.copy(scratch),
     ffprobe: probe, probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: there,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b""),persistent_program:false,picture_socket:array.new(),picture_port:0,picture_token:0,picture_width:0,picture_height:0,picture_peer:array.new(),picture_generation:0}
 }
 
 // FFmpeg is a real-media backend, selected only when gcompose is absent.
@@ -127,7 +132,7 @@ pub fn native(ffmpeg_path: str, probe_path: str, scratch: str) -> Provider effec
   Provider {kind: kind_ffmpeg(), worker: string.copy(ffmpeg_path), ffprobe: string.copy(probe_path),
     scratch: string.copy(scratch), media_scratch: string.copy(scratch), probes: array.new(), frames: array.new(), envelopes: array.new(),
     calls: 0, failures: 0, last_error: string.new(), available: true,
-    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b"")}
+    session: option.none(), reader: proc.line_reader(65536), starts: 0, canvas_width: 1280, canvas_height: 720, program_width: 0, program_height: 0, program_signature: string.new(), profile: false, program_input: option.none(),program_pixels:bytes.copy(b""),persistent_program:false,picture_socket:array.new(),picture_port:0,picture_token:0,picture_width:0,picture_height:0,picture_peer:array.new(),picture_generation:0}
 }
 // Reserve a directory atomically, rather than trusting a timestamp or process ID to
 // be unique. Explicit constructor roots retain their fixture/task semantics until
@@ -251,9 +256,45 @@ pub fn wire_path(value: str) -> string effects {alloc} {
   text.replace(str.view(encoded), "\r", "%0D")
 }
 
+fn retire_picture_socket(state:ref<Provider>) -> unit effects {alloc} {
+  loop {match array.pop(struct.borrow(state,field=picture_socket)) {some(socket)=>{let _=net.tcp_close(socket)},none=>{break},}}
+  struct.set(state,0,field=picture_port)
+  struct.set(state,0,field=picture_token)
+  ()
+}
+pub fn use_program_stream(state:ref<Provider>,enabled:bool) -> unit effects {alloc,process,time} {
+  if state.persistent_program!=enabled {restart(state)
+    struct.set(state,enabled,field=persistent_program)}
+  ()
+}
+// The producer transfers the whole affine Peer only for synchronous rendering.
+// Existing save_control remains the sole command validator/coalescer.
+pub fn begin_picture_control(state:ref<Provider>,peer:link.Peer own,generation:u64) -> unit effects {alloc} {
+  array.push(struct.borrow(state,field=picture_peer),peer)
+  struct.set(state,generation,field=picture_generation)
+  ()
+}
+pub fn end_picture_control(state:ref<Provider>) -> link.Peer effects {alloc} {
+  struct.set(state,0,field=picture_generation)
+  option.unwrap(array.pop(struct.borrow(state,field=picture_peer)))
+}
+fn picture_control(state:ref<Provider>) -> result<unit,string> effects {alloc,net,time} {
+  if array.len(struct.borrow(state,field=picture_peer))==0 {return result.ok(())}
+  let peer:ref<link.Peer> =array.borrow(struct.borrow(state,field=picture_peer),0)
+  try link.poll_commands(peer)
+  // New windows may finish and discard this bounded record. Only a validated
+  // newer retirement or sticky Stop actively interrupts the current transfer.
+  if peer.stopped or peer.retired_generation>state.picture_generation {
+    return result.err("[GA_PROGRAM_CANCELLED] Picture transport retired")}
+  if peer.pending_control and peer.pending_kind==12 {
+    return result.err("[GA_PROGRAM_CANCELLED] Picture transport command refused")}
+  result.ok(())
+}
+
 // Stop the shared worker. The next request starts a new one, which also drops the worker's
 // decoder and LUT caches, so Reload and Relink see files that changed on disk.
 pub fn restart(state: ref<Provider>) -> unit effects {alloc, process, time} {
+  retire_picture_socket(state)
   invalidate(state)
   match ref.swap(struct.borrow(state, field=session), option.none()) {
     none => { },
@@ -276,6 +317,7 @@ pub fn set_canvas(state: ref<Provider>, width: u32, height: u32) -> unit effects
 pub fn shutdown(state: ref<Provider>) -> unit effects {alloc, process, time} { restart(state) }
 
 fn start_worker(state: ref<Provider>) -> option<Child> effects {alloc, process, time} {
+  retire_picture_socket(state)
   var argv: array<string> = [string.copy(str.view(struct.borrow(state, field=worker))),
     string.copy("--serve"), string.copy("--size"), string.from_int(state.canvas_width),
     string.from_int(state.canvas_height)]
@@ -366,6 +408,7 @@ fn ask(state: ref<Provider>, command: str, tag: str) -> option<string> effects {
     var outcome: Exchange = exchange(child, struct.borrow(state, field=reader), command)
     if outcome.kind == 2 {
       discard_program_input(state)
+      retire_picture_socket(state)
       let _ = proc.terminate(child, 200)
       let _ = proc.close(child)
       if attempt == 0 {
@@ -808,8 +851,190 @@ pub fn program_command(state: ref<Provider>, line: str, width: u32, height: u32)
   // Snapshot IDs belong to this worker. Retrying only the final command on a
   // replacement process cannot reconstruct its preceding composition passes.
   let retained:bool=text.contains(line," GPU:") or text.contains(line," GPUDIM:") or text.contains(line," GPUOPAQUE:")
+  if state.persistent_program {return program_keep(state,line,width,height)}
   program_attempt(state,line,width,height,not retained)
 }
+fn picture_keep_bytes(state:ref<Provider>,count:u64,deadline:u64) -> result<bytes,string>
+    effects {alloc,net,time} {
+  var data:bytes=bytes.copy(b"")
+  loop {if view.len(data)>=count {break}
+    try picture_control(state)
+    let now:u64=time.monotonic_ns()
+    if now>=deadline {return result.err("[GA_PROGRAM_PIPE] Persistent picture transfer timed out")}
+    let step:u64=if deadline-now>25000000 {now+25000000}else{deadline}
+    let left:u64=count-view.len(data)
+    match net.tcp_recv_until(array.borrow(struct.borrow(state,field=picture_socket),0),if left>262144 {262144}else{left},step) {
+      ok(next)=>{if view.len(next)==0 {return result.err("[GA_PROGRAM_SIZE] Persistent picture ended before declared bytes")}
+        bytes.append(data,next)},
+      err(error)=>{if error.code!=3 {return result.err("[GA_PROGRAM_PIPE] Persistent picture receive failed")}},
+    }
+  }
+  result.ok(data)
+}
+fn keep_accept(state:ref<Provider>,child:ref<Child>,listener:ref<Socket>,deadline:u64) -> result<Socket,string>
+    effects {alloc,net,process,time} {
+  loop {try picture_control(state)
+    let now:u64=time.monotonic_ns()
+    if now>=deadline {return result.err("[GA_PROGRAM_PIPE] Persistent picture did not connect")}
+    let step:u64=if deadline-now>25000000 {now+25000000}else{deadline}
+    match net.tcp_accept_until(listener,step) {ok(socket)=>{return result.ok(socket)},err(error)=>{
+      if error.code!=3 {return result.err("[GA_PROGRAM_PIPE] Persistent picture accept failed")}},}
+    // Preserve the same immediate coded-refusal/early-DONE handling as legacy.
+    match proc.read_line(child,struct.borrow(state,field=reader),proc.deadline_in(1)) {
+      err(_)=>{},ok(value)=>match value {none=>{return result.err("[GA_PROGRAM_PIPE] Worker exited before persistent picture")},
+        some(line)=>{
+          if str.starts_with(line,"[GA_") {let _=struct.replace(state,string.copy(line),field=last_error)}
+          if str.starts_with(line,"ERR") {return result.err(if str.len(struct.borrow(state,field=last_error))>0 {
+            string.copy(struct.borrow(state,field=last_error))}else{"[GA_WORKER_REQUEST] Persistent picture refused"})}
+          if str.starts_with(line,"DONE") {
+            var restored:bytes=bytes.copy(str.bytes(line))
+            bytes.append(restored,b"\x{0a}")
+            bytes.append(restored,bytes.view(struct.borrow(struct.borrow(state,field=reader),field=pending)))
+            let _=struct.replace(struct.borrow(state,field=reader),restored,field=pending)
+          }
+        },
+      },
+    }
+  }
+  result.err("[GA_PROGRAM_PIPE] Persistent picture did not connect")
+}
+fn keep_record(state:ref<Provider>,child:ref<Child>,width:u32,height:u32,sequence:u64,deadline:u64)
+    -> result<bytes,string> effects {alloc,net,process,time} {
+  let token:u64=state.picture_token
+  let wanted:u64=cast.wrap(width)*cast.wrap(height)*4
+  let header:bytes=try picture_keep_bytes(state,40,deadline)
+  let data:view<byte> =bytes.view(header)
+  let magic:bool=match str.from_bytes(view.slice(data,0,8)) {some(v)=>v=="GAPIX001",none=>false,}
+  if not magic or picture_number(data,8,8)!=token or picture_number(data,16,8)!=sequence or
+      picture_number(data,24,4)!=cast.wrap(width) or picture_number(data,28,4)!=cast.wrap(height) or picture_number(data,32,8)!=wanted {
+    return result.err("[GA_PROGRAM_HEADER] Persistent picture identity or size mismatch")}
+  var pixels:bytes=try picture_keep_bytes(state,wanted,deadline)
+  let footer:bytes=try picture_keep_bytes(state,32,deadline)
+  let end:view<byte> =bytes.view(footer)
+  let finish:bool=match str.from_bytes(view.slice(end,0,8)) {some(v)=>v=="GAPIEND1",none=>false,}
+  if not finish or picture_number(end,8,8)!=token or picture_number(end,16,8)!=sequence or picture_number(end,24,8)!=wanted {
+    return result.err("[GA_PROGRAM_HEADER] Persistent picture completion mismatch")}
+  // Poll both cancellation and bounded text completion; do not commit a footer alone.
+  var diagnostics:u64=0
+  var last_detail:string=string.new()
+  loop {try picture_control(state)
+    if time.monotonic_ns()>=deadline {return result.err("[GA_PROGRAM_PIPE] Persistent picture completion timed out")}
+    match proc.read_line(child,struct.borrow(state,field=reader),proc.deadline_in(25)) {
+      err(_)=>{},ok(value)=>match value {none=>{return result.err("[GA_PROGRAM_PIPE] Worker exited before persistent completion")},
+        some(line)=>{
+          if str.starts_with(line,"[GA_") {last_detail=string.copy(line)}
+          if str.starts_with(line,"ERR") {return result.err(if str.len(last_detail)>0 {last_detail}else{"[GA_WORKER_REQUEST] Persistent picture refused"})}
+          if str.starts_with(line,"DONE") {
+            var fields:array<string> =["DONE","TCPKEEP",string.from_int(token),string.from_int(sequence),string.from_int(width),string.from_int(height),string.from_int(wanted)]
+            if not str.eq(line,text.join(fields," ")) {return result.err("[GA_PROGRAM_HEADER] Persistent text completion mismatch")}
+            match net.tcp_recv_now(array.borrow(struct.borrow(state,field=picture_socket),0),1) {
+              ok(extra)=>{if view.len(extra)!=0 {return result.err("[GA_PROGRAM_SIZE] Persistent picture has undeclared trailing data")}
+                return result.err("[GA_PROGRAM_PIPE] Persistent picture socket closed at completion")},
+              err(error)=>{if error.code!=3 {return result.err("[GA_PROGRAM_PIPE] Persistent picture completion read failed")}},
+            }
+            return result.ok(ref.swap(pixels,bytes.copy(b"")))
+          }
+          diagnostics=diagnostics+1
+          if diagnostics>=256 {return result.err("[GA_PROGRAM_PIPE] Too many persistent picture diagnostics")}
+        },
+      },
+    }
+  }
+  result.err("[GA_PROGRAM_PIPE] Persistent picture completion absent")
+}
+fn program_keep(state:ref<Provider>,line:str,width:u32,height:u32) -> Frame
+    effects {alloc,fs.meta,fs.read,fs.write,process,net,time} {
+  let total:u64=cast.wrap(width)*cast.wrap(height)
+  if width==0 or height==0 or width>16384 or height>16384 or total>draw.max_pixels() or total>16777216 {
+    note_failure(state,"[GA_PREVIEW_SIZE] Invalid monitor dimensions")
+    return failed_frame(state)}
+  if not state.available or state.kind!=kind_gcompose() {
+    note_failure(state,"[GA_WORKER_MISSING] Compositor unavailable")
+    return failed_frame(state)}
+  if state.picture_width!=0 and (state.picture_width!=width or state.picture_height!=height) {
+    // program_plan retires before prepasses. Direct callers cannot resize retained GPU plans.
+    if text.contains(line," GPU:") or text.contains(line," GPUDIM:") or text.contains(line," GPUOPAQUE:") {
+      restart(state)
+      note_failure(state,"[GA_PROGRAM_HEADER] Resize requires a complete new program plan")
+      return failed_frame(state)}
+    restart(state)
+  }
+  struct.set(state,width,field=picture_width)
+  struct.set(state,height,field=picture_height)
+  if state.calls==18446744073709551615 {restart(state)
+    note_failure(state,"[GA_PROGRAM_HEADER] Picture ticket range exhausted")
+    return failed_frame(state)}
+  struct.set(state,state.calls+1,field=calls)
+  let sequence:u64=state.calls
+  var child:Child=match ref.swap(struct.borrow(state,field=session),option.none()) {
+    some(value)=>value,none=>match start_worker(state) {some(value)=>value,none=>{
+      note_failure(state,"[GA_WORKER_START] Compositor could not start")
+      return failed_frame(state)},},}
+  var listeners:array<Socket> =array.new()
+  if array.len(struct.borrow(state,field=picture_socket))==0 {
+    var listener:Socket=match net.tcp_listen("127.0.0.1",0,1) {ok(value)=>value,err(_)=>{
+      let _=proc.terminate(child,200)
+      let _=proc.close(child)
+      note_failure(state,"[GA_PROGRAM_PIPE] Cannot open persistent picture listener")
+      return failed_frame(state)},}
+    let port:u16=match net.tcp_local_port(listener) {ok(value)=>value,err(_)=>{
+      let _=net.tcp_close(listener)
+      let _=proc.terminate(child,200)
+      let _=proc.close(child)
+      note_failure(state,"[GA_PROGRAM_PIPE] Cannot identify persistent listener")
+      return failed_frame(state)},}
+    struct.set(state,port,field=picture_port)
+    struct.set(state,time.monotonic_ns(),field=picture_token)
+    array.push(listeners,listener)
+  }
+  var fields:array<string> =["PREVIEWTCPKEEP",string.from_int(width),string.from_int(height),string.from_int(state.picture_port),string.from_int(state.picture_token),string.from_int(sequence)]
+  var command:string=text.join(fields," ")
+  string.append(command," ")
+  if str.starts_with(line,"PREVIEW ") {string.append(command,str.slice(line,8,str.len(line)))}else{string.append(command,line)}
+  string.append(command,"\n")
+  let deadline:u64=proc.deadline_in(30000)
+  let started:u64=if state.profile {time.monotonic_ns()}else{0}
+  let sent:result<unit,string> =match proc.write_all_stdin(child,str.bytes(command),deadline) {
+    err(_)=>result.err("[GA_PROGRAM_PIPE] Worker stopped accepting persistent requests"),ok(_)=>result.ok(()),}
+  var outcome:result<bytes,string> =match sent {err(problem)=>result.err(problem),ok(_)=>{
+    if array.len(listeners)>0 {
+      match keep_accept(state,child,array.borrow(listeners,0),deadline) {
+        ok(socket)=>{array.push(struct.borrow(state,field=picture_socket),socket)},err(problem)=>{
+          let _=struct.replace(state,string.copy(problem),field=last_error)},
+      }
+    }
+    if array.len(struct.borrow(state,field=picture_socket))==0 {
+      result.err(string.copy(struct.borrow(state,field=last_error)))}
+    else {keep_record(state,child,width,height,sequence,deadline)}
+  },}
+  loop {match array.pop(listeners) {some(listener)=>{let _=net.tcp_close(listener)},none=>{break},}}
+  match outcome {err(problem)=>{
+    retire_picture_socket(state)
+    let _=proc.terminate(child,200)
+    let _=proc.close(child)
+    let _=struct.replace(state,bytes.copy(b""),field=program_pixels)
+    note_failure(state,problem)
+    return failed_frame(state)},ok(raw)=>{
+    let _=struct.replace(state,option.some(child),field=session)
+    let received:u64=if state.profile {time.monotonic_ns()}else{0}
+    let decoded:option<draw.Surface> =rgba_surface(raw,width,height)
+    if state.profile {
+      let completed:u64=time.monotonic_ns()
+      var values:array<string> =[string.from_int(state.calls),string.from_int(received-started),"0","0",string.from_int(completed-received)]
+      let record:string=text.concat(text.join(values,"\t"),"\n")
+      let _=files.append_text(path.join(str.view(struct.borrow(state,field=media_scratch)),"provider-profile.tsv"),record)
+    }
+    match decoded {none=>{restart(state)
+        note_failure(state,"[GA_PROGRAM_SIZE] Persistent picture could not decode")
+        return failed_frame(state)},some(pixels)=>{
+      let _=struct.replace(state,raw,field=program_pixels)
+      struct.set(state,width,field=program_width)
+      struct.set(state,height,field=program_height)
+      Frame {ok:true,width:width,height:height,pixels:pixels,detail:"gcompose PREVIEWTCPKEEP"}
+    },}
+  },}
+}
+
 fn program_attempt(state: ref<Provider>, line: str, width: u32, height: u32, retry: bool) -> Frame
     effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
   let total: u64 = cast.wrap(width)*cast.wrap(height)
@@ -908,6 +1133,9 @@ fn program_attempt(state: ref<Provider>, line: str, width: u32, height: u32, ret
 }
 pub fn program_plan(state: ref<Provider>, lines: ref<array<string>>, width: u32,
                     height: u32, canvas_width: u32, canvas_height: u32) -> Frame effects {alloc, fs.meta, fs.read, fs.write, process, net, time} {
+  if state.persistent_program and state.picture_width!=0 and (state.picture_width!=width or state.picture_height!=height) {restart(state)}
+  struct.set(state,width,field=picture_width)
+  struct.set(state,height,field=picture_height)
   set_canvas(state, canvas_width, canvas_height)
   if array.len(lines) == 0 {
     return Frame {ok: false, width: 0, height: 0, pixels: draw.empty_surface(),

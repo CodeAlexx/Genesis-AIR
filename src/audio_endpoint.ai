@@ -1,0 +1,97 @@
+// Runtime-only endpoint metadata. Authored geometry and saved transports remain authoritative.
+module genesis.audio_endpoint
+import std.math as math
+import std.text as text
+pub type Root = struct {id:string,start:i64,body:i64,actual:i64,tail:bool,native_eof:bool}
+pub type End = struct {generation:u64,authored:i64,actual:i64,frames:i64,fps:f64,roots:array<Root>}
+pub fn empty() -> End effects {alloc} {End {generation:0,authored:0,actual:0,frames:0,fps:30.0,roots:array.new()}}
+pub fn sample(frame:i64,fps:f64) -> i64 effects {} {cast.sat(math.floor(cast.float(frame)*48000.0/fps+0.5))}
+pub fn frame_end(samples:i64,fps:f64) -> result<i64,string> effects {alloc} {
+  if samples<0 or samples>1037040003 or not math.is_finite(fps) or fps<=0.0 or fps>1000.0 {
+    return result.err("[GA_AUDIO_ENDPOINT] Invalid endpoint geometry")
+  }
+  var frame:i64=cast.sat(math.ceil(cast.float(samples)*fps/48000.0))
+  if frame>0 and sample(frame-1,fps)>=samples {frame=frame-1}
+  if sample(frame,fps)<samples {frame=frame+1}
+  result.ok(frame)
+}
+pub fn encode(value:ref<End>) -> string effects {alloc} {
+  var modern:bool=false
+  var scan:u64=0
+  loop {if scan>=array.len(struct.borrow(value,field=roots)) {break}
+    if array.borrow(struct.borrow(value,field=roots),scan).native_eof {modern=true}
+    scan=scan+1
+  }
+  var lines:array<string> =[fields([if modern {"END2"}else{"END1"},string.from_int(value.generation),string.from_int(value.authored),
+    string.from_int(value.actual),string.from_int(value.frames),string.from_float(value.fps)])]
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(value,field=roots)) {break}
+    let root:ref<Root> =array.borrow(struct.borrow(value,field=roots),i)
+    array.push(lines,fields([string.copy(str.view(struct.borrow(root,field=id))),string.from_int(root.start),string.from_int(root.body),
+      string.from_int(root.actual),if root.native_eof {"2"}else if root.tail {"1"}else{"0"}]))
+    i=i+1
+  }
+  text.join(lines,"\n")
+}
+pub fn decode(data:str) -> result<End,string> effects {alloc} {
+  var lines:array<string> =text.split(data,"\n")
+  if array.len(lines)==0 or array.len(lines)>4097 {return result.err("[GA_AUDIO_ENDPOINT] Invalid endpoint descriptor")}
+  var fields:array<string> =text.split(str.view(array.borrow(lines,0))," ")
+  if array.len(fields)!=6 {return result.err("[GA_AUDIO_ENDPOINT] Invalid endpoint header")}
+  let modern:bool=str.eq(str.view(array.borrow(fields,0)),"END2")
+  if not modern and not str.eq(str.view(array.borrow(fields,0)),"END1") {return result.err("[GA_AUDIO_ENDPOINT] Invalid endpoint header")}
+  var end:End=empty()
+  struct.set(end,match text.parse_u64(str.view(array.borrow(fields,1))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid generation")},some(v)=>v,},field=generation)
+  struct.set(end,match text.parse_i64(str.view(array.borrow(fields,2))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid authored bound")},some(v)=>v,},field=authored)
+  struct.set(end,match text.parse_i64(str.view(array.borrow(fields,3))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid audio bound")},some(v)=>v,},field=actual)
+  struct.set(end,match text.parse_i64(str.view(array.borrow(fields,4))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid presentation bound")},some(v)=>v,},field=frames)
+  struct.set(end,match text.parse_f64(str.view(array.borrow(fields,5))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid fps")},some(v)=>v,},field=fps)
+  let expected:i64=try frame_end(if end.actual>end.authored {end.actual}else{end.authored},end.fps)
+  if end.authored<0 or end.actual<0 or end.frames!=expected {return result.err("[GA_AUDIO_ENDPOINT] Endpoint presentation differs from samples")}
+  var i:u64=1
+  var maximum:i64=0
+  loop {if i>=array.len(lines) {break}
+    var f:array<string> =text.split(str.view(array.borrow(lines,i))," ")
+    if array.len(f)!=5 {return result.err("[GA_AUDIO_ENDPOINT] Invalid root descriptor")}
+    let start:i64=match text.parse_i64(str.view(array.borrow(f,1))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid root start")},some(v)=>v,}
+    let body:i64=match text.parse_i64(str.view(array.borrow(f,2))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid root body")},some(v)=>v,}
+    let actual:i64=match text.parse_i64(str.view(array.borrow(f,3))) {none=>{return result.err("[GA_AUDIO_ENDPOINT] Invalid root EOF")},some(v)=>v,}
+    let native_eof:bool=modern and str.eq(str.view(array.borrow(f,4)),"2")
+    let tail:bool=native_eof or str.eq(str.view(array.borrow(f,4)),"1")
+    if (not tail and not str.eq(str.view(array.borrow(f,4)),"0")) or start<0 or body<=start or body>1036800000 or actual<start or actual>body+if native_eof {240000}else if tail {if phase_fps(end.fps) {240003}else{240000}}else{1} or (not native_eof and actual<body-if tail {if phase_fps(end.fps) {2}else{0}}else{1}) {return result.err("[GA_AUDIO_ENDPOINT] Invalid root sample bounds")}
+    if actual>maximum and not (native_eof and actual==start) {maximum=actual}
+    var n:u64=0
+    loop {if n>=array.len(struct.borrow(end,field=roots)) {break}
+      if str.eq(str.view(array.borrow(struct.borrow(end,field=roots),n).id),str.view(array.borrow(f,0))) {return result.err("[GA_AUDIO_ENDPOINT] Duplicate root")}
+      n=n+1
+    }
+    array.push(struct.borrow(end,field=roots),Root {id:string.copy(str.view(array.borrow(f,0))),start:start,body:body,actual:actual,tail:tail,native_eof:native_eof})
+    i=i+1
+  }
+  if maximum!=end.actual or (array.len(struct.borrow(end,field=roots))>0 and end.generation==0) {return result.err("[GA_AUDIO_ENDPOINT] Invalid accepted graph identity")}
+  result.ok(end)
+}
+
+pub fn fields(values:array<string> own) -> string effects {alloc} {var owned:array<string> =values
+  text.join(owned," ")}
+pub fn lines(values:array<string> own) -> string effects {alloc} {var owned:array<string> =values
+  text.join(owned,"\n")}
+
+pub fn presentation_samples(end:ref<End>) -> i64 effects {} {if end.authored>end.actual {end.authored}else{end.actual}}
+pub fn pull_count(end:ref<End>,start:i64,maximum:u64) -> u64 effects {} {
+  if start<0 or start>=end.actual or maximum==0 {return 0}
+  let remaining:u64=cast.wrap(end.actual-start)
+  let limit:u64=if maximum>1440000 {1440000}else{maximum}
+  if remaining<limit {remaining}else{limit}
+}
+pub fn completed(end:ref<End>,origin:i64,samples:u64) -> bool effects {} {
+  if origin<0 or origin>=end.frames {return false}
+  let start:i64=sample(origin,end.fps)
+  let finish:i64=presentation_samples(end)
+  finish<=start or samples>=cast.wrap(finish-start)
+}
+
+pub fn phase_fps(fps:f64) -> bool effects {} {
+  fps==24.0 or fps==30.0 or fps==60.0 or fps==24000.0/1001.0 or
+    fps==30000.0/1001.0 or fps==60000.0/1001.0
+}

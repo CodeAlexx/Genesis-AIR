@@ -82,6 +82,12 @@ def projects(paths):
     effect(doc,30,"compressor",dict(threshold=-14,ratio=4,attack=3,release=80))
     doc=add("delay-history",13,source_in=1,length=80,fade_in=3,fade_out=7)
     effect(doc,30,"delay",dict(time=35,decay=.5))
+    # Exact NTSC owner/sample phase must use the accepted full-history cache.
+    # Sparse original impulses and post-crop scalar fades independently expose
+    # a restarted graph, shifted source selection or wrong bucket partition.
+    doc=add("delay-history-fractional-phase",13,start=7,source_in=3,length=80,fade_in=3,fade_out=7)
+    doc["sequences"][0]["fps"]=60000/1001
+    effect(doc,30,"delay",dict(time=35,decay=.5))
     add("held",7,speed=0,reverse=True,gain=2)
     add("disabled",7,enabled=False,gain=2)
     doc=add("muted-keyed",7)
@@ -258,6 +264,7 @@ def main():
             authored_files.append(saved)
             if code=="ok":expected[name]=reference(doc,sources,worker)
         before.update({str(p):sha(p) for p in authored_files})
+        report["input_sha256"]=before.copy()
         manifest.write_text("".join(f"{name}\t30"+("" if args.baseline_client else f"\t{code}")+"\n"
                                     for name,_,code in cases),encoding="utf-8")
         native=root/"native"
@@ -267,6 +274,12 @@ def main():
             report["client_exit"]=done.returncode
             report["client_stdout"]=done.stdout.decode("utf-8",errors="replace")
             report["client_stderr"]=done.stderr.decode("utf-8",errors="replace")
+            # Preserve the coded cause before a missing secondary manifest
+            # can mask the failed client. Keep its original terminal status.
+            report["client_error_files"]={p.name:p.read_text(encoding="utf-8")
+                                          for p in native.glob("*-error.txt")}
+            assert done.returncode==0,(done.returncode,report["client_stdout"],
+                                       report["client_stderr"],report["client_error_files"])
             errors=[]
             for name,doc,code in cases:
                 error=(native/(name+"-error.txt")).read_text(encoding="utf-8")
@@ -322,6 +335,24 @@ def main():
             assert sha(worker)==report["worker_sha256"] and sha(client)==report["client_sha256"]
             report.update(passed=True,sources_projects_binaries_immutable=True,owned_cache_removed=True,
                           peak_threshold=2e-6)
+        except BaseException as problem:
+            report["failure"]=repr(problem)
+            if args.report:
+                # Preserve native outputs and authored graphs, without copying
+                # the large sparse cancellation source or changing failures.
+                evidence=args.report.parent/(args.report.stem+"-failure-evidence")
+                try:
+                    evidence.mkdir(parents=True,exist_ok=False)
+                    if native.is_dir():
+                        import shutil
+                        shutil.copytree(native,evidence/"native")
+                    for authored in authored_files:
+                        (evidence/authored.name).write_bytes(authored.read_bytes())
+                    (evidence/manifest.name).write_bytes(manifest.read_bytes())
+                    report["failure_evidence"]=str(evidence.resolve())
+                except OSError as preservation_error:
+                    report["failure_evidence_error"]=repr(preservation_error)
+            raise
         finally:
             if args.report:
                 args.report.parent.mkdir(parents=True,exist_ok=True)

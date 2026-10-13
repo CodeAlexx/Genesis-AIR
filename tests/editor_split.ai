@@ -5,6 +5,8 @@ import std.editor as editor
 import std.editor_io as editor_io
 import std.curve as curve
 import std.math as math
+import std.files as files
+import std.path as path
 import std.testing as test
 import "../src/app.ai" as app
 import "../src/commands.ai" as commands
@@ -175,6 +177,71 @@ fn content_continuity(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.
   let _ = test.done(suite)
   ()
 }
+// Supported tail cuts must exercise the public command transaction as well as the
+// toolkit. Expectations below are authored source/frame/sample constants, not
+// values derived from audio_context_for or the new split implementation.
+fn supported_tail_transactions(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var variant: u64 = 0
+  loop {if variant >= 2 {break}
+    var state: app.App = app.app(provider.fake(root))
+    let source: commands.Result = commands.import_media(state,"tail.mov","Tail source")
+    let placed: commands.Result = commands.append_clip(state,app.default_video_track(state),source.value,0,90)
+    let audio: commands.Result = commands.append_clip(state,app.default_audio_track(state),source.value,0,90)
+    let kind: str = if variant == 0 {"delay"} else {"reverb"}
+    let parameter: str = if variant == 0 {"time"} else {"amount"}
+    let amount: f64 = if variant == 0 {250.0} else {0.35}
+    let filter: u64 = option.unwrap(editor.add_filter(struct.borrow(state,field=document),placed.value,kind))
+    let _ = test.check(suite,editor.set_filter_param(struct.borrow(state,field=document),filter,parameter,amount),"Static tail parameter is authored")
+    let _ = commands.select_only(state,placed.value)
+    let _ = commands.seek(state,37)
+    let _ = commands.set_clip_field(state,audio.value,"gain",0.5)
+    let _ = commands.undo(state)
+    app.mark_dirty(state,false)
+    let before: string = encoded(struct.borrow(state,field=document))
+    let neutral: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),audio.value))
+    let depth: u64 = editor.undo_depth(struct.borrow(state,field=history))
+    let revision: u64 = state.document_revision
+    let identity: string = pictures.identity_revision(state,false,true)
+    let eligible_clip: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),placed.value))
+    let _ = test.check(suite,editor.redo_depth(struct.borrow(state,field=history)) == 1 and editor.audio_tail_context_supported(struct.borrow(state,field=document),eligible_clip),"Supported48k tail cut starts with a real Redo branch")
+    let split: commands.Result = commands.split_at_playhead(state)
+    let _ = test.check(suite,split.ok and split.value != placed.value,"Public command admits the supported static48k tail cut")
+    if not split.ok {return ()}
+    let left: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),placed.value))
+    let right: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),split.value))
+    let other: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),audio.value))
+    let _ = test.check(suite,left.start == 0 and left.length == 37 and left.source_in == 0 and right.start == 37 and right.length == 53 and right.source_in == 37,"Both visible pieces exactly cover authored0..90 with source cut37")
+    let _ = test.check(suite,left.source == source.value and right.source == source.value and left.track == app.default_video_track(state) and right.track == left.track and left.streams == editor.streams_both() and right.streams == left.streams,"Split retains media lane and stream identity")
+    let _ = test.check(suite,other.id == neutral.id and other.owner == neutral.owner and other.source == neutral.source and other.nested == neutral.nested and other.track == neutral.track and other.group == neutral.group and other.start == neutral.start and other.length == neutral.length and other.source_in == neutral.source_in,"Unlinked neutral audio clip retains every identity and geometry field")
+    let _ = test.check(suite,other.enabled == neutral.enabled and other.selected == neutral.selected and other.streams == neutral.streams and other.fade_in == neutral.fade_in and other.fade_out == neutral.fade_out and other.gain == neutral.gain and other.pan == neutral.pan and other.speed == neutral.speed and other.reverse == neutral.reverse and not option.is_some(other.audio_context) and editor.filter_count(struct.borrow(state,field=document),other.id) == 0,"Neutral clip scalar state and context remain unchanged")
+    let _ = test.check(suite,option.is_some(left.audio_context) and option.is_some(right.audio_context),"Both pieces own durable full processing contexts")
+    if not option.is_some(left.audio_context) or not option.is_some(right.audio_context) {return ()}
+    let lc: editor.AudioContext = option.unwrap(left.audio_context)
+    let rc: editor.AudioContext = option.unwrap(right.audio_context)
+    let _ = test.check(suite,lc.source_in == 0 and rc.source_in == 0 and lc.length == 90 and rc.length == 90 and lc.origin == 0 and rc.origin == 0 and lc.fps == 30.0 and rc.fps == 30.0 and lc.rate == 1.0 and rc.rate == 1.0 and not lc.reverse and not rc.reverse and not option.is_some(lc.extent) and not option.is_some(rc.extent),"Original full90-frame source and30fps unit phase persist on both pieces")
+    let _ = test.check(suite,lc.offset == 0 and lc.crop_start == 0 and rc.offset == 37 and rc.crop_start == 59200 and lc.output_frames == 144000 and rc.output_frames == 144000,"Exact48k body crop is independently37 times1600 and full90 times1600")
+    let _ = test.check(suite,lc.offset+left.length != lc.length and rc.offset+right.length == rc.length and editor.audio_tail_context_supported(struct.borrow(state,field=document),left) and editor.audio_tail_context_supported(struct.borrow(state,field=document),right),"Only right original-end survivor owns the EOF tail")
+    let clone: u64 = option.unwrap(editor.filter_at(struct.borrow(state,field=document),right.id,0))
+    let _ = test.check(suite,clone != filter and editor.filter_count(struct.borrow(state,field=document),left.id) == 1 and editor.filter_count(struct.borrow(state,field=document),right.id) == 1 and editor.filter_enabled(struct.borrow(state,field=document),filter) and editor.filter_enabled(struct.borrow(state,field=document),clone),"Ordered enabled tail filter is cloned with a fresh identity")
+    let _ = test.eq_str(suite,editor.filter_kind(struct.borrow(state,field=document),clone),kind,"Cloned filter retains authored effect kind")
+    let _ = test.near_f64(suite,editor.filter_param(struct.borrow(state,field=document),clone,parameter,-1.0),amount,0.0,"Cloned parameter retains the independently authored scalar")
+    let _ = test.check(suite,editor.undo_depth(struct.borrow(state,field=history)) == depth+1 and editor.redo_depth(struct.borrow(state,field=history)) == 0,"Successful tail Split captures exactly one Undo and retires Redo")
+    let _ = test.check(suite,state.document_revision == revision+1 and pictures.identity_revision(state,false,true) != identity and app.dirty(state),"Accepted tail Split invalidates prepared content identity exactly once")
+    let committed: string = encoded(struct.borrow(state,field=document))
+    let target: string = path.join(root,if variant == 0 {"split-delay.air"} else {"split-reverb.air"})
+    let saved: bool = match files.write_text(target,committed) {ok(_)=>true,err(_)=>false,}
+    let _ = test.check(suite,saved,"Supported tail project writes to a private Save path")
+    let opened: string = match files.read_text(target) {ok(s)=>s,err(_)=>string.copy("missing"),}
+    var loaded: editor.Document = match editor_io.decode(opened) {ok(d)=>d,err(_)=>{let _=test.check(suite,false,"Supported tail project opens with valid retained contexts")
+      return ()},}
+    let _ = test.eq_str(suite,encoded(loaded),committed,"Save Open retains complete cloned graph contexts and IDs")
+    let _ = test.check(suite,commands.undo(state).ok,"Supported tail Split has Undo")
+    let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo restores complete original graph with no retained context")
+    let _ = test.check(suite,commands.redo(state).ok,"Supported tail Split has Redo")
+    let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),committed,"Redo restores exact supported tail graph and stable IDs")
+    variant=variant+1}
+  ()
+}
 fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   let _ = test.start(suite,"Split refusals preserve complete document redo selection and preview identity")
   var state: app.App = app.app(provider.fake(root))
@@ -183,6 +250,13 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
   let audio: commands.Result = commands.append_clip(state,app.default_audio_track(state),source.value,0,90)
   let _ = commands.select_only(state,placed.value)
   let _ = commands.seek(state,37)
+  let source_slot: u64 = option.unwrap(editor.source_slot(struct.borrow(state,field=document),source.value))
+  let width: u32 = struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sources),source_slot),field=width)
+  let height: u32 = struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sources),source_slot),field=height)
+  let video_present: bool = struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sources),source_slot),field=has_video)
+  let audio_present: bool = struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sources),source_slot),field=has_audio)
+  let audio_rate: u32 = struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sources),source_slot),field=audio_rate)
+  let channels: u32 = struct.get(array.borrow(struct.borrow(struct.borrow(state,field=document),field=sources),source_slot),field=audio_channels)
   var variant: u64 = 0
   loop {if variant >= 9 {break}
     let _ = editor.set_clip_speed(struct.borrow(state,field=document),placed.value,if variant < 2 {0.5} else {1.0})
@@ -193,11 +267,16 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
     if variant == 5 {let _ = editor.set_key(struct.borrow(state,field=document),placed.value,"speed.rate",0,1.0,curve.linear())}
     let original_streams:u32=editor.clip_streams(struct.borrow(state,field=document),placed.value)
     if variant >= 7 {let _=editor.set_clip_streams(struct.borrow(state,field=document),placed.value,editor.streams_both())}
+    // Static48k Delay/Reverb cuts now preserve actual EOF tails. These two
+    // negatives intentionally use the still-unproved32k native domain instead.
+    if variant >= 7 {let _=editor.describe_source(struct.borrow(state,field=document),source.value,width,height,video_present,audio_present,32000,channels)}
     var temporal: u64 = 0
     if variant >= 6 {
       let kind: string = if variant == 6 {string.copy("timer")} else if variant == 7 {string.copy("delay")} else {string.copy("reverb")}
       temporal=option.unwrap(editor.add_filter(struct.borrow(state,field=document),placed.value,str.view(kind)))
     }
+    if variant >= 7 {let unproved: editor.Clip=option.unwrap(editor.clip(struct.borrow(state,field=document),placed.value))
+      let _=test.check(suite,not editor.audio_tail_context_supported(struct.borrow(state,field=document),unproved),"Unproved32k tail history remains outside the supported cut domain")}
     let _ = commands.set_clip_field(state,audio.value,"gain",0.5)
     let _ = commands.undo(state)
     app.mark_dirty(state,false)
@@ -229,7 +308,7 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
       let _ = test.eq_str(suite,encoded(probe),before,"Destructive lift-range caller fails safely before unsupported context")
     }
     let result: commands.Result = commands.split_at_playhead(state)
-    let _ = test.check(suite,not result.ok,"Unsupported phase fades rates picture timer or audible delay-tail cut is refused")
+    let _ = test.check(suite,not result.ok,"Unsupported phase fades rates picture timer or unproved32k delay-tail cut is refused")
     let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Refusal does not cut the other eligible audio clip")
     let _ = test.eq_str(suite,history_bytes(struct.borrow(state,field=history)),history,"Refusal preserves every undo and redo snapshot")
     let _ = test.eq_u64(suite,state.document_revision,revision,"Refused Split preserves document revision")
@@ -243,6 +322,7 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
     if variant == 5 {let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"speed.rate",0)}
     if temporal != 0 {let _ = editor.remove_filter(struct.borrow(state,field=document),temporal)}
     let _=editor.set_clip_streams(struct.borrow(state,field=document),placed.value,original_streams)
+    if variant >= 7 {let _=test.check(suite,editor.describe_source(struct.borrow(state,field=document),source.value,width,height,video_present,audio_present,audio_rate,channels),"Restore original source metadata after unproved tail refusal")}
     variant=variant+1}
   let _ = editor.remove_key(struct.borrow(state,field=document),placed.value,"speed.rate",0)
   let _ = editor.set_clip_speed(struct.borrow(state,field=document),placed.value,1.0)
@@ -258,6 +338,7 @@ fn refused_and_undo(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs
   let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo restores full pre-Split document")
   let _ = commands.redo(state)
   let _ = test.eq_str(suite,encoded(struct.borrow(state,field=document)),committed,"Redo restores exact committed Split")
+  supported_tail_transactions(suite,root)
   let _ = test.done(suite)
   ()
 }

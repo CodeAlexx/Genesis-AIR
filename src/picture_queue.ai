@@ -61,6 +61,14 @@ pub fn identity_revision(state: ref<app.App>, source: bool, playing: bool) -> st
     string.append(out,"\n")
     string.append(out,string.from_int(if source {doc.monitor.frame}else{editor.playhead(doc)}))
   }
+  string.append(out,"\n")
+  string.append(out,string.from_int(app.presentation_duration(state)))
+  string.append(out,"\n")
+  string.append(out,string.from_int(state.endpoint_prepare))
+  string.append(out,"\n")
+  string.append(out,string.from_int(state.endpoint_seek_requested))
+  string.append(out,"\n")
+  string.append(out,if state.endpoint_end_requested {"end"}else{"none"})
   out
 }
 pub fn configure(queue: ref<Queue>, key: str, epoch: u64, playing: bool,
@@ -319,6 +327,7 @@ pub fn take_due(queue: ref<Queue>, wanted: i64) -> option<Frame> effects {} {
 }
 pub fn apply(state: ref<app.App>, frame: Frame own, source: ref<draw.Surface>,
     program: ref<draw.Surface>) -> unit effects {alloc} {
+  if not app.endpoint_picture_ready(state) {return ()}
   var picture: Frame = frame
   struct.set(state,picture.position.program_frame,field=presented_program_frame)
   struct.set(state,picture.position.source_frame,field=presented_source_frame)

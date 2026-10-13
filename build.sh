@@ -79,6 +79,21 @@ else
   exit 1
 fi
 
+# Separate overlays also upgrade an SDK that already has the deadline change.
+channel_read_patch="$here/patches/air-channel-read-first.patch"
+if [ ! -f "$channel_read_patch" ]; then
+  echo 'genesis-air: [GA_SDK_CHANNEL_READ_PATCH_MISSING] shared channel terminal delivery overlay is missing' >&2
+  exit 1
+fi
+if git -C "$AIR_HOME" apply --reverse --check "$channel_read_patch" >/dev/null 2>&1; then
+  :
+elif git -C "$AIR_HOME" apply --check "$channel_read_patch" >/dev/null 2>&1; then
+  git -C "$AIR_HOME" apply "$channel_read_patch"
+else
+  echo 'genesis-air: [GA_SDK_CHANNEL_READ_PATCH_BASE] channel terminal delivery overlay does not match SDK; existing changes preserved' >&2
+  exit 1
+fi
+
 publish_patch="$here/patches/air-file-publish.patch"
 if [ ! -f "$publish_patch" ]; then
   echo 'genesis-air: [GA_SDK_PUBLISH_PATCH_MISSING] file publication overlay is missing' >&2
@@ -100,7 +115,7 @@ echo "genesis-air: building against AIR $AIR_SDK_COMMIT ($mode)"
 # Capture the report even when the compile fails: the diagnostics live inside it, and
 # dying before the reporter runs is how a build error turns into silence.
 set +e
-"$AIRC" build "$here/src/main.ai" -o "$here/build/genesis-air" --mode "$mode" --json > "$here/build/build.json"
+"$AIRC" build "$here/src/main.ai" -o "$here/build/genesis-air" --mode "$mode" --provider hash.sha256=portable --json > "$here/build/build.json"
 status=$?
 set -e
 if [ "$status" -ne 0 ]; then

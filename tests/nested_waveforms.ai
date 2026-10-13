@@ -31,7 +31,7 @@ fn same(a: ref<draw.Surface>, b: ref<draw.Surface>) -> bool effects {} {
   true
 }
 fn publication(suite: ref<test.Suite>, state: ref<app.App>, root: str, clip: u64)
-    -> unit effects {alloc,fs.meta,fs.read,fs.write,time} {
+    -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
   let _ = test.start(suite,"Descendant edits retire peaks even when root endpoints are unchanged")
   preview.write_waveforms(state,root)
   let original: string = match files.read_text(path.join(root,"waveforms.tsv")) {
@@ -40,6 +40,15 @@ fn publication(suite: ref<test.Suite>, state: ref<app.App>, root: str, clip: u64
   }
   let _ = files.write_text(path.join(root,"waveforms.id"),"11")
   let before: i64 = cast.sat(app.waveform_count(state))
+  // The legacy payload below remains processed audio. GUI painting now owns
+  // a separate neutral-output reference with a complete descendant descriptor.
+  let shown: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),clip))
+  let reference_ready: bool = match preview.visual_waveforms_for_viewport(state,"",0,shown.start,editor.clip_end(shown),
+      preview.StripView {limited:false,first:0,height:0.0}) {ok(count)=>count>0,err(_)=>false,}
+  let _ = test.check(suite,reference_ready,"Actual current display reference is generated separately from processed peaks")
+  if not reference_ready {return ()}
+  let visual_slot: u64 = option.unwrap(app.visual_waveform_slot(state,clip))
+  let original_key: string = string.copy(struct.borrow(array.borrow(struct.borrow(state,field=visual_waveforms),visual_slot),field=key))
   let doc: ref<editor.Document> = struct.borrow(state,field=document)
   let compound: editor.Clip = option.unwrap(editor.clip(doc,clip))
   var at: u64 = 0
@@ -60,11 +69,25 @@ fn publication(suite: ref<test.Suite>, state: ref<app.App>, root: str, clip: u64
   var stale: draw.Surface = painted(state)
   let slot: u64 = option.unwrap(app.waveform_slot(state,clip))
   struct.set(array.borrow(struct.borrow(state,field=waveforms),slot),state.document_revision,field=document_revision)
-  var current: draw.Surface = painted(state)
-  let _ = test.check(suite,not same(stale,current),"Current waveform paints on its timeline lane")
+  var processed_only: draw.Surface = painted(state)
+  let _ = test.check(suite,same(stale,processed_only),"Processed row relabeling cannot make an obsolete display reference paint")
   let _ = struct.replace(state,array.new(),field=waveforms)
+  let _ = struct.replace(state,array.new(),field=visual_waveforms)
   var empty: draw.Surface = painted(state)
   let _ = test.check(suite,same(stale,empty),"Stale waveform contributes no painted pixels")
+  let current_clip: editor.Clip = option.unwrap(editor.clip(struct.borrow(state,field=document),clip))
+  let regenerated: bool = match preview.visual_waveforms_for_viewport(state,"",0,current_clip.start,editor.clip_end(current_clip),
+      preview.StripView {limited:false,first:0,height:0.0}) {ok(count)=>count>0,err(_)=>false,}
+  let _ = test.check(suite,regenerated,"Descendant edit requires actual fresh display-reference planning")
+  if not regenerated {return ()}
+  let current_slot: u64 = option.unwrap(app.visual_waveform_slot(state,clip))
+  let current_key: string = string.copy(struct.borrow(array.borrow(struct.borrow(state,field=visual_waveforms),current_slot),field=key))
+  let _ = test.check(suite,not str.eq(original_key,current_key),"Unchanged root endpoints do not hide changed descendant DSP identity")
+  let _ = test.check(suite,current_clip.start==shown.start and current_clip.length==shown.length and
+    current_clip.source_in==shown.source_in and current_clip.source==shown.source and current_clip.nested==shown.nested,
+    "Descendant edit preserves all root clip geometry and resource endpoints")
+  var current: draw.Surface = painted(state)
+  let _ = test.check(suite,not same(stale,current),"Current waveform paints on its timeline lane")
   let revised: string = text.replace(original,"WAVEFORMS 2\t41\t7","WAVEFORMS 2\t42\t7")
   let updated: string = text.replace(revised,"\t7\t41\t","\t7\t42\t")
   let _ = files.write_text(path.join(root,"waveforms.tsv"),updated)

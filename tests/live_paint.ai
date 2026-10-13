@@ -3,15 +3,18 @@ module genesis.tests.live_paint
 import std.draw as draw
 import std.geometry as geometry
 import std.editor as editor
+import std.editor_io as editor_io
 import std.image as image
 import std.path as path
 import std.testing as test
+import std.timeline as timeline
 import std.text as text
 import "../src/app.ai" as app
 import "../src/chrome.ai" as chrome
 import "../src/commands.ai" as commands
 import "../src/layout.ai" as layout
 import "../src/provider.ai" as provider
+import "../src/preview.ai" as preview
 import "../src/project_session.ai" as session
 import "../src/typeface.ai" as typeface
 import "../src/view.ai" as painter
@@ -21,6 +24,44 @@ fn picture(width: u32, height: u32, blue: bool, alpha: u8) -> draw.Surface effec
   draw.clear(canvas, draw.Color {r: if blue { 12 } else { 238 }, g: 40, b: if blue { 238 } else { 12 }, a: alpha})
   draw.fill_rect(canvas, option.unwrap(geometry.rect(8.0, 8.0, 24.0, 24.0)), draw.rgb(20, 240, 30))
   draw.finish(canvas)
+}
+// The processed cache remains an independent legacy API; GUI paints use the
+// separately validated neutral-mixer reference without changing its samples.
+fn seed_reference(state:ref<app.App>,id:u64)->bool effects {alloc} {
+  let clip:editor.Clip=match editor.clip(struct.borrow(state,field=document),id) {none=>{return false},some(value)=>value,}
+  var neutral:editor.Document=preview.visual_reference_document(struct.borrow(state,field=document))
+  let key:string=match preview.visual_reference_key(neutral,clip,8) {err(_)=>{return false},ok(value)=>value,}
+  app.set_visual_waveform(state,id,str.view(key),[0.1,0.8,0.2,0.5,0.3,0.9,0.4,0.7])
+}
+// Count the actual waveform ink inside A1, away from its silent center line.
+// A retained/full comparison of two blank waveforms cannot satisfy this check.
+fn visible_wave_pixels(state:ref<app.App>,surface:ref<draw.Surface>)->u64 effects {alloc} {
+  let scale:f64=layout.ui_scale(1600.0,980.0)
+  let frame:layout.Frame=layout.frame(1600.0/scale,980.0/scale)
+  var model:timeline.Timeline=painter.timeline_model(state,frame.timeline)
+  var lane:u64=0
+  loop {if lane>=array.len(struct.borrow(model,field=tracks)) {return 0}
+    if struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=id)==app.default_audio_track(state) {break}
+    lane=lane+1}
+  let top:f64=timeline.track_top(model,lane)
+  let height:f64=struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=height)
+  let middle:f64=(top+height*0.5)*scale
+  var y:u64=cast.sat((top+4.0)*scale)
+  let end_y:u64=cast.sat((top+height-4.0)*scale)
+  var count:u64=0
+  loop {if y>=end_y {break}
+    let yf:f64=cast.float(y)
+    if yf<middle-2.0 or yf>middle+2.0 {
+      var x:u64=cast.sat((frame.timeline.left+4.0)*scale)
+      let end_x:u64=cast.sat((frame.timeline.right-4.0)*scale)
+      loop {if x>=end_x {break}
+        match draw.surface_pixel(surface,cast.sat(x),cast.sat(y)) {none=>{},some(pixel)=>{
+          if pixel.r==215 and pixel.g==255 and pixel.b==236 {count=count+1}
+        },}
+        x=x+1}
+    }
+    y=y+1}
+  count
 }
 fn fixture(scratch: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.write, process, time} {
   var state: app.App = app.app(provider.fake(scratch))
@@ -32,6 +73,7 @@ fn fixture(scratch: str) -> app.App effects {alloc, env, fs.meta, fs.read, fs.wr
   let _ = commands.select_only(state, added.value)
   var peaks: array<f64> = [0.1, 0.8, 0.2, 0.5, 0.3, 0.9]
   app.set_waveform(state,audio.value,peaks,0,899,state.media_revision)
+  let _=seed_reference(state,audio.value)
   var frame: i64 = 0
   loop { if frame >= 900 { break }
     array.push(struct.borrow(state, field=thumbnails), app.Thumbnail {clip: added.value, frame: frame, source:source.value,source_frame:frame,revision:0,document_revision:0,
@@ -62,7 +104,18 @@ fn compare(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.Rende
 }
 fn compare_held(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.Renderer>, width: u32,
     height: u32, full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, scratch: str, hold_source: bool) -> unit effects {alloc, fs.read, fs.write, io.write} {
-  let _ = test.check(suite, painter.render_with_source_hold(state, cache, width, height, full, source, program,hold_source), "Retained paint succeeds")
+  compare_damage(suite,state,cache,width,height,full,source,program,scratch,hold_source,false)
+}
+fn compare_damage(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.Renderer>, width: u32,
+    height: u32, full: bool, source: ref<draw.Surface>, program: ref<draw.Surface>, scratch: str,
+    hold_source: bool, timeline_damage: bool) -> unit effects {alloc, fs.read, fs.write, io.write} {
+  compare_regions(suite,state,cache,width,height,full,source,program,scratch,hold_source,timeline_damage,false,false)
+}
+fn compare_regions(suite:ref<test.Suite>,state:ref<app.App>,cache:ref<painter.Renderer>,width:u32,
+    height:u32,full:bool,source:ref<draw.Surface>,program:ref<draw.Surface>,scratch:str,
+    hold_source:bool,timeline_damage:bool,waveform_damage:bool,thumbnail_damage:bool)
+    ->unit effects {alloc,fs.read,fs.write,io.write} {
+  let _=test.check(suite,painter.render_with_timeline_regions(state,cache,width,height,full,source,program,hold_source,timeline_damage,waveform_damage,thumbnail_damage),"Retained paint succeeds")
   var oracle: painter.Renderer = painter.renderer()
   let _ = test.check(suite, painter.render(state, oracle, width, height, true, source, program), "Complete paint succeeds")
   let actual: ref<array<byte>> = struct.borrow(struct.borrow(cache, field=surface), field=pixels)
@@ -87,6 +140,28 @@ fn compare_held(suite: ref<test.Suite>, state: ref<app.App>, cache: ref<painter.
   }
   ()
 }
+// Compare fixed physical canvas regions to the pre-delivery pixels, independent
+// of the retained renderer. Insets avoid antialiased shared panel borders.
+fn changed_region(before:view<byte>,surface:ref<draw.Surface>,area:layout.Rect,scale:f64)->u64 effects {} {
+  let pixels:ref<array<byte>> =struct.borrow(surface,field=pixels)
+  let left:u64=cast.sat(area.left*scale+3.0)
+  let right:u64=cast.sat(area.right*scale-3.0)
+  var y:u64=cast.sat(area.top*scale+3.0)
+  let bottom:u64=cast.sat(area.bottom*scale-3.0)
+  var changed:u64=0
+  loop {if y>=bottom {break}
+    var x:u64=left
+    loop {if x>=right {break}
+      var channel:u64=0
+      loop {if channel==4 {break}
+        let at:u64=(y*cast.wrap(surface.width)+x)*4+channel
+        if view.get(before,at)!=array.get(pixels,at) {changed=changed+1}
+        channel=channel+1}
+      x=x+1}
+    y=y+1}
+  changed
+}
+
 pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
   if view.len(args) < 2 { return 2 }
   let scratch: str = view.get(args, 1)
@@ -94,6 +169,25 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
   var state: app.App = fixture(scratch)
   var source: draw.Surface = picture(480, 270, false, 255)
   var program: draw.Surface = picture(480, 270, false, 255)
+  let _=test.start(suite,"Current A1 reference paints nonzero peaks while legacy cache stays distinct")
+  let audio:editor.Clip=option.unwrap(editor.clip_at(struct.borrow(state,field=document),1))
+  let legacy:u64=option.unwrap(app.waveform_slot(state,audio.id))
+  let _=test.eq_u64(suite,array.len(struct.borrow(array.borrow(struct.borrow(state,field=waveforms),legacy),field=peaks)),6,"Six processed legacy peaks remain unchanged")
+  let reference:u64=option.unwrap(app.visual_waveform_slot(state,audio.id))
+  let _=test.eq_u64(suite,array.len(struct.borrow(array.borrow(struct.borrow(state,field=visual_waveforms),reference),field=peaks)),8,"GUI has eight independent reference peaks")
+  var neutral:editor.Document=preview.visual_reference_document(struct.borrow(state,field=document))
+  let key:string=match preview.visual_reference_key(neutral,audio,8) {err(_)=>string.new(),ok(value)=>value,}
+  let _=test.check(suite,preview.visual_reference_current(state,audio,str.view(key),8),"Reference descriptor and current clip/media/project identity match")
+  var visible:painter.Renderer=painter.renderer()
+  let _=test.check(suite,painter.render(state,visible,1600,980,true,source,program),"Complete waveform paint succeeds")
+  let _=test.check(suite,visible_wave_pixels(state,struct.borrow(visible,field=surface))>0,"Actual mint waveform pixels extend beyond the center baseline")
+  let _=struct.replace(state,array.new(),field=visual_waveforms)
+  var missing:painter.Renderer=painter.renderer()
+  let _=test.check(suite,painter.render(state,missing,1600,980,true,source,program),"Missing-reference control paint succeeds")
+  let _=test.eq_u64(suite,visible_wave_pixels(state,struct.borrow(missing,field=surface)),0,"Processed legacy cache alone cannot paint GUI waveform peaks")
+  let _=test.check(suite,seed_reference(state,audio.id),"Current reference is restored for all original retained-paint cases")
+  compare(suite,state,visible,1600,980,false,source,program,scratch)
+  let _=test.done(suite)
   let widths: array<u32> = [1600, 2560, 3200]
   let heights: array<u32> = [980, 1440, 1800]
   let positions: array<i64> = [1, 17, 0, 85, 600]
@@ -282,5 +376,134 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.wr
     let _ = test.done(suite)
     size=size+1
   }
-  test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 32)
+  // New view-only changes must be complete immediately, including the same-frame
+  // page turn before any asynchronous cache delivery. All original 33/667 checks
+  // above remain; damage is exercised at each UI scale and every dock/light mode.
+  size=0
+  loop {if size==3 {break}
+    var dock:u32=0
+    loop {if dock==4 {break}
+      let _=test.start(suite,text.concat("Timeline damage at scale/dock ",text.concat(string.from_int(size),string.from_int(dock))))
+      var changed:app.App=fixture(scratch)
+      app.set_light(changed,dock%2==1)
+      app.set_dock_tab(changed,dock)
+      let width:u32=array.get(widths,size)
+      let height:u32=array.get(heights,size)
+      let scale:f64=layout.ui_scale(cast.float(width),cast.float(height))
+      let frame:layout.Frame=layout.frame(cast.float(width)/scale,cast.float(height)/scale)
+      // Put marker centers exactly at both old ruler boundaries. Their ink may
+      // not leave gutter fragments after the same-frame page turn.
+      let _=app.set_zoom(changed,layout.width_of(frame.timeline)/400.0)
+      let owner:u64=struct.get(struct.borrow(changed,field=document),field=active)
+      let left_marker:u64=editor.add_marker(struct.borrow(changed,field=document),owner,0,"Left boundary",0)
+      let right_marker:u64=editor.add_marker(struct.borrow(changed,field=document),owner,400,"Right boundary",0)
+      let _=test.check(suite,left_marker!=0 and right_marker!=0,"Authored markers exercise both old ruler boundaries")
+      var stable_source:draw.Surface=picture(480,270,false,255)
+      var moving_program:draw.Surface=picture(480,270,true,255)
+      let _=editor.seek(struct.borrow(changed,field=document),17)
+      var damage_cache:painter.Renderer=painter.renderer()
+      compare_held(suite,changed,damage_cache,width,height,true,stable_source,moving_program,scratch,true)
+      var before:bytes=draw.surface_rgba(struct.borrow(damage_cache,field=surface))
+      let _=app.set_scroll(changed,180)
+      compare_held(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true)
+      let _=test.eq_u64(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.source,scale),0,"Page turn retains every Source pixel")
+      let _=test.check(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.ruler,scale)>0,"Same-frame page turn changes actual ruler pixels")
+      let _=test.check(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.timeline,scale)>0,"Same-frame page turn repaints old seek head and clip pixels")
+      let _=editor.seek(struct.borrow(changed,field=document),205)
+      compare_held(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true)
+      let authored:string=match editor_io.encode(struct.borrow(changed,field=document)) {ok(v)=>v,err(_)=>string.new(),}
+      let audio_clip:editor.Clip=option.unwrap(editor.clip_at(struct.borrow(changed,field=document),1))
+      var reference_doc:editor.Document=preview.visual_reference_document(struct.borrow(changed,field=document))
+      let key:string=match preview.visual_reference_key(reference_doc,audio_clip,8) {err(_)=>string.new(),ok(v)=>v,}
+      before=draw.surface_rgba(struct.borrow(damage_cache,field=surface))
+      let _=test.check(suite,app.set_visual_waveform(changed,audio_clip.id,key,[0.95,0.1,0.85,0.15,0.75,0.2,0.65,0.25]),"Current waveform delivery changes independently authored reference peaks")
+      compare_damage(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true,true)
+      let _=test.check(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.timeline,scale)>0,"Same-frame waveform delivery changes actual lane pixels")
+      let _=test.eq_u64(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.source,scale),0,"Waveform delivery preserves Source pixels")
+      // Pending/failed labels change without evicting a current reference.
+      app.waveform_request(changed,71)
+      compare_damage(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true,true)
+      before=draw.surface_rgba(struct.borrow(damage_cache,field=surface))
+      app.waveform_failure(changed,71)
+      compare_damage(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true,true)
+      let _=test.check(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.timeline,scale)>0,"Current failure removes Loading label with unchanged peak count")
+      let video_clip:editor.Clip=option.unwrap(editor.clip_at(struct.borrow(changed,field=document),0))
+      before=draw.surface_rgba(struct.borrow(damage_cache,field=surface))
+      let _=struct.replace(changed,array.new(),field=thumbnails)
+      let thumb_media:u64=changed.media_revision
+      let thumb_document:u64=changed.document_revision
+      array.push(struct.borrow(changed,field=thumbnails),app.Thumbnail {clip:video_clip.id,frame:180,source:video_clip.source,source_frame:180,
+        revision:thumb_media,document_revision:thumb_document,pixels:picture(80,45,false,255)})
+      compare_damage(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true,true)
+      let _=test.check(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.timeline,scale)>0,"Separate thumbnail delivery changes actual video lane pixels")
+      let _=test.eq_u64(suite,changed_region(bytes.view(before),struct.borrow(damage_cache,field=surface),frame.source,scale),0,"Thumbnail delivery preserves Source pixels")
+      let _=app.set_zoom(changed,3.0)
+      compare_held(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true)
+      struct.set(struct.borrow(changed,field=viewport),300.0,field=track_height)
+      compare_held(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true)
+      let _=app.set_track_scroll(changed,1,layout.height_of(frame.timeline))
+      let _=test.check(suite,app.track_scroll(changed)==1,"Fixture actually changes the first visible lane")
+      compare_held(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,true)
+      // Timeline damage must not override release of Source hold at equal size.
+      stable_source=picture(480,270,true,255)
+      compare_damage(suite,changed,damage_cache,width,height,false,stable_source,moving_program,scratch,false,true)
+      let after:string=match editor_io.encode(struct.borrow(changed,field=document)) {ok(v)=>v,err(_)=>string.new(),}
+      let _=test.check(suite,str.eq(authored,after),"Timeline damage and viewport state preserve authored document and transport")
+      let _=test.done(suite)
+      dock=dock+1
+    }
+    size=size+1
+  }
+
+  size=0
+  loop {if size==3 {break}
+    var dock:u32=0
+    loop {if dock==4 {break}
+      let _=test.start(suite,text.concat("Independent media lane receipts at scale/dock ",text.concat(string.from_int(size),string.from_int(dock))))
+      var delivered:app.App=fixture(scratch)
+      app.set_light(delivered,dock%2==1)
+      app.set_dock_tab(delivered,dock)
+      let width:u32=array.get(widths,size)
+      let height:u32=array.get(heights,size)
+      let scale:f64=layout.ui_scale(cast.float(width),cast.float(height))
+      let frame:layout.Frame=layout.frame(cast.float(width)/scale,cast.float(height)/scale)
+      let _=app.set_scroll(delivered,180)
+      let _=editor.seek(struct.borrow(delivered,field=document),205)
+      var parked:draw.Surface=picture(480,270,false,255)
+      var running:draw.Surface=picture(480,270,true,255)
+      var lane_cache:painter.Renderer=painter.renderer()
+      compare_held(suite,delivered,lane_cache,width,height,true,parked,running,scratch,true)
+      let audio_clip:editor.Clip=option.unwrap(editor.clip_at(struct.borrow(delivered,field=document),1))
+      var neutral:editor.Document=preview.visual_reference_document(struct.borrow(delivered,field=document))
+      let key:string=match preview.visual_reference_key(neutral,audio_clip,8) {err(_)=>string.new(),ok(v)=>v,}
+      var before:bytes=draw.surface_rgba(struct.borrow(lane_cache,field=surface))
+      let _=test.check(suite,app.set_visual_waveform(delivered,audio_clip.id,key,[0.95,0.1,0.85,0.15,0.75,0.2,0.65,0.25]),"A lane receives independent new peaks")
+      compare_regions(suite,delivered,lane_cache,width,height,false,parked,running,scratch,true,false,true,false)
+      let _=test.check(suite,changed_region(bytes.view(before),struct.borrow(lane_cache,field=surface),frame.timeline,scale)>0,"A-only delivery actually changes visible pixels")
+      let _=test.eq_u64(suite,changed_region(bytes.view(before),struct.borrow(lane_cache,field=surface),frame.source,scale),0,"A-only delivery preserves every Source pixel")
+      let _=editor.seek(struct.borrow(delivered,field=document),207)
+      app.waveform_request(delivered,91)
+      compare_regions(suite,delivered,lane_cache,width,height,false,parked,running,scratch,true,false,true,false)
+      app.waveform_failure(delivered,91)
+      compare_regions(suite,delivered,lane_cache,width,height,false,parked,running,scratch,true,false,true,false)
+      let video_clip:editor.Clip=option.unwrap(editor.clip_at(struct.borrow(delivered,field=document),0))
+      let thumb_media:u64=delivered.media_revision
+      let thumb_document:u64=delivered.document_revision
+      let _=struct.replace(delivered,array.new(),field=thumbnails)
+      array.push(struct.borrow(delivered,field=thumbnails),app.Thumbnail {clip:video_clip.id,frame:180,source:video_clip.source,source_frame:180,
+        revision:thumb_media,document_revision:thumb_document,pixels:picture(80,45,false,255)})
+      compare_regions(suite,delivered,lane_cache,width,height,false,parked,running,scratch,true,false,false,true)
+      let _=app.set_zoom(delivered,3.0)
+      struct.set(struct.borrow(delivered,field=viewport),300.0,field=track_height)
+      let _=app.set_track_scroll(delivered,1,layout.height_of(frame.timeline))
+      compare_held(suite,delivered,lane_cache,width,height,false,parked,running,scratch,true)
+      let _=test.check(suite,app.set_visual_waveform(delivered,audio_clip.id,key,[0.2,0.8,0.1,0.9,0.3,0.7,0.4,0.6]),"Partly visible A lane gets exact next reference")
+      compare_regions(suite,delivered,lane_cache,width,height,false,parked,running,scratch,true,false,true,true)
+      parked=picture(480,270,true,128)
+      compare_regions(suite,delivered,lane_cache,width,height,false,parked,running,scratch,false,false,true,false)
+      let _=test.done(suite)
+      dock=dock+1}
+    size=size+1}
+
+  test.conclude(suite, path.join(scratch, "live-paint-tests.json"), 57)
 }

@@ -105,6 +105,7 @@ pub fn act_zoom_fit() -> u32 effects {} { 32 }
 pub fn act_zoom_in() -> u32 effects {} { 33 }
 pub fn act_group() -> u32 effects {} { 34 }
 pub fn act_transition() -> u32 effects {} { 35 }
+pub fn act_follow() -> u32 effects {} { 36 }
 
 pub fn act_tab() -> u32 effects {} { 40 }
 pub fn act_dock_scroll_up() -> u32 effects {} { 41 }
@@ -348,6 +349,7 @@ pub fn menu_popup(frame: layout.Frame, state: ref<app.App>) -> array<Control> ef
     top = menu_item(out, state, left, top, act_zoom_fit(), 0, "Fit timeline", false)
     top = menu_item(out, state, left, top, act_zoom_out(), 0, "Zoom out", false)
     top = menu_item(out, state, left, top, act_snap(), 0, "Snapping", app.snap(state))
+    top = menu_item(out, state, left, top, act_follow(), 0, "Follow Program playhead", state.timeline_follow_program)
     var palette: u64 = 0
     loop {
       if palette >= themes.count() { break }
@@ -504,10 +506,10 @@ pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
   let playing_paste: bool = app.has_clipboard(state)
   let snapping: bool = app.snap(state)
   var labels: array<string> = ["Split", "Razor all", "Lift", "Ripple", "Cut", "Copy",
-    "Paste", "Append", "Overwrite", "Insert", "Marker", "Transition", "Group", "Snap"]
+    "Paste", "Append", "Overwrite", "Insert", "Marker", "Transition", "Group", "Snap", "Follow"]
   var actions: array<u32> = [act_split(), act_razor_all(), act_lift(), act_ripple(),
     act_cut(), act_copy(), act_paste(), act_append(), act_overwrite(), act_insert(),
-    act_marker(), act_transition(), act_group(), act_snap()]
+    act_marker(), act_transition(), act_group(), act_snap(), act_follow()]
   var zoom_labels: array<string> = ["Zoom in", "Fit", "Zoom out"]
   var zoom_actions: array<u32> = [act_zoom_in(), act_zoom_fit(), act_zoom_out()]
 
@@ -546,9 +548,9 @@ pub fn timeline_bar(frame: layout.Frame, state: ref<app.App>) -> array<Control> 
     let action: u32 = array.get(actions, index)
     var made: Control = button(action, text, layout.rect(x, top, x + wide, top + height),
       if action == act_paste() { playing_paste } else if action == act_snap() { snapping }
-      else { false })
+      else if action == act_follow() {state.timeline_follow_program} else { false })
     struct.set(made, size, field=size)
-    if action == act_snap() { struct.set(made, style_toggle(), field=style) }
+    if action == act_snap() or action == act_follow() { struct.set(made, style_toggle(), field=style) }
     array.push(out, made)
     x = x + wide + 3.0
     index = index + 1

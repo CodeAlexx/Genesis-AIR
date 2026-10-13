@@ -272,12 +272,30 @@ def main():
             output=work/"refusal.mkv"
             check(output.is_file(),name+" valid export recovery")
             if output.is_file():
-                decoded=subprocess.run([str(tool(a.worker,"ffmpeg")),"-nostdin","-v","error","-i",str(output),
-                                        "-map","0:a:0","-f","f32le","pipe:1"],capture_output=True,
-                                       timeout=30,creationflags=FLAGS)
-                check(decoded.returncode==0,name+" independent lossless master decode")
-                actual=array("f"); actual.frombytes(decoded.stdout)
-                expected=[0.]*38400 if case["pcm"]=="silence" else [v/32768 for v in stereo[:38400]]
+                no_audible_root=name=="mask-paired-audio-muted"
+                audio_streams=None
+                if no_audible_root:
+                    # This authored graph has video but no eligible audible root.
+                    # Prove stream/packet absence before deciding whether to map audio.
+                    probed=subprocess.run([str(tool(a.worker,"ffprobe")),"-v","error","-select_streams","a",
+                                           "-show_streams","-show_packets","-of","json",str(output)],
+                                          capture_output=True,timeout=30,creationflags=FLAGS)
+                    check(probed.returncode==0,name+" independent absent-audio probe")
+                    metadata=json.loads(probed.stdout)
+                    check(isinstance(metadata,dict) and isinstance(metadata.get("streams"),list) and isinstance(metadata.get("packets"),list),name+" complete audio probe metadata")
+                    audio_streams=metadata["streams"]
+                    audio_packets=metadata["packets"]
+                    check(not audio_packets,name+" no encoded audio sample packets")
+                    check(all(row.get("codec_type")=="audio" for row in audio_streams),name+" selected audio stream metadata")
+                actual=array("f")
+                if not no_audible_root or audio_streams:
+                    decoded=subprocess.run([str(tool(a.worker,"ffmpeg")),"-nostdin","-v","error","-i",str(output),
+                                            "-map","0:a:0","-f","f32le","pipe:1"],capture_output=True,
+                                           timeout=30,creationflags=FLAGS)
+                    # A mapping/decode failure is always a failure, even for a zero-sample stream.
+                    check(decoded.returncode==0,name+" independent lossless master decode")
+                    actual.frombytes(decoded.stdout)
+                expected=[] if no_audible_root else ([0.]*38400 if case["pcm"]=="silence" else [v/32768 for v in stereo[:38400]])
                 if case["pcm"]=="gain-fades":
                     expected=[v*(.25+.5*min(n//2,9600)/9600)*min(1,(n//2)/4800)*min(1,(19200-n//2)/4800)
                               for n,v in enumerate(expected)]

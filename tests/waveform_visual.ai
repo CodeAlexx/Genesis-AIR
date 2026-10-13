@@ -1,0 +1,389 @@
+module genesis.tests.waveform_visual
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as codec
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import std.timeline as timeline
+import std.math as math
+import std.tasks as tasks
+import "../src/preview_link.ai" as link
+import "../src/app.ai" as app
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+import "../src/waveform_view.ai" as waveform
+
+fn state(root:str)->app.App effects {alloc} {
+  var value:app.App=app.app(provider.fake(root))
+  var doc:editor.Document=editor.document(60.0,160,90)
+  let source:u64=editor.add_source(doc,"self-authored-reference.wav","Declared stereo",600,60.0)
+  let _=editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let _=editor.place(doc,track,source,0,60,0)
+  let _=struct.replace(value,doc,field=document)
+  value
+}
+fn clip(state:ref<app.App>)->editor.Clip effects {} {option.unwrap(editor.clip_at(struct.borrow(state,field=document),0))}
+fn key(state:ref<app.App>,value:editor.Clip,buckets:u64)->string effects {alloc} {
+  var doc:editor.Document=preview.visual_reference_document(struct.borrow(state,field=document))
+  match preview.visual_reference_key(doc,value,buckets) {err(_)=>string.new(),ok(v)=>v,}
+}
+fn requests(state:ref<app.App>)->u64 effects {} {struct.get(struct.borrow(state,field=provider),field=calls)}
+fn peak(state:ref<app.App>,id:u64,at:u64)->f64 effects {} {
+  let slot:u64=option.unwrap(app.visual_waveform_slot(state,id))
+  array.get(struct.borrow(array.borrow(struct.borrow(state,field=visual_waveforms),slot),field=peaks),at)
+}
+fn fill(state:ref<app.App>)->bool effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  match preview.visual_waveforms_for_viewport(state,"",0,0,300,preview.StripView {limited:false,first:0,height:0.0}) {err(_)=>false,ok(n)=>n==1,}
+}
+fn count_color(image:ref<draw.Surface>,r:u8,g:u8,b:u8)->u64 effects {} {
+  var n:u64=0
+  var y:u32=0
+  loop {if y>=image.height {break}
+    var x:u32=0
+    loop {if x>=image.width {break}
+      match draw.surface_pixel(image,x,y) {none=>{},some(v)=>{if v.r==r and v.g==g and v.b==b {n=n+1}},}
+      x=x+1}
+    y=y+1}
+  n
+}
+fn display(values:view<f64>,lane:u64,first:f64,last:f64,top:f64,bottom:f64)->draw.Surface effects {alloc} {
+  var model:timeline.Timeline=timeline.timeline(60.0,2.0,10.0,10.0)
+  let _=timeline.push_track(model,timeline.track(1,timeline.track_audio(),"A1",40.0))
+  var canvas:draw.Canvas=draw.canvas(option.unwrap(draw.surface(160,80)))
+  draw.clear(canvas,draw.rgb(0,0,0))
+  waveform.paint_reference(canvas,draw.rgb(220,250,230),draw.rgb(90,150,110),model,lane,0,60,values,first,top,last,bottom)
+  draw.finish(canvas)
+}
+fn header(state:ref<app.App>,id:u64)->string effects {alloc} {
+  var value:string=text.concat("VISUAL-WAVEFORMS 1\t",string.from_int(state.document_revision))
+  string.append(value,text.concat("\t",string.from_int(state.media_revision)))
+  string.append(value,text.concat("\t",string.from_int(state.project_epoch)))
+  string.append(value,text.concat("\t",string.from_int(id)))
+  string.append(value,"\n")
+  value
+}
+fn payload(state:ref<app.App>,id:u64)->string effects {alloc} {
+  let value:editor.Clip=clip(state)
+  var row:array<string> =[string.from_int(value.id),string.from_int(value.source),string.from_int(value.nested),string.from_int(value.length),key(state,value,20)]
+  var at:u64=0
+  loop {if at>=20 {break}
+    array.push(row,"0.5")
+    at=at+1}
+  var out:string=header(state,id)
+  string.append(out,text.join(row,"\t"))
+  string.append(out,"\n")
+  out
+}
+
+fn long_reference(root:str)->app.App effects {alloc} {
+  var value:app.App=app.app(provider.fake(root))
+  var doc:editor.Document=editor.document(60.0,160,90)
+  let source:u64=editor.add_source(doc,"declared-long-reference.wav","Long reference",90000,60.0)
+  let _=editor.describe_source(doc,source,0,0,false,true,48000,2)
+  let track:u64=editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let _=editor.place(doc,track,source,0,76680,0)
+  let _=struct.replace(value,doc,field=document)
+  value
+}
+fn publish_reference(value:ref<app.App>,dir:str,id:u64,start:i64,body:str)->bool effects {alloc,fs.write} {
+  let encoded:string=match codec.encode(struct.borrow(value,field=document)) {err(_)=>{return false},ok(v)=>v,}
+  if not preview.request_visual_strips(dir,encoded,id,start,2.0,300,480,270,value.media_revision,value.document_revision,0,200.0,value.project_epoch) {return false}
+  var content:string=header(value,id)
+  string.append(content,body)
+  if match files.write_text(path.join(dir,"waveforms.tsv"),content) {err(_)=>true,ok(_)=>false,} {return false}
+  if match files.write_text(path.join(dir,"waveforms.id"),string.from_int(id)) {err(_)=>true,ok(_)=>false,} {return false}
+  app.waveform_request(value,id)
+  true
+}
+
+pub fn main(args:view<str>)->i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  if view.len(args)!=2 {return 2}
+  let root:str=view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite:test.Suite=test.suite("A1 reference waveform identity and visible states",true)
+  var value:app.App=state(root)
+  let original:editor.Clip=clip(value)
+  let original_key:string=key(value,original,20)
+  let _=test.start(suite,"Output mixer changes retain exactly the same clip reference bytes")
+  let _=test.check(suite,fill(value),"Initial real planning + fake-provider reference completes")
+  let calls:u64=requests(value)
+  let first:f64=peak(value,original.id,3)
+  let _=editor.set_track_muted(struct.borrow(value,field=document),original.track,true)
+  app.document_changed(value)
+  let _=test.eq_str(suite,key(value,clip(value),20),original_key,"Root mute does not change neutral descriptor")
+  let _=test.check(suite,fill(value),"Muted reference remains complete")
+  let _=test.near_f64(suite,peak(value,original.id,3),first,0.0,"Mute retains exact owned peak value")
+  let _=editor.set_track_gain(struct.borrow(value,field=document),original.track,0.0)
+  let _=editor.set_track_pan(struct.borrow(value,field=document),original.track,-1.0)
+  let owner:u64=value.document.active
+  let other:u64=editor.add_track(struct.borrow(value,field=document),owner,editor.track_audio(),"Other root solo")
+  let _=editor.set_track_solo(struct.borrow(value,field=document),other,true)
+  app.document_changed(value)
+  let _=test.eq_str(suite,key(value,clip(value),20),original_key,"Gain0/pan/other-root Solo leave reference descriptor identical")
+  let _=test.check(suite,fill(value),"Output-suppressed reference remains complete")
+  let _=test.eq_u64(suite,requests(value),calls,"Mixer-only changes perform no new envelope request")
+  let _=test.near_f64(suite,peak(value,original.id,3),first,0.0,"Root mixer edits never flatten cached shape")
+  let _=test.check(suite,editor.track_gain(struct.borrow(value,field=document),original.track)==0.0,"Reference-copy planning leaves authored gain0 unchanged")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Semantic edits and resource epochs refuse the old visual reference")
+  var changed:app.App=state(root)
+  let c:editor.Clip=clip(changed)
+  let before:string=key(changed,c,20)
+  let _=test.check(suite,app.set_visual_waveform(changed,c.id,str.view(before),array.repeat(0.25,20)),"Seed owns validated reference")
+  let filter:u64=option.unwrap(editor.add_filter(struct.borrow(changed,field=document),c.id,"eq_3band"))
+  let _=editor.set_filter_param(struct.borrow(changed,field=document),filter,"low",3.0)
+  app.document_changed(changed)
+  let after:string=key(changed,clip(changed),20)
+  let _=test.check(suite,not str.eq(before,after),"Actual EQ parameter changes descriptor")
+  let _=test.check(suite,not preview.visual_reference_current(changed,clip(changed),str.view(after),20),"Old FX peaks cannot paint")
+  let _=editor.set_clip_speed(struct.borrow(changed,field=document),c.id,2.0)
+  let retimed:string=key(changed,clip(changed),20)
+  let _=test.check(suite,not str.eq(after,retimed),"Actual rate changes descriptor/history geometry")
+  let _=editor.relink_source(struct.borrow(changed,field=document),c.source,"different-real-resource.wav",600)
+  let relinked:string=key(changed,clip(changed),20)
+  let _=test.check(suite,not str.eq(retimed,relinked),"Relink source path changes descriptor")
+  struct.set(changed,changed.project_epoch+1,field=project_epoch)
+  let _=test.check(suite,not preview.visual_reference_current(changed,clip(changed),str.view(before),20),"Project epoch excludes reused clip IDs")
+  app.mark_media_changed(changed)
+  let _=test.eq_u64(suite,array.len(struct.borrow(changed,field=visual_waveforms)),0,"External media invalidation retires references")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Neutral root mix preserves descendant compound DSP and eligibility")
+  var nested:app.App=state(root)
+  var doc:editor.Document=editor.copy_document(struct.borrow(nested,field=document))
+  let child:u64=editor.add_sequence(doc,"Child",60.0,160,90)
+  let child_track:u64=editor.add_track(doc,child,editor.track_audio(),"Child A")
+  let leaf:u64=option.unwrap(editor.place(doc,child_track,clip(nested).source,0,60,0))
+  let parent:u64=option.unwrap(editor.place_nested(doc,clip(nested).track,child,0,60,90))
+  let _=struct.replace(nested,doc,field=document)
+  let parent_clip:editor.Clip=option.unwrap(editor.clip(struct.borrow(nested,field=document),parent))
+  let n1:string=key(nested,parent_clip,20)
+  let _=editor.set_track_gain(struct.borrow(nested,field=document),child_track,0.3)
+  let n2:string=key(nested,parent_clip,20)
+  let _=test.check(suite,not str.eq(n1,n2),"Child mixer gain remains in parent reference")
+  let _=editor.set_track_muted(struct.borrow(nested,field=document),child_track,true)
+  let n3:string=key(nested,parent_clip,20)
+  let _=test.check(suite,not str.eq(n2,n3),"Child mute changes sum reference instead of being neutralized")
+  let _=editor.set_track_muted(struct.borrow(nested,field=document),child_track,false)
+  let _=editor.add_filter(struct.borrow(nested,field=document),leaf,"compressor")
+  let _=test.check(suite,not str.eq(n2,key(nested,parent_clip,20)),"Child ordered nonlinear DSP stays in descriptor")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Request lifecycle exposes loading, mute, gain0 and unavailability honestly")
+  var labels:app.App=state(root)
+  let lc:editor.Clip=clip(labels)
+  let _=test.eq_str(suite,preview.visual_waveform_label(labels,lc,false),"Unavailable","Missing cache never pretends silence")
+  app.waveform_request(labels,7)
+  let _=test.eq_str(suite,preview.visual_waveform_label(labels,lc,false),"Loading waveform...","Actual queued generation reports loading")
+  app.waveform_failure(labels,6)
+  let _=test.eq_u64(suite,labels.waveform_pending,7,"Late failure cannot retire newer request")
+  app.waveform_complete(labels,6)
+  let _=test.eq_u64(suite,labels.waveform_pending,7,"Late success cannot clear newer loading")
+  let _=editor.set_track_muted(struct.borrow(labels,field=document),lc.track,true)
+  let _=test.eq_str(suite,preview.visual_waveform_label(labels,lc,true),"Muted / Loading waveform...","Muted reference shape can stay while data queued")
+  app.waveform_complete(labels,7)
+  let _=test.eq_str(suite,preview.visual_waveform_label(labels,lc,true),"Muted","Muted reference stays labelled after completion")
+  let _=editor.set_track_muted(struct.borrow(labels,field=document),lc.track,false)
+  let _=editor.set_track_gain(struct.borrow(labels,field=document),lc.track,0.0)
+  let _=test.eq_str(suite,preview.visual_waveform_label(labels,lc,true),"Gain 0","Zero fader is explicit instead of blank")
+  let _=editor.set_source_offline(struct.borrow(labels,field=document),lc.source)
+  let _=test.eq_str(suite,preview.visual_waveform_label(labels,lc,true),"Unavailable","Offline identity never displays a stale reference as valid")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Distinct reference wire validates all epochs and rejects partial publication atomically")
+  var wire:app.App=state(root)
+  let dir:string=path.join(root,"wire")
+  let _=files.mkdirs(dir)
+  let encoded:string=match codec.encode(struct.borrow(wire,field=document)) {err(_)=>{return 3},ok(v)=>v,}
+  let _=test.check(suite,preview.request_visual_strips(dir,encoded,9,0,2.0,300,480,270,wire.media_revision,wire.document_revision,0,200.0,wire.project_epoch),"Opt-in reference request publishes exact epoch")
+  app.waveform_request(wire,9)
+  let _=files.write_text(path.join(dir,"waveforms.id"),"9")
+  let _=files.write_text(path.join(dir,"waveforms.tsv"),header(wire,9))
+  let _=test.check(suite,not preview.read_waveforms(wire,dir,9),"Missing target row is refused")
+  let _=test.eq_u64(suite,app.visual_peak_count(wire),0,"Partial publication cannot mutate cache")
+  let _=files.write_text(path.join(dir,"waveforms.tsv"),payload(wire,9))
+  struct.set(wire,wire.project_epoch+1,field=project_epoch)
+  let _=test.check(suite,not preview.read_waveforms(wire,dir,9),"Old project epoch payload refuses")
+  struct.set(wire,wire.project_epoch-1,field=project_epoch)
+  struct.set(wire,wire.media_revision+1,field=media_revision)
+  let _=test.check(suite,not preview.read_waveforms(wire,dir,9),"Wrong media revision payload refuses")
+  struct.set(wire,wire.media_revision-1,field=media_revision)
+  let _=test.check(suite,preview.read_waveforms(wire,dir,9),"Complete current descriptor commits")
+  let _=test.eq_u64(suite,app.visual_peak_count(wire),20,"Reference wire owns exactly declared peaks")
+  let _=test.eq_u64(suite,wire.waveform_pending,0,"Current commit clears loading")
+  let _=test.eq_u64(suite,app.waveform_count(wire),0,"Reference wire does not repurpose processed cache")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Both peak cache kinds obey the original scalar capacity without reducing resolution")
+  var budget:app.App=state(root)
+  let bc:editor.Clip=clip(budget)
+  var ids:array<u64> =[bc.id]
+  var i:u64=1
+  loop {if i>=4 {break}
+    array.push(ids,option.unwrap(editor.place(struct.borrow(budget,field=document),bc.track,bc.source,0,60,cast.sat(i*100))))
+    i=i+1}
+  i=0
+  loop {if i>=4 {break}
+    app.set_waveform(budget,array.get(ids,i),array.repeat(0.25,65536),0,59,budget.media_revision)
+    i=i+1}
+  let _=test.eq_u64(suite,app.waveform_peak_count(budget),262144,"Original processed cache fills exactly two MiB")
+  let bk:string=key(budget,bc,65536)
+  let _=test.check(suite,app.set_visual_waveform(budget,bc.id,str.view(bk),array.repeat(0.7,65536)),"Fine reference keeps all65536 cells")
+  let _=test.eq_u64(suite,app.waveform_peak_count(budget),262144,"Reference + processed share original budget")
+  let _=test.eq_u64(suite,app.visual_peak_count(budget),65536,"Reference cells are not coarsened for style")
+  let _=test.check(suite,not app.set_visual_waveform(budget,bc.id,str.view(bk),array.repeat(math.nan(),65536)),"Malformed peaks refuse before eviction")
+  let _=test.near_f64(suite,peak(budget,bc.id,100),0.7,0.0,"Refusal preserves previous exact reference bytes")
+  let _=test.eq_u64(suite,app.waveform_peak_count(budget),262144,"Malformed reference retains complete budget ledger")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Silence and loading baselines remain visible with strict lane and viewport clipping")
+  var zero:array<f64> =array.repeat(0.0,20)
+  var empty:array<f64> =array.new()
+  var zeros:draw.Surface=display(array.view(zero),0,10.0,130.0,0.0,80.0)
+  var loading:draw.Surface=display(array.view(empty),0,10.0,130.0,0.0,80.0)
+  let _=test.eq_u64(suite,count_color(zeros,90,150,110),120,"Real silent span has exact one-pixel120-column baseline")
+  let _=test.eq_u64(suite,count_color(loading,90,150,110),120,"Missing data has same honest geometric baseline")
+  let _=test.eq_u64(suite,count_color(zeros,220,250,230),0,"Silence never fabricates waveform amplitude")
+  var missing_lane:draw.Surface=display(array.view(empty),1,10.0,130.0,0.0,80.0)
+  var offscreen:draw.Surface=display(array.view(empty),0,10.0,130.0,60.0,80.0)
+  let _=test.eq_u64(suite,count_color(missing_lane,90,150,110),0,"Invalid lane cannot paint")
+  let _=test.eq_u64(suite,count_color(offscreen,90,150,110),0,"Offscreen lane cannot paint")
+  array.set(zero,10,0.8)
+  var impulse:draw.Surface=display(array.view(zero),0,10.0,130.0,0.0,80.0)
+  let _=test.check(suite,count_color(impulse,220,250,230)>0,"Declared transient remains contrasting above baseline")
+  let _=test.near_f64(suite,array.get(zero,10),0.8,0.0,"Drawing never rescales or mutates reference peaks")
+  let _=test.done(suite)
+  let _=test.start(suite,"Actual strip producer publishes distinct current reference wire and retires cleanly")
+  let producer_root:string=path.join(root,"actual-strip-task")
+  let _=files.mkdirs(producer_root)
+  preview.reset(producer_root)
+  var consumer:app.App=state(producer_root)
+  struct.set(consumer,17,field=project_epoch)
+  struct.set(consumer,5,field=document_revision)
+  struct.set(consumer,3,field=media_revision)
+  let pc:editor.Clip=clip(consumer)
+  let _=editor.set_track_muted(struct.borrow(consumer,field=document),pc.track,true)
+  let _=editor.set_track_gain(struct.borrow(consumer,field=document),pc.track,0.0)
+  var transport:link.Link=match link.open() {ok(v)=>v,err(_)=>{return 3},}
+  var config:preview.Config=preview.config(consumer,producer_root,link.ticket(transport))
+  struct.set(config,true,field=strips_only)
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=preview.run)]
+    let connected:bool=match link.connect(transport) {ok(_)=>true,err(_)=>false,}
+    let _=test.check(suite,connected,"Actual reverse command channel connects")
+    let graph:string=match codec.encode(struct.borrow(consumer,field=document)) {ok(v)=>v,err(_)=>string.new(),}
+    let published:bool=preview.request_visual_strips(producer_root,graph,13,0,2.0,300,480,270,3,5,0,200.0,17)
+    let _=test.check(suite,published,"Reference snapshot publication succeeds")
+    app.waveform_request(consumer,13)
+    let _=link.wake(transport,false)
+    let received:bool=match link.await_event(transport,2,13,time.monotonic_ns()+5000000000) {ok(_)=>true,err(e)=>{io.write(text.concat(e,"\n"))
+      false},}
+    let _=test.check(suite,received,"Actual producer commits a ready reference event")
+    let payload:string=match files.read_text(path.join(producer_root,"waveforms.tsv")) {ok(v)=>v,err(_)=>string.new(),}
+    let _=test.check(suite,str.starts_with(payload,"VISUAL-WAVEFORMS 1\t5\t3\t17\t13\n"),"Actual producer carries distinct protocol and all epochs")
+    let _=test.check(suite,preview.read_waveforms(consumer,producer_root,13),"Actual complete payload validates before commit")
+    let _=test.eq_u64(suite,app.visual_peak_count(consumer),20,"Current reference owns full expected resolution")
+    let _=test.check(suite,peak(consumer,pc.id,3)>0.0,"Mute and zero fader retain actual shape")
+    let _=test.eq_u64(suite,app.waveform_count(consumer),0,"Actual display protocol never writes processed cache")
+    let _=test.eq_u64(suite,consumer.waveform_pending,0,"Actual current receipt clears loading")
+    preview.stop(producer_root)
+    let _=link.wake(transport,true)
+    let joined:bool=match tasks.join_next<bool>(jobs,2000) {some(v)=>v,none=>false,}
+    let _=test.check(suite,joined,"Owned strip task stops and joins within two seconds")
+    link.close_commands(transport)
+  }
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Identical long reference bytes reuse owned peaks across actual viewport publications")
+  var repeated:app.App=long_reference(root)
+  let rc:editor.Clip=clip(repeated)
+  let rd:string=path.join(root,"long-repeated-reference")
+  let _=files.mkdirs(rd)
+  let rk:string=key(repeated,rc,25560)
+  var cells:array<string> =[string.from_int(rc.id),string.from_int(rc.source),"0","76680",string.copy(rk)]
+  var q:u64=0
+  loop {if q>=25560 {break}
+    array.push(cells,if q%2==0 {"0.12500000000000000"}else{"0.87500000000000000"})
+    q=q+1}
+  var body:string=text.join(cells,"\t")
+  string.append(body,"\n")
+  let saved_graph:string=match codec.encode(struct.borrow(repeated,field=document)) {err(_)=>string.new(),ok(v)=>v,}
+  let _=test.check(suite,publish_reference(repeated,rd,21,0,body),"First real request owns exact publication markers")
+  let full_begin:u64=time.monotonic_ns()
+  let full_ok:bool=preview.read_waveforms(repeated,rd,21)
+  let full_ns:u64=time.monotonic_ns()-full_begin
+  let _=test.check(suite,full_ok,"First complete25560-peak body validates")
+  let epoch:u64=repeated.visual_cache_epoch
+  let _=test.eq_u64(suite,app.visual_peak_count(repeated),25560,"No visual downsampling on admission")
+  let _=test.check(suite,publish_reference(repeated,rd,22,300,body),"Independent next-page request publishes a different current ID")
+  let reuse_begin:u64=time.monotonic_ns()
+  let reuse_ok:bool=preview.read_waveforms(repeated,rd,22)
+  let reuse_ns:u64=time.monotonic_ns()-reuse_begin
+  let _=test.check(suite,reuse_ok,"Byte-identical body is accepted for current viewport")
+  let _=test.eq_u64(suite,repeated.visual_cache_epoch,epoch,"Owned peak cache is reused instead of replaced")
+  let _=test.check(suite,epoch>0 and str.len(struct.borrow(repeated,field=visual_receipt_body))==64,"Complete validated body establishes bounded receipt witness")
+  let _=test.near_f64(suite,peak(repeated,rc.id,0),0.125,0.0,"First independent peak is exact")
+  let _=test.near_f64(suite,peak(repeated,rc.id,25559),0.875,0.0,"Last independent peak is exact")
+  let _=test.eq_u64(suite,repeated.waveform_pending,0,"Current cached acknowledgement clears loading")
+  let current_graph:string=match codec.encode(struct.borrow(repeated,field=document)) {err(_)=>string.new(),ok(v)=>v,}
+  let _=test.eq_str(suite,current_graph,saved_graph,"Receipt reuse leaves authored graph byte-identical")
+  var timing:string=text.concat("full_read_ns\t",string.from_int(full_ns))
+  string.append(timing,text.concat("\nreused_read_ns\t",string.from_int(reuse_ns)))
+  string.append(timing,"\n")
+  let _=files.write_text(path.join(root,"waveform-receipt-read-timing.tsv"),timing)
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Cached receipt cannot hide malformed bytes, stale markers or changed neutral graph")
+  var malformed:string=string.copy(body)
+  string.append(malformed,"undeclared-row\n")
+  let _=test.check(suite,publish_reference(repeated,rd,23,600,malformed),"Malformed publication has independently current markers")
+  let _=test.check(suite,not preview.read_waveforms(repeated,rd,23),"Extra malformed row never inherits prior validated-body status")
+  let _=test.eq_u64(suite,repeated.visual_cache_epoch,epoch,"Malformed payload retains exact peak ownership")
+  let _=test.eq_u64(suite,app.visual_peak_count(repeated),25560,"Malformed payload cannot change capacity ledger")
+  let _=test.near_f64(suite,peak(repeated,rc.id,25559),0.875,0.0,"Malformed payload preserves last actual sample")
+  let _=test.check(suite,not preview.read_waveforms(repeated,rd,22),"Retired ready ID cannot clear newer request")
+  let _=test.eq_u64(suite,repeated.waveform_pending,23,"Late old acknowledgement preserves current loading")
+  let _=test.check(suite,publish_reference(repeated,rd,24,600,body),"Current valid reference is independently republished")
+  let _=files.write_text(path.join(rd,"waveforms.id"),"23")
+  let _=test.check(suite,not preview.read_waveforms(repeated,rd,24),"Wrong publication marker rejects cached body")
+  let _=files.write_text(path.join(rd,"waveforms.id"),"24")
+  let _=test.check(suite,preview.read_waveforms(repeated,rd,24),"Current markers restore exact unchanged receipt")
+  let _=test.eq_u64(suite,repeated.visual_cache_epoch,epoch,"Recovery reuses unmodified owned peaks")
+  // Direct SDK mutation deliberately does not increment App document revision:
+  // fresh neutral-key validation must still detect the changed audio graph.
+  let graph_filter:u64=match editor.add_filter(struct.borrow(repeated,field=document),rc.id,"compressor") {some(v)=>v,none=>0,}
+  let _=test.check(suite,graph_filter!=0,"Actual ordered graph changes without a revision shortcut")
+  let _=test.check(suite,publish_reference(repeated,rd,25,900,body),"Current snapshot contains changed actual graph")
+  let _=test.check(suite,not preview.read_waveforms(repeated,rd,25),"Same body and revision cannot bypass fresh neutral descriptor")
+  let _=test.eq_u64(suite,repeated.visual_cache_epoch,epoch,"Wrong graph refuses before cache mutation")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Any cache replacement invalidates body reuse before next valid admission")
+  let _=editor.remove_filter(struct.borrow(repeated,field=document),graph_filter)
+  let _=test.check(suite,app.set_visual_waveform(repeated,rc.id,rk,array.repeat(0.4,25560)),"Public cache setter replaces actual peak bytes")
+  let changed_epoch:u64=repeated.visual_cache_epoch
+  let _=test.check(suite,changed_epoch>epoch,"Cache replacement advances ownership ledger")
+  let _=test.eq_u64(suite,str.len(struct.borrow(repeated,field=visual_receipt_body)),0,"Mutation retires prior byte witness")
+  let _=test.check(suite,publish_reference(repeated,rd,26,1200,body),"Valid original body arrives after actual cache mutation")
+  let _=test.check(suite,preview.read_waveforms(repeated,rd,26),"Changed cache requires full validated re-admission")
+  let _=test.check(suite,repeated.visual_cache_epoch>changed_epoch,"Full admission replaces different owned peaks")
+  let _=test.near_f64(suite,peak(repeated,rc.id,0),0.125,0.0,"Original first peak restored from payload")
+  let _=test.near_f64(suite,peak(repeated,rc.id,25559),0.875,0.0,"Original last peak restored from payload")
+  let _=test.eq_u64(suite,app.waveform_peak_count(repeated),25560,"No extra peak allocation escapes original shared budget")
+  // Direct eviction deliberately bypasses the App ledger. A fingerprint and
+  // matching revision alone must not acknowledge an absent owned peak array.
+  let retained_epoch:u64=repeated.visual_cache_epoch
+  let _=struct.replace(repeated,array.new(),field=visual_waveforms)
+  let _=test.eq_u64(suite,app.visual_peak_count(repeated),0,"Untracked test eviction removes actual owned peaks")
+  let _=test.check(suite,publish_reference(repeated,rd,27,1500,body),"Current request follows actual cache eviction")
+  let _=test.check(suite,preview.read_waveforms(repeated,rd,27),"Missing actual cache takes full validated admission")
+  let _=test.check(suite,repeated.visual_cache_epoch>retained_epoch,"Missing cache is rebuilt rather than falsely acknowledged")
+  let _=test.near_f64(suite,peak(repeated,rc.id,25559),0.875,0.0,"Eviction recovery restores the exact final peak")
+  let _=test.done(suite)
+
+  test.conclude(suite,path.join(root,"waveform-visual-tests.json"),11)
+}

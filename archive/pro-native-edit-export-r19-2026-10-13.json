@@ -1,0 +1,38 @@
+{
+  "schema": "genesis.pro_native.generic_acceptance_archive_receipt.v1",
+  "passed": true,
+  "prefix": "pro-native-edit-export-r19-2026-10-13",
+  "archive": "archive/pro-native-edit-export-r19-2026-10-13.tar.gz",
+  "archive_sha256": "c5117ed663866ec00531708805cbfd58c4cd79c820b9d9306341b81e65263cf9",
+  "app_sha256": "a2d950cb2ae9a6b922e0e7d7efa78265ca477def639baeeb47924472adcd77c1",
+  "worker_sha256": "079171d5d625e6acb36bcd80809279e43838278b5dd9bc21d7403ce1ec4c81d3",
+  "audio_adapter_sha256": "f6885bec959c0e29b3583af5cab28dcb28a07996b2c356b860ed1cda097829d9",
+  "entries": 16677,
+  "duplicate_selection_aliases": 12614,
+  "all_selected_paths_preserved": true,
+  "all_members_read_back": true,
+  "sanitized": true,
+  "git_index_filtered_equality": true,
+  "published_payload_verified": true,
+  "acceptance_receipt_sha256": {
+    "frozen": "46dbc02762d260ca2385b48e5f22c342fad24075fc038c67cc25b3da0e4ac66d",
+    "build": "70173a79abfe6b739f7d3e0a0767b798e829dbe033cd82de7b6d406767942fb8",
+    "background": "83491dd2b58e707f525af3e51f8f841d125235b438988721b8ec484034626959",
+    "publication": "7d684d88f115b7c9ae1a98a6d2c703f20a2c53b9adae23544cc156b44829e084",
+    "root-ready": "c791b500a716ac44b74a6d1f12cee8a2a3a765e967c53c4435708474fb1029ac",
+    "native-ui": "1ee3865a902b397159b972bd2f6d2a690486ce678a88c5ec405a31f01db8d325",
+    "device": "32bfc96d1c2d5d9453bcbde73dd7d7d506fa110e5e6d955124f4e5477b4b7e01",
+    "accepted-background-log": "f6c084a4ce30b32e6aa42f278677316abfef504b00f41801f45c759311ec56c5",
+    "accepted-background-exit": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+    "source16-title": "f737e37b131731cad1ba7b0050791da2e922664351e187c43630575931c4fbc7",
+    "same-target-retry": "457c89f594593c14222b862a1fcf5e6db5dc77cb095d0daaed15ac625dff2d5d"
+  },
+  "qualified_cadence_summary_sha256": [
+    "26a704b644cd77967110e089a3b747ed5e75da1cf0a303fe176b5e202dd12d29",
+    "29220b1106aab55486875774ce720c5295ed69f5347eb6a5b1e94735c10d799c"
+  ],
+  "historical_f718_failures_preserved": true,
+  "helper_sha256": "37c45c7ead53cb0b61b63ad9365c4327ea87afc1bd60f4207abf1eea3de99af3",
+  "pinned_sanitization_helper_sha256": "c31c1155b475f810b1c8b343cc06af70ccdb6d3b0f45531acbef4fa3ff4ccac8",
+  "complete_professional_editing_acceptance": false
+}
