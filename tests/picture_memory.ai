@@ -9,7 +9,7 @@ import "../src/picture_memory.ai" as memory
 fn pass(kind:str,base:str,upper:str,incoming:str,out:str) -> string effects {alloc} {
   var fields:array<string> = array.new()
   var at:u64=0
-  loop {if at>=108 {break}
+  loop {if at>=109 {break}
     array.push(fields,string.copy("0"))
     at=at+1
   }
@@ -55,7 +55,7 @@ fn lifetimes(lines:ref<array<string>>) -> bool effects {alloc} {
         }
         slot=slot+1
       }
-      let output_field:u64=if command=="UTRANS" {9}else{109}
+      let output_field:u64=if command=="UTRANS" {9}else{110}
       if (command=="FLOAT" or command=="UTRANS") and str.starts_with(array.borrow(fields,output_field),"GPU:") {
         let value:str=array.borrow(fields,output_field)
         let key:str=str.slice(value,4,str.len(value))

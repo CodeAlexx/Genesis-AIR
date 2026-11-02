@@ -85,6 +85,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'snap-controls/snap-controls-tests.json') -Destination (Join-Path $reports 'snap-controls-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-bidi-layout.exe' @((Join-Path $work 'bidi-layout'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'bidi-layout/bidi-layout-tests.json') -Destination (Join-Path $reports 'bidi-layout-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-long-project-cycles.exe' @('-', (Join-Path $work 'long-project-cycles'), '1000')).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'long-project-cycles/long-project-cycles-tests.json') -Destination (Join-Path $reports 'long-project-cycles-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-transition-controls.exe' @((Join-Path $work 'transition-controls'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'transition-controls/transition-controls-tests.json') -Destination (Join-Path $reports 'transition-controls-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-filter-transactions.exe' @((Join-Path $work 'filter-transactions'))).TrimEnd()
@@ -279,6 +281,9 @@ try {
     & python (Join-Path $PSScriptRoot 'title_typography.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --report (Join-Path $reports 'title-typography.json')
     if ($LASTEXITCODE -ne 0) { throw 'Title font, style, colour, outline, box and alignment acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'pip_rotation.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe') `
+      --report (Join-Path $reports 'pip-rotation.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Rotated picture-in-picture and transition-side acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'transition_clips.py') --worker $worker --binary (Join-Path $Bin 'Genesis-AIR.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Per-clip transition preview/master acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_export_length.py') --worker $worker

@@ -50,7 +50,7 @@ fn neutral() -> array<string> effects {alloc} {
   var values: array<string> = array.new()
   var at: u64 = 0
   loop {
-    if at == 108 { break }
+    if at == 109 { break }
     array.push(values, string.copy("0"))
     at = at + 1
   }
@@ -255,7 +255,10 @@ fn apply_filter(doc: ref<editor.Document>, clip: editor.Clip, values: ref<array<
       else { mode }
     put_i(values, 5, wire_mode)
   } else if str.eq(str.view(kind), "size_position") and overlay {
-    if filter_value(doc, clip, filter, str.view(kind), frame, "rotation", 0.0) != 0.0 { return false }
+    // The worker turns the placed rectangle about its centre (value 108).
+    let rotation: f64 = filter_value(doc, clip, filter, str.view(kind), frame, "rotation", 0.0)
+    if not math.is_finite(rotation) or math.abs(rotation) > 360.0 { return false }
+    put_f(values, 108, rotation)
     put_f(values, 6, filter_value(doc, clip, filter, str.view(kind), frame, "x", 0.0))
     put_f(values, 7, filter_value(doc, clip, filter, str.view(kind), frame, "y", 0.0))
     put_f(values, 8, filter_value(doc, clip, filter, str.view(kind), frame, "w", 1.0))
@@ -470,7 +473,6 @@ pub fn key_supported(param: str) -> bool effects {alloc} {
   }
   if str.eq(kind, "stabilize") { return str.eq(name, "strength") }
   if str.eq(kind, "speed") { return false }
-  if str.eq(kind, "size_position") and str.eq(name, "rotation") { return false }
   var video: array<string> = chrome.video_kinds()
   var known: bool = false
   var family: u64 = 0
@@ -1140,16 +1142,6 @@ pub fn transition_upper_edits_supported(doc:ref<editor.Document>,clip:editor.Cli
     if key.clip==clip.id and not key_supported(str.view(editor.name_text(doc,key.param))) {return false}
     at=at+1
   }
-  var index:u32=0
-  loop {match editor.filter_at(doc,clip.id,index) {
-    none=>{break},some(filter)=>{
-      if editor.filter_enabled(doc,filter) {
-        let kind:string=editor.filter_kind(doc,filter)
-        if kind=="size_position" and editor.filter_param(doc,filter,"rotation",0.0)!=0.0 {return false}
-      }
-    },
-  }
-  index=index+1}
   true
 }
 

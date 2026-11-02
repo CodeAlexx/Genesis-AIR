@@ -66,7 +66,7 @@ pub fn lower(lines:ref<array<string>>,epoch:u64) -> result<array<string>,string>
     let upper:bool=command=="UTRANS"
     if (command!="FLOAT" and command!="PREVIEW" and command!="ENC" and not upper) or
        (not terminal and command!="FLOAT" and not upper) or (terminal and upper) or
-       array.len(fields)!=if upper {10}else if command=="ENC" {109}else{110} {
+       array.len(fields)!=if upper {10}else if command=="ENC" {110}else{111} {
       return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid picture pass command")
     }
     // Resolve all reads against the previous version before defining this
@@ -88,7 +88,7 @@ pub fn lower(lines:ref<array<string>>,epoch:u64) -> result<array<string>,string>
       slot=slot+1
     }
     if not terminal {
-      let output_field:u64=if upper {9}else{109}
+      let output_field:u64=if upper {9}else{110}
       let output:str=array.borrow(fields,output_field)
       if output=="-" or str.len(output)==0 or str.starts_with(output,"GPU:") {
         return result.err("[GA_PICTURE_MEMORY_PROTOCOL] Invalid internal picture output")

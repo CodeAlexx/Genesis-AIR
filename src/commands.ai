@@ -442,16 +442,40 @@ fn linked_geometry(doc:ref<editor.Document>,id:u64,peer:u64) -> bool effects {} 
 // A multi-lane operation may affect unselected followers or neighbours. Every
 // previously linked pair must survive with one source-time mapping or disappear
 // together; validate before capturing history, including pairs on other A lanes.
-fn linked_document_geometry(before:ref<editor.Document>,after:ref<editor.Document>) -> bool effects {} {
+// Mates and id lookups are computed once per validation (O(n log n)); the former
+// per-clip scans made every edit quadratic in long projects.
+fn slot_by_id(doc:ref<editor.Document>,order:ref<array<u64>>,id:u64) -> option<u64> effects {} {
+  var lo:u64=0
+  var hi:u64=array.len(order)
+  loop {if lo>=hi {break}
+    let mid:u64=lo+(hi-lo)/2
+    let value:u64=option.unwrap(editor.clip_at(doc,array.get(order,mid))).id
+    if value==id {return option.some(array.get(order,mid))}
+    if value<id {lo=mid+1}else{hi=mid}}
+  option.none()
+}
+fn linked_document_geometry(before:ref<editor.Document>,after:ref<editor.Document>) -> bool effects {alloc} {
+  var paired:array<u64> =linked_media.mates(before)
+  var ids:array<u64> =array.new()
+  var at:u64=0
+  loop {if at>=editor.clip_count(after) {break}
+    array.push(ids,option.unwrap(editor.clip_at(after,at)).id)
+    at=at+1}
+  var order:array<u64> =linked_media.order_by(ids)
   var i:u64=0
   loop {if i>=editor.clip_count(before) {break}
     let old:editor.Clip=option.unwrap(editor.clip_at(before,i))
-    let peer:u64=linked_media.mate(before,old.id)
+    let peer:u64=array.get(paired,i)
     if peer!=0 and old.id<peer {
-      let first:bool=option.is_some(editor.clip(after,old.id))
-      let second:bool=option.is_some(editor.clip(after,peer))
-      if first!=second {return false}
-      if first and not linked_geometry(after,old.id,peer) {return false}
+      let first:option<u64> =slot_by_id(after,order,old.id)
+      let second:option<u64> =slot_by_id(after,order,peer)
+      if option.is_some(first)!=option.is_some(second) {return false}
+      match first {none=>{},some(slot)=>{
+        let a:editor.Clip=option.unwrap(editor.clip_at(after,slot))
+        let b:editor.Clip=option.unwrap(editor.clip_at(after,option.unwrap(second)))
+        if not (a.owner==b.owner and a.source==b.source and a.nested==b.nested and
+            a.start==b.start and a.source_in==b.source_in and a.length==b.length and a.speed==b.speed and a.reverse==b.reverse) {return false}
+      },}
     }
     i=i+1}
   true

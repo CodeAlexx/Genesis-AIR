@@ -51,6 +51,84 @@ fn same_time(a:editor.Clip,b:editor.Clip) -> bool effects {} {
   a.owner==b.owner and a.source==b.source and a.nested==b.nested and a.start==b.start and
   a.source_in==b.source_in and a.length==b.length and a.speed==b.speed and a.reverse==b.reverse
 }
+// Slot indices of `keys` in ascending key order: stable bottom-up merge sort,
+// O(n log n), so whole-document passes stay linear-logarithmic on long projects.
+pub fn order_by(keys:ref<array<u64>>) -> array<u64> effects {alloc} {
+  let n:u64=array.len(keys)
+  var a:array<u64> =array.new()
+  var b:array<u64> =array.new()
+  var i:u64=0
+  loop {if i>=n {break}
+    array.push(a,i)
+    array.push(b,i)
+    i=i+1}
+  var width:u64=1
+  loop {if width>=n {break}
+    var lo:u64=0
+    loop {if lo>=n {break}
+      let mid:u64=if lo+width<n {lo+width}else{n}
+      let hi:u64=if lo+2*width<n {lo+2*width}else{n}
+      var x:u64=lo
+      var y:u64=mid
+      var k:u64=lo
+      loop {if k>=hi {break}
+        if x<mid and (y>=hi or array.get(keys,array.get(a,x))<=array.get(keys,array.get(a,y))) {
+          array.set(b,k,array.get(a,x))
+          x=x+1
+        }else{
+          array.set(b,k,array.get(a,y))
+          y=y+1}
+        k=k+1}
+      lo=hi}
+    var c:u64=0
+    loop {if c>=n {break}
+      array.set(a,c,array.get(b,c))
+      c=c+1}
+    width=width*2}
+  a
+}
+
+// `mate(doc, id)` for every clip slot at once (0 where a clip has no unique mate).
+// Mates share a start (`same_time`), so clips are bucketed by start and each small
+// bucket is examined internally; cut pieces of one take can share a link group.
+pub fn mates(doc:ref<editor.Document>) -> array<u64> effects {alloc} {
+  let n:u64=editor.clip_count(doc)
+  var starts:array<u64> =array.new()
+  var out:array<u64> =array.new()
+  var i:u64=0
+  loop {if i>=n {break}
+    array.push(starts,cast.wrap(option.unwrap(editor.clip_at(doc,i)).start))
+    array.push(out,0)
+    i=i+1}
+  var order:array<u64> =order_by(starts)
+  var start:u64=0
+  loop {if start>=n {break}
+    let bucket:u64=array.get(starts,array.get(order,start))
+    var end:u64=start
+    loop {if end>=n {break}
+      if array.get(starts,array.get(order,end))!=bucket {break}
+      end=end+1}
+    var p:u64=start
+    loop {if p>=end {break}
+      let old:editor.Clip=option.unwrap(editor.clip_at(doc,array.get(order,p)))
+      if old.group!=0 and (old.streams==1 or old.streams==2) {
+        var found:u64=0
+        var unique:bool=true
+        var q:u64=start
+        loop {if q>=end {break}
+          let item:editor.Clip=option.unwrap(editor.clip_at(doc,array.get(order,q)))
+          if item.group==old.group and item.id!=old.id and item.streams+old.streams==3 and same_time(old,item) {
+            if found!=0 {unique=false}
+            found=item.id
+          }
+          q=q+1}
+        if unique {array.set(out,array.get(order,p),found)}
+      }
+      p=p+1}
+    start=end}
+  out
+}
+
 pub fn mate(doc:ref<editor.Document>,id:u64) -> u64 effects {} {
   let old:editor.Clip=match editor.clip(doc,id) {none=>{return 0},some(value)=>value,}
   if old.group==0 or (old.streams!=1 and old.streams!=2) {return 0}

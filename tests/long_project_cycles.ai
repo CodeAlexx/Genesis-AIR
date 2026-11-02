@@ -1,0 +1,133 @@
+module genesis.tests.long_project_cycles
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/provider.ai" as provider
+
+// Long-project save/reopen cycles. A private copy of a long linked project is cut
+// into hundreds of clips with titles, gain keys and fades, then repeatedly saved and
+// reopened through the native linked open path. Every reopen must reproduce the
+// encoded document exactly, an unchanged save must reproduce the file bytes, and an
+// edit between cycles must survive the next round trip.
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match editor_io.encode(doc) {ok(value)=>value,err(_)=>string.copy("ENCODE_FAILED"),}
+}
+
+fn ms(start: u64) -> string effects {alloc, time} {
+  string.from_int(cast.sat((time.monotonic_ns() - start) / 1000000))
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, time} {
+  if view.len(args) != 4 { return 2 }
+  let project: str = view.get(args, 1)
+  let root: str = view.get(args, 2)
+  let cuts: u64 = match text.parse_u64(view.get(args, 3)) {some(value)=>value,none=>{return 2},}
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Long project save/reopen cycles", false)
+  var state: app.App = app.app(provider.fake(root))
+  // "-" synthesizes a 21-minute 60 fps linked picture/sound take and saves it first,
+  // so the suite needs no local media; a path opens a private project copy instead.
+  let synthetic: string = path.join(root, "synthetic-long.air")
+  let source_project: string = if str.eq(project, "-") { string.copy(str.view(synthetic)) } else { string.copy(project) }
+  if str.eq(project, "-") {
+    var seed: app.App = app.app(provider.fake(root))
+    let doc: ref<editor.Document> = struct.borrow(seed, field=document)
+    let id: u64 = editor.add_source(doc, "synthetic long take.mp4", "Synthetic long take", 76701, 60.0)
+    let _ = editor.describe_source(doc, id, 1920, 1080, true, true, 48000, 2)
+    let placed: commands.Result = commands.append_source(seed, id, 0, 76701)
+    let _ = test.check(suite, placed.ok, "synthetic linked take is placed")
+    let written: commands.Result = commands.save_project(seed, str.view(synthetic))
+    let _ = test.check(suite, written.ok, "synthetic project is saved")
+  }
+  let _ = test.start(suite, "Open the long linked project")
+  let opened: commands.Result = commands.open_linked_project(state, str.view(source_project))
+  let _ = test.check(suite, opened.ok, "linked project opens")
+  let length: i64 = editor.duration(struct.borrow(state, field=document))
+  let _ = test.check(suite, length > cast.sat(cuts) * 2, "project is long enough for the requested cuts")
+
+  let _ = test.start(suite, "Cut, title and key the long project")
+  var began: u64 = time.monotonic_ns()
+  let step: i64 = length / cast.sat(cuts + 1)
+  var cut: u64 = 1
+  loop { if cut > cuts { break }
+    let _ = commands.seek(state, cast.sat(cut) * step)
+    let done: commands.Result = commands.split_at_playhead(state)
+    if not done.ok { let _ = test.check(suite, false, "every razor cut succeeds")
+      break }
+    cut = cut + 1
+  }
+  let clips: u64 = editor.clip_count(struct.borrow(state, field=document))
+  io.write(text.concat("cut ms ", text.concat(str.view(ms(began)), "\n")))
+  let _ = test.check(suite, clips >= cuts * 2, "both linked lanes were cut")
+  // Every eighth video clip receives a title, a gain key pair and a fade.
+  var at: u64 = 0
+  var titled: u64 = 0
+  loop { if at >= editor.clip_count(struct.borrow(state, field=document)) { break }
+    let clip: editor.Clip = match editor.clip_at(struct.borrow(state, field=document), at) {none=>{break},some(value)=>value,}
+    at = at + 1
+    if at % 8 != 1 or not editor.clip_has_video(clip) { continue }
+    let filter: commands.Result = commands.add_filter(state, clip.id, "text")
+    if not filter.ok { continue }
+    let label: string = text.concat("Chapter ", str.view(string.from_int(titled)))
+    let _ = commands.set_filter_text_param(state, filter.value, "content", str.view(label))
+    let _ = commands.set_parameter(state, chrome.domain_filter(), filter.value, "text", "font", cast.float(titled % 7))
+    let _ = commands.set_parameter(state, chrome.domain_filter(), filter.value, "text", "outline", 2.0)
+    let _ = commands.set_key(state, clip.id, "gain", 0, 0.5, 2)
+    let _ = commands.set_key(state, clip.id, "gain", clip.length - 1, 1.0, 2)
+    titled = titled + 1
+  }
+  let _ = test.check(suite, titled * 8 + 8 >= clips / 2, "titles were placed across the project")
+  io.write(text.concat("edit ms ", text.concat(str.view(ms(began)), "\n")))
+
+  let _ = test.start(suite, "Repeated save and reopen preserve the document")
+  let file: string = path.join(root, "long-cycles.air")
+  let reference: string = encoded(struct.borrow(state, field=document))
+  var previous_bytes: string = string.new()
+  var cycle: u64 = 0
+  var save_total: u64 = 0
+  var open_total: u64 = 0
+  loop { if cycle >= 20 { break }
+    let save_began: u64 = time.monotonic_ns()
+    let saved: commands.Result = commands.save_project(state, str.view(file))
+    save_total = save_total + (time.monotonic_ns() - save_began)
+    if not saved.ok { let _ = test.check(suite, false, "save succeeds")
+      break }
+    let bytes: string = match files.read_text(str.view(file)) {ok(value)=>value,err(_)=>string.copy(""),}
+    if cycle > 0 and cycle % 5 != 1 {
+      let _ = test.check(suite, str.eq(str.view(bytes), str.view(previous_bytes)), "unchanged save reproduces the file")
+    }
+    var reopened: app.App = app.app(provider.fake(root))
+    let open_began: u64 = time.monotonic_ns()
+    let loaded: commands.Result = commands.open_linked_project(reopened, str.view(file))
+    open_total = open_total + (time.monotonic_ns() - open_began)
+    let _ = test.check(suite, loaded.ok, "reopen succeeds")
+    let after: string = encoded(struct.borrow(reopened, field=document))
+    let before: string = encoded(struct.borrow(state, field=document))
+    let _ = test.check(suite, str.eq(str.view(after), str.view(before)), "reopened document equals the saved one")
+    let _ = test.check(suite, not app.dirty(reopened), "reopened project is clean")
+    // Every fifth cycle edits the reopened copy, which then becomes the session.
+    if cycle % 5 == 0 {
+      let _ = commands.seek(reopened, step / 2 + cast.sat(cycle))
+      let edited: commands.Result = commands.split_at_playhead(reopened)
+      let _ = test.check(suite, edited.ok and app.dirty(reopened), "an edit between cycles marks the project dirty")
+    }
+    state = reopened
+    previous_bytes = bytes
+    cycle = cycle + 1
+  }
+  let final_text: string = encoded(struct.borrow(state, field=document))
+  let _ = test.check(suite, not str.eq(str.view(final_text), str.view(reference)), "edits between cycles accumulated")
+  io.write(text.concat("clips ", text.concat(str.view(string.from_int(editor.clip_count(struct.borrow(state, field=document)))),
+    text.concat(" bytes ", text.concat(str.view(string.from_int(str.len(str.view(final_text)))),
+    text.concat(" save avg ms ", text.concat(str.view(string.from_int(cast.sat(save_total / 20000000))),
+    text.concat(" open avg ms ", text.concat(str.view(string.from_int(cast.sat(open_total / 20000000))), "\n")))))))))
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(root, "long-project-cycles-tests.json"), 16)
+}
