@@ -41,7 +41,9 @@ pub fn main(args:view<str>) -> i32 effects {alloc,env,fs.meta,fs.write,io.write,
    else {code(channel.send_deadlines(sender,20,bytes.view(payload),begin+50000000,begin+if str.eq(mode,"long") {2000000000}else{50000000}))}
   let elapsed:u64=time.monotonic_ns()-begin
   let _=files.write_text(path.join(root,"timing.tsv"),text.concat(string.from_int(elapsed),text.concat("\t",string.from_int(outcome))))
-  if str.eq(mode,"long") {
+  // Plain send grants a started frame the frame_deadline() grace (AIR main), so
+  // legacy completes like the explicit long write budget instead of failing.
+  if str.eq(mode,"long") or str.eq(mode,"legacy") {
    let _=test.eq_u64(suite,outcome,0,"Started 262KB frame completes under separate long write budget")
    let _=test.check(suite,elapsed>50000000,"Started socket frame spans the controlled stall beyond the old 50ms budget")
    let _=test.check(suite,not sender.failed and sender.sent==1 and sender.sequence==1 and sender.credits==1,"Full frame commits one credit and leaves sender healthy")

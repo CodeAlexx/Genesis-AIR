@@ -24,6 +24,12 @@ function Download([string]$Url, [string]$Target, [string]$Sha256) {
 }
 $sdkRevision = (Get-Content (Join-Path $repo 'air-sdk.conf') | Where-Object { $_ -match '^AIR_SDK_COMMIT=' }) -replace '^AIR_SDK_COMMIT=', ''
 Checkout 'https://github.com/CodeAlexx/AIR.git' $sdkRevision (Join-Path $repo 'build-windows/AIR-SDK')
+# Native Windows AIR compiler from the pinned SDK (no WSL). build-windows.ps1 finds it here.
+$nativeCompiler = Join-Path $repo 'build-windows/native-compiler-main/bin/airc.exe'
+if (-not (Test-Path -LiteralPath $nativeCompiler)) {
+  & pwsh -NoProfile -File (Join-Path $repo 'build-windows/AIR-SDK/tools/build-windows-compiler.ps1') -BuildDirectory (Join-Path $repo 'build-windows/native-compiler-main')
+  if ($LASTEXITCODE -ne 0) { throw '[GA_SETUP_COMPILER] Could not build the native Windows AIR compiler.' }
+}
 $worker = Join-Path $repo 'build-windows/gcompose-source'
 Checkout 'https://github.com/CodeAlexx/Genesis-.git' $pins.worker $worker
 $patch = Join-Path $repo 'windows/gcompose-windows.patch'

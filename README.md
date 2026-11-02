@@ -217,15 +217,14 @@ export GENESIS_GCOMPOSE="$PWD/target/release/gcompose"
 cd ../Genesis-AIR
 ```
 
-On Windows, use PowerShell 7, Visual Studio 2022 C++ Build Tools (including CMake),
-Git, and WSL Ubuntu with CMake 3.24+, Ninja and a C++20 compiler. Build AIR from the
-pinned SDK with the script below. AIR emits C in WSL;
-MSVC builds the Windows application. The installed editor runs directly as a Windows GUI
+On Windows, use PowerShell 7, Visual Studio 2022 C++ Build Tools (including CMake)
+and Git. No WSL is needed: setup builds the native Windows AIR compiler (airc.exe)
+from the pinned SDK, airc.exe emits C and MSVC builds the Windows application.
+The legacy WSL compiler path remains available with `build-windows.ps1 -UseWsl`. The installed editor runs directly as a Windows GUI
 executable, and its redirected media subprocesses do not open console windows.
 
 ```powershell
 .\setup-windows.ps1
-.\build-compiler-wsl.ps1
 .\build-windows.ps1 -RunTests
 .\Genesis-AIR.exe open .\project.air
 ```

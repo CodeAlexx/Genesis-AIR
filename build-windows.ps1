@@ -26,6 +26,7 @@ if (-not $AirSdk) {
 }
 if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
 $sdk = (Resolve-Path -LiteralPath $AirSdk).Path
+if (-not $PreparedSdk -and (Select-String -LiteralPath (Join-Path $here 'air-sdk.conf') -Pattern '^AIR_SDK_PREPARED=1' -Quiet)) { $PreparedSdk = $true }
 if (-not $PreparedSdk) {
 $publishPatch = Join-Path $here 'patches/air-file-publish.patch'
 if (-not (Test-Path -LiteralPath $publishPatch)) { throw '[GA_SDK_PUBLISH_PATCH_MISSING] The portable file publication overlay is missing.' }
