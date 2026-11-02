@@ -452,6 +452,26 @@ def main():
         report = json.loads((Path(temporary) / "keyframe-controls-tests.json").read_text())["payload"]
         assert report["status"] == "pass", report
         print(f"  keyframe controls: {report['checks']} shared UI/controller checks")
+    with TemporaryDirectory(prefix="genesis-track-automation-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "track_automation.ai", "--mode", "release", "--provider", "hash.sha256=portable", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "track-automation-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  track automation: {report['checks']} format/command checks")
+    with TemporaryDirectory(prefix="genesis-audio-track-plan-") as temporary:
+        import wave
+        source = Path(temporary) / "track-gain-source.wav"
+        with wave.open(str(source), "wb") as audio:
+            audio.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
+            audio.writeframes(bytes(4 * 48000))
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        # An empty worker path runs the planning suite only; Windows adds the PCM oracle.
+        done = run([airc, "run", HERE / "audio_track_plan.ai", "--mode", "release", "--provider", "hash.sha256=portable", "--", "", source, temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "audio-track-plan-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  track gain planning: {report['checks']} planner token/window/stability checks")
     with TemporaryDirectory(prefix="genesis-snap-controls-") as temporary:
         env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
         done = run([airc, "run", HERE / "snap_controls.ai", "--mode", "release", "--", temporary], env)

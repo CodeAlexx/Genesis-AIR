@@ -3,6 +3,7 @@ module genesis.linked_media
 import std.editor as editor
 import std.math as math
 import std.text as text
+import "track_keys.ai" as track_keys
 
 pub fn is_audio_kind(kind:str) -> bool effects {} {
   str.eq(kind,"gain") or str.eq(kind,"pan") or str.eq(kind,"eq_3band") or
@@ -155,8 +156,10 @@ fn destination(doc:ref<editor.Document>,video:u64,audio:u64,preserve_mixer:bool)
   (not preserve_mixer or (math.is_finite(vt.gain) and vt.gain>=0.0 and math.is_finite(vt.pan) and vt.pan>= -1.0 and vt.pan<=1.0 and
   at.gain==vt.gain and at.pan==vt.pan and at.muted==vt.muted and at.solo==vt.solo))
 }
-fn compatible(doc:ref<editor.Document>,video:u64,audio:u64) -> bool effects {} {
-  destination(doc,video,audio,true)
+// An existing lane can only stand in for the embedded audio when it needs no automation;
+// automated video lanes get a fresh lane that copies their curves.
+fn compatible(doc:ref<editor.Document>,video:u64,audio:u64) -> bool effects {alloc} {
+  destination(doc,video,audio,true) and not track_keys.has_any(doc,video)
 }
 fn vacant(doc:ref<editor.Document>,old:editor.Clip,track:u64) -> bool effects {} {
   if old.start<0 or old.length<=0 or old.start>9223372036854775807-old.length {return false}
@@ -282,6 +285,8 @@ fn audio_lane(doc:ref<editor.Document>,old:editor.Clip) -> result<u64,string> ef
   struct.set(array.borrow(struct.borrow(doc,field=tracks),slot),muted,field=muted)
   struct.set(array.borrow(struct.borrow(doc,field=tracks),slot),solo,field=solo)
   let _=editor.reorder_track(doc,id,order+1)
+  // A linked lane must sound like the embedded audio it replaces, automation included.
+  if not track_keys.copy_track(doc,old.track,id) {return result.err("[GA_LINKED_TRACK] Video lane automation could not be copied")}
   result.ok(id)
 }
 pub fn migrate_legacy(doc:ref<editor.Document>) -> result<u64,string> effects {alloc} {

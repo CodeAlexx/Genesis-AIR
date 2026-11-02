@@ -20,6 +20,7 @@ import "provider.ai" as provider
 import "typeface.ai" as typeface
 import "bidi.ai" as bidi
 import "filter_keys.ai" as filter_keys
+import "track_keys.ai" as track_keys
 import "picture_memory.ai" as picture_memory
 import "audio_endpoint.ai" as endpoint
 
@@ -2902,6 +2903,80 @@ fn audio_pan_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, fps:
   result.ok(token)
 }
 
+// Track gain automation (TRKGAIN). Same point grammar as GAINKEYS, but the keys live in the
+// sequence-wide store (clip 0, name track.<id>.gain) at TIMELINE frames of the owning
+// sequence, so `sample` is audio_sample_frame(key.frame) with no clip offset. Only the keys
+// that matter for samples [first,last] are emitted: the segment containing each end plus one
+// key before and two after, which are exactly the neighbors Catmull-Rom tangents read
+// (i-1..i+2). Everything before is only ever held outside the span, so the worker's windowed
+// evaluation is bit-identical to the full curve while descriptors stay bounded and an edit
+// outside every clip's window leaves the definition lines (and the parked endpoint) alone.
+fn track_gain_keys(doc: ref<editor.Document>, clip: editor.Clip, begin: i64, fps: f64, first: i64, last: i64)
+    -> result<string, string> effects {alloc} {
+  let param: u64 = track_keys.param_index(doc, clip.track, "gain")
+  if param == 0 { return result.ok(string.copy("")) }
+  var samples: array<i64> = array.new()
+  var points: array<editor.Key> = array.new()
+  var at: u64 = 0
+  loop { if at >= array.len(struct.borrow(doc, field=keys)) { break }
+    let key: editor.Key = array.get(struct.borrow(doc, field=keys), at)
+    at = at + 1
+    if key.clip != 0 or key.param != param { continue }
+    let sample: f64 = math.floor(cast.float(key.frame) * 48000.0 / fps + 0.5)
+    let count: u64 = array.len(samples)
+    let sample_at: i64 = cast.sat(sample)
+    if key.owner != clip.owner or key.frame < -9007199254740991 or key.frame > 9007199254740991 or
+        not math.is_finite(key.value) or key.value < 0.0 or key.value > 3.4028234e38 or key.interp >= 38 or
+        not math.is_finite(sample) or math.abs(sample) > 9007199254740991.0 or count >= 65536 or
+        (count != 0 and (key.frame <= array.get(points, count - 1).frame or
+          sample_at <= array.get(samples, count - 1))) {
+      return result.err("[GA_AUDIO_TRACK_GAIN_KEYS] Invalid track gain keyframe")
+    }
+    array.push(samples, sample_at)
+    array.push(points, key)
+  }
+  let n: u64 = array.len(samples)
+  if n == 0 { return result.ok(string.copy("")) }
+  var i0: u64 = 0
+  var i1: u64 = 0
+  var j: u64 = 0
+  loop { if j >= n { break }
+    let sample: i64 = array.get(samples, j)
+    if sample <= first { i0 = j }
+    if sample <= last { i1 = j }
+    j = j + 1
+  }
+  let lo: u64 = if i0 > 0 { i0 - 1 } else { 0 }
+  let hi: u64 = if i1 + 2 < n { i1 + 2 } else { n - 1 }
+  var window: array<string> = array.new()
+  j = lo
+  loop { if j > hi { break }
+    let key: editor.Key = array.get(points, j)
+    var fields: array<string> = [string.from_int(array.get(samples, j)),
+      string.from_int(key.frame), string.from_float(key.value), string.from_int(key.interp)]
+    array.push(window, text.join(fields, ","))
+    j = j + 1
+  }
+  var token: string = string.copy("TRKGAIN:")
+  string.append(token, str.view(string.from_int(audio_sample_frame(begin, fps))))
+  string.append(token, ":")
+  string.append(token, str.view(text.join(window, "/")))
+  result.ok(token)
+}
+
+// A keyed parameter replaces its static value: a keyed clip gain leaves only the track scalar,
+// a keyed track gain leaves only the clip scalar, both keyed leave 1.0.
+fn track_gain_scalar(doc: ref<editor.Document>, clip: editor.Clip, clip_keyed: bool, track_keyed: bool)
+    -> f64 effects {} {
+  if clip_keyed and track_keyed { return 1.0 }
+  if clip_keyed { return editor.track_gain(doc, clip.track) }
+  if track_keyed {
+    if not clip.enabled or not editor.track_audible(doc, clip.track) { return 0.0 }
+    return clip.gain
+  }
+  editor.effective_gain(doc, clip.id)
+}
+
 // Gain, pan and mute stages are memoryless per-channel scales, so they commute
 // with a per-sample balance. Any other enabled audio stage keeps the refusal.
 fn audio_pan_post_chain(doc: ref<editor.Document>, clip: editor.Clip) -> bool effects {alloc} {
@@ -3248,6 +3323,11 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
     let fade_keys: string = match audio_fade_keys(doc, clip, begin, end, fps, streaming) {
       err(problem) => {return result.err(problem)},ok(value)=>value,
     }
+    // Window over the clip's whole audible span (not this chunk) so chunk lines stay byte-stable.
+    let track_gain: string = match track_gain_keys(doc, clip, begin, fps, audio_sample_frame(clip.start, fps),
+        audio_sample_frame(editor.clip_end(clip), fps) + if audio_tail_owner(doc, clip) {240003} else {0}) {
+      err(problem) => {return result.err(problem)},ok(value)=>value,
+    }
     let destination_s: f64 = if context_requested or str.len(str.view(fade_keys)) != 0 {
       cast.float(audio_sample_frame(begin,fps)-audio_sample_frame(start,fps))/48000.0
     }else{legacy_destination_s}
@@ -3256,9 +3336,8 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
       provider.wire_path(str.view(struct.borrow(source, field=path))),
       string.from_float(source_s), string.from_float(duration_s),
       string.from_float(destination_s),
-      string.from_float(if str.len(str.view(gain_keys)) == 0 {
-        editor.effective_gain(doc, clip.id)
-      } else { editor.track_gain(doc, clip.track) }),
+      string.from_float(track_gain_scalar(doc, clip, str.len(str.view(gain_keys)) != 0,
+        str.len(str.view(track_gain)) != 0)),
       string.from_float(cast.float(clip.fade_in) / fps),
       string.from_float(cast.float(clip.fade_out) / fps),
       string.from_float(cast.float(clip.length) / fps),
@@ -3301,6 +3380,7 @@ fn flat_audio_lines(doc: ref<editor.Document>, start: i64, finish: i64, fps: f64
     if str.len(str.view(gain_keys)) != 0 { array.push(fields, gain_keys) }
     if str.len(str.view(fade_keys)) != 0 { array.push(fields, fade_keys) }
     if str.len(str.view(pan_keys)) != 0 { array.push(fields, pan_keys) }
+    if str.len(str.view(track_gain)) != 0 { array.push(fields, track_gain) }
     array.push(lines, text.join(fields, " "))
   }
   result.ok(lines)
@@ -3473,7 +3553,9 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   let gain_keys: string = try audio_gain_keys(doc,clip,clip.start,bounds.fps)
   let fade_keys: string = try audio_fade_keys(doc,clip,clip.start,editor.clip_end(clip),bounds.fps,false)
   let pan_keys: string = try audio_pan_keys(doc,clip,clip.start,bounds.fps)
-  let gain: f64 = if str.len(gain_keys) == 0 {editor.effective_gain(doc,clip.id)}else{editor.track_gain(doc,clip.track)}
+  let track_gain: string = try track_gain_keys(doc,clip,clip.start,bounds.fps,bounds.first,
+    bounds.last+if direct_tail {240003}else{0})
+  let gain: f64 = track_gain_scalar(doc,clip,str.len(gain_keys) != 0,str.len(track_gain) != 0)
   if not math.is_finite(gain) or gain < 0.0 or gain > 3.4028234663852886e38 or
       clip.fade_in < 0 or clip.fade_out < 0 {
     return result.err("[GA_AUDIO_NESTED_PROTOCOL] Invalid nested gain or scalar fade")
@@ -3573,6 +3655,7 @@ fn nested_audio_define(doc: ref<editor.Document>, clip: editor.Clip, instance: s
   if str.len(gain_keys) != 0 {array.push(fields,gain_keys)}
   if str.len(fade_keys) != 0 {array.push(fields,fade_keys)}
   if str.len(pan_keys) != 0 {array.push(fields,pan_keys)}
+  if str.len(track_gain) != 0 {array.push(fields,track_gain)}
   if has_context {
     var ctx_fields: array<string> = ["AUDIOCTX",string.from_float(context_source),string.from_float(context_duration),
       string.from_int(context.output_frames)]

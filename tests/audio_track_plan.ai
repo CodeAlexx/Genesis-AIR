@@ -1,0 +1,876 @@
+// Track gain automation, phase 2 (sound): planner tokens, windowing, byte stability and
+// sample-exact rendering. Usage: genesis-audio-track-plan WORKER SOURCE.wav ROOT
+//
+// Part 1 (planning) needs no decoder: it inspects the exact TRKGAIN wire text from the shared
+// endpoint/flat planners, proves windowed evaluation equals the full curve for all 38 modes,
+// and pins which edits change the definition lines (and therefore the parked endpoint key).
+// Part 2 renders every variant through the flat path (whole, uneven chunks, fresh seek) and
+// the endpoint path (whole, chunks, seek) and writes SDK-curve oracles for
+// tests/audio_track_keys.py, which checks every PCM sample.
+module genesis.tests.audio_track_plan
+import std.curve as curve
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.math as math
+import std.path as path
+import std.tasks as tasks
+import std.testing as test
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/audio_endpoint.ai" as endpoint
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+import "../src/track_keys.ai" as track_keys
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+
+fn sample_of(frame: i64, fps: f64) -> i64 effects {} { media.audio_sample_frame(frame,fps) }
+
+// std.curve value of one segment list at an absolute sample, using the points exactly as the
+// worker adapter sees them (sample position selects the segment, frames feed Catmull metrics).
+fn curve_at(samples: ref<array<i64>>, frames: ref<array<i64>>, values: ref<array<f64>>, mode: u32,
+            position: i64) -> f64 effects {} {
+  let last: u64 = array.len(samples)-1
+  if position < array.get(samples,0) {return array.get(values,0)}
+  var at: u64 = 0
+  loop {
+    if at == last {return array.get(values,last)}
+    let a: i64 = array.get(samples,at)
+    let b: i64 = array.get(samples,at+1)
+    if position >= b {at=at+1
+      continue}
+    let av: f64 = array.get(values,at)
+    let bv: f64 = array.get(values,at+1)
+    if mode == curve.hold() {return av}
+    let progress: f64 = cast.float(position-a)/cast.float(b-a)
+    match curve.catmull_alpha(mode) {
+      some(alpha)=>{
+        let before: u64 = if at > 0 {at-1}else{at}
+        let after: u64 = if at+2 <= last {at+2}else{at+1}
+        return curve.catmull_rom(cast.float(array.get(frames,before)),array.get(values,before),
+          cast.float(array.get(frames,at)),av,cast.float(array.get(frames,at+1)),bv,
+          cast.float(array.get(frames,after)),array.get(values,after),progress,alpha,curve.catmull_tension(mode))
+      },
+      none=>{let blend: f64 = if mode == curve.smooth() {progress*progress*(3.0-2.0*progress)}
+          else {match curve.ease_factor(mode,progress) {some(value)=>value,none=>progress,}}
+        return av+(bv-av)*blend},
+    }
+  }
+  0.0
+}
+fn clamp_gain(value: f64) -> f64 effects {} {
+  if value < 0.0 {return 0.0}
+  if value > 3.4028234663852886e38 {return 3.4028234663852886e38}
+  value
+}
+
+type Points = struct {origin: i64, samples: array<i64>, frames: array<i64>, values: array<f64>, modes: array<u32>}
+fn parse_points(token: str) -> option<Points> effects {alloc} {
+  var parts: array<string> = text.split(token,":")
+  if array.len(parts) != 3 {return option.none()}
+  let origin: i64 = match text.parse_i64(str.view(array.borrow(parts,1))) {none=>{return option.none()},some(v)=>v,}
+  var rows: array<string> = text.split(str.view(array.borrow(parts,2)),"/")
+  var out: Points = Points {origin:origin,samples:array.new(),frames:array.new(),values:array.new(),modes:array.new()}
+  var at: u64 = 0
+  loop {if at >= array.len(rows) {break}
+    var f: array<string> = text.split(str.view(array.borrow(rows,at)),",")
+    at=at+1
+    if array.len(f) != 4 {return option.none()}
+    let sample: i64 = match text.parse_i64(str.view(array.borrow(f,0))) {none=>{return option.none()},some(v)=>v,}
+    let frame: i64 = match text.parse_i64(str.view(array.borrow(f,1))) {none=>{return option.none()},some(v)=>v,}
+    let value: f64 = match text.parse_f64(str.view(array.borrow(f,2))) {none=>{return option.none()},some(v)=>v,}
+    let mode: u64 = match text.parse_u64(str.view(array.borrow(f,3))) {none=>{return option.none()},some(v)=>v,}
+    array.push(struct.borrow(out,field=samples),sample)
+    array.push(struct.borrow(out,field=frames),frame)
+    array.push(struct.borrow(out,field=values),value)
+    array.push(struct.borrow(out,field=modes),cast.wrap(mode))
+  }
+  option.some(out)
+}
+
+fn lines_of(doc: ref<editor.Document>) -> result<array<string>,string> effects {alloc} {
+  match media.endpoint_plan(doc,"worker.exe","out.wav") {
+    err(problem)=>result.err(problem),
+    ok(value)=>{var plan: media.EndpointPlan = value
+      result.ok(struct.replace(plan,array.new(),field=lines))},
+  }
+}
+fn flat_of(doc: ref<editor.Document>, start: i64, finish: i64) -> result<array<string>,string> effects {alloc} {
+  match media.audio_plan_range(doc,"worker.exe",start,finish,"out.wav") {
+    err(problem)=>result.err(problem),
+    ok(value)=>{var plan: media.AudioPlan = value
+      result.ok(struct.replace(plan,array.new(),field=sounds))},
+  }
+}
+fn joined(lines: ref<array<string>>) -> string effects {alloc} { text.join(lines,"\n") }
+fn planned(doc: ref<editor.Document>) -> string effects {alloc} {
+  match lines_of(doc) {ok(lines)=>{var owned: array<string> = lines
+      joined(owned)},err(problem)=>problem,}
+}
+fn line_with(lines: ref<array<string>>, needle: str) -> string effects {alloc} {
+  var at: u64 = 0
+  loop {if at >= array.len(lines) {break}
+    if text.contains(str.view(array.borrow(lines,at)),needle) {return string.copy(str.view(array.borrow(lines,at)))}
+    at=at+1}
+  string.new()
+}
+fn field_with(line: str, marker: str) -> string effects {alloc} {
+  var fields: array<string> = text.split(line," ")
+  var at: u64 = 0
+  loop {if at >= array.len(fields) {break}
+    if text.contains(str.view(array.borrow(fields,at)),marker) {return string.copy(str.view(array.borrow(fields,at)))}
+    at=at+1}
+  string.new()
+}
+fn field_at(line: str, index: u64) -> string effects {alloc} {
+  var fields: array<string> = text.split(line," ")
+  if index >= array.len(fields) {return string.new()}
+  string.copy(str.view(array.borrow(fields,index)))
+}
+fn leaf_line(lines: ref<array<string>>, clip: u64) -> string effects {alloc} {
+  let id: string = string.from_int(clip)
+  line_with(lines,str.view(text.concat("NESTLEAF n",text.concat(str.view(id),text.concat(".l",text.concat(str.view(id)," "))))))
+}
+fn scalar_of(line: str) -> f64 effects {alloc} {
+  match text.parse_f64(str.view(field_at(line,8))) {some(v)=>v,none=>-1.0,}
+}
+fn first_source(doc: ref<editor.Document>) -> u64 effects {} {
+  array.borrow(struct.borrow(doc,field=sources),0).id
+}
+fn new_doc(source: str, fps: f64, frames: i64) -> editor.Document effects {alloc} {
+  var doc: editor.Document = editor.document(fps,640,360)
+  let id: u64 = editor.add_source(doc,source,"Track gain source",frames,fps)
+  let _=editor.describe_source(doc,id,0,0,false,true,48000,2)
+  doc
+}
+fn key(doc: ref<editor.Document>, track: u64, frame: i64, value: f64, mode: u32) -> bool effects {alloc} {
+  match track_keys.set(doc,track,"gain",frame,value,mode) {none=>true,some(_)=>false,}
+}
+fn ramp_value(k: u64) -> f64 effects {} { 0.1+0.04*cast.float(k) }
+fn point_text(frame: i64, fps: f64, value: f64, mode: u32) -> string effects {alloc} {
+  var fields: array<string> = [string.from_int(sample_of(frame,fps)),string.from_int(frame),string.from_float(value),string.from_int(mode)]
+  text.join(fields,",")
+}
+// Expected token over ramp keys k = first..last (frame = 30k, linear) at fps 30.
+fn ramp_token(origin_frame: i64, first: u64, last: u64) -> string effects {alloc} {
+  var points: array<string> = array.new()
+  var k: u64 = first
+  loop {if k > last {break}
+    array.push(points,point_text(30*cast.sat(k),30.0,ramp_value(k),curve.linear()))
+    k=k+1}
+  var out: string = text.concat("TRKGAIN:",string.from_int(sample_of(origin_frame,30.0)))
+  string.append(out,":")
+  string.append(out,str.view(text.join(points,"/")))
+  out
+}
+fn ramp_keys(doc: ref<editor.Document>, track: u64, count: u64) -> bool effects {alloc} {
+  var good: bool = true
+  var k: u64 = 0
+  loop {if k >= count {break}
+    good=key(doc,track,30*cast.sat(k),ramp_value(k),curve.linear()) and good
+    k=k+1}
+  good
+}
+
+// A fresh 30 fps project: A1 with clips at 0 and 300 (30 frames each, ids returned through the
+// out parameters), A2 with an unrelated clip at 0. The source declares 100000 frames, enough for
+// every planning case; only plans are built, nothing is decoded.
+type Fixture = struct {a1: u64, a2: u64, first: u64, second: u64, other: u64}
+fn fixture(doc: ref<editor.Document>) -> Fixture effects {alloc} {
+  let src: u64 = first_source(doc)
+  let a1: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let a2: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A2")
+  let first: u64 = option.unwrap(editor.place(doc,a1,src,0,30,0))
+  let second: u64 = option.unwrap(editor.place(doc,a1,src,0,30,300))
+  let other: u64 = option.unwrap(editor.place(doc,a2,src,0,30,0))
+  Fixture {a1:a1,a2:a2,first:first,second:second,other:other}
+}
+
+// ---------------------------------------------------------------------------
+// Part 1: planning
+
+fn tokens_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let fx: Fixture = fixture(doc)
+  let _=editor.set_clip_gain(doc,fx.first,0.8)
+  let _=editor.set_track_gain(doc,fx.a1,0.5)
+  let _=editor.set_track_gain(doc,fx.a2,0.25)
+  let _=test.start(suite,"Static-only plans carry no TRKGAIN and keep the folded clip*track scalar")
+  var plain: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let _=test.check(suite,array.len(plain) > 0 and not text.contains(str.view(joined(plain)),"TRKGAIN"),"No automation, no token")
+  let leaf_a: string = leaf_line(plain,fx.first)
+  let _=test.near_f64(suite,scalar_of(str.view(leaf_a)),0.4,0.0000001,"Scalar = clip 0.8 * track 0.5")
+  let _=test.near_f64(suite,scalar_of(str.view(leaf_line(plain,fx.other))),0.25,0.0000001,"Other track scalar = its static gain")
+  let before_names: u64 = array.len(struct.borrow(doc,field=names))
+  let _=test.eq_u64(suite,array.len(struct.borrow(doc,field=names)),before_names,"Planning never interns names")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Each clip line carries only the keys covering its window plus neighbours, at exact samples")
+  let _=test.check(suite,ramp_keys(doc,fx.a1,20),"20 track keys written")
+  var lines: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let token_a: string = field_with(str.view(leaf_line(lines,fx.first)),"TRKGAIN:")
+  let token_b: string = field_with(str.view(leaf_line(lines,fx.second)),"TRKGAIN:")
+  let _=test.eq_str(suite,str.view(token_a),str.view(ramp_token(0,0,3)),"Clip at frame 0 covers keys 0..30 plus two after")
+  let _=test.eq_str(suite,str.view(token_b),str.view(ramp_token(300,9,13)),"Clip at frame 300 covers one key before and two after its end key")
+  let _=test.check(suite,str.len(str.view(field_with(str.view(leaf_line(lines,fx.other)),"TRKGAIN:"))) == 0,"A track without keys gets no token")
+  let _=test.near_f64(suite,scalar_of(str.view(leaf_line(lines,fx.first))),0.8,0.0000001,"Keyed track gain leaves only the clip scalar")
+  let _=test.near_f64(suite,scalar_of(str.view(leaf_line(lines,fx.other))),0.25,0.0000001,"Unkeyed track keeps clip*track scalar")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Flat chunk lines carry the same clip window, anchored at the chunk origin")
+  var flat: array<string> = match flat_of(doc,10,330) {ok(v)=>v,err(_)=>array.new(),}
+  let flat_a: string = line_with(flat,str.view(text.concat(" ",str.view(string.from_float(0.8)))))
+  var count_tokens: u64 = 0
+  var at: u64 = 0
+  loop {if at >= array.len(flat) {break}
+    if text.contains(str.view(array.borrow(flat,at)),"TRKGAIN:") {count_tokens=count_tokens+1}
+    at=at+1}
+  let _=test.eq_u64(suite,count_tokens,2,"Both keyed clips plan a flat TRKGAIN token")
+  let flat_token_a: string = field_with(str.view(flat_a),"TRKGAIN:")
+  match parse_points(str.view(flat_token_a)) {
+    none=>{let _=test.check(suite,false,"Flat token parses")},
+    some(value)=>{var p: Points = value
+      let _=test.eq_i64(suite,p.origin,sample_of(10,30.0),"Origin is the chunk start sample, like GAINKEYS")
+      let _=test.eq_u64(suite,array.len(struct.borrow(p,field=samples)),4,"Window is the whole clip span (keys 0..90), not the chunk")},
+  }
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Edits inside a window change the lines; edits outside every window do not")
+  var base: string = planned(doc)
+  let signature: string = media.audio_signature(doc)
+  // Key 19 (frame 570) and key 4 (frame 120): beyond clip A's last needed key (index 3) and
+  // beyond clip B's (index 13).
+  let _=key(doc,fx.a1,570,0.9,curve.linear())
+  let _=test.eq_str(suite,str.view(planned(doc)),str.view(base),"Far key edit: byte-identical definition lines")
+  let _=test.eq_str(suite,str.view(media.audio_signature(doc)),str.view(signature),"Far key edit: audio signature unchanged (sound is not restarted)")
+  let _=key(doc,fx.a1,120,0.77,curve.linear())
+  let _=test.eq_str(suite,str.view(planned(doc)),str.view(base),"Key just past the neighbour window: identical")
+  let _=editor.set_track_gain(doc,fx.a1,0.9)
+  let _=test.eq_str(suite,str.view(planned(doc)),str.view(base),"Static track gain under a keyed curve is ignored: identical")
+  let _=key(doc,fx.a1,90,0.66,curve.linear())
+  let edited: string = planned(doc)
+  let _=test.check(suite,not str.eq(str.view(edited),str.view(base)),"Neighbour key inside clip A's window changes the lines")
+  let _=test.check(suite,not str.eq(str.view(media.audio_signature(doc)),str.view(signature)),"...and the audio signature")
+  var edited_lines: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let _=test.eq_str(suite,str.view(field_with(str.view(leaf_line(edited_lines,fx.second)),"TRKGAIN:")),str.view(token_b),"Clip B's line is untouched by an edit near clip A")
+  let _=key(doc,fx.a1,270,0.5,curve.linear())
+  var b_lines: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let _=test.check(suite,not str.eq(str.view(field_with(str.view(leaf_line(b_lines,fx.second)),"TRKGAIN:")),str.view(token_b)),"Neighbour key before clip B's window changes B")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Keyed clip gain and keyed track gain fold to scalars independently")
+  var mixdoc: editor.Document = new_doc(source,30.0,100000)
+  let mix: Fixture = fixture(mixdoc)
+  let _=editor.set_clip_gain(mixdoc,mix.first,0.8)
+  let _=editor.set_track_gain(mixdoc,mix.a1,0.5)
+  let _=editor.set_key(mixdoc,mix.first,"gain",0,0.5,curve.linear())
+  let _=editor.set_key(mixdoc,mix.first,"gain",20,1.0,curve.linear())
+  var clip_only: array<string> = match lines_of(mixdoc) {ok(v)=>v,err(_)=>array.new(),}
+  let clip_line: string = leaf_line(clip_only,mix.first)
+  let _=test.near_f64(suite,scalar_of(str.view(clip_line)),0.5,0.0000001,"Clip keyed only: scalar = track gain")
+  let _=test.check(suite,text.contains(str.view(clip_line),"GAINKEYS:") and not text.contains(str.view(clip_line),"TRKGAIN:"),"Only GAINKEYS present")
+  let _=key(mixdoc,mix.a1,0,0.5,curve.linear())
+  let _=key(mixdoc,mix.a1,30,1.0,curve.linear())
+  var both: array<string> = match lines_of(mixdoc) {ok(v)=>v,err(_)=>array.new(),}
+  let both_line: string = leaf_line(both,mix.first)
+  let _=test.near_f64(suite,scalar_of(str.view(both_line)),1.0,0.0,"Both keyed: scalar 1.0")
+  let _=test.check(suite,text.contains(str.view(both_line),"GAINKEYS:") and text.contains(str.view(both_line),"TRKGAIN:"),"Both tokens present")
+  let _=test.done(suite)
+}
+
+fn exclusion_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let fx: Fixture = fixture(doc)
+  let _=ramp_keys(doc,fx.a1,20)
+  let _=test.start(suite,"Muted, soloed-out and disabled clips plan nothing, so their automation is inert")
+  let live: string = planned(doc)
+  let _=test.check(suite,text.contains(str.view(live),"TRKGAIN:"),"Automation is planned while audible")
+  let _=editor.set_track_muted(doc,fx.a1,true)
+  let muted_keyed: string = planned(doc)
+  let _=test.check(suite,not text.contains(str.view(muted_keyed),"TRKGAIN:"),"A muted track emits no TRKGAIN")
+  let _=track_keys.drop_track(doc,fx.a1)
+  let muted_plain: string = planned(doc)
+  let _=test.eq_str(suite,str.view(muted_keyed),str.view(muted_plain),"Muted: keyed and unkeyed plans are byte-identical")
+  let _=editor.set_track_muted(doc,fx.a1,false)
+  let _=ramp_keys(doc,fx.a1,20)
+  let _=test.eq_str(suite,str.view(planned(doc)),str.view(live),"Unmuting restores the very same lines")
+  let _=editor.set_track_solo(doc,fx.a2,true)
+  let soloed_keyed: string = planned(doc)
+  let _=test.check(suite,not text.contains(str.view(soloed_keyed),"TRKGAIN:"),"Solo on another track silences the keyed track: no token")
+  let _=editor.set_track_solo(doc,fx.a2,false)
+  let _=editor.set_clip_enabled(doc,fx.first,false)
+  var disabled: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let _=test.check(suite,str.len(str.view(leaf_line(disabled,fx.first))) == 0 and str.len(str.view(field_with(str.view(leaf_line(disabled,fx.second)),"TRKGAIN:"))) > 0,"A disabled clip is skipped; its neighbour keeps its window")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Adding then removing automation leaves static plans byte-identical")
+  var plain_doc: editor.Document = new_doc(source,30.0,100000)
+  let plain_fx: Fixture = fixture(plain_doc)
+  let before: string = planned(plain_doc)
+  let _=ramp_keys(plain_doc,plain_fx.a1,5)
+  let _=test.check(suite,not str.eq(str.view(planned(plain_doc)),str.view(before)),"Keys change the plan")
+  let _=track_keys.drop_track(plain_doc,plain_fx.a1)
+  let _=test.eq_str(suite,str.view(planned(plain_doc)),str.view(before),"Dropping them restores the exact static plan")
+  let _=test.done(suite)
+}
+
+fn key_index(doc: ref<editor.Document>, frame: i64) -> u64 effects {alloc} {
+  var at: u64 = 0
+  loop {if at >= array.len(struct.borrow(doc,field=keys)) {break}
+    let k: editor.Key = array.get(struct.borrow(doc,field=keys),at)
+    if k.clip == 0 and k.frame == frame {return at}
+    at=at+1}
+  999999999
+}
+fn refusal(doc: ref<editor.Document>) -> string effects {alloc} {
+  match lines_of(doc) {ok(_)=>string.new(),err(problem)=>problem,}
+}
+fn flat_refusal(doc: ref<editor.Document>) -> string effects {alloc} {
+  match flat_of(doc,0,330) {ok(_)=>string.new(),err(problem)=>problem,}
+}
+fn malformed_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let fx: Fixture = fixture(doc)
+  let _=ramp_keys(doc,fx.a1,6)
+  let _=test.start(suite,"Malformed track keys are coded planner errors and a repaired project plans again")
+  let _=test.check(suite,str.len(str.view(refusal(doc))) == 0,"Valid project plans")
+  let at: u64 = key_index(doc,60)
+  let good: editor.Key = array.get(struct.borrow(doc,field=keys),at)
+  var bad: editor.Key = good
+  struct.set(bad,-0.5,field=value)
+  array.set(struct.borrow(doc,field=keys),at,bad)
+  let _=test.check(suite,text.contains(str.view(refusal(doc)),"GA_AUDIO_TRACK_GAIN_KEYS"),"Negative gain refused with GA_AUDIO_TRACK_GAIN_KEYS")
+  let _=test.check(suite,text.contains(str.view(flat_refusal(doc)),"GA_AUDIO_TRACK_GAIN_KEYS"),"Flat planner refuses the same malformed key")
+  var bad_mode: editor.Key = good
+  struct.set(bad_mode,38,field=interp)
+  array.set(struct.borrow(doc,field=keys),at,bad_mode)
+  let _=test.check(suite,text.contains(str.view(refusal(doc)),"GA_AUDIO_TRACK_GAIN_KEYS"),"Interpolation 38 refused")
+  var bad_owner: editor.Key = good
+  struct.set(bad_owner,good.owner+7,field=owner)
+  array.set(struct.borrow(doc,field=keys),at,bad_owner)
+  let _=test.check(suite,text.contains(str.view(refusal(doc)),"GA_AUDIO_TRACK_GAIN_KEYS"),"Key owned by a different sequence refused")
+  var bad_nan: editor.Key = good
+  struct.set(bad_nan,0.0/0.0,field=value)
+  array.set(struct.borrow(doc,field=keys),at,bad_nan)
+  let _=test.check(suite,text.contains(str.view(refusal(doc)),"GA_AUDIO_TRACK_GAIN_KEYS"),"Non-finite gain refused")
+  var huge: editor.Key = good
+  struct.set(huge,1.0e39,field=value)
+  array.set(struct.borrow(doc,field=keys),at,huge)
+  let _=test.check(suite,text.contains(str.view(refusal(doc)),"GA_AUDIO_TRACK_GAIN_KEYS"),"Gain above f32::MAX refused")
+  array.set(struct.borrow(doc,field=keys),at,good)
+  let _=test.eq_u64(suite,str.len(str.view(refusal(doc))),0,"Repaired project plans again with no residue")
+  let _=test.eq_u64(suite,str.len(str.view(flat_refusal(doc))),0,"Flat plans accept the repaired project too")
+  let _=test.done(suite)
+}
+
+// Every interpolation mode: the windowed points the worker receives evaluate bit-equal to the
+// complete curve at every sample of the clip span (stride 1 for the main placement).
+type Tally = struct {bad: u64, windowed: u64, total: u64, checked: u64}
+fn window_frames() -> array<i64> effects {alloc} { [-20,3,40,77,95,101,118,131,149,170,205,260,300,360] }
+fn window_values() -> array<f64> effects {alloc} { [0.9,0.15,1.3,0.4,0.0,1.1,0.55,0.2,1.7,0.35,0.8,0.05,1.0,0.6] }
+fn window_case(source: str, mode: u32, start: i64, stride: i64, tally: ref<Tally>) -> unit effects {alloc} {
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let src: u64 = first_source(doc)
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let clip: u64 = option.unwrap(editor.place(doc,track,src,0,30,start))
+  var frames: array<i64> = window_frames()
+  var values: array<f64> = window_values()
+  var full: array<i64> = array.new()
+  var at: u64 = 0
+  loop {if at >= array.len(frames) {break}
+    let _=key(doc,track,array.get(frames,at),array.get(values,at),mode)
+    array.push(full,sample_of(array.get(frames,at),30.0))
+    at=at+1}
+  var lines: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>{struct.set(tally,tally.bad+1,field=bad)
+    return ()},}
+  match parse_points(str.view(field_with(str.view(leaf_line(lines,clip)),"TRKGAIN:"))) {
+    none=>{struct.set(tally,tally.bad+1,field=bad)},
+    some(value)=>{var points: Points = value
+      struct.set(tally,tally.windowed+cast.wrap(array.len(struct.borrow(points,field=samples))),field=windowed)
+      struct.set(tally,tally.total+cast.wrap(array.len(frames)),field=total)
+      let first: i64 = sample_of(start,30.0)
+      let last: i64 = sample_of(start+30,30.0)
+      var position: i64 = first
+      loop {if position > last {break}
+        let a: f64 = clamp_gain(curve_at(struct.borrow(points,field=samples),struct.borrow(points,field=frames),struct.borrow(points,field=values),mode,position))
+        let b: f64 = clamp_gain(curve_at(full,frames,values,mode,position))
+        if a != b {struct.set(tally,tally.bad+1,field=bad)}
+        struct.set(tally,tally.checked+1,field=checked)
+        position=position+stride}
+      let a: f64 = clamp_gain(curve_at(struct.borrow(points,field=samples),struct.borrow(points,field=frames),struct.borrow(points,field=values),mode,last))
+      let b: f64 = clamp_gain(curve_at(full,frames,values,mode,last))
+      if a != b {struct.set(tally,tally.bad+1,field=bad)}},
+  }
+  ()
+}
+fn equivalence_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  let _=test.start(suite,"Windowed evaluation equals the full curve for all 38 modes at every span sample")
+  var tally: Tally = Tally {bad:0,windowed:0,total:0,checked:0}
+  var mode: u32 = 0
+  loop {if mode >= 38 {break}
+    window_case(source,mode,100,1,tally)
+    mode=mode+1}
+  let _=test.eq_u64(suite,tally.bad,0,"Middle placement: zero windowed/full differences")
+  let _=test.check(suite,tally.windowed < tally.total,"The window drops keys")
+  let _=test.check(suite,tally.checked > 1800000,"Every sample of every mode was compared")
+  var edge: Tally = Tally {bad:0,windowed:0,total:0,checked:0}
+  var modes: array<u32> = [curve.linear(),curve.hold(),curve.smooth(),5,6,7,curve.smooth_loose(),11,23,37]
+  var m: u64 = 0
+  loop {if m >= array.len(modes) {break}
+    let one: u32 = array.get(modes,m)
+    window_case(source,one,0,1,edge)
+    window_case(source,one,205,1,edge)
+    window_case(source,one,400,1,edge)
+    window_case(source,one,355,1,edge)
+    m=m+1}
+  let _=test.eq_u64(suite,edge.bad,0,"Clip before the first key, on a key, after the last key and straddling the last key")
+  let _=test.done(suite)
+}
+
+fn big_track(doc: ref<editor.Document>, source: str, name: str, keys: u64, step: i64) -> u64 effects {alloc} {
+  let track: u64 = editor.add_track(doc,doc.active,editor.track_audio(),name)
+  var k: u64 = 0
+  loop {if k >= keys {break}
+    let _=key(doc,track,step*cast.sat(k),0.2+0.0005*cast.float(k),curve.linear())
+    k=k+1}
+  track
+}
+fn capacity_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  let _=test.start(suite,"1000 keys x 200 clips stays far below the descriptor cap thanks to windowing")
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let src: u64 = first_source(doc)
+  let track: u64 = big_track(doc,source,"A1",1000,2)
+  var c: i64 = 0
+  loop {if c >= 200 {break}
+    let _=editor.place(doc,track,src,0,10,c*10)
+    c=c+1}
+  match lines_of(doc) {
+    err(problem)=>{let _=test.check(suite,false,str.view(problem))},
+    ok(value)=>{var lines: array<string> = value
+      let bytes: u64 = str.len(str.view(joined(lines)))
+      let _=test.check(suite,bytes < 200000,"Whole plan is small (a full copy per clip would exceed 5 MB)")
+      var widest: u64 = 0
+      var at: u64 = 0
+      loop {if at >= array.len(lines) {break}
+        match parse_points(str.view(field_with(str.view(array.borrow(lines,at)),"TRKGAIN:"))) {
+          none=>{},some(p)=>{var points: Points = p
+            let n: u64 = array.len(struct.borrow(points,field=samples))
+            if n > widest {widest=n}},
+        }
+        at=at+1}
+      let _=test.check(suite,widest > 0 and widest <= 12,"No clip line carries more than its own window")},
+  }
+  let _=test.done(suite)
+
+  let _=test.start(suite,"A pathological project still fails with the coded descriptor capacity error")
+  var heavy: editor.Document = new_doc(source,30.0,100000)
+  let heavy_src: u64 = first_source(heavy)
+  var t: u64 = 0
+  loop {if t >= 40 {break}
+    let lane: u64 = big_track(heavy,source,"L",1000,3)
+    let _=editor.place(heavy,lane,heavy_src,0,3000,0)
+    t=t+1}
+  let _=test.check(suite,text.contains(str.view(refusal(heavy)),"GA_AUDIO_NESTED_CAPACITY"),"40 clips each carrying 1000 keys exceed the mailbox with GA_AUDIO_NESTED_CAPACITY")
+  let _=test.done(suite)
+}
+
+fn nested_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  let _=test.start(suite,"Child-sequence tracks window in child time; a parent track keys its compound clip")
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let src: u64 = first_source(doc)
+  let parent: u64 = doc.active
+  let child: u64 = editor.add_sequence(doc,"Child",24.0,640,360)
+  let child_track: u64 = editor.add_track(doc,child,editor.track_audio(),"CA1")
+  let child_clip: u64 = option.unwrap(editor.place(doc,child_track,src,0,48,0))
+  let _=editor.set_active(doc,child)
+  let _=key(doc,child_track,0,0.2,curve.linear())
+  let _=key(doc,child_track,24,0.8,curve.linear())
+  let _=key(doc,child_track,300,1.0,curve.linear())
+  let _=editor.set_active(doc,parent)
+  let lane: u64 = editor.add_track(doc,parent,editor.track_audio(),"A1")
+  let compound: u64 = option.unwrap(editor.place_nested(doc,lane,child,0,48,15))
+  let _=key(doc,lane,0,0.5,curve.linear())
+  let _=key(doc,lane,60,1.0,curve.linear())
+  var lines: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let leaf_marker: string = text.concat("NESTLEAF n",text.concat(str.view(string.from_int(compound)),text.concat(".l",text.concat(str.view(string.from_int(child_clip))," "))))
+  let leaf: string = line_with(lines,str.view(leaf_marker))
+  let _=test.check(suite,str.len(str.view(leaf)) > 0,"Child leaf is planned")
+  let child_token: string = field_with(str.view(leaf),"TRKGAIN:")
+  match parse_points(str.view(child_token)) {
+    none=>{let _=test.check(suite,false,"Child TRKGAIN parses")},
+    some(value)=>{var p: Points = value
+      let _=test.eq_i64(suite,p.origin,0,"Child origin is the child clip start sample (child time)")
+      let _=test.eq_u64(suite,array.len(struct.borrow(p,field=samples)),3,"Child window holds the three keys")
+      let _=test.eq_i64(suite,array.get(struct.borrow(p,field=samples),1),48000,"Child key 24 at 24 fps is sample 48000 (owner rate, not parent rate)")
+      let _=test.eq_i64(suite,array.get(struct.borrow(p,field=frames),1),24,"Frames stay raw")},
+  }
+  let bus: string = line_with(lines,str.view(text.concat("NESTBUS n",text.concat(str.view(string.from_int(compound))," - "))))
+  let _=test.check(suite,str.len(str.view(bus)) > 0,"Compound bus is planned")
+  match parse_points(str.view(field_with(str.view(bus),"TRKGAIN:"))) {
+    none=>{let _=test.check(suite,false,"Compound TRKGAIN parses")},
+    some(value)=>{var p: Points = value
+      let _=test.eq_i64(suite,p.origin,sample_of(15,30.0),"Compound origin is its parent-timeline start")
+      let _=test.eq_i64(suite,array.get(struct.borrow(p,field=samples),1),sample_of(60,30.0),"Parent key sample uses the parent rate")},
+  }
+  var neutral: u64 = 0
+  var at: u64 = 0
+  loop {if at >= array.len(lines) {break}
+    let row: string = string.copy(str.view(array.borrow(lines,at)))
+    if text.contains(str.view(row),"NESTBUS ") and text.contains(str.view(row)," - 1 0 0 ") and text.contains(str.view(row),"TRKGAIN:") {neutral=neutral+1}
+    at=at+1}
+  let _=test.eq_u64(suite,neutral,0,"No neutral direct wrapper carries TRKGAIN")
+  let _=test.done(suite)
+}
+
+// ---------------------------------------------------------------------------
+// Part 2: rendering. Variants 0..37 = one keyed track gain per interpolation mode, 38 = fractional
+// rate, 39 = overlapping clips on one automated track, 40/41 = two clips 20 s apart sharing a dense
+// Catmull/linear curve (windowing), 42 = clip gain keys x scalar fades x track keys, 43 = child
+// sequence (24 fps) automated inside a compound clip that is itself automated.
+
+type Seq = struct {request: u64, generation: u64, prepared: u64}
+fn variant_count() -> u64 effects {} { 44 }
+type Spec = struct {mode: u32, fps: f64, end: i64, seek: i64, fade_in: i64, fade_out: i64, clip_start: i64, clip_length: i64}
+fn spec_of(v: u64) -> Spec effects {} {
+  if v == 38 {return Spec {mode:curve.linear(),fps:60000.0/1001.0,end:37,seek:16,fade_in:0,fade_out:0,clip_start:7,clip_length:30}}
+  if v == 39 {return Spec {mode:curve.smooth(),fps:60.0,end:48,seek:12,fade_in:0,fade_out:0,clip_start:3,clip_length:30}}
+  if v == 40 {return Spec {mode:5,fps:30.0,end:630,seek:609,fade_in:0,fade_out:0,clip_start:600,clip_length:30}}
+  if v == 41 {return Spec {mode:6,fps:30.0,end:630,seek:609,fade_in:0,fade_out:0,clip_start:600,clip_length:30}}
+  if v == 42 {return Spec {mode:curve.smooth(),fps:30.0,end:60,seek:21,fade_in:10,fade_out:12,clip_start:0,clip_length:60}}
+  if v == 43 {return Spec {mode:curve.smooth(),fps:30.0,end:75,seek:24,fade_in:0,fade_out:0,clip_start:15,clip_length:60}}
+  Spec {mode:cast.wrap(v),fps:60.0,end:33,seek:12,fade_in:0,fade_out:0,clip_start:3,clip_length:30}
+}
+fn track_frames(v: u64) -> array<i64> effects {alloc} {
+  if v == 40 or v == 41 {
+    var out: array<i64> = array.new()
+    var k: i64 = 0
+    loop {if k >= 37 {break}
+      array.push(out,k*20-20)
+      k=k+1}
+    return out
+  }
+  if v == 42 {return [-4,0,10,25,40,64,70]}
+  if v == 43 {return [0,30,60,90]}
+  [-6,0,7,14,22,31,45]
+}
+fn track_values(v: u64) -> array<f64> effects {alloc} {
+  if v == 40 or v == 41 {
+    var out: array<f64> = array.new()
+    var k: i64 = 0
+    loop {if k >= 37 {break}
+      array.push(out,0.15+0.85*cast.float((k*37)%100)/100.0)
+      k=k+1}
+    return out
+  }
+  if v == 42 {return [0.9,0.3,1.0,0.5,0.9,0.2,0.6]}
+  if v == 43 {return [0.5,1.0,0.25,0.7]}
+  [0.7,1.0,0.3,0.95,0.15,0.8,0.5]
+}
+// Child-sequence curve of variant 43 (24 fps child time).
+fn child_frames() -> array<i64> effects {alloc} { [0,12,30,48] }
+fn child_values() -> array<f64> effects {alloc} { [0.2,1.0,0.4,0.9] }
+fn clip_frames() -> array<i64> effects {alloc} { [0,30] }
+fn clip_values() -> array<f64> effects {alloc} { [0.5,1.0] }
+fn track_mode(v: u64) -> u32 effects {} { if v == 43 {curve.linear()}else{spec_of(v).mode} }
+
+fn build(source: str, v: u64, keyed: bool) -> editor.Document effects {alloc} {
+  let spec: Spec = spec_of(v)
+  var doc: editor.Document = new_doc(source,spec.fps,cast.sat(11.0*spec.fps))
+  let src: u64 = first_source(doc)
+  let parent: u64 = doc.active
+  var track: u64 = editor.add_track(doc,parent,editor.track_audio(),"A1")
+  if v == 43 {
+    let child: u64 = editor.add_sequence(doc,"Child",24.0,640,360)
+    let child_track: u64 = editor.add_track(doc,child,editor.track_audio(),"CA1")
+    let _=editor.place(doc,child_track,src,0,48,0)
+    if keyed {
+      let _=editor.set_active(doc,child)
+      var cf: array<i64> = child_frames()
+      var cv: array<f64> = child_values()
+      var i: u64 = 0
+      loop {if i >= array.len(cf) {break}
+        let _=key(doc,child_track,array.get(cf,i),array.get(cv,i),curve.smooth())
+        i=i+1}
+      let _=editor.set_active(doc,parent)
+    }
+    let compound: u64 = option.unwrap(editor.place_nested(doc,track,child,0,60,15))
+    let _=compound
+  } else if v == 40 or v == 41 {
+    let _=editor.place(doc,track,src,0,30,0)
+    let _=editor.place(doc,track,src,0,30,600)
+  } else if v == 42 {
+    let clip: u64 = option.unwrap(editor.place(doc,track,src,3,60,0))
+    if keyed {
+      let _=editor.set_clip_gain(doc,clip,0.8)
+      let _=editor.set_fade_in(doc,clip,10)
+      let _=editor.set_fade_out(doc,clip,12)
+      let _=editor.set_key(doc,clip,"gain",0,0.5,curve.linear())
+      let _=editor.set_key(doc,clip,"gain",30,1.0,curve.linear())
+    }
+  } else {
+    let clip: u64 = option.unwrap(editor.place(doc,track,src,3,30,spec.clip_start))
+    if keyed {let _=editor.set_clip_gain(doc,clip,0.8)}
+    if v == 39 {
+      let second: u64 = option.unwrap(editor.place(doc,track,src,3,30,18))
+      if keyed {let _=editor.set_clip_gain(doc,second,0.8)}
+    }
+  }
+  if keyed {
+    let _=editor.set_track_gain(doc,track,0.5)
+    var frames: array<i64> = track_frames(v)
+    var values: array<f64> = track_values(v)
+    var i: u64 = 0
+    loop {if i >= array.len(frames) {break}
+      let _=key(doc,track,array.get(frames,i),array.get(values,i),track_mode(v))
+      i=i+1}
+  }
+  doc
+}
+
+fn packed(out: ref<array<byte>>, value: f64) -> unit effects {alloc} {
+  let bits: u64 = cast.bits(value)
+  var shift: u64 = 0
+  loop {if shift == 64 {break}
+    let octet: u8 = cast.wrap(shr(bits,shift))
+    array.push(out,cast.bits(octet))
+    shift=shift+8}
+  ()
+}
+fn samples_of(frames: ref<array<i64>>, fps: f64) -> array<i64> effects {alloc} {
+  var out: array<i64> = array.new()
+  var i: u64 = 0
+  loop {if i >= array.len(frames) {break}
+    array.push(out,sample_of(array.get(frames,i),fps))
+    i=i+1}
+  out
+}
+// Independent SDK-curve oracle: per output sample, `pre` (clip-side factor) and `track` value.
+fn write_oracle(root: str, v: u64, source: str) -> bool effects {alloc,fs.write} {
+  let spec: Spec = spec_of(v)
+  let total: i64 = sample_of(spec.end,spec.fps)
+  var tf: array<i64> = track_frames(v)
+  var tv: array<f64> = track_values(v)
+  let tfps: f64 = spec.fps
+  var ts: array<i64> = samples_of(tf,tfps)
+  var cf: array<i64> = child_frames()
+  var cv: array<f64> = child_values()
+  var cs_samples: array<i64> = samples_of(cf,24.0)
+  var kf: array<i64> = clip_frames()
+  var kv: array<f64> = clip_values()
+  var ks: array<i64> = array.new()
+  var i: u64 = 0
+  loop {if i >= array.len(kf) {break}
+    array.push(ks,sample_of(spec.clip_start+array.get(kf,i),spec.fps))
+    i=i+1}
+  var out: array<byte> = array.new()
+  var s: i64 = 0
+  loop {if s >= total {break}
+    var pre: f64 = 0.8
+    if v == 40 or v == 41 {pre=1.0}
+    if v == 42 {pre=clamp_gain(curve_at(ks,kf,kv,curve.linear(),s))}
+    if v == 43 {pre=clamp_gain(curve_at(cs_samples,cf,cv,curve.smooth(),s-sample_of(15,30.0)))}
+    if v > 43 {pre=1.0}
+    packed(out,pre)
+    packed(out,clamp_gain(curve_at(ts,tf,tv,track_mode(v),s)))
+    s=s+1}
+  match files.write_bytes(path.join(root,text.concat("tg-",text.concat(str.view(string.from_int(v)),"-oracle.f64"))),array.view(out)) {ok(_)=>true,err(_)=>false,}
+}
+
+fn name_of(root: str, v: u64, suffix: str) -> string effects {alloc} {
+  path.join(root,text.concat("tg-",text.concat(str.view(string.from_int(v)),suffix)))
+}
+fn chunk_name(root: str, v: u64, kind: str, index: u64) -> string effects {alloc} {
+  name_of(root,v,text.concat(kind,text.concat(str.view(string.from_int(index)),".wav")))
+}
+
+fn pull(peer: ref<link.Link>, root: str, request: u64, generation: u64, plan: ref<media.AudioPlan>)
+    -> bool effects {alloc,fs.write,io.write,net,time} {
+  if not playback.request(root,request,generation,plan) {return false}
+  if not match link.wake(peer,false) {ok(_)=>true,err(_)=>false,} {return false}
+  match link.await_ready(peer,request,time.monotonic_ns()+30000000000) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+    false},}
+}
+
+// Flat (AUDIO/AUDIOSTREAM and whole-range) rendering of one variant.
+fn flat_variant(worker: str, source: str, root: str, peer: ref<link.Link>, v: u64, seq: ref<Seq>) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,time} {
+  let spec: Spec = spec_of(v)
+  var good: bool = true
+  var base_doc: editor.Document = build(source,v,false)
+  var doc: editor.Document = build(source,v,true)
+  var base_plan: media.AudioPlan = match media.audio_plan_range(base_doc,worker,0,spec.end,name_of(root,v,"-base.wav")) {
+    ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+      return false},}
+  good=match media.execute_audio_plan(base_plan) {ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+    false},} and good
+  var seek_base: media.AudioPlan = match media.audio_plan_range(base_doc,worker,spec.seek,spec.end,name_of(root,v,"-seek-base.wav")) {
+    ok(value)=>value,err(_)=>{return false},}
+  good=match media.execute_audio_plan(seek_base) {ok(value)=>value,err(_)=>false,} and good
+  // The saved project is what playback actually decodes: round-trip through the codec.
+  let original_signature: string = media.audio_signature(doc)
+  let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{return false},}
+  let _=files.write_text(name_of(root,v,".air"),encoded)
+  good=text.contains(str.view(encoded),"\"revision\":5") and good
+  doc=match editor_io.decode(encoded) {ok(value)=>value,err(_)=>{return false},}
+  good=str.eq(str.view(original_signature),str.view(media.audio_signature(doc))) and good
+  good=not str.eq(str.view(original_signature),str.view(media.audio_signature(base_doc))) and good
+  good=match media.prepare_audio(doc,worker,0,name_of(root,v,"-whole.wav")) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+    false},} and good
+  var at: i64 = 0
+  var chunk: u64 = 0
+  loop {if at >= spec.end or not good {break}
+    let size: i64 = if chunk == 0 {5}else if chunk == 1 {7}else{9}
+    let finish: i64 = if at+size > spec.end {spec.end}else{at+size}
+    var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,finish,chunk_name(root,v,"-chunk",chunk)) {
+      ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+        return false},}
+    struct.set(seq,seq.request+1,field=request)
+    good=pull(peer,root,seq.request,v+1,plan) and good
+    chunk=chunk+1
+    at=finish}
+  at=spec.seek
+  chunk=0
+  loop {if at >= spec.end or not good {break}
+    let finish: i64 = if at+7 > spec.end {spec.end}else{at+7}
+    var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,finish,chunk_name(root,v,"-seek",chunk)) {
+      ok(value)=>value,err(_)=>{return false},}
+    struct.set(seq,seq.request+1,field=request)
+    good=pull(peer,root,seq.request,100+v,plan) and good
+    chunk=chunk+1
+    at=finish}
+  good=write_oracle(root,v,source) and good
+  good
+}
+
+fn ready(peer: ref<link.Link>, id: u64) -> result<unit,string> effects {alloc,net,time} {
+  try link.wake(peer,false)
+  link.await_ready(peer,id,time.monotonic_ns()+60000000000)
+}
+fn ep_prepare(peer: ref<link.Link>, root: str, doc: ref<editor.Document>, seq: ref<Seq>) -> result<endpoint.End,string> effects {alloc,fs.read,fs.write,net,time} {
+  struct.set(seq,seq.request+1,field=request)
+  struct.set(seq,seq.generation+1,field=generation)
+  struct.set(seq,seq.request,field=prepared)
+  if not playback.request_prepare_document(root,seq.request,seq.generation,doc,path.join(root,"unused.wav")) {return result.err("prepare publication")}
+  try ready(peer,seq.request)
+  playback.read_endpoint(root)
+}
+fn ep_pull(peer: ref<link.Link>, root: str, seq: ref<Seq>, output: str, start: i64, count: u64) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  struct.set(seq,seq.request+1,field=request)
+  if not playback.request_pull(root,seq.request,seq.generation,seq.prepared,output,start,count) {return result.err("pull publication")}
+  ready(peer,seq.request)
+}
+fn ep_retire(peer: ref<link.Link>, root: str, seq: ref<Seq>) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  struct.set(seq,seq.request+1,field=request)
+  struct.set(seq,seq.generation+1,field=generation)
+  if not playback.discard(root,seq.request,seq.generation) {return result.err("discard publication")}
+  ready(peer,seq.request)
+}
+fn ep_variant(source: str, root: str, peer: ref<link.Link>, v: u64, seq: ref<Seq>) -> result<unit,string> effects {alloc,fs.read,fs.write,net,time} {
+  let spec: Spec = spec_of(v)
+  var base_doc: editor.Document = build(source,v,false)
+  var base_end: endpoint.End = try ep_prepare(peer,root,base_doc,seq)
+  let base_count: u64 = endpoint.pull_count(base_end,0,1440000)
+  if base_count == 0 {return result.err("empty endpoint")}
+  let _=try ep_pull(peer,root,seq,name_of(root,v,"-ep-base.wav"),0,base_count)
+  try ep_retire(peer,root,seq)
+  // The keyed project is exactly what the worker plans after a save/open round trip.
+  var built: editor.Document = build(source,v,true)
+  let encoded: string = match editor_io.encode(built) {ok(value)=>value,err(_)=>{return result.err("encode")},}
+  var doc: editor.Document = match editor_io.decode(encoded) {ok(value)=>value,err(_)=>{return result.err("decode")},}
+  var end: endpoint.End = try ep_prepare(peer,root,doc,seq)
+  let count: u64 = endpoint.pull_count(end,0,1440000)
+  if count != base_count {return result.err("keyed endpoint length differs from the baseline")}
+  let _=try ep_pull(peer,root,seq,name_of(root,v,"-ep-whole.wav"),0,count)
+  // Uneven pulls across the whole program, then a fresh seek into the clip.
+  var sizes: array<u64> = [4801,7777,1234,20011,333,9001]
+  var at: u64 = 0
+  var index: u64 = 0
+  loop {if at >= count {break}
+    let want: u64 = array.get(sizes,index % array.len(sizes))
+    let size: u64 = if at+want > count {count-at}else{want}
+    let _=try ep_pull(peer,root,seq,chunk_name(root,v,"-ep-chunk",index),cast.sat(at),size)
+    at=at+size
+    index=index+1}
+  let seek: i64 = sample_of(spec.seek,spec.fps)
+  let seek_count: u64 = endpoint.pull_count(end,seek,1440000)
+  if seek_count == 0 {return result.err("seek outside endpoint")}
+  let _=try ep_pull(peer,root,seq,name_of(root,v,"-ep-seek.wav"),seek,seek_count)
+  try ep_retire(peer,root,seq)
+  result.ok(())
+}
+
+fn run_flat(worker: str, source: str, root: str, cases: ref<string>) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var good: bool = true
+  var seq: Seq = Seq {request:0,generation:0,prepared:0}
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    good=match link.connect(peer) {ok(_)=>true,err(_)=>false,}
+    var v: u64 = 0
+    loop {if v >= variant_count() or not good {break}
+      let spec: Spec = spec_of(v)
+      good=flat_variant(worker,source,root,peer,v,seq) and good
+      var fields: array<string> = [string.from_int(v),string.from_int(spec.mode),string.from_float(spec.fps),string.from_int(spec.end),
+        string.from_int(spec.seek),string.from_int(spec.fade_in),string.from_int(spec.fade_out),string.from_int(spec.clip_start),string.from_int(spec.clip_length)]
+      string.append(cases,str.view(text.join(fields,"\t")))
+      string.append(cases,"\n")
+      v=v+1}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    good=match tasks.join_next<bool>(jobs,10000) {some(value)=>value,none=>false,} and good
+    link.close_commands(peer)
+  }
+  good
+}
+fn run_endpoint(worker: str, source: str, root: str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var good: bool = true
+  var seq: Seq = Seq {request:0,generation:0,prepared:0}
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    good=match link.connect(peer) {ok(_)=>true,err(_)=>false,}
+    var v: u64 = 0
+    loop {if v >= variant_count() or not good {break}
+      match ep_variant(source,root,peer,v,seq) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+        io.write("\n")
+        good=false},}
+      v=v+1}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    good=match tasks.join_next<bool>(jobs,10000) {some(value)=>value,none=>false,} and good
+    link.close_commands(peer)
+  }
+  good
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,thread,time} {
+  if view.len(args) != 4 {return 2}
+  let worker: str = view.get(args,1)
+  let source: str = view.get(args,2)
+  let root: str = view.get(args,3)
+  let _=files.mkdirs(root)
+  var suite: test.Suite = test.suite("Track gain plan",false)
+  tokens_suite(suite,source)
+  exclusion_suite(suite,source)
+  malformed_suite(suite,source)
+  equivalence_suite(suite,source)
+  capacity_suite(suite,source)
+  nested_suite(suite,source)
+  let status: i32 = test.conclude(suite,path.join(root,"audio-track-plan-tests.json"),64)
+  if status != 0 {return status}
+  if str.len(worker) == 0 {return 0}
+  var cases: string = string.copy("variant\tmode\tfps\tend\tseek\tfade_in\tfade_out\tclip_start\tclip_length\n")
+  var good: bool = run_flat(worker,source,path.join(root,"flat"),cases)
+  let _=files.write_text(path.join(root,"track-cases.tsv"),cases)
+  good=run_endpoint(worker,source,path.join(root,"endpoint")) and good
+  if good {io.write("Track gain: planning suite passed; 44 variants rendered through flat and endpoint paths\n")
+    0}else{io.write("[GA_TEST_AUDIO_TRACK_PLAN] Rendering failed\n")
+    1}
+}

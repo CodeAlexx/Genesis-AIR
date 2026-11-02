@@ -1,20 +1,72 @@
 diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
 --- a/stdlib/editor_io.ai
 +++ b/stdlib/editor_io.ai
-@@ -15,10 +15,11 @@
+@@ -13,12 +13,63 @@
+ // its JSON Pointer paths — not a new format.
+ module std.editor_io
  import std.codec as codec
++import std.curve as curve
  import std.editor as editor
  import std.json as json
++import std.math as math
 +import std.text as text
  
  // The document format this build writes and the only revision it reads.
  pub fn schema_name() -> string effects {alloc} { string.copy("air.editor.project") }
 -pub fn schema_revision() -> u64 effects {} { 2 }
-+pub fn schema_revision() -> u64 effects {} { 4 }
++pub fn schema_revision() -> u64 effects {} { 5 }
++
++// Revision 5 = the document carries track automation: sequence-wide keys (clip 0) named
++// `track.<id>.gain` / `track.<id>.pan` whose frames are timeline frames of the track's
++// owning sequence. Every other sequence-wide name is ignored here. New automated mixer
++// parameters must keep the `track.<id>.<param>` prefix; a decoder that does not know the
++// parameter refuses (strict) instead of skipping it.
++fn track_key_parts(name: str) -> array<string> effects {alloc} {
++  var parts: array<string> = text.split(name,".")
++  if array.len(parts) == 3 and str.eq(str.view(array.borrow(parts,0)),"track") {
++    let id: u64 = match text.parse_u64(str.view(array.borrow(parts,1))) {none=>0,some(found)=>found,}
++    let digits: string = string.from_int(id)
++    if id > 0 and str.eq(str.view(digits),str.view(array.borrow(parts,1))) {return parts}
++  }
++  var none: array<string> = array.new()
++  none
++}
++// The track a `track.<id>.<param>` name addresses, or 0 when it is not a track key name.
++pub fn track_key_track(name: str) -> u64 effects {alloc} {
++  var parts: array<string> = track_key_parts(name)
++  if array.len(parts) == 0 {return 0}
++  match text.parse_u64(str.view(array.borrow(parts,1))) {none=>0,some(found)=>found,}
++}
++// 0 not a track key name, 1 gain, 2 pan, 3 a track-scoped name this build does not know.
++pub fn track_key_param(name: str) -> u64 effects {alloc} {
++  var parts: array<string> = track_key_parts(name)
++  if array.len(parts) == 0 {return 0}
++  let param: str = str.view(array.borrow(parts,2))
++  if str.eq(param,"gain") {return 1}
++  if str.eq(param,"pan") {return 2}
++  3
++}
++// Track automation validity. Keys that are not track keys are always acceptable here.
++pub fn track_key_valid(doc: ref<editor.Document>, key: editor.Key) -> bool effects {alloc} {
++  if key.clip != 0 {return true}
++  let name: string = editor.name_text(doc,key.param)
++  let kind: u64 = track_key_param(str.view(name))
++  if kind == 0 {return true}
++  if kind == 3 {return false}
++  let track: u64 = track_key_track(str.view(name))
++  let slot: u64 = match editor.track_slot(doc,track) {none=>{return false},some(found)=>found,}
++  if struct.get(array.borrow(struct.borrow(doc,field=tracks),slot),field=owner) != key.owner {return false}
++  if not math.is_finite(key.value) {return false}
++  if kind == 1 and (key.value < 0.0 or key.value > 3.4028234663852886e38) {return false}
++  if kind == 2 and (key.value < -1.0 or key.value > 1.0) {return false}
++  if key.interp >= curve.interp_count() {return false}
++  if key.frame < -9007199254740991 or key.frame > 9007199254740991 {return false}
++  true
++}
  
  fn write_source(w: ref<codec.Writer>, entry: ref<editor.Source>) -> unit effects {alloc} {
    codec.begin_object(w)
-@@ -58,6 +59,29 @@
+@@ -58,6 +109,29 @@ fn write_clip(w: ref<codec.Writer>, value: editor.Clip) -> unit effects {alloc}
    codec.field_f64(w, "pan", value.pan)
    codec.field_f64(w, "speed", value.speed)
    codec.field_bool(w, "reverse", value.reverse)
@@ -44,7 +96,7 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
    codec.end_object(w)
    ()
  }
-@@ -79,10 +103,26 @@
+@@ -79,10 +153,41 @@ fn write_transport(w: ref<codec.Writer>, name: str, value: editor.Transport) ->
  // writer's own state machine, so a structural mistake is an error here rather than text that
  // fails to parse later.
  pub fn encode(doc: ref<editor.Document>) -> result<string, codec.Error> effects {alloc} {
@@ -64,6 +116,21 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
 +    }
 +    stream_at=stream_at+1
 +  }
++  var key_at: u64 = 0
++  loop {if key_at >= array.len(struct.borrow(doc,field=keys)) {break}
++    let value: editor.Key = array.get(struct.borrow(doc,field=keys),key_at)
++    if value.clip == 0 {
++      let named: string = editor.name_text(doc,value.param)
++      if track_key_param(str.view(named)) != 0 {
++        if not track_key_valid(doc,value) {
++          return result.err(codec.error(codec.Code.Range,
++            text.concat("/keys/",string.from_int(key_at)),"valid track automation key","invalid track key"))
++        }
++        revision = 5
++      }
++    }
++    key_at=key_at+1
++  }
    var w: codec.Writer = codec.writer()
    codec.begin_object(w)
    codec.field_text(w, "schema", str.view(schema_name()))
@@ -72,16 +139,16 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
    codec.field_u64(w, "active", doc.active)
    codec.field_u64(w, "source_bounds", cast.wrap(doc.source_bounds))
    codec.field_u64(w, "monitor_source", doc.monitor_source)
-@@ -327,7 +367,7 @@
+@@ -327,7 +432,7 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
      return result.err(codec.error(codec.Code.Invalid, "/schema", str.view(schema_name()), str.view(schema)))
    }
    let revision: u64 = try codec.u64_field(document, root, "revision")
 -  if revision != 1 and revision != schema_revision() {
-+  if revision != 1 and revision != 2 and revision != 3 and revision != schema_revision() {
++  if revision != 1 and revision != 2 and revision != 3 and revision != 4 and revision != schema_revision() {
      let want: i64 = cast.sat(schema_revision())
      let got: i64 = cast.sat(revision)
      return result.err(codec.error(codec.Code.Invalid, "/revision",
-@@ -449,12 +489,47 @@
+@@ -449,12 +554,47 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
          let pan: f64 = try codec.f64_field(document, entry, "pan")
          let speed: f64 = try codec.f64_field(document, entry, "speed")
          let reverse: bool = try codec.bool_field(document, entry, "reverse")
@@ -130,10 +197,20 @@ diff --git a/stdlib/editor_io.ai b/stdlib/editor_io.ai
      }
    }
  
-@@ -582,5 +657,11 @@
+@@ -582,5 +722,21 @@ pub fn decode(source: str) -> result<editor.Document, codec.Error> effects {allo
    }
  
    let _ = try codec.reader_finish(document, root)
++  var track_at: u64 = 0
++  loop {if track_at >= array.len(struct.borrow(doc,field=keys)) {break}
++    let value: editor.Key = array.get(struct.borrow(doc,field=keys),track_at)
++    if value.clip == 0 and track_key_param(str.view(editor.name_text(doc,value.param))) != 0 {
++      if revision < 5 {return result.err(codec.error(codec.Code.Invalid,"/revision",
++        "revision 5 for track automation",string.from_int(revision)))}
++      if not track_key_valid(doc,value) {return result.err(codec.error(codec.Code.Range,
++        text.concat("/keys/",string.from_int(track_at)),"valid track automation key","invalid track key"))}
++    }
++    track_at=track_at+1}
 +  var context_at:u64=0
 +  loop {if context_at >= editor.clip_count(doc) {break}
 +    let value:editor.Clip=option.unwrap(editor.clip_at(doc,context_at))

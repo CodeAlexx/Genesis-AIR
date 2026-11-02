@@ -487,6 +487,19 @@ Automation changes do not rebuild the retained effect graph between chunks; a se
 actual key edit invalidates queued sound. Negative curve overshoot clamps to zero.
 Malformed gain envelopes report `GA_AUDIO_GAIN_KEYS` and the next request can recover.
 
+Track gain keys (sequence-wide keys named `track.<id>.gain`, saved as project revision 5)
+sound through the same evaluator: each clip line carries a `TRKGAIN:<origin>:<sample>,<frame>,
+<value>,<interp>/...` token holding only the keys that cover that clip's span plus one key
+before and two after (the neighbours Catmull tangents read), so playback chunks, endpoint
+pulls and export agree sample for sample and descriptors stay bounded. A keyed track gain
+replaces the static fader value, multiplies after the clip gain and its keys, and applies
+before the clip fades. Because the lines are the park key, an edit inside a clip window
+prepares fresh while an edit outside every window keeps the parked endpoint. Track pan
+automation is not part of this stage. Malformed curves report `GA_AUDIO_TRACK_GAIN_KEYS`.
+`tests/audio_track_plan.ai` pins tokens, windows and stability, `tests/audio_track_keys.py`
+checks 44 variants (all 38 modes, overlap, windowing, fades, nested) against an SDK-curve
+oracle, and `tests/audio_track_project.py` renders independently authored revision 5 projects.
+
 Fade-length keys follow the same destination sample clock. Each curve retains raw
 sequence-frame coordinates and values through interpolation, then converts the length
 to seconds. Audio multiplies the separate fade-in and fade-out ramps, preserving the
