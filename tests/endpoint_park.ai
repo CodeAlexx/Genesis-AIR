@@ -1,0 +1,115 @@
+// A prepared Program endpoint survives Pause/seek retirement and is reused for an
+// identical mix. Usage: genesis-endpoint-park WORKER PROJECT.air ROOT
+// Writes park-ns.txt (cold, warm-after-pause, edited) and refuses on any regression:
+// metadata must match cold, a stale pull must be refused, and an edited mix must
+// prepare fresh rather than reuse the parked session.
+module test.endpoint_park
+import std.editor as editor
+import std.editor_io as codec
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import std.md5 as md5
+import "../src/audio_playback.ai" as playback
+import "../src/audio_endpoint.ai" as endpoint
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+fn ready(peer:ref<link.Link>,id:u64) -> result<unit,string> effects {alloc,net,time} {
+  try link.wake(peer,false)
+  link.await_ready(peer,id,time.monotonic_ns()+60000000000)
+}
+fn prepare(peer:ref<link.Link>,root:str,doc:ref<editor.Document>,id:u64,generation:u64) -> result<endpoint.End,string> effects {alloc,fs.read,fs.write,net,time} {
+  if not playback.request_prepare_document(root,id,generation,doc,path.join(root,"unused.wav")) {return result.err("prepare publication")}
+  try ready(peer,id)
+  playback.read_endpoint(root)
+}
+fn pull(peer:ref<link.Link>,root:str,id:u64,generation:u64,prepared:u64,name:str,start:i64,count:u64) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  if not playback.request_pull(root,id,generation,prepared,path.join(root,name),start,count) {return result.err("pull publication")}
+  ready(peer,id)
+}
+// MD5 is only an equality witness here; files.sha256 selects an undeclared SHA-NI
+// provider on this pinned SDK's Windows runtime.
+fn digest(root:str,name:str) -> result<string,string> effects {alloc,fs.read} {
+  match files.read_limited(path.join(root,name),268435456) {ok(v)=>result.ok(md5.hex(bytes.view(v))),err(_)=>result.err(text.concat("read ",name)),}
+}
+fn retire(peer:ref<link.Link>,root:str,id:u64,generation:u64) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  if not playback.discard(root,id,generation) {return result.err("discard publication")}
+  ready(peer,id)
+}
+fn sequence(peer:ref<link.Link>,root:str,doc:ref<editor.Document>,moved:ref<editor.Document>,edited:ref<editor.Document>) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,time} {
+  try link.connect(peer)
+  let t0:u64=time.monotonic_ns()
+  var cold:endpoint.End=try prepare(peer,root,doc,1,1)
+  let t1:u64=time.monotonic_ns()
+  let count:u64=endpoint.pull_count(cold,0,48000)
+  if count>0 {let _=try pull(peer,root,2,1,1,"before.wav",0,count)}
+  // Pause: the main loop bumps the generation and retires queued sound.
+  try retire(peer,root,3,2)
+  // A pull naming the pre-Pause preparation must be refused.
+  match pull(peer,root,4,2,1,"stale.wav",0,count) {
+    ok(_)=>{return result.err("stale pull after Pause was accepted")},
+    err(p)=>{if not text.contains(str.view(p),"GA_AUDIO_ENDPOINT_STALE") {return result.err(text.concat("unexpected stale refusal: ",str.view(p)))}},
+  }
+  // Play again: next generation, same mix, playhead moved while paused.
+  let t2:u64=time.monotonic_ns()
+  var warm:endpoint.End=try prepare(peer,root,moved,5,3)
+  let t3:u64=time.monotonic_ns()
+  if not str.eq(endpoint.encode(cold),endpoint.encode(warm)) {return result.err("parked endpoint metadata changed")}
+  if count>0 {let _=try pull(peer,root,6,3,5,"after.wav",0,count)}
+  let before:string=try digest(root,"before.wav")
+  let after:string=try digest(root,"after.wav")
+  if not str.eq(str.view(before),str.view(after)) {return result.err("PCM after Pause differs from PCM before Pause")}
+  // An edit changes the definitions: Pause, then prepare must not reuse the parked mix.
+  try retire(peer,root,7,4)
+  let t4:u64=time.monotonic_ns()
+  var changed:endpoint.End=try prepare(peer,root,edited,8,5)
+  let t5:u64=time.monotonic_ns()
+  if changed.actual!=cold.actual {return result.err("edited endpoint length changed")}
+  if count>0 {let _=try pull(peer,root,9,5,8,"edited.wav",0,count)}
+  let quieter:string=try digest(root,"edited.wav")
+  if str.eq(str.view(before),str.view(quieter)) {return result.err("edited mix reused the parked PCM")}
+  let _=files.write_text(path.join(root,"park-ns.txt"),endpoint.fields([string.from_int(t1-t0),string.from_int(t3-t2),string.from_int(t5-t4)]))
+  try retire(peer,root,10,6)
+  result.ok(())
+}
+fn run(worker:str,input:str,root:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time} {
+  let raw:string=match files.read_text(input) {ok(v)=>v,err(_)=>{return result.err("input read")},}
+  var doc:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
+  // The moved copy differs only in its paused Program playhead.
+  var moved:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
+  let total:i64=editor.duration(moved)
+  let _=editor.seek_until(moved,total/2,total)
+  if editor.playhead(moved)==editor.playhead(doc) {return result.err("playhead did not move")}
+  // The edited copy halves every audio track's gain, changing the mix definitions.
+  var edited:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
+  var halved:u64=0
+  var at:u64=0
+  loop {if at>=array.len(struct.borrow(edited,field=tracks)) {break}
+    let id:u64=array.borrow(struct.borrow(edited,field=tracks),at).id
+    let kind:u32=array.borrow(struct.borrow(edited,field=tracks),at).kind
+    if kind==1 {if editor.set_track_gain(edited,id,editor.track_gain(edited,id)*0.5) {halved=halved+1}}
+    at=at+1
+  }
+  if halved==0 {return result.err("no audio track to edit")}
+  playback.reset(root)
+  var peer:link.Link=try link.open()
+  let config:playback.Config=playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var problem:string=string.new()
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=playback.run)]
+    match sequence(peer,root,doc,moved,edited) {ok(_)=>{},err(p)=>{problem=p},}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    match tasks.join_next<bool>(jobs,5000) {none=>{if str.len(problem)==0 {problem="actor did not join"}},some(v)=>{if not v and str.len(problem)==0 {problem="actor returned false"}},}
+    link.close_commands(peer)
+  }
+  if str.len(problem)>0 {result.err(problem)}else{result.ok(())}
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time,io.write} {
+  if view.len(args)!=4 {return 2}
+  match run(view.get(args,1),view.get(args,2),view.get(args,3)) {ok(_)=>{io.write("endpoint park: cold, warm-after-pause and edited preparation passed\n")
+    0},err(p)=>{io.write(str.view(p))
+    io.write("\n")
+    3},}
+}

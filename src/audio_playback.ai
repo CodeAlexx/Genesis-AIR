@@ -73,6 +73,10 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
   var peer: link.Peer = match link.peer(struct.borrow(owned,field=events)) {ok(value)=>value,err(_)=>{return false},}
   var retained:Retained=Retained {session:option.none(),end:option.none()}
   var prepared_id:u64=0
+  // Definitions held by an idle prepared Program session, and whether that session
+  // was parked across a Pause/seek retirement rather than closed.
+  var endpoint_key:string=string.new()
+  var parked:bool=false
   var transport: u64 = 0
   var seen: u64 = 0
   var good: bool = true
@@ -106,15 +110,26 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
     let pull:bool=array.len(header)==6 and str.eq(str.view(array.borrow(header,3)),"pull")
     if (array.len(header)==4 and not preparation) or (array.len(header)==6 and not pull) {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid endpoint mode")
       continue}
-    if generation != transport or (frames == 0 and not preparation) or (not preparation and not pull and match struct.borrow(retained,field=end) {some(_)=>true,none=>false,}) {
+    let source_request:bool=not preparation and not pull and frames!=0
+    if generation != transport or (frames == 0 and not preparation) or (source_request and (match struct.borrow(retained,field=end) {some(_)=>true,none=>false,} or str.len(str.view(endpoint_key))>0)) {
       let _=struct.replace(retained,option.none(),field=end)
       prepared_id=0
-      let closed: bool = match struct.replace(retained,option.none(),field=session) {
-        none=>true,some(value)=>close_session(value,str.view(owned.root),peer,id),
+      // An idle prepared Program endpoint is parked, not closed: the next preparation
+      // reuses it only for byte-identical definitions, so Play after Pause skips the
+      // cold whole-program mix. Stale pulls are still refused (prepared_id is cleared).
+      if str.len(str.view(endpoint_key))>0 and not source_request and match struct.borrow(retained,field=session) {some(_)=>true,none=>false,} {
+        parked=true
+      }else{
+        let closed: bool = match struct.replace(retained,option.none(),field=session) {
+          none=>true,some(value)=>close_session(value,str.view(owned.root),peer,id),
+        }
+        endpoint_key=string.new()
+        parked=false
+        if not closed {transport=generation
+          good=false
+          continue}
       }
       transport=generation
-      if not closed {good=false
-        continue}
     }
     if preparation {
       if frames!=0 or array.len(lines)<3 {link.fail(peer,id,"[GA_AUDIO_TASK_REQUEST] Invalid preparation descriptor")
@@ -143,6 +158,15 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
         }
         media.EndpointPlan {worker:string.copy(str.view(owned.worker)),output:output,end:end,lines:definitions}
       }
+      let key:string=text.join(struct.borrow(plan,field=lines),"\n")
+      if parked and not str.eq(str.view(key),str.view(endpoint_key)) {
+        let closed:bool=match struct.replace(retained,option.none(),field=session) {
+          none=>true,some(value)=>close_session(value,str.view(owned.root),peer,id),
+        }
+        if not closed {good=false}
+      }
+      parked=false
+      endpoint_key=string.new()
       match media.prepare_audio_endpoint(plan,struct.replace(retained,option.none(),field=session),str.view(owned.root),id) {
         err(p)=>{let _=struct.replace(retained,option.none(),field=end)
           prepared_id=0
@@ -161,6 +185,7 @@ pub fn run(config: Config own) -> bool effects {alloc,fs.meta,fs.read,fs.write,n
             let _=struct.replace(retained,option.some(struct.replace(ready,media.AudioSession {child:option.none(),reader:proc.line_reader(65536),cache:string.new()},field=session)),field=session)
             let _=struct.replace(retained,option.some(struct.replace(ready,endpoint.empty(),field=end)),field=end)
             prepared_id=id
+            endpoint_key=key
             let _=link.notify(peer,1,id)
           }
         },

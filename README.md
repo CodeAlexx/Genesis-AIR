@@ -457,6 +457,13 @@ at the device cursor after mixing. Preview decoding runs on a separate thread; r
 seeks publish the newest requested frame. Waveform completion is published independently
 so an early image result cannot hide a later audio envelope.
 
+Retiring queued sound on Pause or seek parks the idle prepared Program endpoint instead of
+closing it. The next Play reuses it when the mix definitions are byte-identical, so restarting
+after a Pause or paused seek skips the cold whole-program preparation (measured 4.7 s on a
+21-minute 1080p60 project, 1.2 s on the 5-minute 4K fixture, down to 8 ms). Any edit that changes
+the definitions, or Source playback, closes it as before; stale pulls are still refused.
+`tests/endpoint_park.ai` checks reuse, identical PCM, stale refusal and edited-mix freshness.
+
 Clip gain keys are evaluated per 48 kHz stereo sample after the audio effects, then
 multiplied by track gain and the clip fades. Playback and export share rounded absolute
 key boundaries and all 38 interpolation modes from the pinned `std.curve` contract.
