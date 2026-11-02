@@ -449,8 +449,16 @@ anchored to the first decoded frame timestamp after codec skip/edit handling. Po
 source origins insert silence and negative origins skip pre-zero samples; coarse
 Matroska packet timestamps no longer select trim edges. This keeps reverse source
 buffering independent of clip duration while preserving delay and speed history.
-Origin-based fresh selection may decode from the beginning, so distant audio seeks
-remain O(seek). Later timestamp discontinuities are not repaired.
+A fresh selection at least six seconds into a clip seeks the demuxer two seconds before
+the target, decodes and discards that preroll, and counts native samples from the first
+frame it keeps (its index is its timestamp minus the same first-frame origin), so a
+distant Source start or reverse window costs the same at 20 minutes as at one. Only
+index-addressed containers whose timestamp tick resolves one native sample (MP4/MOV, WAV)
+take this path; anything else, an unreachable target or a silence prefix still decodes
+from the origin and stays O(seek). Compressed decoders with noise substitution (AAC PNS)
+carry a random state from the stream start, so a seeked decode can differ from a full
+decode by up to 3 PCM units inside a few isolated frames; alignment is sample-exact.
+Later timestamp discontinuities are not repaired.
 Pause, Stop and seek immediately reset output; gain, pan, mute, solo and audio-effect
 edits invalidate queued sound. Picture-only edits preserve it. The meters read the PCM
 at the device cursor after mixing. Preview decoding runs on a separate thread; rapid

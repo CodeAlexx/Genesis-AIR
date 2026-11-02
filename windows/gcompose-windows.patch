@@ -249,7 +249,7 @@ index 5e20142..c80bf6d 100644
  
  // Build a peak-amplitude ENVELOPE of the whole audio track for a waveform display:
 diff --git a/gcompose/csrc/fpx_audio.c b/gcompose/csrc/fpx_audio.c
-index 4b33e4a..1ddfa2e 100644
+index 4b33e4a..d1e2452 100644
 --- a/gcompose/csrc/fpx_audio.c
 +++ b/gcompose/csrc/fpx_audio.c
 @@ -7,6 +7,8 @@
@@ -274,7 +274,7 @@ index 4b33e4a..1ddfa2e 100644
  
  // One-shot: apply `chain` to `in` (nb samples/ch, interleaved float, stereo `ch` channels),
  // write up to out_cap floats into `out`. Returns output samples-per-channel, or negative on error.
-@@ -164,3 +172,294 @@ int main(int argc, char** argv) {
+@@ -164,3 +172,463 @@ int main(int argc, char** argv) {
      free(in); free(out); return 0;
  }
  #endif
@@ -282,6 +282,18 @@ index 4b33e4a..1ddfa2e 100644
 +
 +// Playback owns one decoder/resampler/filter graph per audible clip. Pulling the
 +// next device block must not flush/recreate it: filters and resampling retain history.
++// Forward decoder that starts near a distant source position instead of at the
++// file origin. Owned by a FpxAudioStream and feeds its "abuffer" lazily.
++typedef struct {
++    AVFormatContext* format;
++    AVCodecContext* decoder;
++    AVPacket* packet;
++    AVFrame* held;          // first frame to feed (already decoded), or NULL
++    int index;              // audio stream index
++    int64_t fed;            // samples already pushed to abuffer
++    int input_ended;
++} FpxAudioSeekFeed;
++
 +typedef struct {
 +    AVFilterGraph* graph;
 +    AVFilterContext* sink;
@@ -296,12 +308,23 @@ index 4b33e4a..1ddfa2e 100644
 +    int native_rate;
 +    int offset;
 +    int ended;
++    FpxAudioSeekFeed* seek;
 +} FpxAudioStream;
++
++static void fpx_au_seek_free(FpxAudioSeekFeed* f) {
++    if (!f) return;
++    av_frame_free(&f->held);
++    av_packet_free(&f->packet);
++    avcodec_free_context(&f->decoder);
++    avformat_close_input(&f->format);
++    av_free(f);
++}
 +
 +void fpx_au_stream_close(void* handle) {
 +    FpxAudioStream* s = (FpxAudioStream*)handle;
 +    if (!s) return;
 +    av_frame_free(&s->frame);
++    fpx_au_seek_free(s->seek);
 +    avfilter_graph_free(&s->graph);
 +    av_free(s->reverse_path);
 +    av_free(s);
@@ -375,6 +398,129 @@ index 4b33e4a..1ddfa2e 100644
 +    return result;
 +}
 +
++// A seekable open is only exact when decoded timestamps are the sample index plus
++// a constant, which holds for index-addressed containers (MP4/MOV family, WAV).
++// Everything else keeps the full decode from the file origin (O(position)).
++#define FPX_AU_SEEK_PREROLL_SECONDS 2
++#define FPX_AU_SEEK_MIN_SECONDS 6
++
++static int fpx_au_frame_index(const AVFrame* frame, AVRational time_base, int rate, int64_t origin, int64_t* index) {
++    int64_t pts = frame->best_effort_timestamp;
++    if (pts == AV_NOPTS_VALUE) pts = frame->pts;
++    if (pts == AV_NOPTS_VALUE) return -1;
++    int64_t at = av_rescale_q(pts, time_base, (AVRational){1, rate});
++    if (at == INT64_MIN || at == INT64_MAX) return -1;
++    if ((origin < 0 && at > INT64_MAX + origin) || (origin > 0 && at < INT64_MIN + origin)) return -1;
++    *index = at - origin;
++    return 0;
++}
++
++// Pull the next decoded frame, reading packets as needed. 1 = frame, 0 = end, <0 = error.
++static int fpx_au_seek_next(FpxAudioSeekFeed* f, AVFrame* frame) {
++    for (;;) {
++        int rc = avcodec_receive_frame(f->decoder, frame);
++        if (rc >= 0) return 1;
++        if (rc == AVERROR_EOF) return 0;
++        if (rc != AVERROR(EAGAIN)) return rc;
++        if (f->input_ended) return 0;
++        for (;;) {
++            rc = av_read_frame(f->format, f->packet);
++            if (rc < 0) {
++                if (rc != AVERROR_EOF || avcodec_send_packet(f->decoder, NULL) < 0) return -1;
++                f->input_ended = 1; break;
++            }
++            if (f->packet->stream_index == f->index) {
++                rc = avcodec_send_packet(f->decoder, f->packet);
++                av_packet_unref(f->packet);
++                if (rc < 0) return rc;
++                break;
++            }
++            av_packet_unref(f->packet);
++        }
++    }
++}
++
++// Seek the demuxer shortly before `native_start` (a native sample index counted
++// from the first decoded frame), decode and discard the preroll, and hold the first
++// frame that reaches the target. On success `*first_index` is that frame's native
++// sample index. Returns NULL (caller falls back to a full decode) on anything unusual.
++static FpxAudioSeekFeed* fpx_au_seek_open(const char* path, int rate, int64_t origin,
++                                         int64_t native_start, int64_t* first_index) {
++    FpxAudioSeekFeed* f = av_mallocz(sizeof(*f));
++    AVFrame* work = NULL;
++    if (!f) return NULL;
++    const AVCodec* codec = NULL;
++    if (avformat_open_input(&f->format, path, NULL, NULL) < 0) goto fail;
++    if (!f->format->iformat || !f->format->iformat->name ||
++        (!strstr(f->format->iformat->name, "mov") && strcmp(f->format->iformat->name, "wav"))) goto fail;
++    if (avformat_find_stream_info(f->format, NULL) < 0) goto fail;
++    f->index = av_find_best_stream(f->format, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
++    if (f->index < 0) goto fail;
++    AVStream* stream = f->format->streams[f->index];
++    AVRational tb = stream->time_base;
++    // A timestamp tick must resolve one native sample or the index cannot be exact.
++    if (tb.num <= 0 || tb.den <= 0 || (int64_t)tb.den < (int64_t)tb.num * rate) goto fail;
++    f->decoder = avcodec_alloc_context3(codec);
++    f->packet = av_packet_alloc();
++    f->held = av_frame_alloc();
++    work = av_frame_alloc();
++    if (!f->decoder || !f->packet || !f->held || !work ||
++        avcodec_parameters_to_context(f->decoder, stream->codecpar) < 0) goto fail;
++    f->decoder->pkt_timebase = tb;
++    f->decoder->thread_count = 1;
++    if (avcodec_open2(f->decoder, codec, NULL) < 0) goto fail;
++    int64_t target = native_start - (int64_t)rate * FPX_AU_SEEK_PREROLL_SECONDS;
++    if (target <= 0 || origin > INT64_MAX - target) goto fail;
++    int64_t seek_ts = av_rescale_q(origin + target, (AVRational){1, rate}, tb);
++    if (av_seek_frame(f->format, f->index, seek_ts, AVSEEK_FLAG_BACKWARD) < 0) goto fail;
++    avcodec_flush_buffers(f->decoder);
++    int seen = 0;
++    for (;;) {
++        int rc = fpx_au_seek_next(f, work);
++        if (rc <= 0) goto fail;
++        int64_t index = 0;
++        if (work->sample_rate != rate || fpx_au_frame_index(work, tb, rate, origin, &index) < 0) goto fail;
++        // The seek must not have landed after the target, and the decoder must have
++        // had a frame of warm-up before the first one that is kept.
++        if (!seen && index > native_start) goto fail;
++        if (index + work->nb_samples > native_start && seen) {
++            if (index > native_start) goto fail;
++            av_frame_move_ref(f->held, work);
++            *first_index = index;
++            break;
++        }
++        seen = 1;
++        av_frame_unref(work);
++    }
++    av_frame_free(&work);
++    return f;
++fail:
++    av_frame_free(&work);
++    fpx_au_seek_free(f);
++    return NULL;
++}
++
++// Push the held frame, or the next decoded frame, into the stream's abuffer; EOF
++// closes the buffer. Frames are numbered by running sample count like amovie+atrim.
++static int fpx_au_seek_feed(FpxAudioStream* s) {
++    FpxAudioSeekFeed* f = s->seek;
++    AVFrame* frame = f->held;
++    f->held = NULL;
++    if (!frame) {
++        frame = av_frame_alloc();
++        if (!frame) return -1;
++        int rc = fpx_au_seek_next(f, frame);
++        if (rc == 0) { av_frame_free(&frame); return av_buffersrc_add_frame(s->feed, NULL); }
++        if (rc < 0) { av_frame_free(&frame); return rc; }
++    }
++    frame->pts = f->fed;
++    frame->time_base = (AVRational){1, frame->sample_rate};
++    f->fed += frame->nb_samples;
++    int rc = av_buffersrc_add_frame(s->feed, frame);
++    av_frame_free(&frame);
++    return rc;
++}
++
 +static void* fpx_au_stream_open_range(const char* path, double start, double duration,
 +                                    const char* chain, double anchor, double range_end) {
 +    if (!path || !chain || !isfinite(start) || !isfinite(duration) || start < 0 || duration <= 0 || !isfinite(start + duration) || start + duration >= (double)INT64_MAX / 1000000.0)
@@ -420,20 +566,12 @@ index 4b33e4a..1ddfa2e 100644
 +        if (rc < 0) goto fail;
 +        return s;
 +    }
-+    const AVFilter* movie = avfilter_get_by_name("amovie");
-+    if (!movie) goto fail;
 +    // Pre/postroll protects compressed-decoder and resampler history at reverse
 +    // window seams. An anchor plus whole seconds preserves the resampling phase
 +    // of the clip's original input, including a fractional source trim.
 +    int guarded = range_end > anchor;
 +    double decode_start = guarded ? fmax(anchor, anchor + floor(start - anchor - 0.1)) : start;
 +    double decode_end = guarded ? fmin(range_end, start + duration + 0.1) : start + duration;
-+    AVFilterContext* source = avfilter_graph_alloc_filter(s->graph, movie, "source");
-+    // Set filename as an option value, never as filter-expression syntax. This
-+    // preserves Windows drive letters, spaces, quotes and Unicode paths.
-+    if (!source || av_opt_set(source, "filename", path, AV_OPT_SEARCH_CHILDREN) < 0 ||
-+        av_opt_set_double(source, "seek_point", 0.0, AV_OPT_SEARCH_CHILDREN) < 0 ||
-+        avfilter_init_dict(source, NULL) < 0) goto fail;
 +    // Container timestamps may be coarse (e.g. Matroska PCM's millisecond
 +    // timebase). Only decoding from the file origin establishes an exact native
 +    // sample index. Keep selection before resampling, preserving clip phase.
@@ -457,9 +595,40 @@ index 4b33e4a..1ddfa2e 100644
 +    }
 +    int64_t selected_count = native_count - prefix;
 +    if (native_start > INT64_MAX - selected_count) goto fail;
++    // A distant start seeks the demuxer to just before the target and counts native
++    // samples from the first frame it feeds (its index is known from the same
++    // origin-relative timestamps); anything not provably exact decodes from the origin.
++    AVFilterContext* source = NULL;
++    int64_t trim_base = 0;
++    if (prefix == 0 && native_start >= (int64_t)rate * FPX_AU_SEEK_MIN_SECONDS) {
++        int64_t first = 0;
++        FpxAudioSeekFeed* seek = fpx_au_seek_open(path, rate, source_origin, native_start, &first);
++        if (seek) {
++            char layout[128], args[320];
++            if (av_channel_layout_describe(&seek->held->ch_layout, layout, sizeof(layout)) > 0) {
++                snprintf(args, sizeof(args), "time_base=1/%d:sample_rate=%d:sample_fmt=%s:channel_layout=%s",
++                    rate, rate, av_get_sample_fmt_name((enum AVSampleFormat)seek->held->format), layout);
++                if (avfilter_graph_create_filter(&s->feed, avfilter_get_by_name("abuffer"), "source",
++                                                args, NULL, s->graph) >= 0) {
++                    s->seek = seek; seek = NULL; source = s->feed; trim_base = first;
++                }
++            }
++            fpx_au_seek_free(seek);
++        }
++    }
++    if (!source) {
++        const AVFilter* movie = avfilter_get_by_name("amovie");
++        if (!movie) goto fail;
++        source = avfilter_graph_alloc_filter(s->graph, movie, "source");
++        // Set filename as an option value, never as filter-expression syntax. This
++        // preserves Windows drive letters, spaces, quotes and Unicode paths.
++        if (!source || av_opt_set(source, "filename", path, AV_OPT_SEARCH_CHILDREN) < 0 ||
++            av_opt_set_double(source, "seek_point", 0.0, AV_OPT_SEARCH_CHILDREN) < 0 ||
++            avfilter_init_dict(source, NULL) < 0) goto fail;
++    }
 +    char trim_options[128];
 +    snprintf(trim_options, sizeof(trim_options), "start_sample=%lld:end_sample=%lld",
-+        (long long)native_start, (long long)(native_start + selected_count));
++        (long long)(native_start - trim_base), (long long)(native_start - trim_base + selected_count));
 +    char leading_silence[192] = "";
 +    if (prefix) snprintf(leading_silence, sizeof(leading_silence),
 +        "adelay=%lldS:all=1,apad=whole_len=%lld,", (long long)prefix, (long long)native_count);
@@ -553,7 +722,7 @@ index 4b33e4a..1ddfa2e 100644
 +            int rc = av_buffersink_get_frame(s->sink, s->frame);
 +            if (rc == AVERROR_EOF) { s->ended = 1; break; }
 +            if (rc == AVERROR(EAGAIN) && s->feed) {
-+                if (fpx_au_reverse_feed(s) < 0) return -5;
++                if ((s->seek ? fpx_au_seek_feed(s) : fpx_au_reverse_feed(s)) < 0) return -5;
 +                continue;
 +            }
 +            if (rc < 0) return -2;
