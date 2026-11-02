@@ -112,6 +112,7 @@ pub type App = struct {
   document: editor.Document,
   accepted_audio:option<endpoint.End>, endpoint_revision:u64,endpoint_media:u64,endpoint_owner:u64,endpoint_prepare:u64,endpoint_end_requested:bool,endpoint_seek_requested:i64,runtime_program_end:i64,
   history: editor.History,
+  ui_percent: u32,
   provider: provider.Provider,
   viewport: Viewport,
   focus: u32,
@@ -183,7 +184,7 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
   let _ = editor.add_track(document, sequence, editor.track_video(), "V1")
   let _ = editor.add_track(document, sequence, editor.track_video(), "V2")
   App {document: document,accepted_audio:option.none(),endpoint_revision:0,endpoint_media:0,endpoint_owner:0,endpoint_prepare:0,endpoint_end_requested:false,endpoint_seek_requested:-1,runtime_program_end:0, history: editor.history(64), provider: engine,
-    viewport: viewport(), focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
+    viewport: viewport(), ui_percent: 0, focus: panel_timeline(), menu: 0, hover_action: 0, hover_target: 0,
     pool_row: 0, selected_filter: 0, selected_transition:0, selected_transition_epoch:0,
     dock_tab: 0, dock_scroll: 0.0, dock_scroll_dragging: false,
     dock_scroll_drag_offset: 0.0, snap: true, light: false, theme_id: 0,
@@ -206,6 +207,13 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
 }
 
+// UI size is view state: 0 follows the automatic window-size scale (layout.ui_scale), otherwise
+// a percentage from 100 to 250 set by Ctrl +/-/0 or GENESIS_UI_SCALE.
+pub fn ui_percent(state: ref<App>) -> u32 effects {} { state.ui_percent }
+pub fn set_ui_percent(state: ref<App>, value: u32) -> unit effects {} {
+  let bounded: u32 = if value == 0 { 0 } else if value < 100 { 100 } else if value > 250 { 250 } else { value }
+  struct.set(state, bounded, field=ui_percent)
+}
 pub fn status(state: ref<App>) -> string effects {alloc} {
   string.copy(str.view(struct.borrow(state, field=status)))
 }

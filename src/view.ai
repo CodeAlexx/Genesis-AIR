@@ -1440,7 +1440,7 @@ pub fn render_with_timeline_regions(state: ref<app.App>, cache: ref<Renderer>, w
   var surface: draw.Surface = struct.replace(cache, draw.empty_surface(), field=surface)
   if resized { surface = match draw.surface(width, height) {none => { return false }, some(value) => value,} }
   var canvas: draw.Canvas = draw.canvas(surface)
-  let scale: f64 = layout.ui_scale(cast.float(width), cast.float(height))
+  let scale: f64 = layout.ui_scale_for(app.ui_percent(state), cast.float(width), cast.float(height))
   draw.set_transform(canvas, draw.scale(scale, scale))
   if repaint { paint(state, canvas, cast.float(width) / scale, cast.float(height) / scale, source, program) }
   else { paint_live(state, canvas, cast.float(width) / scale, cast.float(height) / scale, cache.frame, source, program,hold_source,timeline_changed,waveform_damage,thumbnail_damage) }

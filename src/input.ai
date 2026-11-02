@@ -1160,6 +1160,14 @@ pub fn prompt_is_render(state: ref<app.App>) -> bool effects {} {
 
 // A key press. The set is the conventional editor one; while the prompt is open the
 // printable keys belong to it instead.
+fn ui_size_message(state: ref<app.App>) -> string effects {alloc} {
+  if app.ui_percent(state) == 0 { return note("UI size automatic") }
+  var message: string = string.copy("UI size ")
+  string.append(message, string.from_int(cast.wrap(app.ui_percent(state))))
+  string.append(message, "%")
+  message
+}
+
 pub fn key(state: ref<app.App>, code: u32, control: bool,
            shift: bool) -> string effects {alloc, fs.meta, fs.read, fs.write, process, time} {
   if session.modal(state) {
@@ -1230,6 +1238,17 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
   }
 
 
+  // UI size: Ctrl +/= larger, Ctrl - smaller, Ctrl 0 back to automatic. X keysyms for + = - 0.
+  // Plain +/- keep zooming the timeline.
+  if control and (code == 43 or code == 61 or code == 45) {
+    let current: u32 = if app.ui_percent(state) == 0 { 100 } else { app.ui_percent(state) }
+    app.set_ui_percent(state, if code == 45 { if current > 25 { current - 25 } else { 100 } } else { current + 25 })
+    return ui_size_message(state)
+  }
+  if control and code == 48 {
+    app.set_ui_percent(state, 0)
+    return ui_size_message(state)
+  }
   if control and (code == 115 or code == 111) {
     var control: chrome.Control = chrome.button(if code == 115 { chrome.act_save() } else { chrome.act_open() },
       "File shortcut", layout.rect(0.0, 0.0, 1.0, 1.0), false)

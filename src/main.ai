@@ -1135,7 +1135,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
     let height: u32 = if box.height < 480 { 480 } else { box.height }
     let physical_width: u64 = cast.wrap(width)
     let physical_height: u64 = cast.wrap(height)
-    let ui_scale: f64 = layout.ui_scale(cast.float(physical_width),
+    let ui_scale: f64 = layout.ui_scale_for(app.ui_percent(state), cast.float(physical_width),
       cast.float(physical_height))
     let logical_width: f64 = cast.float(physical_width) / ui_scale
     let logical_height: f64 = cast.float(physical_height) / ui_scale
@@ -1858,6 +1858,15 @@ pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, 
   var state: app.App = app.app(engine)
   app.set_fonts(state, typeface.search_paths())
   load_theme(state, args, scratch)
+  match env.get("GENESIS_UI_SCALE") {
+    some(value) => {
+      match text.parse_u64(str.view(value)) {
+        some(percent) => { app.set_ui_percent(state, cast.sat(percent)) },
+        none => { say("GENESIS_UI_SCALE must be a percentage, for example 200") },
+      }
+    },
+    none => { },
+  }
   // Which inspector tab a headless render shows, so every panel is checkable without a
   // screen. The window path starts on Properties like any other launch.
   match env.get("GENESIS_TAB") {

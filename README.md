@@ -494,6 +494,12 @@ the next valid request. Ordinary Stop/seek cancellation is silent.
 
 The `audio` command writes the program mix from the current playhead for inspection.
 
+UI size follows the window automatically (1x, 1.5x or 2x on large desktops). To override it,
+launch with `GENESIS_UI_SCALE=200 build/genesis-air new`, or press **Ctrl++ / Ctrl+-** to step
+the size in 25% increments (100-250%); **Ctrl+0** returns to the automatic size. The override
+scales text, controls, monitor images and pointer coordinates together, independently of
+timeline zoom, and lasts for the session. Plain `+` / `-` still zoom the timeline.
+
 ## Keys
 
 | | |

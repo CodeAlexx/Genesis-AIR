@@ -66,6 +66,14 @@ pub fn ui_scale(width: f64, height: f64) -> f64 effects {} {
   1.0
 }
 
+// A user-chosen UI size (percent, 100..250) overrides the automatic scale; 0 means automatic.
+pub fn ui_scale_for(percent: u32, width: f64, height: f64) -> f64 effects {} {
+  if percent == 0 { return ui_scale(width, height) }
+  let bounded: u32 = if percent < 100 { 100 } else if percent > 250 { 250 } else { percent }
+  let whole: u64 = cast.wrap(bounded)
+  cast.float(whole) / 100.0
+}
+
 pub fn prompt_panel(width: f64, height: f64) -> Rect effects {} {
   let span: f64 = if width < 680.0 { width - 32.0 } else { 648.0 }
   let left: f64 = (width - span) * 0.5
