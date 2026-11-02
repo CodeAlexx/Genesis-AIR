@@ -75,7 +75,10 @@ $env:RUSTUP_HOME = Join-Path $deps 'rustup'
 $rustup = Join-Path $env:CARGO_HOME 'bin/rustup.exe'
 if (-not (Test-Path -LiteralPath $rustup)) {
   $url = 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe'
-  $checksum = ((Invoke-WebRequest -Uri ($url + '.sha256')).Content -split '\s+')[0]
+  # PowerShell 7 returns an octet-stream body as bytes; decode before splitting.
+  $published = (Invoke-WebRequest -Uri ($url + '.sha256')).Content
+  if ($published -is [byte[]]) { $published = [Text.Encoding]::ASCII.GetString($published) }
+  $checksum = ($published.Trim() -split '\s+')[0]
   $installer = Join-Path $deps 'rustup-init.exe'
   Download $url $installer $checksum
   & $installer -y --no-modify-path --profile minimal --default-toolchain $pins.rust
