@@ -161,10 +161,10 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_p
       if preview_link.closed or str.len(preview_link.error) != 0 {io.write(preview_link.error)
         failure=true
         break}
-      if preview_link.ready > seen {
-        let ready: u64 = preview_link.ready
-        seen=ready
-        if legacy or pictures.accepts(queue,ready) {
+      if legacy {
+        if preview_link.ready > seen {
+          let ready: u64 = preview_link.ready
+          seen=ready
           var images: array<draw.Surface> = link.take_images(preview_link,ready)
           if array.len(images) != 2 {failure=true
             break}
@@ -175,10 +175,31 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_p
             dirty=true}
           let frame: pictures.Frame = pictures.Frame {source:draw.empty_surface(),program:next_program,
             position:preview_link.position,held_source:true}
-          if legacy {pictures.apply(state,frame,source,program)
-            dirty=true}else{
-            let _ = pictures.receive(queue,ready,frame,time.monotonic_ns())}
+          pictures.apply(state,frame,source,program)
+          dirty=true
         }
+      }else{
+        // Production completions travel through the transport's owned packet FIFO.
+        loop {
+          let ready: u64 = link.next_completed(preview_link)
+          if ready == 0 {break}
+          if not link.select_completed(preview_link,ready) {break}
+          seen=ready
+          if pictures.accepts(queue,ready) {
+            var images: array<draw.Surface> = link.take_images(preview_link,ready)
+            if array.len(images) != 2 {failure=true
+              break}
+            var next_program: draw.Surface = option.unwrap(array.pop(images))
+            var next_source: draw.Surface = option.unwrap(array.pop(images))
+            let held: bool = link.holds_source(preview_link)
+            if not held {source=next_source
+              dirty=true}
+            let frame: pictures.Frame = pictures.Frame {source:draw.empty_surface(),program:next_program,
+              position:preview_link.position,held_source:true}
+            let _ = pictures.receive(queue,ready,frame,time.monotonic_ns())
+          }
+        }
+        if failure {break}
       }
       if not legacy {match pictures.take_due(queue,heard) {none=>{},some(frame)=>{
         pictures.apply(state,frame,source,program)
@@ -187,7 +208,16 @@ pub fn run(state: ref<app.App>, report: str, seconds: u64, legacy: bool, sleep_p
         else {pictures.target(queue,heard,finish-1,fps,state.presented_program_frame)}
       match target {none=>{},some(frame)=>{
         requested=requested+1
-        if not publish(state,root,preview_link,requested,frame) {failure=true
+        // Legacy mode keeps the file-marker request as its baseline. Every other
+        // request uses the production decode-window command lane: rewriting and
+        // re-reading request.id for each frame costs about 3 ms per read on
+        // Windows once the process has completed roughly 10k such cycles.
+        let content: string = if legacy {string.new()}else{preview.strips_signature(struct.borrow(state,field=document))}
+        let sent: bool = if legacy {publish(state,root,preview_link,requested,frame)}else{
+          preview.request_window(state,root,preview_link,requested,1,
+            str.view(content),frame,
+            struct.get(struct.borrow(struct.borrow(state,field=document),field=monitor),field=frame),480,270,false)}
+        if not sent {failure=true
           break}
         pictures.requested(queue,requested,frame,time.monotonic_ns())
         last_legacy=frame},}
