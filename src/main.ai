@@ -458,6 +458,17 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var native_source_media:u64 = 0
   var native_source_id:u64 = 0
   var audio_request: u64 = 0
+  // Paused Program scrub sound: one warm endpoint preparation per drag, then one
+  // short exact PCM pull per new playhead frame. Zero means no request.
+  var scrub_prep:u64=0
+  var scrub_ready:u64=0
+  var scrub_pull:u64=0
+  var scrub_frame:i64=-1
+  var scrub_actual:i64=0
+  var scrub_revision:u64=0
+  var scrub_media:u64=0
+  var scrub_device:bool=false
+  var scrub_failed:bool=false
   task.scope {
   var audio_jobs: array<task<bool>> = array.new()
   var preview_jobs: array<task<bool>> = array.new()
@@ -969,6 +980,63 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
                     pause_transport(state,source_playing)
                   }
                 },
+              }
+            }
+          }
+        }
+        let scrub_gesture:u32=app.gesture_kind(state)
+        let scrubbing:bool=not playing_now and (scrub_gesture==app.drag_scrub() or scrub_gesture==app.drag_program_scrub())
+        if not scrubbing {
+          if scrub_device and not audio_active {let _=native_audio.request(library,"stop","")}
+          scrub_device=false
+          scrub_prep=0
+          scrub_ready=0
+          scrub_pull=0
+          scrub_frame=-1
+          scrub_failed=false
+        } else if not audio_active and not audio_pending and not endpoint_pending and not app.endpoint_requested(state) and audio_request<18446744073709551614 {
+          if scrub_ready!=0 and (scrub_revision!=state.document_revision or scrub_media!=state.media_revision) {scrub_ready=0}
+          if scrub_ready==0 and scrub_prep==0 and not scrub_failed {
+            audio_request=audio_request+1
+            scrub_revision=state.document_revision
+            scrub_media=state.media_revision
+            if audio_playback.request_prepare_document(str.view(audio_root),audio_request,audio_generation,struct.borrow(state,field=document),str.view(path.join(str.view(audio_root),"scrub-prepare.wav"))) {
+              scrub_prep=audio_request
+              let _=preview_link.wake(audio_transport,false)
+            }else{scrub_failed=true}
+          }
+          if scrub_prep!=0 and (audio_transport.ready==scrub_prep or audio_transport.error_generation==scrub_prep or audio_transport.closed) {
+            if audio_transport.ready==scrub_prep {
+              match audio_playback.read_endpoint(str.view(audio_root)) {
+                ok(end)=>{scrub_ready=scrub_prep
+                  scrub_actual=end.actual},
+                err(_)=>{scrub_failed=true},
+              }
+            }else{scrub_failed=true}
+            scrub_prep=0
+          }
+          if scrub_pull!=0 and (audio_transport.ready==scrub_pull or audio_transport.error_generation==scrub_pull or audio_transport.closed) {
+            if audio_transport.ready==scrub_pull {
+              let scrub_started:string=native_audio.request(library,"start","")
+              if str.eq(str.view(scrub_started),"ok") {
+                scrub_device=true
+                let _=native_audio.request(library,"queue",str.view(path.join(str.view(audio_root),"scrub.wav")))
+              }
+            }else{scrub_ready=0}
+            scrub_pull=0
+          }
+          let scrub_at:i64=editor.playhead(struct.borrow(state,field=document))
+          if scrub_ready!=0 and scrub_pull==0 and scrub_at!=scrub_frame {
+            let scrub_owner:u64=state.document.active
+            let scrub_fps:f64=editor.sequence_fps(struct.borrow(state,field=document),scrub_owner)
+            let scrub_sample:i64=endpoint.sample(scrub_at,scrub_fps)
+            scrub_frame=scrub_at
+            if scrub_sample>=0 and scrub_sample<scrub_actual {
+              let scrub_count:i64=if scrub_actual-scrub_sample>3600 {3600}else{scrub_actual-scrub_sample}
+              audio_request=audio_request+1
+              if audio_playback.request_pull(str.view(audio_root),audio_request,audio_generation,scrub_ready,str.view(path.join(str.view(audio_root),"scrub.wav")),scrub_sample,cast.wrap(scrub_count)) {
+                scrub_pull=audio_request
+                let _=preview_link.wake(audio_transport,false)
               }
             }
           }

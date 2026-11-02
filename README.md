@@ -464,6 +464,12 @@ after a Pause or paused seek skips the cold whole-program preparation (measured 
 the definitions, or Source playback, closes it as before; stale pulls are still refused.
 `tests/endpoint_park.ai` checks reuse, identical PCM, stale refusal and edited-mix freshness.
 
+While paused, dragging the timeline ruler or the Program monitor bar plays 75 ms of the exact
+Program mix at each new playhead frame (scrub sound). The first move prepares the endpoint (warm
+after a Pause), each step pulls one short window (about 6 ms) and restarts the device so pieces
+never queue behind each other. Release or Play stops it. Source monitor scrubbing stays silent:
+source audio still decodes from the clip start, which is too slow for scrubbing.
+
 Clip gain keys are evaluated per 48 kHz stereo sample after the audio effects, then
 multiplied by track gain and the clip fades. Playback and export share rounded absolute
 key boundaries and all 38 interpolation modes from the pinned `std.curve` contract.

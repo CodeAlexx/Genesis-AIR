@@ -57,20 +57,33 @@ fn sequence(peer:ref<link.Link>,root:str,doc:ref<editor.Document>,moved:ref<edit
   let t3:u64=time.monotonic_ns()
   if not str.eq(endpoint.encode(cold),endpoint.encode(warm)) {return result.err("parked endpoint metadata changed")}
   if count>0 {let _=try pull(peer,root,6,3,5,"after.wav",0,count)}
+  // Scrub: twenty 75 ms exact pulls at spread positions from the warm endpoint.
+  var scrub_ns:u64=0
+  var scrubs:u64=0
+  var step:u64=0
+  loop {if step>=20 or warm.actual<=3600 {break}
+    let at:i64=(warm.actual-3600)*cast.wrap(step)/19
+    let s0:u64=time.monotonic_ns()
+    let _=try pull(peer,root,100+step,3,5,"scrub.wav",at,3600)
+    scrub_ns=scrub_ns+(time.monotonic_ns()-s0)
+    scrubs=scrubs+1
+    step=step+1
+  }
+  if scrubs==0 {return result.err("no scrub pulls")}
   let before:string=try digest(root,"before.wav")
   let after:string=try digest(root,"after.wav")
   if not str.eq(str.view(before),str.view(after)) {return result.err("PCM after Pause differs from PCM before Pause")}
   // An edit changes the definitions: Pause, then prepare must not reuse the parked mix.
-  try retire(peer,root,7,4)
+  try retire(peer,root,130,4)
   let t4:u64=time.monotonic_ns()
-  var changed:endpoint.End=try prepare(peer,root,edited,8,5)
+  var changed:endpoint.End=try prepare(peer,root,edited,131,5)
   let t5:u64=time.monotonic_ns()
   if changed.actual!=cold.actual {return result.err("edited endpoint length changed")}
-  if count>0 {let _=try pull(peer,root,9,5,8,"edited.wav",0,count)}
+  if count>0 {let _=try pull(peer,root,132,5,131,"edited.wav",0,count)}
   let quieter:string=try digest(root,"edited.wav")
   if str.eq(str.view(before),str.view(quieter)) {return result.err("edited mix reused the parked PCM")}
-  let _=files.write_text(path.join(root,"park-ns.txt"),endpoint.fields([string.from_int(t1-t0),string.from_int(t3-t2),string.from_int(t5-t4)]))
-  try retire(peer,root,10,6)
+  let _=files.write_text(path.join(root,"park-ns.txt"),endpoint.fields([string.from_int(t1-t0),string.from_int(t3-t2),string.from_int(t5-t4),string.from_int(scrub_ns/scrubs)]))
+  try retire(peer,root,133,6)
   result.ok(())
 }
 fn run(worker:str,input:str,root:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time} {
