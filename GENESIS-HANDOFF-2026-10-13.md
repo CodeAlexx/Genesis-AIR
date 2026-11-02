@@ -8,7 +8,7 @@ Save/Open, representative rendered effects/titles, and cancellable export.
 Broader professional features and validation gaps remain below. The archive
 explicitly records `complete_professional_editing_acceptance: false`.
 
-- Repository: `C:\Users\Alexn\Documents\Codex\2026-09-28\Genesis-AIR-windows-native`.
+- Repository: `<repo>`.
 - Branch: `windows-native`; remote: `https://github.com/CodeAlexx/Genesis-AIR.git`.
 - Local HEAD and remote branch both verified as
   `481090d3158646a1d075945325ba00c575a856b8`.
@@ -59,9 +59,9 @@ Both were freshly checked; applied overlays are additionally bound by the freeze
 `genesis-media-runtime.txt` points to:
 
 ```text
-C:\MM-Air\share\media\ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-shared-9.0\bin
-C:\MM-Air\ffmpeg.exe
-C:\MM-Air\ffprobe.exe
+<MM-Air root>\share\media\ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-shared-9.0\bin
+<MM-Air root>\ffmpeg.exe
+<MM-Air root>\ffprobe.exe
 ```
 
 D3D11 is the default native decoder; Vulkan is opt-in. Supported downscaled
@@ -135,8 +135,8 @@ private copies and native Save As into a newly named candidate directory.
 | Root `Costa Rica 4K.air` | `480d82e310ba6f231fab2c0c0db9945dab193d63073cb63fe053019a13aeb143` |
 | Root `Regular 1080p60.air` | `7d9e045225e1a236237b85c22342f612c1be92e2cfd298e47df58df8014c9ba0` |
 | Root `Regular 1080p60 linked.air` | `97d28812e5bd1a8f9bf6d86df87726809bc1e3cd5842686b72b0ff685d61369b` |
-| `C:\Users\Alexn\Downloads\AirFetch\COSTA RICA IN 4K 60fps HDR (ULTRA HD).mp4` | `bff7165e6704e7188fee82b990e5128fe87c3ce9c5ef7eeb85bd1bb0da42c6da` |
-| `C:\Users\Alexn\Downloads\AirFetch\Which is The Best Qwen3.8-27B_.mp4` | `061d76990215c31e6dc58d22f4ecd09ac92d414fdc73061e8dfcb502cee3f11d` |
+| `<media>\costa-4k.mp4` | `bff7165e6704e7188fee82b990e5128fe87c3ce9c5ef7eeb85bd1bb0da42c6da` |
+| `<media>\qwen-comparison.mp4` | `061d76990215c31e6dc58d22f4ecd09ac92d414fdc73061e8dfcb502cee3f11d` |
 
 1080 fixture: 1920×1080, 60 fps, 76701 frames, 44.1 kHz stereo audio.
 4K fixture: AV1 Main, 3840×2160, P010/BT.2020/PQ, 60000/1001 fps, 18808 frames.
