@@ -469,6 +469,11 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
   var scrub_media:u64=0
   var scrub_device:bool=false
   var scrub_failed:bool=false
+  // Paused Source scrub sound: one 75 ms source-audio window per dragged frame,
+  // one request in flight, device restarted per piece.
+  var sscrub_pull:u64=0
+  var sscrub_frame:i64=-1
+  var sscrub_device:bool=false
   task.scope {
   var audio_jobs: array<task<bool>> = array.new()
   var preview_jobs: array<task<bool>> = array.new()
@@ -1037,6 +1042,56 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               if audio_playback.request_pull(str.view(audio_root),audio_request,audio_generation,scrub_ready,str.view(path.join(str.view(audio_root),"scrub.wav")),scrub_sample,cast.wrap(scrub_count)) {
                 scrub_pull=audio_request
                 let _=preview_link.wake(audio_transport,false)
+              }
+            }
+          }
+        }
+        let sscrub_gesture:u32=app.gesture_kind(state)
+        let sscrubbing:bool=not playing_now and sscrub_gesture==app.drag_source_scrub()
+        if not sscrubbing {
+          if sscrub_device and not audio_active {let _=native_audio.request(library,"stop","")}
+          sscrub_device=false
+          sscrub_pull=0
+          sscrub_frame=-1
+        } else if not audio_active and not audio_pending and not endpoint_pending and not app.endpoint_requested(state) and audio_request<18446744073709551614 and audio_generation<18446744073709551614 {
+          if sscrub_pull!=0 and (audio_transport.ready==sscrub_pull or audio_transport.error_generation==sscrub_pull or audio_transport.closed) {
+            if audio_transport.ready==sscrub_pull {
+              let sscrub_started:string=native_audio.request(library,"start","")
+              if str.eq(str.view(sscrub_started),"ok") {
+                sscrub_device=true
+                let sscrub_media:string=provider.media_root(struct.borrow(state,field=provider))
+                let sscrub_file:string=path.join(str.view(sscrub_media),"source-scrub.wav")
+                let _=native_audio.request(library,"queue",str.view(sscrub_file))
+              }
+            }
+            sscrub_pull=0
+          }
+          let sscrub_at:i64=struct.get(struct.borrow(struct.borrow(state,field=document),field=monitor),field=frame)
+          if sscrub_pull==0 and sscrub_at!=sscrub_frame {
+            sscrub_frame=sscrub_at
+            let sscrub_fps:f64=timeline_media.monitor_fps(struct.borrow(state,field=document))
+            let sscrub_selected:u64=struct.get(struct.borrow(state,field=document),field=monitor_source)
+            let sscrub_total:i64=editor.source_frames(struct.borrow(state,field=document),sscrub_selected)
+            if sscrub_at>=0 and sscrub_at<sscrub_total {
+              let sscrub_span:i64=cast.sat(sscrub_fps*0.075)+1
+              let sscrub_end:i64=if sscrub_at+sscrub_span>sscrub_total {sscrub_total}else{sscrub_at+sscrub_span}
+              let sscrub_worker:string=provider.worker_path(struct.borrow(state,field=provider))
+              let sscrub_root:string=provider.media_root(struct.borrow(state,field=provider))
+              let sscrub_output:string=path.join(str.view(sscrub_root),"source-scrub.wav")
+              match timeline_media.source_audio_range(struct.borrow(state,field=document),str.view(sscrub_worker),sscrub_at,sscrub_end,str.view(sscrub_output)) {
+                err(_)=>{},
+                ok(sscrub_plan)=>{
+                  var sscrub_prepared:timeline_media.AudioPlan=sscrub_plan
+                  if sscrub_prepared.frames>3600 {struct.set(sscrub_prepared,3600,field=frames)}
+                  // A new generation closes the retained source session, so each seek
+                  // opens fresh at its own frame (constant time in the fast-seek worker).
+                  audio_request=audio_request+1
+                  audio_generation=audio_generation+1
+                  if audio_playback.request(str.view(audio_root),audio_request,audio_generation,sscrub_prepared) {
+                    sscrub_pull=audio_request
+                    let _=preview_link.wake(audio_transport,false)
+                  }
+                },
               }
             }
           }

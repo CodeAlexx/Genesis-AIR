@@ -1,0 +1,80 @@
+// Source-monitor scrub sound at the worker level: 75 ms windows of one source's
+// audio requested at spread positions through the playback actor, one in flight.
+// Usage: genesis-source-scrub WORKER MEDIA FRAMES FPS ROOT
+// Writes source-scrub-ns.txt: per-position nanoseconds (start, 25%, middle, 75%, end)
+// followed by the mean over every step. Refuses an absent or wrongly sized window.
+module test.source_scrub
+import std.editor as editor
+import std.files as files
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/audio_endpoint.ai" as endpoint
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+fn window(peer:ref<link.Link>,root:str,worker:str,doc:ref<editor.Document>,id:u64,at:i64,total:i64,fps:f64) -> result<u64,string> effects {alloc,fs.read,fs.write,net,time} {
+  let span:i64=cast.sat(fps*0.075)+1
+  let finish:i64=if at+span>total {total} else {at+span}
+  let out:string=path.join(root,"source-scrub.wav")
+  var plan:media.AudioPlan=match media.source_audio_range(doc,worker,at,finish,str.view(out)) {ok(v)=>v,err(p)=>{return result.err(p)},}
+  if plan.frames>3600 {struct.set(plan,3600,field=frames)}
+  let began:u64=time.monotonic_ns()
+  if not playback.request(root,id,id,plan) {return result.err("source scrub publication")}
+  try link.wake(peer,false)
+  try link.await_ready(peer,id,began+60000000000)
+  let took:u64=time.monotonic_ns()-began
+  match files.read_limited(str.view(out),1048576) {
+    ok(v)=>{if view.len(bytes.view(v))<1000 {return result.err("source scrub window is empty")}},
+    err(_)=>{return result.err("source scrub window missing")},
+  }
+  result.ok(took)
+}
+fn sequence(peer:ref<link.Link>,root:str,worker:str,doc:ref<editor.Document>,total:i64,fps:f64) -> result<unit,string> effects {alloc,fs.read,fs.write,net,time} {
+  try link.connect(peer)
+  var all:u64=0
+  var steps:u64=0
+  var marks:array<string> =array.new()
+  var id:u64=1
+  var k:i64=0
+  loop {if k>=20 {break}
+    let at:i64=(total-8)*k/19
+    let took:u64=try window(peer,root,worker,doc,id,at,total,fps)
+    all=all+took
+    steps=steps+1
+    id=id+1
+    if k==0 or k==5 or k==10 or k==14 or k==19 {array.push(marks,string.from_int(took))}
+    k=k+1
+  }
+  array.push(marks,string.from_int(all/steps))
+  let _=files.write_text(path.join(root,"source-scrub-ns.txt"),endpoint.fields(marks))
+  result.ok(())
+}
+fn run(worker:str,media_path:str,frames:i64,fps:f64,root:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time} {
+  playback.reset(root)
+  var doc:editor.Document=editor.document(fps,1920,1080)
+  let source:u64=editor.add_source(doc,media_path,"Source scrub",frames,fps)
+  let _=editor.describe_source(doc,source,0,0,false,true,48000,2)
+  struct.set(doc,source,field=monitor_source)
+  var peer:link.Link=try link.open()
+  let config:playback.Config=playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var problem:string=string.new()
+  task.scope {
+    var jobs:array<task<bool>> =[task.spawn(config,fn=playback.run)]
+    match sequence(peer,root,worker,doc,frames,fps) {ok(_)=>{},err(p)=>{problem=p},}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    match tasks.join_next<bool>(jobs,5000) {none=>{if str.len(problem)==0 {problem="actor did not join"}},some(v)=>{if not v and str.len(problem)==0 {problem="actor returned false"}},}
+    link.close_commands(peer)
+  }
+  if str.len(problem)>0 {result.err(problem)}else{result.ok(())}
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time,io.write} {
+  if view.len(args)!=6 {return 2}
+  let frames:i64=match text.parse_i64(view.get(args,3)) {some(v)=>v,none=>{return 2},}
+  let fps:f64=match text.parse_f64(view.get(args,4)) {some(v)=>v,none=>{return 2},}
+  match run(view.get(args,1),view.get(args,2),frames,fps,view.get(args,5)) {ok(_)=>{io.write("source scrub: twenty 75 ms windows passed\n")
+    0},err(p)=>{io.write(str.view(p))
+    io.write("\n")
+    3},}
+}

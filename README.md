@@ -474,8 +474,11 @@ the definitions, or Source playback, closes it as before; stale pulls are still 
 While paused, dragging the timeline ruler or the Program monitor bar plays 75 ms of the exact
 Program mix at each new playhead frame (scrub sound). The first move prepares the endpoint (warm
 after a Pause), each step pulls one short window (about 6 ms) and restarts the device so pieces
-never queue behind each other. Release or Play stops it. Source monitor scrubbing stays silent:
-source audio still decodes from the clip start, which is too slow for scrubbing.
+never queue behind each other. Release or Play stops it. Dragging the Source monitor bar does
+the same with the selected source's own audio (`timeline_media.source_audio_range`, a 75 ms
+window per new frame, one request in flight, the same pending-work guards); the compositor
+seeks source audio in constant time, so any position in a long clip answers in tens of
+milliseconds. `tests/source_scrub.ai` measures that per step against a real clip.
 
 Clip gain keys are evaluated per 48 kHz stereo sample after the audio effects, then
 multiplied by track gain and the clip fades. Playback and export share rounded absolute
