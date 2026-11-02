@@ -129,7 +129,17 @@ set_target_properties(genesis-native-u16-upload PROPERTIES RUNTIME_OUTPUT_DIRECT
 
 # Exercise the exact Windows transport adapter. Fault hooks are confined to
 # component fixtures; the production runtime retains its real Winsock calls.
-foreach(genesis_net_fixture IN ITEMS classifier policy resource)
+# These fixtures test the Genesis loopback overlay's classifier. An SDK whose own
+# runtime already owns the loopback policy (AIR main) has no such classifier.
+file(READ "${CMAKE_SOURCE_DIR}/runtime/windows/air_net_win32.c" genesis_net_source)
+string(FIND "${genesis_net_source}" "classify_loopback_peer" genesis_loopback_overlay)
+if(genesis_loopback_overlay EQUAL -1)
+  set(genesis_net_fixtures)
+  message(STATUS "Genesis: SDK owns the loopback policy; overlay loopback fixtures are not built")
+else()
+  set(genesis_net_fixtures classifier policy resource)
+endif()
+foreach(genesis_net_fixture IN LISTS genesis_net_fixtures)
   add_executable(genesis-net-loopback-${genesis_net_fixture}
     "${GENESIS_ROOT}/tests/net_loopback_${genesis_net_fixture}_windows.c")
   target_include_directories(genesis-net-loopback-${genesis_net_fixture} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")

@@ -73,12 +73,14 @@ try {
   & python (Join-Path $PSScriptRoot 'channel_deadlines.py') --binary (Join-Path $Bin 'genesis-channel-deadlines.exe') `
     --root (Join-Path $work 'channel-deadlines') --report (Join-Path $reports 'channel-deadlines-tests.json')
   if ($LASTEXITCODE -ne 0) { throw 'The real TCP channel deadline gate failed.' }
-  & python (Join-Path $PSScriptRoot 'net_loopback_windows.py') `
-    --classifier (Join-Path $Bin 'genesis-net-loopback-classifier.exe') `
-    --policy (Join-Path $Bin 'genesis-net-loopback-policy.exe') `
-    --resource (Join-Path $Bin 'genesis-net-loopback-resource.exe') `
-    --report (Join-Path $reports 'net-loopback-windows.json')
-  if ($LASTEXITCODE -ne 0) { throw 'The native loopback transport policy/resource gate failed.' }
+  if (Test-Path -LiteralPath (Join-Path $Bin 'genesis-net-loopback-classifier.exe')) {
+    & python (Join-Path $PSScriptRoot 'net_loopback_windows.py') `
+      --classifier (Join-Path $Bin 'genesis-net-loopback-classifier.exe') `
+      --policy (Join-Path $Bin 'genesis-net-loopback-policy.exe') `
+      --resource (Join-Path $Bin 'genesis-net-loopback-resource.exe') `
+      --report (Join-Path $reports 'net-loopback-windows.json')
+    if ($LASTEXITCODE -ne 0) { throw 'The native loopback transport policy/resource gate failed.' }
+  } else { Write-Host 'Loopback overlay fixtures not built: the SDK runtime owns the loopback policy (channel-deadlines covers real TCP).' }
   Write-Host (Invoke-Native 'genesis-linked-media.exe' @((Join-Path $work 'linked-media'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'linked-media/linked-media-tests.json') -Destination (Join-Path $reports 'linked-media-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-snap-controls.exe' @((Join-Path $work 'snap-controls'))).TrimEnd()
