@@ -76,6 +76,20 @@ pub fn neighbor(doc: ref<editor.Document>, track: u64, param: str, frame: i64, l
                 forward: bool) -> option<i64> effects {alloc} {
   filter_keys.neighbor(doc,0,str.view(name(track,param)),frame,length,forward)
 }
+// Every key of one track parameter, in store order, for lane painting and picking.
+pub fn list(doc: ref<editor.Document>, track: u64, param: str) -> array<editor.Key> effects {alloc} {
+  var found: array<editor.Key> = array.new()
+  if not has(doc,track,param) {return found}
+  let wanted: string = name(track,param)
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    i=i+1
+    if key.clip != 0 {continue}
+    if str.eq(str.view(editor.name_text(doc,key.param)),str.view(wanted)) {array.push(found,key)}
+  }
+  found
+}
 pub fn count(doc: ref<editor.Document>, track: u64, param: str) -> u64 effects {alloc} {
   if not has(doc,track,param) {return 0}
   editor.key_count(doc,0,str.view(name(track,param)))

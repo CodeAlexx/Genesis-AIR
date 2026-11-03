@@ -1623,6 +1623,7 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               let at_y: u64 = cast.wrap(at.y)
               pointer_x = cast.float(at_x) / ui_scale
               pointer_y = cast.float(at_y) / ui_scale
+              app.set_pointer_shift(state, widgets.point_shift(point))
               var note: string = input.pointer_down(state, logical_width, logical_height,
                 pointer_x, pointer_y)
               if str.len(str.view(note)) != 0 { app.set_status(state, str.view(note)) }
@@ -1636,11 +1637,12 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               let my: u64 = cast.wrap(at.y)
               pointer_x = cast.float(mx) / ui_scale
               pointer_y = cast.float(my) / ui_scale
+              app.set_pointer_shift(state, widgets.point_shift(point))
               if input.pointer_hover(state, logical_width, logical_height, pointer_x, pointer_y) {
                 repaint_all = true
                 dirty = true
               }
-              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) or app.prompt_dragging(state) {
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) or app.automation_dragging(state) or app.prompt_dragging(state) {
                 var moving: string = input.pointer_move(state, logical_width, logical_height,
                   pointer_x, pointer_y)
                 if str.len(str.view(moving)) != 0 {
@@ -1693,7 +1695,8 @@ fn run_window(state: ref<app.App>, title: str) -> i32 effects {alloc, env, ffi, 
               let uy: u64 = cast.wrap(at.y)
               pointer_x = cast.float(ux) / ui_scale
               pointer_y = cast.float(uy) / ui_scale
-              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) or app.prompt_dragging(state) {
+              app.set_pointer_shift(state, widgets.point_shift(point))
+              if app.gesture_kind(state) != app.drag_none() or app.dock_scroll_dragging(state) or app.parameter_dragging(state) or app.automation_dragging(state) or app.prompt_dragging(state) {
                 var released: string = input.pointer_up(state, logical_width, logical_height,
                   pointer_x, pointer_y)
                 if str.len(str.view(released)) != 0 {

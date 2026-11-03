@@ -500,6 +500,21 @@ automation is not part of this stage. Malformed curves report `GA_AUDIO_TRACK_GA
 checks 44 variants (all 38 modes, overlap, windowing, fades, nested) against an SDK-curve
 oracle, and `tests/audio_track_project.py` renders independently authored revision 5 projects.
 
+Track automation UI. In the Audio tab each track Gain and Pan row has a working K button
+(refused on locked tracks); once a parameter is keyed the slider follows the curve on seek,
+faders write a key at the playhead instead of the static value (one Undo per drag), and a
+Prev key / Next key / Delete key / Ease < / Ease > row appears under that parameter only,
+so panels without automation keep their exact layout. The K button on each track header
+title row (`K`, `K*` when the track has keys, `K:G` / `K:P` when open; Shift-click flips
+Gain/Pan) toggles a lane overlay drawn inside the existing lane: gain on a dB scale (0 dB at
+70% of the lane, +6 dB at the top), pan linear with its centre at mid-height. Clicking empty
+lane space (or the curve) adds a key, dragging a diamond moves frame and value (Shift = a
+tenth of the value change, frames snap to clip edges, the playhead and frame 0 when Snap is
+on) and is written on release as ONE Undo step, Delete removes the selected key, Escape
+cancels a drag. Locked tracks refuse with `GA_EDIT_LOCKED` and hidden tracks show no overlay.
+The header toggle is view state only: no document change, history entry or sound restart.
+`tests/track_automation_ui.ai` drives the real controls, pointer dispatch and painter.
+
 Fade-length keys follow the same destination sample clock. Each curve retains raw
 sequence-frame coordinates and values through interpolation, then converts the length
 to seconds. Audio multiplies the separate fade-in and fade-out ramps, preserving the

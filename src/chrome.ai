@@ -20,6 +20,7 @@ import "ui_text.ai" as ui_text
 import "app.ai" as app
 import "layout.ai" as layout
 import "filter_keys.ai" as filter_keys
+import "track_keys.ai" as track_keys
 import "typeface.ai" as typeface
 
 // ---------------------------------------------------------------------------
@@ -121,6 +122,7 @@ pub fn act_add_video_track() -> u32 effects {} { 55 }
 pub fn act_add_audio_track() -> u32 effects {} { 56 }
 pub fn act_tracks_up() -> u32 effects {} { 57 }
 pub fn act_tracks_down() -> u32 effects {} { 58 }
+pub fn act_track_automation() -> u32 effects {} { 59 }
 
 pub fn act_pool_pick() -> u32 effects {} { 60 }
 pub fn act_pool_relink() -> u32 effects {} { 61 }
@@ -936,7 +938,9 @@ fn param_row(doc: ref<editor.Document>, out: ref<array<Control>>, area: layout.R
   struct.set(bar, style_slider(), field=style)
   var up: Control = button(act_param_inc(), "+",
     layout.rect(bar_right + 2.0, top + 1.0, bar_right + 24.0, bottom - 1.0), false)
-  let keyable: bool = domain != domain_track()
+  let keyable: bool = if domain == domain_track() {
+    match editor.track_slot(doc, target) {none => false, some(_) => not editor.track_locked(doc, target)}
+  } else { true }
   var key: Control = button(if keyable { act_param_key() } else { act_none() }, "K",
     layout.rect(bar_right + 26.0, top + 1.0, bar_right + 48.0, bottom - 1.0), false)
   struct.set(key, keyable, field=enabled)
@@ -982,6 +986,7 @@ fn param_row(doc: ref<editor.Document>, out: ref<array<Control>>, area: layout.R
 
 fn key_management_row(doc: ref<editor.Document>, out: ref<array<Control>>, area: layout.Rect,
                       top: f64, domain: u32, target: u64, kind: str, name: str) -> f64 effects {alloc} {
+  if domain == domain_track() {return track_key_management_row(doc,out,area,top,target,name)}
   if domain != domain_clip() and domain != domain_filter() {return top}
   var clip: u64 = target
   if domain == domain_filter() {
@@ -1021,6 +1026,45 @@ fn key_management_row(doc: ref<editor.Document>, out: ref<array<Control>>, area:
     let _=ref.swap(struct.borrow(item,field=name),string.copy(name))
     // Reserve a separate interpolation row. The conservative cap bounds every
     // English glyph even when the dock is narrowed; the full name is retained.
+    let label: str = str.view(array.borrow(labels,i))
+    struct.set(item,math.min(14.0,math.max(1.0,(right-left-10.0)/math.max(1.0,cast.float(str.len(label))))),field=size)
+    array.push(out,item)
+    i=i+1
+  }
+  top+row_height()*2.0
+}
+
+// Track automation key row: same two lines as the clip version, addressed by timeline frame.
+fn track_key_management_row(doc: ref<editor.Document>, out: ref<array<Control>>, area: layout.Rect,
+                            top: f64, track: u64, param: str) -> f64 effects {alloc} {
+  if not track_keys.supported(param) or not track_keys.has(doc,track,param) {return top}
+  match editor.track_slot(doc,track) {none=>{return top},some(_)=>{},}
+  let local: i64 = editor.playhead(doc)
+  let exact: option<editor.Key> = track_keys.exact(doc,track,param,local)
+  let current: u32 = match exact {none=>curve.linear(),some(point)=>point.interp,}
+  let present: bool = option.is_some(exact) and local >= 0
+  let locked: bool = editor.track_locked(doc,track)
+  var labels: array<string> = ["Prev key","Next key","Delete key","Ease <",
+    if present {curve.interp_name(current)}else{string.copy("Between keys")},"Ease >"]
+  var actions: array<u32> = [act_key_previous(),act_key_next(),act_key_delete(),
+    act_key_interp_previous(),act_none(),act_key_interp_next()]
+  let wide: f64 = math.max(1.0,layout.width_of(area)-8.0)
+  let edge: f64 = math.min(60.0,wide*0.23)
+  var i: u64 = 0
+  loop {if i == 6 {break}
+    let y: f64 = if i < 3 {top}else{top+row_height()}
+    let left: f64 = area.left+4.0+if i < 3 {wide*cast.float(i)/3.0}
+      else if i == 3 {0.0}else if i == 4 {edge}else{wide-edge}
+    let right: f64 = if i < 3 {left+wide/3.0}
+      else if i == 3 {left+edge}else if i == 4 {area.right-4.0-edge}else{area.right-4.0}
+    var item: Control = button(array.get(actions,i),str.view(array.borrow(labels,i)),
+      layout.rect(left,y+1.0,right-2.0,y+row_height()-1.0),false)
+    let nearby: bool = if i < 2 {option.is_some(track_keys.neighbor(doc,track,param,local,editor.duration(doc),i == 1))}else{false}
+    struct.set(item,if i < 2 {nearby}else{present and not locked and i != 4},field=enabled)
+    struct.set(item,domain_track(),field=domain)
+    struct.set(item,track,field=target)
+    struct.set(item,cast.float(current),field=value)
+    let _=ref.swap(struct.borrow(item,field=name),string.copy(param))
     let label: str = str.view(array.borrow(labels,i))
     struct.set(item,math.min(14.0,math.max(1.0,(right-left-10.0)/math.max(1.0,cast.float(str.len(label))))),field=size)
     array.push(out,item)
@@ -1527,9 +1571,9 @@ pub fn audio_panel(frame: layout.Frame, state: ref<app.App>) -> array<Control> e
         continue }
       cursor = heading(out, area, cursor, str.view(title))
       cursor = param_row(doc, out, area, cursor, domain_track(), id, "", "gain", "Gain",
-        editor.track_gain(doc, id), 0.0, 2.0, 0.05, available)
+        track_keys.reading(doc, id, "gain", editor.playhead(doc), editor.track_gain(doc, id)), 0.0, 2.0, 0.05, available)
       cursor = param_row(doc, out, area, cursor, domain_track(), id, "", "pan", "Pan",
-        editor.track_pan(doc, id), -1.0, 1.0, 0.05, available)
+        track_keys.reading(doc, id, "pan", editor.playhead(doc), editor.track_pan(doc, id)), -1.0, 1.0, 0.05, available)
       let top: f64 = cursor
       let half: f64 = (area.left + area.right) * 0.5
       var mute: Control = toggle(act_track_mute(), "Mute",
@@ -1604,6 +1648,7 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
                       model: ref<timeline.Timeline>) -> array<Control> effects {alloc} {
   var out: array<Control> = array.new()
   let area: layout.Rect = frame.headers
+  let lane_views: array<app.AutomationView> = app.automation_views(state)
   let doc: ref<editor.Document> = struct.borrow(state, field=document)
   let sequence: u64 = doc.active
   var lanes: array<u64> = editor_view.lanes(doc, sequence)
@@ -1632,6 +1677,23 @@ pub fn track_controls(frame: layout.Frame, state: ref<app.App>,
         soloed = struct.get(entry, field=solo)
       },
     }
+    // Automation lane toggle on the title row (app state only): K closed (K* when the track has keys), K:G / K:P when the
+    // overlay shows Gain / Pan. Shift-click flips the parameter.
+    var lane_open: bool = false
+    var lane_pan: bool = false
+    var seen_view: u64 = 0
+    loop { if seen_view >= array.len(lane_views) { break }
+      let entry: app.AutomationView = array.get(lane_views, seen_view)
+      if entry.track == id { lane_open = true
+        lane_pan = entry.pan }
+      seen_view = seen_view + 1 }
+    let lane_text: str = if not lane_open { if track_keys.has_any(doc, id) { "K*" } else { "K" } } else if lane_pan { "K:P" } else { "K:G" }
+    var automation: Control = toggle(act_track_automation(), lane_text,
+      layout.rect(area.right - 34.0, top + 2.0, area.right - 6.0, top + 18.0), lane_open)
+    struct.set(automation, domain_track(), field=domain)
+    struct.set(automation, id, field=target)
+    struct.set(automation, 11.0, field=size)
+    array.push(out, automation)
     let row: f64 = top + 18.0
     let size: f64 = 18.0
     var x: f64 = area.left + 8.0

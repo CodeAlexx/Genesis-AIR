@@ -1,0 +1,48 @@
+// Vertical mapping of the track automation lane overlay, shared by painting and pointer editing.
+//
+// Gain is stored linear and drawn on a dB scale: 0 dB sits at 70% of the plot height, +6 dB at
+// the top, -40 dB at 10% and silence at the bottom (the last stretch is linear gain, so zero is
+// reachable). Pan is linear with its centre at mid-height (+1 on top).
+module genesis.track_lane
+import std.math as math
+
+pub fn plot_margin() -> f64 effects {} { 3.0 }
+pub fn gain_top_db() -> f64 effects {} { 6.0 }
+pub fn gain_ceiling() -> f64 effects {} { 1.9952623149688795 }
+pub fn hit_radius() -> f64 effects {} { 6.0 }
+
+// 0 at the bottom of the plot, 1 at the top.
+pub fn fraction(pan: bool, value: f64) -> f64 effects {} {
+  if not math.is_finite(value) { return if pan { 0.5 } else { 0.0 } }
+  if pan { return (math.max(-1.0, math.min(1.0, value)) + 1.0) * 0.5 }
+  if value <= 0.0 { return 0.0 }
+  let db: f64 = 20.0 * math.log10(value)
+  if db >= 0.0 { return 0.7 + math.min(db, gain_top_db()) * 0.05 }
+  if db >= -40.0 { return 0.7 + db * 0.015 }
+  math.max(0.0, 0.1 * value / 0.01)
+}
+pub fn value_at(pan: bool, fraction: f64) -> f64 effects {} {
+  let f: f64 = math.max(0.0, math.min(1.0, if math.is_finite(fraction) { fraction } else { 0.0 }))
+  if pan { return f * 2.0 - 1.0 }
+  if f >= 0.7 { return math.min(gain_ceiling(), math.pow(10.0, (f - 0.7) / 0.05 / 20.0)) }
+  if f >= 0.1 { return math.pow(10.0, (f - 0.7) / 0.015 / 20.0) }
+  0.01 * f / 0.1
+}
+pub fn y_of(pan: bool, value: f64, top: f64, height: f64) -> f64 effects {} {
+  let inner: f64 = math.max(1.0, height - plot_margin() * 2.0)
+  top + plot_margin() + inner * (1.0 - fraction(pan, value))
+}
+pub fn value_at_y(pan: bool, y: f64, top: f64, height: f64) -> f64 effects {} {
+  let inner: f64 = math.max(1.0, height - plot_margin() * 2.0)
+  value_at(pan, 1.0 - (y - top - plot_margin()) / inner)
+}
+// The value a key may hold after an edit: gain 0..ceiling, pan -1..1.
+pub fn limit(pan: bool, value: f64) -> f64 effects {} {
+  if not math.is_finite(value) { return if pan { 0.0 } else { 1.0 } }
+  if pan { return math.max(-1.0, math.min(1.0, value)) }
+  math.max(0.0, math.min(gain_ceiling(), value))
+}
+// Shift drags change the value at a tenth of the pointer's travel.
+pub fn fine_value(pan: bool, start: f64, pointer: f64) -> f64 effects {} {
+  limit(pan, start + (pointer - start) * 0.1)
+}

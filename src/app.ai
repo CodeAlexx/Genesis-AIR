@@ -108,6 +108,13 @@ pub fn parameter_drag() -> ParameterDrag effects {alloc} {
     left: 0.0, width: 0.0, low: 0.0, high: 1.0, step: 0.1, value: 0.0}
 }
 
+// Track automation lane overlay: app state only, never saved and never part of history.
+// `pan` chooses which parameter the lane shows for that track.
+pub type AutomationView = struct { track: u64, pan: bool }
+// The key under the pointer while a lane drag is in progress, and the selected key.
+pub type AutomationDrag = struct { active: bool, track: u64, pan: bool, from: i64, frame: i64, value: f64 }
+pub type AutomationKey = struct { track: u64, pan: bool, frame: i64 }
+
 pub type App = struct {
   document: editor.Document,
   accepted_audio:option<endpoint.End>, endpoint_revision:u64,endpoint_media:u64,endpoint_owner:u64,endpoint_prepare:u64,endpoint_end_requested:bool,endpoint_seek_requested:i64,runtime_program_end:i64,
@@ -165,7 +172,11 @@ pub type App = struct {
   // TrueType faces for titles and captions, earliest first; later faces are fallbacks.
   fonts: array<string>,
   typography: ui_text.Typography,
-  parameter_drag: ParameterDrag
+  parameter_drag: ParameterDrag,
+  automation: array<AutomationView>,
+  automation_drag: AutomationDrag,
+  automation_key: AutomationKey,
+  pointer_shift: bool
 }
 
 pub fn viewport() -> Viewport effects {} {
@@ -204,7 +215,9 @@ pub fn app(engine: provider.Provider own) -> App effects {alloc} {
     visual_receipt_media:0,visual_receipt_project:0,visual_receipt_body:string.new(),
     visual_receipt_clips:array.new(),thumbnails: array.new(),
     presented_source_frame: -1, presented_program_frame: -1, audio_left: 0.0, audio_right: 0.0,
-    fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag()}
+    fonts: typeface.defaults(), typography: ui_text.empty(), parameter_drag: parameter_drag(),
+    automation: array.new(), automation_drag: AutomationDrag {active: false, track: 0, pan: false, from: 0, frame: 0, value: 0.0},
+    automation_key: AutomationKey {track: 0, pan: false, frame: 0}, pointer_shift: false}
 }
 
 // UI size is view state: 0 follows the automatic window-size scale (layout.ui_scale), otherwise
@@ -1201,3 +1214,103 @@ pub fn set_visual_waveform(state:ref<App>,clip:u64,key:str,peaks:array<f64> own)
   visual_cache_changed(state)
   true
 }
+
+// ---- track automation lanes (view state) ------------------------------------
+
+fn automation_slot(state: ref<App>, track: u64) -> option<u64> effects {} {
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(state, field=automation)) { break }
+    if struct.get(array.borrow(struct.borrow(state, field=automation), i), field=track) == track { return option.some(i) }
+    i = i + 1 }
+  option.none()
+}
+// A copy of the open lane views, for painters that hold a document borrow.
+pub fn automation_views(state: ref<App>) -> array<AutomationView> effects {alloc} {
+  var copy: array<AutomationView> = array.new()
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(state, field=automation)) { break }
+    array.push(copy, array.get(struct.borrow(state, field=automation), i))
+    i = i + 1 }
+  copy
+}
+pub fn automation_open(state: ref<App>, track: u64) -> bool effects {} {
+  option.is_some(automation_slot(state, track))
+}
+pub fn automation_pan(state: ref<App>, track: u64) -> bool effects {} {
+  match automation_slot(state, track) {
+    none => false,
+    some(i) => struct.get(array.borrow(struct.borrow(state, field=automation), i), field=pan),
+  }
+}
+pub fn automation_param(state: ref<App>, track: u64) -> str effects {} {
+  if automation_pan(state, track) { "pan" } else { "gain" }
+}
+fn automation_close(state: ref<App>, track: u64) -> unit effects {alloc} {
+  var kept: array<AutomationView> = array.new()
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(state, field=automation)) { break }
+    let view: AutomationView = array.get(struct.borrow(state, field=automation), i)
+    if view.track != track { array.push(kept, view) }
+    i = i + 1 }
+  let _ = struct.replace(state, kept, field=automation)
+  if struct.get(struct.borrow(state, field=automation_key), field=track) == track { automation_clear_key(state) }
+  ()
+}
+// Plain K click: open or close the lane overlay for the track.
+pub fn automation_toggle(state: ref<App>, track: u64) -> bool effects {alloc} {
+  if automation_open(state, track) { automation_close(state, track)
+    return false }
+  array.push(struct.borrow(state, field=automation), AutomationView {track: track, pan: false})
+  true
+}
+// Shift-click: closed -> open on Gain; open -> flip Gain/Pan.
+pub fn automation_cycle(state: ref<App>, track: u64) -> bool effects {alloc} {
+  match automation_slot(state, track) {
+    none => { array.push(struct.borrow(state, field=automation), AutomationView {track: track, pan: false}) },
+    some(i) => {
+      let view: ref<AutomationView> = array.borrow(struct.borrow(state, field=automation), i)
+      struct.set(view, not struct.get(view, field=pan), field=pan)
+      if struct.get(struct.borrow(state, field=automation_key), field=track) == track { automation_clear_key(state) }
+    },
+  }
+  automation_pan(state, track)
+}
+pub fn automation_reset(state: ref<App>) -> unit effects {alloc} {
+  let _ = struct.replace(state, array.new(), field=automation)
+  automation_end_drag(state)
+  automation_clear_key(state)
+  ()
+}
+pub fn automation_dragging(state: ref<App>) -> bool effects {} {
+  struct.get(struct.borrow(state, field=automation_drag), field=active)
+}
+pub fn automation_begin_drag(state: ref<App>, track: u64, pan: bool, frame: i64, value: f64) -> unit effects {} {
+  let _ = struct.replace(state, AutomationDrag {active: true, track: track, pan: pan, from: frame, frame: frame, value: value},
+    field=automation_drag)
+  ()
+}
+pub fn automation_update_drag(state: ref<App>, frame: i64, value: f64) -> unit effects {} {
+  let held: ref<AutomationDrag> = struct.borrow(state, field=automation_drag)
+  struct.set(held, frame, field=frame)
+  struct.set(held, value, field=value)
+  ()
+}
+pub fn automation_end_drag(state: ref<App>) -> unit effects {} {
+  struct.set(struct.borrow(state, field=automation_drag), false, field=active)
+  ()
+}
+pub fn automation_drag_state(state: ref<App>) -> AutomationDrag effects {} { state.automation_drag }
+pub fn automation_select(state: ref<App>, track: u64, pan: bool, frame: i64) -> unit effects {} {
+  let _ = struct.replace(state, AutomationKey {track: track, pan: pan, frame: frame}, field=automation_key)
+  ()
+}
+pub fn automation_clear_key(state: ref<App>) -> unit effects {} {
+  struct.set(struct.borrow(state, field=automation_key), 0, field=track)
+  ()
+}
+pub fn automation_selected(state: ref<App>) -> AutomationKey effects {} { state.automation_key }
+pub fn set_pointer_shift(state: ref<App>, shift: bool) -> unit effects {} {
+  struct.set(state, shift, field=pointer_shift)
+  ()
+}
+pub fn pointer_shift(state: ref<App>) -> bool effects {} { state.pointer_shift }

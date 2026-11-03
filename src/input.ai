@@ -12,6 +12,7 @@ import std.application_theme as themes
 import std.path as path
 import std.editor as editor
 import std.math as math
+import std.curve as curve
 import std.text as text
 import std.editor_view as editor_view
 import std.files as files
@@ -27,6 +28,8 @@ import "commands.ai" as commands
 import "linked_media.ai" as linked_media
 import "layout.ai" as layout
 import "view.ai" as painter
+import "track_keys.ai" as track_keys
+import "track_lane.ai" as track_lane
 
 // Only successful explicit Program navigation re-arms a manually suspended viewport.
 fn program_follow(state:ref<app.App>,action:u32) -> commands.Result effects {alloc} {
@@ -422,6 +425,14 @@ fn perform(state: ref<app.App>, control: ref<chrome.Control>, width: f64,
     var landed: commands.Result = commands.remove_track(state, target)
     return commands.message(landed)
   }
+  if action == chrome.act_track_automation() {
+    // View state only: no document change, no history entry, no sound restart.
+    var shown: bool = false
+    if app.pointer_shift(state) { shown = app.automation_cycle(state, target)
+      shown = true } else { shown = app.automation_toggle(state, target) }
+    if not shown { return note("Automation lane closed") }
+    return note(if app.automation_pan(state, target) { "Automation lane: Pan" } else { "Automation lane: Gain" })
+  }
   if action == chrome.act_add_video_track() {
     var landed: commands.Result = commands.add_track(state, editor.track_video(), "V")
     return commands.message(landed)
@@ -674,6 +685,8 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
   // A fresh press ends any previous drag whose release was lost during focus changes.
   app.end_parameter_drag(state)
   app.end_gesture(state)
+  app.automation_end_drag(state)
+  app.automation_clear_key(state)
   let frame: layout.Frame = layout.frame(width, height)
   if state.fullscreen != 0 {
     let source: bool = state.fullscreen == 2
@@ -825,6 +838,9 @@ pub fn pointer_down(state: ref<app.App>, width: f64, height: f64, x: f64,
       var landed: commands.Result = seek_follow(state, at)
       return commands.message(landed)
     }
+    match automation_press(state, model, frame.timeline, x, y) {
+      some(line) => { return line }, none => { },
+    }
     match timeline.clip_at(model, x, y) {
       some(index) => {
         let entry: ref<timeline.Clip> = array.borrow(struct.borrow(model, field=clips), index)
@@ -878,6 +894,112 @@ fn seek_monitor_bar(state: ref<app.App>, frame: layout.Frame, source: bool, x: f
   commands.message(landed)
 }
 
+// ---- track automation lane gestures ----------------------------------------
+
+fn automation_snap(state: ref<app.App>, model: ref<timeline.Timeline>, lane: u64, frame: i64) -> i64 effects {alloc} {
+  let bounded: i64 = if frame < 0 { 0 } else { frame }
+  if not app.snap(state) { return bounded }
+  let zoom: f64 = app.zoom(state)
+  let pixels: i64 = if zoom <= 0.0 { 4 } else { cast.sat(8.0 / zoom) }
+  var edges: array<i64> = [0, editor.playhead(struct.borrow(state, field=document))]
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(model, field=clips)) { break }
+    let clip: timeline.Clip = array.get(struct.borrow(model, field=clips), i)
+    i = i + 1
+    if clip.track != lane { continue }
+    array.push(edges, clip.start)
+    array.push(edges, add.sat(clip.start, clip.length))
+  }
+  timeline.snap_frame(bounded, array.view(edges), if pixels < 0 { 0 } else { pixels })
+}
+
+fn automation_text(pan: bool, value: f64, frame: i64) -> string effects {alloc} {
+  var line: string = string.copy(if pan { "Pan " } else { "Gain " })
+  if pan { string.append(line, str.view(math.format_fixed(value, 2))) }
+  else if value <= 0.0 { string.append(line, "-inf dB") }
+  else { string.append(line, str.view(math.format_fixed(20.0 * math.log10(value), 1)))
+    string.append(line, " dB") }
+  string.append(line, " at frame ")
+  string.append(line, str.view(string.from_int(frame)))
+  line
+}
+
+// A press inside an open automation lane: pick a key diamond (and start dragging it) or add a
+// key. Clips keep priority unless the pointer is on the curve or the lane has no clip there.
+fn automation_press(state: ref<app.App>, model: ref<timeline.Timeline>, area: layout.Rect,
+                    x: f64, y: f64) -> option<string> effects {alloc} {
+  let lane: u64 = match timeline.track_at(model, y) { none => { return option.none() }, some(found) => found, }
+  let track: u64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=id)
+  if not painter.automation_shown(state, track) { return option.none() }
+  let pan: bool = app.automation_pan(state, track)
+  let param: str = if pan { "pan" } else { "gain" }
+  let top: f64 = timeline.track_top(model, lane)
+  let lane_height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=height)
+  var keys: array<editor.Key> = track_keys.list(struct.borrow(state, field=document), track, param)
+  var best: u64 = array.len(keys)
+  var best_gap: f64 = track_lane.hit_radius() * 2.0 + 1.0
+  var i: u64 = 0
+  loop { if i >= array.len(keys) { break }
+    let key: editor.Key = array.get(keys, i)
+    let dx: f64 = math.abs(timeline.frame_to_x(model, key.frame) - x)
+    let dy: f64 = math.abs(track_lane.y_of(pan, key.value, top, lane_height) - y)
+    if dx <= track_lane.hit_radius() and dy <= track_lane.hit_radius() and dx + dy < best_gap {
+      best = i
+      best_gap = dx + dy
+    }
+    i = i + 1
+  }
+  if best < array.len(keys) {
+    let key: editor.Key = array.get(keys, best)
+    app.automation_select(state, track, pan, key.frame)
+    app.automation_begin_drag(state, track, pan, key.frame, key.value)
+    app.set_focus(state, app.panel_timeline())
+    return option.some(automation_text(pan, key.value, key.frame))
+  }
+  let raw: i64 = timeline.x_to_frame(model, x)
+  let on_curve: bool = math.abs(track_lane.y_of(pan, painter.automation_value(struct.borrow(state, field=document), track, pan, raw), top, lane_height) - y) <= track_lane.hit_radius()
+  if option.is_some(timeline.clip_at(model, x, y)) and not on_curve { return option.none() }
+  if x < area.left or x > area.right { return option.none() }
+  let at: i64 = automation_snap(state, model, lane, raw)
+  let value: f64 = track_lane.limit(pan, track_lane.value_at_y(pan, y, top, lane_height))
+  app.set_focus(state, app.panel_timeline())
+  var landed: commands.Result = commands.set_track_key(state, track, param, at, value, curve.linear())
+  if landed.ok { app.automation_select(state, track, pan, at) }
+  option.some(commands.message(landed))
+}
+
+fn automation_drag_move(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64) -> string effects {alloc} {
+  let held: app.AutomationDrag = app.automation_drag_state(state)
+  let frame: layout.Frame = layout.frame(width, height)
+  var model: timeline.Timeline = painter.timeline_model(state, frame.timeline)
+  let lane: u64 = match painter.automation_lane(model, held.track) { none => { return note("") }, some(found) => found, }
+  let top: f64 = timeline.track_top(model, lane)
+  let lane_height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=height)
+  let raw: f64 = track_lane.value_at_y(held.pan, y, top, lane_height)
+  let origin: f64 = match track_keys.exact(struct.borrow(state, field=document), held.track, if held.pan { "pan" } else { "gain" }, held.from) {
+    none => raw, some(key) => key.value,
+  }
+  let value: f64 = if app.pointer_shift(state) { track_lane.fine_value(held.pan, origin, raw) } else { track_lane.limit(held.pan, raw) }
+  let at: i64 = automation_snap(state, model, lane, timeline.x_to_frame(model, x))
+  app.automation_update_drag(state, at, value)
+  automation_text(held.pan, value, at)
+}
+
+// Release writes the whole drag as ONE command, so it is one Undo step.
+fn automation_drag_release(state: ref<app.App>, width: f64, height: f64, x: f64, y: f64) -> string effects {alloc} {
+  let _ = automation_drag_move(state, width, height, x, y)
+  let held: app.AutomationDrag = app.automation_drag_state(state)
+  app.automation_end_drag(state)
+  let param: str = if held.pan { "pan" } else { "gain" }
+  let origin: f64 = match track_keys.exact(struct.borrow(state, field=document), held.track, param, held.from) {
+    none => { return note("[GA_KEY_MISSING] There is no key at that frame") }, some(key) => key.value,
+  }
+  if held.frame == held.from and math.abs(held.value - origin) < 0.000000001 { return note("Key selected") }
+  var landed: commands.Result = commands.move_track_key(state, held.track, param, held.from, held.frame, held.value)
+  if landed.ok { app.automation_select(state, held.track, held.pan, held.frame) }
+  commands.message(landed)
+}
+
 // A drag in progress. Nothing is written yet; this only reports where a release would land,
 // so the whole gesture becomes ONE undo step.
 pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
@@ -888,6 +1010,7 @@ pub fn pointer_move(state: ref<app.App>, width: f64, height: f64, x: f64,
   }
   if session.pending(state) { return note("") }
   if app.parameter_dragging(state) { return continue_parameter_drag(state, x) }
+  if app.automation_dragging(state) { return automation_drag_move(state, width, height, x, y) }
   if app.dock_scroll_dragging(state) {
     let frame: layout.Frame = layout.frame(width, height)
     let track: layout.Rect = chrome.dock_scroll_track(frame)
@@ -938,6 +1061,7 @@ pub fn pointer_up(state: ref<app.App>, width: f64, height: f64, x: f64,
     app.end_parameter_drag(state)
     return line
   }
+  if app.automation_dragging(state) { return automation_drag_release(state, width, height, x, y) }
   if app.dock_scroll_dragging(state) {
     app.end_dock_scroll_drag(state)
     return note("Inspector scrolled")
@@ -1228,6 +1352,10 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
     struct.set(state, if state.fullscreen != 0 { 0 } else if app.focus(state) == app.panel_source() { 2 } else { 1 }, field=fullscreen)
     return note("Fullscreen toggled")
   }
+  if app.automation_dragging(state) and code == widgets.key_escape() {
+    app.automation_end_drag(state)
+    return note("Key drag cancelled")
+  }
   if app.parameter_dragging(state) and code == widgets.key_escape() {
     app.end_parameter_drag(state)
     var restored: commands.Result = commands.undo(state)
@@ -1301,6 +1429,13 @@ pub fn key(state: ref<app.App>, code: u32, control: bool,
   if code == 115 {
     // `s` splits at the playhead.
     var landed: commands.Result = commands.split_at_playhead(state)
+    return commands.message(landed)
+  }
+  if code == widgets.key_delete() and app.automation_selected(state).track != 0 {
+    let picked: app.AutomationKey = app.automation_selected(state)
+    app.automation_clear_key(state)
+    var landed: commands.Result = commands.delete_track_key(state, picked.track,
+      if picked.pan { "pan" } else { "gain" }, picked.frame)
     return commands.message(landed)
   }
   if code == widgets.key_delete() {

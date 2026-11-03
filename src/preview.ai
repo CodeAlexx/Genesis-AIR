@@ -1636,7 +1636,7 @@ pub fn visual_waveform_label(state:ref<app.App>,clip:editor.Clip,current:bool)->
     let muted:bool=match editor.track_slot(document,clip.track) {none=>true,some(slot)=>{
       struct.get(array.borrow(struct.borrow(document,field=tracks),slot),field=muted)},}
     label=string.copy(if muted {"Muted"}else{"Solo excluded"})}
-  else if editor.track_gain(document,clip.track)==0.0 {label=string.copy("Gain 0")}
+  else if editor.track_gain(document,clip.track)==0.0 and not track_keys.has(document,clip.track,"gain") {label=string.copy("Gain 0")}
   if state.waveform_pending!=0 {
     if str.len(label)!=0 {string.append(label," / ")}
     string.append(label,"Loading waveform...")}

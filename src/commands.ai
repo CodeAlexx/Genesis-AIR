@@ -68,6 +68,7 @@ pub fn replace_project(state: ref<app.App>, document: editor.Document own) -> un
   let _ = app.set_dock_scroll(state, 0.0)
   app.end_parameter_drag(state)
   app.end_gesture(state)
+  app.automation_reset(state)
   app.document_changed(state)
   struct.set(state, state.project_epoch + 1, field=project_epoch)
   app.mark_media_changed(state)

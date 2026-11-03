@@ -1,0 +1,569 @@
+// Track automation, phase 3: dock rows, lane overlay editing and the header K toggle, driven
+// through the real controls, pointer dispatch and painter.
+module genesis.tests.track_automation_ui
+import std.draw as draw
+import std.editor as editor
+import std.editor_io as store
+import std.curve as curve
+import std.files as files
+import std.math as math
+import std.path as path
+import std.testing as test
+import std.text as text
+import std.timeline as timeline
+import std.widgets as widgets
+import "../src/app.ai" as app
+import "../src/chrome.ai" as chrome
+import "../src/commands.ai" as commands
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+import "../src/timeline_media.ai" as media
+import "../src/track_keys.ai" as track_keys
+import "../src/track_lane.ai" as track_lane
+import "../src/view.ai" as painter
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+// Document, revision, dirty flag, undo and redo stacks: every byte a refusal must preserve.
+fn transaction(state: ref<app.App>) -> string effects {alloc} {
+  var out: string = encoded(struct.borrow(state,field=document))
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  let history: ref<editor.History> = struct.borrow(state,field=history)
+  var i: u64 = 0
+  loop {if i >= editor.undo_depth(history) {break}
+    string.append(out,"undo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),i)))
+    i=i+1}
+  i=0
+  loop {if i >= editor.redo_depth(history) {break}
+    string.append(out,"redo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),i)))
+    i=i+1}
+  out
+}
+fn depth(state: ref<app.App>) -> u64 effects {alloc} {
+  editor.undo_depth(struct.borrow(state,field=history))
+}
+fn playhead(state: ref<app.App>) -> i64 effects {alloc} {
+  editor.playhead(struct.borrow(state,field=document))
+}
+
+fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App = app.app(provider.fake(root))
+  let track: u64 = app.default_audio_track(state)
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let source: u64 = editor.add_source(doc,"tone.wav","Tone",300,30.0)
+  let _=editor.describe_source(doc,source,64,36,true,true,48000,2)
+  let _=option.unwrap(editor.place(doc,track,source,0,90,0))
+  app.set_dock_tab(state,chrome.tab_audio())
+  let _=commands.seek(state,0)
+  app.mark_dirty(state,false)
+  state
+}
+fn audio_clip(state: ref<app.App>) -> u64 effects {alloc} {
+  option.unwrap(editor.clip_at(struct.borrow(state,field=document),0)).id
+}
+
+type Row = struct {area: layout.Rect, enabled: bool, value: f64, found: bool}
+fn missing() -> Row effects {} {
+  Row {area:layout.rect(0.0,0.0,0.0,0.0),enabled:false,value:0.0,found:false}
+}
+fn dock_row(state: ref<app.App>, action: u32, track: u64, name: str) -> Row effects {alloc} {
+  var list: array<chrome.Control> = chrome.audio_panel(layout.frame(1600.0,1400.0),state)
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    let item: ref<chrome.Control> = array.borrow(list,i)
+    if item.action == action and item.target == track and item.domain == chrome.domain_track() and
+        str.eq(chrome.name_of(item),name) {
+      return Row {area:item.area,enabled:item.enabled,value:item.value,found:true}
+    }
+    i=i+1}
+  missing()
+}
+fn dock_actions(state: ref<app.App>, action: u32) -> u64 effects {alloc} {
+  var list: array<chrome.Control> = chrome.audio_panel(layout.frame(1600.0,1400.0),state)
+  var count: u64 = 0
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    if array.borrow(list,i).action == action {count=count+1}
+    i=i+1}
+  count
+}
+fn dock_click(state: ref<app.App>, action: u32, track: u64, name: str) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let item: Row = dock_row(state,action,track,name)
+  if not item.found {return string.copy("missing")}
+  input.pointer_down(state,1600.0,1400.0,(item.area.left+item.area.right)*0.5,(item.area.top+item.area.bottom)*0.5)
+}
+fn dock_layout(state: ref<app.App>) -> string effects {alloc} {
+  var list: array<chrome.Control> = chrome.audio_panel(layout.frame(1600.0,1400.0),state)
+  var out: string = string.new()
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    let item: ref<chrome.Control> = array.borrow(list,i)
+    string.append(out,string.from_int(cast.sat(item.area.top)))
+    string.append(out,",")
+    string.append(out,string.from_int(cast.sat(item.area.left)))
+    string.append(out,";")
+    i=i+1}
+  out
+}
+
+type Point = struct {x: f64, y: f64}
+// Pixel position of (frame, value) inside the track's lane on the 1600x980 layout.
+fn lane_point(state: ref<app.App>, track: u64, pan: bool, at: i64, value: f64) -> Point effects {alloc} {
+  let frame: layout.Frame = layout.frame(1600.0,980.0)
+  var model: timeline.Timeline = painter.timeline_model(state,frame.timeline)
+  let lane: u64 = match painter.automation_lane(model,track) {none=>{return Point {x:0.0,y:0.0}},some(found)=>found,}
+  let top: f64 = timeline.track_top(model,lane)
+  let height: f64 = struct.get(array.borrow(struct.borrow(model,field=tracks),lane),field=height)
+  Point {x:timeline.frame_to_x(model,at)+0.5,y:track_lane.y_of(pan,value,top,height)}
+}
+fn press(state: ref<app.App>, point: Point) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  input.pointer_down(state,1600.0,980.0,point.x,point.y)
+}
+fn move_to(state: ref<app.App>, point: Point) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  input.pointer_move(state,1600.0,980.0,point.x,point.y)
+}
+fn release(state: ref<app.App>, point: Point) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  input.pointer_up(state,1600.0,980.0,point.x,point.y)
+}
+fn key_value(state: ref<app.App>, track: u64, param: str, at: i64) -> f64 effects {alloc} {
+  match track_keys.exact(struct.borrow(state,field=document),track,param,at) {none=>-99.0,some(key)=>key.value,}
+}
+fn key_count(state: ref<app.App>, track: u64, param: str) -> u64 effects {alloc} {
+  track_keys.count(struct.borrow(state,field=document),track,param)
+}
+fn has_code(message: str, code: str) -> bool effects {alloc} {
+  text.contains(message,code)
+}
+fn sound(state: ref<app.App>) -> string effects {alloc} {
+  media.audio_signature(struct.borrow(state,field=document))
+}
+
+fn lane_math_suite(suite: ref<test.Suite>) -> unit effects {alloc,fs.meta,fs.write,time} {
+  let _=test.start(suite,"Lane mapping: dB scale for gain, linear for pan, exact inverse")
+  let _=test.near_f64(suite,track_lane.fraction(false,1.0),0.7,0.000001,"0 dB sits at 70% of the plot")
+  let _=test.near_f64(suite,track_lane.fraction(false,0.0),0.0,0.0,"Silence is the bottom")
+  let _=test.near_f64(suite,track_lane.fraction(false,track_lane.gain_ceiling()),1.0,0.000001,"+6 dB is the top")
+  let _=test.near_f64(suite,track_lane.fraction(true,0.0),0.5,0.0,"Pan centre is mid-height")
+  let _=test.near_f64(suite,track_lane.fraction(true,1.0),1.0,0.0,"Full right is the top")
+  var f: f64 = 0.0
+  var worst: f64 = 0.0
+  loop {if f > 1.0 {break}
+    worst = math.max(worst,math.abs(track_lane.fraction(false,track_lane.value_at(false,f))-f))
+    worst = math.max(worst,math.abs(track_lane.fraction(true,track_lane.value_at(true,f))-f))
+    f = f + 0.01}
+  let _=test.check(suite,worst < 0.000001,"value_at inverts fraction across the whole range")
+  let _=test.near_f64(suite,track_lane.limit(false,50.0),track_lane.gain_ceiling(),0.0,"Gain edits stay within +6 dB")
+  let _=test.near_f64(suite,track_lane.limit(true,-3.0),-1.0,0.0,"Pan edits stay within -1..1")
+  let _=test.check(suite,math.abs(track_lane.fine_value(false,1.0,1.5)-1.05) < 0.000001,"Shift moves the value at one tenth of the pointer travel")
+  let _=test.done(suite)
+  ()
+}
+
+fn dock_suite(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _=test.start(suite,"Audio tab: rows stay byte-identical until a parameter is keyed")
+  var state: app.App = fixture(root)
+  let track: u64 = app.default_audio_track(state)
+  let plain: string = dock_layout(state)
+  let _=test.eq_u64(suite,dock_actions(state,chrome.act_key_next()),0,"No key management row for an unkeyed track")
+  let _=test.check(suite,dock_row(state,chrome.act_param_key(),track,"gain").enabled,"Track Gain K is enabled")
+  let _=test.check(suite,dock_row(state,chrome.act_param_key(),track,"pan").enabled,"Track Pan K is enabled")
+  let _=test.near_f64(suite,dock_row(state,chrome.act_param_set(),track,"gain").value,1.0,0.0,"Unkeyed slider reads the static gain")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"K on track Gain writes one key at the playhead with one Undo")
+  let before: string = encoded(struct.borrow(state,field=document))
+  let _=commands.seek(state,0)
+  let base: u64 = depth(state)
+  let sound_before: string = sound(state)
+  let landed: string = dock_click(state,chrome.act_param_key(),track,"gain")
+  let _=test.eq_str(suite,landed,"track keyframe set","K dispatches through the real pointer path")
+  let _=test.eq_u64(suite,key_count(state,track,"gain"),1,"One key was written")
+  let _=test.near_f64(suite,key_value(state,track,"gain",0),1.0,0.0,"The key holds the displayed value")
+  let _=test.eq_u64(suite,depth(state),base+1,"Exactly one Undo step")
+  let _=test.check(suite,dock_row(state,chrome.act_key_next(),track,"gain").found,"Management row appears once keyed")
+  let _=test.check(suite,dock_row(state,chrome.act_key_delete(),track,"gain").enabled,"Delete is enabled on the key")
+  let _=test.check(suite,not dock_row(state,chrome.act_key_next(),track,"gain").enabled,"Next is disabled without a later key")
+  let _=test.eq_u64(suite,dock_actions(state,chrome.act_key_next()),1,"Only the keyed parameter gets a row")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),before,"Undo restores every authored byte")
+  let _=test.check(suite,dock_layout(state) == plain,"Unkeyed again: the panel layout is byte-identical")
+  let _=commands.redo(state)
+  let _=test.check(suite,not (sound(state) == sound_before),"A track key is part of the sound")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Slider follows the curve on seek; faders write keys when keyed")
+  let _=commands.set_track_key(state,track,"gain",30,2.0,curve.linear())
+  let _=commands.seek(state,15)
+  let _=test.near_f64(suite,dock_row(state,chrome.act_param_set(),track,"gain").value,1.5,0.001,"Slider shows the interpolated value")
+  let _=commands.seek(state,60)
+  let _=test.near_f64(suite,dock_row(state,chrome.act_param_set(),track,"gain").value,2.0,0.001,"Slider holds the last key after it")
+  let static_gain: f64 = editor.track_gain(struct.borrow(state,field=document),track)
+  let rev: u64 = depth(state)
+  let moved: commands.Result = commands.set_parameter(state,chrome.domain_track(),track,"","gain",0.75)
+  let _=test.check(suite,moved.ok,"set_parameter on a keyed track succeeds")
+  let _=test.near_f64(suite,key_value(state,track,"gain",60),0.75,0.0,"The fader wrote a key at the playhead")
+  let _=test.near_f64(suite,editor.track_gain(struct.borrow(state,field=document),track),static_gain,0.0,"The static gain did not change")
+  let _=test.eq_u64(suite,depth(state),rev+1,"One Undo for the fader write")
+  let live: commands.Result = commands.update_parameter(state,chrome.domain_track(),track,"gain",0.5)
+  let _=test.check(suite,live.ok,"Live drag continuation succeeds")
+  let _=test.near_f64(suite,key_value(state,track,"gain",60),0.5,0.0,"Live drag keeps rewriting the same key")
+  let _=test.eq_u64(suite,depth(state),rev+1,"The drag did not add Undo steps")
+  let pan: commands.Result = commands.set_parameter(state,chrome.domain_track(),track,"","pan",0.25)
+  let _=test.check(suite,pan.ok,"Unkeyed pan fader still writes the static value")
+  let _=test.near_f64(suite,editor.track_pan(struct.borrow(state,field=document),track),0.25,0.0,"Static pan changed")
+  let _=test.eq_u64(suite,key_count(state,track,"pan"),0,"No pan key was created")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Key management: Prev/Next seek, Ease changes the key, Delete removes it")
+  let _=commands.seek(state,10)
+  let _=test.check(suite,not dock_row(state,chrome.act_key_delete(),track,"gain").enabled,"Delete is disabled between keys")
+  let _=test.check(suite,not dock_row(state,chrome.act_key_interp_next(),track,"gain").enabled,"Ease is disabled between keys")
+  let seek_before: string = transaction(state)
+  let _=test.eq_str(suite,dock_click(state,chrome.act_key_next(),track,"gain"),"sought keyframe","Next seeks")
+  let _=test.eq_i64(suite,playhead(state),30,"Next lands on the key frame")
+  let _=test.eq_str(suite,dock_click(state,chrome.act_key_previous(),track,"gain"),"sought keyframe","Prev seeks")
+  let _=test.eq_i64(suite,playhead(state),0,"Prev lands on the earlier key")
+  let _=commands.seek(state,10)
+  let _=test.eq_str(suite,transaction(state),seek_before,"Seeking never changes the document or history")
+  let _=commands.seek(state,0)
+  let ease: u64 = depth(state)
+  let _=test.eq_str(suite,dock_click(state,chrome.act_key_interp_next(),track,"gain"),"keyframe interpolation set","Ease > dispatches")
+  let _=test.check(suite,option.unwrap(track_keys.exact(struct.borrow(state,field=document),track,"gain",0)).interp != curve.linear(),"Interpolation changed")
+  let _=test.eq_u64(suite,depth(state),ease+1,"One Undo for Ease")
+  let _=test.eq_str(suite,dock_click(state,chrome.act_key_delete(),track,"gain"),"keyframe deleted","Delete dispatches")
+  let _=test.eq_u64(suite,key_count(state,track,"gain"),2,"The key was removed (two remain)")
+  let _=test.eq_u64(suite,depth(state),ease+2,"One Undo for Delete")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Pan rows: K, management row and a locked track")
+  let pan_k: string = dock_click(state,chrome.act_param_key(),track,"pan")
+  let _=test.eq_str(suite,pan_k,"track keyframe set","K on Pan writes a pan key")
+  let _=test.near_f64(suite,key_value(state,track,"pan",0),0.25,0.0,"The pan key holds the static pan")
+  let _=test.check(suite,dock_row(state,chrome.act_key_delete(),track,"pan").enabled,"Pan has its own management row")
+  let _=commands.toggle_track_lock(state,track)
+  let _=test.check(suite,not dock_row(state,chrome.act_param_key(),track,"gain").enabled,"Locked track: Gain K disabled")
+  let _=test.check(suite,not dock_row(state,chrome.act_key_delete(),track,"pan").enabled,"Locked track: Delete disabled")
+  let locked_bytes: string = transaction(state)
+  let refused_key: commands.Result = commands.keyframe_parameter(state,chrome.domain_track(),track,"","gain",0.5)
+  let _=test.check(suite,not refused_key.ok and has_code(str.view(refused_key.message),"GA_EDIT_LOCKED"),"K on a locked track is refused with GA_EDIT_LOCKED")
+  let refused_set: commands.Result = commands.set_parameter(state,chrome.domain_track(),track,"","pan",0.9)
+  let _=test.check(suite,not refused_set.ok,"A keyed fader write on a locked track is refused")
+  let refused_manage: commands.Result = commands.manage_key(state,chrome.domain_track(),track,"","pan",2,0)
+  let _=test.check(suite,not refused_manage.ok and has_code(str.view(refused_manage.message),"GA_EDIT_LOCKED"),"Delete on a locked track is refused")
+  let _=test.eq_str(suite,transaction(state),locked_bytes,"Refusals preserve document, history, redo and revision bytes")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"A track whose gain is keyed no longer shows the static Gain 0 label")
+  var zero: app.App = fixture(root)
+  let ztrack: u64 = app.default_audio_track(zero)
+  let zclip: u64 = audio_clip(zero)
+  let _=editor.set_track_gain(struct.borrow(zero,field=document),ztrack,0.0)
+  let zdoc: editor.Clip = option.unwrap(editor.clip(struct.borrow(zero,field=document),zclip))
+  let _=test.check(suite,text.contains(str.view(preview.visual_waveform_label(zero,zdoc,true)),"Gain 0"),"Static zero gain is labelled")
+  let _=commands.set_track_key(zero,ztrack,"gain",0,1.0,curve.linear())
+  let _=test.check(suite,not text.contains(str.view(preview.visual_waveform_label(zero,zdoc,true)),"Gain 0"),"A keyed track gain is not labelled by its static value")
+  let _=test.done(suite)
+  ()
+}
+
+fn lane_suite(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _=test.start(suite,"Lane editing: click adds a key on empty lane space, Delete removes it")
+  var state: app.App = fixture(root)
+  let track: u64 = app.default_audio_track(state)
+  let _=test.check(suite,app.automation_toggle(state,track),"Lane overlay opens")
+  let start: string = transaction(state)
+  // Frame 200 lies beyond the 90-frame clip: empty lane space, away from every snap edge.
+  let target: Point = lane_point(state,track,false,200,1.0)
+  let base: u64 = depth(state)
+  let _=test.eq_str(suite,press(state,target),"track keyframe set","A click on empty lane space adds a key")
+  let _=test.eq_u64(suite,key_count(state,track,"gain"),1,"One key exists")
+  let _=test.check(suite,math.abs(lane_point(state,track,false,200,key_value(state,track,"gain",200)).y-target.y) < 1.0,"The key value comes from the click height")
+  let _=test.eq_u64(suite,depth(state),base+1,"One Undo for the add")
+  let _=release(state,target)
+  let _=test.eq_u64(suite,depth(state),base+1,"Releasing a plain click adds no step")
+  let _=test.eq_i64(suite,playhead(state),0,"A lane click does not move the playhead")
+  let line: string = input.key(state,widgets.key_delete(),false,false)
+  let _=test.eq_u64(suite,key_count(state,track,"gain"),0,"Delete removes the selected key")
+  let _=test.eq_u64(suite,depth(state),base+2,"One Undo for the delete")
+  let _=commands.undo(state)
+  let _=commands.undo(state)
+  let _=test.eq_u64(suite,key_count(state,track,"gain"),0,"Undo twice returns to the start")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Lane editing: dragging a diamond is ONE undo step; Shift is fine control")
+  var drag: app.App = fixture(root)
+  let dtrack: u64 = app.default_audio_track(drag)
+  let _=commands.set_track_key(drag,dtrack,"gain",200,1.0,curve.linear())
+  let _=commands.set_track_key(drag,dtrack,"gain",260,0.5,curve.linear())
+  let _=app.automation_toggle(drag,dtrack)
+  let _=commands.seek(drag,0)
+  let drag_base: u64 = depth(drag)
+  let origin: Point = lane_point(drag,dtrack,false,200,1.0)
+  let _=press(drag,origin)
+  let _=test.check(suite,app.automation_dragging(drag),"Pressing a diamond starts a drag")
+  let at_press: string = transaction(drag)
+  let _=move_to(drag,Point {x:origin.x+40.0,y:origin.y-10.0})
+  let _=move_to(drag,Point {x:origin.x+70.0,y:origin.y-20.0})
+  let _=test.eq_str(suite,transaction(drag),at_press,"Nothing is written while dragging")
+  let _=test.eq_u64(suite,depth(drag),drag_base,"The drag has no history yet")
+  let landed: string = release(drag,Point {x:origin.x+70.0,y:origin.y-20.0})
+  let _=test.eq_u64(suite,depth(drag),drag_base+1,"Release writes exactly one Undo step")
+  let _=test.check(suite,not text.contains(str.view(landed),"GA_"),"The drag reported no refusal")
+  let _=test.check(suite,not app.automation_dragging(drag),"The drag ended")
+  let _=test.eq_u64(suite,key_count(drag,dtrack,"gain"),2,"The key was moved, not duplicated")
+  let moved_frame: i64 = timeline.x_to_frame(painterModel(drag),origin.x+70.0)
+  let _=test.check(suite,math.abs(cast.float(moved_frame-200)-29.0) < 3.0,"The key moved right by about 29 frames")
+  let _=test.check(suite,key_value(drag,dtrack,"gain",200) == -99.0,"Nothing remains at the old frame")
+  let _=commands.undo(drag)
+  let _=test.near_f64(suite,key_value(drag,dtrack,"gain",200),1.0,0.0,"One Undo restores the key exactly")
+
+  var fine: app.App = fixture(root)
+  let ftrack: u64 = app.default_audio_track(fine)
+  let _=commands.set_track_key(fine,ftrack,"gain",200,1.0,curve.linear())
+  let _=app.automation_toggle(fine,ftrack)
+  let fine_origin: Point = lane_point(fine,ftrack,false,200,1.0)
+  let _=press(fine,fine_origin)
+  app.set_pointer_shift(fine,true)
+  let _=release(fine,Point {x:fine_origin.x,y:fine_origin.y-20.0})
+  let fine_value: f64 = key_value(fine,ftrack,"gain",200)
+  var coarse: app.App = fixture(root)
+  let ctrack: u64 = app.default_audio_track(coarse)
+  let _=commands.set_track_key(coarse,ctrack,"gain",200,1.0,curve.linear())
+  let _=app.automation_toggle(coarse,ctrack)
+  let _=press(coarse,lane_point(coarse,ctrack,false,200,1.0))
+  let _=release(coarse,Point {x:fine_origin.x,y:fine_origin.y-20.0})
+  let coarse_value: f64 = key_value(coarse,ctrack,"gain",200)
+  let _=test.check(suite,fine_value > 1.0 and coarse_value > fine_value,"Shift moves the value less than the same drag without Shift")
+  let _=test.check(suite,math.abs((fine_value-1.0)*10.0-(coarse_value-1.0)) < 0.2*(coarse_value-1.0)+0.02,"Shift is about one tenth of the plain change")
+  app.set_pointer_shift(fine,false)
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Lane editing: snap to clip edges, Escape cancels a drag")
+  var snap: app.App = fixture(root)
+  let strack: u64 = app.default_audio_track(snap)
+  let _=app.automation_toggle(snap,strack)
+  let _=press(snap,lane_point(snap,strack,false,92,1.0))
+  let _=test.check(suite,key_value(snap,strack,"gain",90) > 0.0,"The key snapped onto the clip end")
+  let _=commands.undo(snap)
+  let _=app.toggle_snap(snap)
+  let _=press(snap,lane_point(snap,strack,false,92,1.0))
+  let _=test.check(suite,key_value(snap,strack,"gain",92) > 0.0,"With snapping off the key stays where it was clicked")
+  let _=commands.set_track_key(snap,strack,"gain",300,1.0,curve.linear())
+  let before_escape: string = transaction(snap)
+  let _=press(snap,lane_point(snap,strack,false,300,1.0))
+  let _=move_to(snap,lane_point(snap,strack,false,330,0.5))
+  let _=input.key(snap,widgets.key_escape(),false,false)
+  let _=release(snap,lane_point(snap,strack,false,330,0.5))
+  let _=test.check(suite,not app.automation_dragging(snap),"Escape ended the drag")
+  let _=test.eq_str(suite,transaction(snap),before_escape,"Escape leaves document and history untouched")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Lane editing: clips keep priority away from the curve")
+  var clips: app.App = fixture(root)
+  let ktrack: u64 = app.default_audio_track(clips)
+  let _=app.automation_toggle(clips,ktrack)
+  let clip_depth: u64 = depth(clips)
+  // Near the top of the lane over the clip, far from the 0 dB reference line.
+  let over_clip: Point = lane_point(clips,ktrack,false,45,track_lane.gain_ceiling())
+  let _=press(clips,Point {x:over_clip.x,y:over_clip.y-1.0})
+  let _=test.eq_u64(suite,key_count(clips,ktrack,"gain"),0,"A press on a clip away from the curve does not add a key")
+  let _=test.eq_u64(suite,depth(clips),clip_depth,"No history entry was made")
+  let _=test.eq_u64(suite,app.current_clip(clips),audio_clip(clips),"The clip was selected instead")
+  let on_line: Point = lane_point(clips,ktrack,false,45,1.0)
+  let _=press(clips,on_line)
+  let _=test.eq_u64(suite,key_count(clips,ktrack,"gain"),1,"A press on the curve over a clip adds a key")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Lane editing: locked tracks refuse, hidden tracks show no overlay")
+  var locked: app.App = fixture(root)
+  let ltrack: u64 = app.default_audio_track(locked)
+  let _=commands.set_track_key(locked,ltrack,"gain",200,1.0,curve.linear())
+  let _=app.automation_toggle(locked,ltrack)
+  let _=commands.toggle_track_lock(locked,ltrack)
+  let locked_bytes: string = transaction(locked)
+  let add_line: string = press(locked,lane_point(locked,ltrack,false,400,1.0))
+  let _=test.check(suite,has_code(str.view(add_line),"GA_EDIT_LOCKED"),"Adding on a locked track reports GA_EDIT_LOCKED")
+  let _=release(locked,lane_point(locked,ltrack,false,400,1.0))
+  let _=test.eq_str(suite,transaction(locked),locked_bytes,"The refused add preserves every byte")
+  let diamond: Point = lane_point(locked,ltrack,false,200,1.0)
+  let _=press(locked,diamond)
+  let drop_line: string = release(locked,Point {x:diamond.x+50.0,y:diamond.y-8.0})
+  let _=test.check(suite,has_code(str.view(drop_line),"GA_EDIT_LOCKED"),"Dragging on a locked track reports GA_EDIT_LOCKED")
+  let _=test.eq_str(suite,transaction(locked),locked_bytes,"The refused drag preserves every byte")
+  let _=press(locked,diamond)
+  let _=release(locked,diamond)
+  let delete_line: string = input.key(locked,widgets.key_delete(),false,false)
+  let _=test.check(suite,has_code(str.view(delete_line),"GA_EDIT_LOCKED"),"Delete on a locked track reports GA_EDIT_LOCKED")
+  let _=test.eq_str(suite,transaction(locked),locked_bytes,"The refused delete preserves every byte")
+  let _=commands.toggle_track_lock(locked,ltrack)
+  let _=commands.toggle_track_hidden(locked,ltrack)
+  let _=test.check(suite,not painter.automation_shown(locked,ltrack),"A hidden track shows no overlay")
+  let hidden_bytes: string = transaction(locked)
+  let _=press(locked,lane_point(locked,ltrack,false,400,1.0))
+  let _=release(locked,lane_point(locked,ltrack,false,400,1.0))
+  let _=test.eq_str(suite,transaction(locked),hidden_bytes,"Pointer gestures on a hidden track never edit")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Lane overlay is painted: curve colour, diamonds, clipped to its lane")
+  var paint: app.App = fixture(root)
+  let ptrack: u64 = app.default_audio_track(paint)
+  let _=commands.set_track_key(paint,ptrack,"gain",20,0.5,curve.linear())
+  let _=commands.set_track_key(paint,ptrack,"gain",80,1.5,curve.linear())
+  let _=app.automation_toggle(paint,ptrack)
+  let first: Point = lane_point(paint,ptrack,false,20,0.5)
+  let second: Point = lane_point(paint,ptrack,false,80,1.5)
+  let _=test.check(suite,ink_at(paint,first) and ink_at(paint,second),"Both key diamonds are painted in the gain colour")
+  let middle: Point = lane_point(paint,ptrack,false,50,1.0)
+  let _=test.check(suite,ink_near(paint,middle),"The curve passes through its interpolated midpoint")
+  let _=app.automation_cycle(paint,ptrack)
+  let _=test.check(suite,not ink_at(paint,first),"The pan view does not paint the gain curve")
+  let _=app.automation_cycle(paint,ptrack)
+  let _=commands.toggle_track_hidden(paint,ptrack)
+  let _=test.check(suite,not ink_at(paint,first),"A hidden track paints no overlay")
+  let _=test.done(suite)
+  ()
+}
+
+fn painterModel(state: ref<app.App>) -> timeline.Timeline effects {alloc} {
+  painter.timeline_model(state,layout.frame(1600.0,980.0).timeline)
+}
+fn ink_pixel(pixel: draw.Color) -> bool effects {} {
+  pixel.r >= 245 and pixel.g >= 185 and pixel.g <= 205 and pixel.b >= 50 and pixel.b <= 80
+}
+fn painted(state: ref<app.App>) -> draw.Surface effects {alloc} {
+  var target: draw.Surface = match draw.surface(1600,980) {some(value)=>value,none=>draw.empty_surface(),}
+  var canvas: draw.Canvas = draw.canvas(target)
+  var blank_a: draw.Surface = draw.empty_surface()
+  var blank_b: draw.Surface = draw.empty_surface()
+  painter.paint(state,canvas,1600.0,980.0,blank_a,blank_b)
+  draw.finish(canvas)
+}
+fn ink_at(state: ref<app.App>, point: Point) -> bool effects {alloc} {
+  var surface: draw.Surface = painted(state)
+  match draw.surface_pixel(surface,cast.sat(math.round(point.x)),cast.sat(math.round(point.y))) {
+    none=>false,some(pixel)=>ink_pixel(pixel),
+  }
+}
+fn ink_near(state: ref<app.App>, point: Point) -> bool effects {alloc} {
+  var surface: draw.Surface = painted(state)
+  let bx: u32 = cast.sat(math.round(point.x))
+  let by: u32 = cast.sat(math.round(point.y))
+  var dy: u32 = 0
+  loop {if dy > 4 {break}
+    var dx: u32 = 0
+    loop {if dx > 4 {break}
+      match draw.surface_pixel(surface,bx+dx-2,by+dy-2) {
+        none=>{},some(pixel)=>{if pixel.r >= 200 and pixel.g >= 150 and pixel.b <= 140 and pixel.r > pixel.b + 80 {return true}},
+      }
+      dx=dx+1}
+    dy=dy+1}
+  false
+}
+
+fn header_controls(state: ref<app.App>) -> array<chrome.Control> effects {alloc} {
+  let frame: layout.Frame = layout.frame(1600.0,980.0)
+  var model: timeline.Timeline = painter.timeline_model(state,frame.timeline)
+  chrome.track_controls(frame,state,model)
+}
+fn header_k(state: ref<app.App>, track: u64) -> Row effects {alloc} {
+  var list: array<chrome.Control> = header_controls(state)
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    let item: ref<chrome.Control> = array.borrow(list,i)
+    if item.action == chrome.act_track_automation() and item.target == track {
+      return Row {area:item.area,enabled:item.enabled,value:0.0,found:true}
+    }
+    i=i+1}
+  missing()
+}
+fn header_label(state: ref<app.App>, track: u64) -> string effects {alloc} {
+  var list: array<chrome.Control> = header_controls(state)
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    let item: ref<chrome.Control> = array.borrow(list,i)
+    if item.action == chrome.act_track_automation() and item.target == track {return chrome.label_of(item)}
+    i=i+1}
+  string.new()
+}
+fn click_header(state: ref<app.App>, track: u64) -> string effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let item: Row = header_k(state,track)
+  if not item.found {return string.copy("missing")}
+  input.pointer_down(state,1600.0,980.0,(item.area.left+item.area.right)*0.5,(item.area.top+item.area.bottom)*0.5)
+}
+
+fn header_suite(suite: ref<test.Suite>, root: str) -> unit effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let _=test.start(suite,"Header K: every lane has one toggle on the title row, clear of the other buttons")
+  var state: app.App = fixture(root)
+  let track: u64 = app.default_audio_track(state)
+  var list: array<chrome.Control> = header_controls(state)
+  var buttons: u64 = 0
+  var overlaps: u64 = 0
+  var i: u64 = 0
+  loop {if i >= array.len(list) {break}
+    let item: ref<chrome.Control> = array.borrow(list,i)
+    if item.action == chrome.act_track_automation() {
+      buttons=buttons+1
+      var j: u64 = 0
+      loop {if j >= array.len(list) {break}
+        let other: ref<chrome.Control> = array.borrow(list,j)
+        if j != i and other.action != chrome.act_none() and item.area.left < other.area.right and other.area.left < item.area.right and
+            item.area.top < other.area.bottom and other.area.top < item.area.bottom {overlaps=overlaps+1}
+        j=j+1}
+    }
+    i=i+1}
+  let _=test.eq_u64(suite,buttons,4,"One K per track lane")
+  let _=test.eq_u64(suite,overlaps,0,"K overlaps no other header control")
+  let k: Row = header_k(state,track)
+  let headers: layout.Rect = layout.frame(1600.0,980.0).headers
+  let _=test.check(suite,k.area.right <= headers.right-6.0 and k.area.right-k.area.left == 28.0,"K sits at the right edge of the header column")
+  let _=test.eq_str(suite,header_label(state,track),"K","A closed lane without keys reads K")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Header K: view state only. No document, history, revision or sound change")
+  let before: string = transaction(state)
+  let sound_before: string = sound(state)
+  let epoch: u64 = state.document_revision
+  let _=test.eq_str(suite,click_header(state,track),"Automation lane: Gain","Click opens the Gain lane")
+  let _=test.check(suite,app.automation_open(state,track) and not app.automation_pan(state,track),"The overlay is open on Gain")
+  let _=test.eq_str(suite,header_label(state,track),"K:G","The button reads K:G")
+  app.set_pointer_shift(state,true)
+  let _=test.eq_str(suite,click_header(state,track),"Automation lane: Pan","Shift-click cycles to Pan")
+  let _=test.eq_str(suite,header_label(state,track),"K:P","The button reads K:P")
+  let _=test.eq_str(suite,click_header(state,track),"Automation lane: Gain","Shift-click cycles back to Gain")
+  app.set_pointer_shift(state,false)
+  let _=test.eq_str(suite,click_header(state,track),"Automation lane closed","A plain click closes the lane")
+  let _=test.check(suite,not app.automation_open(state,track),"The overlay is closed")
+  let _=test.eq_str(suite,transaction(state),before,"Document, history, redo and dirty flag are byte-identical")
+  let _=test.eq_u64(suite,state.document_revision,epoch,"The document revision did not change")
+  let _=test.eq_str(suite,sound(state),sound_before,"The sound signature did not change")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Header K: keyed tracks are marked, and a new project drops every overlay")
+  let _=commands.set_track_key(state,track,"pan",10,0.5,curve.linear())
+  let _=test.eq_str(suite,header_label(state,track),"K*","A track with keys reads K*")
+  let _=app.automation_toggle(state,track)
+  let _=app.automation_select(state,track,false,10)
+  let _=commands.new_project(state)
+  let _=test.check(suite,not app.automation_open(state,track),"Replacing the project closes every lane overlay")
+  let _=test.eq_u64(suite,app.automation_selected(state).track,0,"…and clears the selected key")
+  let _=test.done(suite)
+  ()
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite: test.Suite = test.suite("Track automation UI",false)
+  lane_math_suite(suite)
+  dock_suite(suite,root)
+  lane_suite(suite,root)
+  header_suite(suite,root)
+  test.conclude(suite,path.join(root,"track-automation-ui-tests.json"),24)
+}
