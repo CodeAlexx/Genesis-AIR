@@ -73,12 +73,14 @@ try {
   & python (Join-Path $PSScriptRoot 'channel_deadlines.py') --binary (Join-Path $Bin 'genesis-channel-deadlines.exe') `
     --root (Join-Path $work 'channel-deadlines') --report (Join-Path $reports 'channel-deadlines-tests.json')
   if ($LASTEXITCODE -ne 0) { throw 'The real TCP channel deadline gate failed.' }
-  & python (Join-Path $PSScriptRoot 'net_loopback_windows.py') `
-    --classifier (Join-Path $Bin 'genesis-net-loopback-classifier.exe') `
-    --policy (Join-Path $Bin 'genesis-net-loopback-policy.exe') `
-    --resource (Join-Path $Bin 'genesis-net-loopback-resource.exe') `
-    --report (Join-Path $reports 'net-loopback-windows.json')
-  if ($LASTEXITCODE -ne 0) { throw 'The native loopback transport policy/resource gate failed.' }
+  if (Test-Path -LiteralPath (Join-Path $Bin 'genesis-net-loopback-classifier.exe')) {
+    & python (Join-Path $PSScriptRoot 'net_loopback_windows.py') `
+      --classifier (Join-Path $Bin 'genesis-net-loopback-classifier.exe') `
+      --policy (Join-Path $Bin 'genesis-net-loopback-policy.exe') `
+      --resource (Join-Path $Bin 'genesis-net-loopback-resource.exe') `
+      --report (Join-Path $reports 'net-loopback-windows.json')
+    if ($LASTEXITCODE -ne 0) { throw 'The native loopback transport policy/resource gate failed.' }
+  } else { Write-Host 'Loopback overlay fixtures not built: the SDK runtime owns the loopback policy (channel-deadlines covers real TCP).' }
   Write-Host (Invoke-Native 'genesis-linked-media.exe' @((Join-Path $work 'linked-media'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'linked-media/linked-media-tests.json') -Destination (Join-Path $reports 'linked-media-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-snap-controls.exe' @((Join-Path $work 'snap-controls'))).TrimEnd()
@@ -309,6 +311,12 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_fade_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-fade-keys.exe') `
       --report (Join-Path $reports 'audio-fade-keys.json')
     if ($LASTEXITCODE -ne 0) { throw 'Clip fade automation SDK/PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_track_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-track-plan.exe') `
+      --report (Join-Path $reports 'audio-track-keys.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Track gain automation planner/worker/endpoint PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_track_project.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') --worker $worker `
+      --park-client (Join-Path $Bin 'genesis-endpoint-park.exe') --report (Join-Path $reports 'audio-track-project.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Saved-project track gain audition/export and endpoint park acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_nested.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') `
       --client (Join-Path $Bin 'genesis-audio-nested.exe') --worker $worker `
       --report (Join-Path $reports 'audio-nested.json')
@@ -458,6 +466,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'inspector-tests.json') -Destination (Join-Path $reports 'inspector-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-keyframe-controls.exe' @((Join-Path $work 'keyframe-controls'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'keyframe-controls/keyframe-controls-tests.json') -Destination (Join-Path $reports 'keyframe-controls-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-track-automation.exe' @((Join-Path $work 'track-automation'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'track-automation/track-automation-tests.json') -Destination (Join-Path $reports 'track-automation-tests.json') -Force
   $fadeControls = Join-Path $work 'fade-controls'
   Write-Host (Invoke-Native 'genesis-fade-controls.exe' @($fadeControls)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $fadeControls 'fade-controls-tests.json') -Destination (Join-Path $reports 'fade-controls-tests.json') -Force

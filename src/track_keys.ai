@@ -1,0 +1,207 @@
+// Track-level mixer automation (gain and pan) stored in the sequence-wide key store.
+//
+// A track key is a key with `clip == 0` named `track.<trackId>.gain` or `track.<trackId>.pan`.
+// Its frame is a TIMELINE frame of the track's owning sequence (clip keys are clip-local), so
+// no clip operation (move, trim, split, snapshot) touches it. `Key.owner` is the track's owner
+// and equals `doc.active` at write time. Static `Track.gain/pan` stay in the project; once a
+// parameter has a key the curve wins and deleting the last key restores the static value.
+//
+// A project containing any track key is written as revision 5 (std.editor_io); older readers
+// refuse it. Reads here never intern names, so inspecting an unkeyed track never dirties the
+// document. New automated mixer parameters must keep the `track.<id>.<param>` prefix.
+module genesis.track_keys
+import std.curve as curve
+import std.editor as editor
+import std.editor_io as editor_io
+import std.math as math
+import std.text as text
+import "filter_keys.ai" as filter_keys
+
+pub fn max_gain() -> f64 effects {} { 3.4028234663852886e38 }
+pub fn max_frame() -> i64 effects {} { 9007199254740991 }
+
+pub fn name(track: u64, param: str) -> string effects {alloc} {
+  text.concat("track.",text.concat(str.view(string.from_int(track)),text.concat(".",param)))
+}
+pub fn supported(param: str) -> bool effects {} {
+  str.eq(param,"gain") or str.eq(param,"pan")
+}
+// The track a key name addresses, or 0 when it is not a track key name.
+pub fn name_track(named: str) -> u64 effects {alloc} { editor_io.track_key_track(named) }
+
+pub fn value_ok(param: str, value: f64) -> bool effects {} {
+  if not math.is_finite(value) {return false}
+  if str.eq(param,"gain") {return value >= 0.0 and value <= max_gain()}
+  if str.eq(param,"pan") {return value >= -1.0 and value <= 1.0}
+  false
+}
+pub fn clamp(param: str, value: f64) -> f64 effects {} {
+  if str.eq(param,"pan") {
+    if value < -1.0 {return -1.0}
+    if value > 1.0 {return 1.0}
+    return value
+  }
+  if value < 0.0 {return 0.0}
+  if value > max_gain() {return max_gain()}
+  value
+}
+
+// 1-based index of the interned `track.<id>.<param>` name, or 0 when it was never
+// written. Planner reads must not intern, so an unkeyed track never dirties the document.
+pub fn param_index(doc: ref<editor.Document>, track: u64, param: str) -> u64 effects {alloc} {
+  let wanted: string = name(track,param)
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=names)) {break}
+    if str.eq(str.view(array.borrow(struct.borrow(doc,field=names),i)),str.view(wanted)) {return i+1}
+    i=i+1}
+  0
+}
+pub fn has(doc: ref<editor.Document>, track: u64, param: str) -> bool effects {alloc} {
+  filter_keys.has(doc,0,str.view(name(track,param)))
+}
+// Any automation on the track at all, for either parameter.
+pub fn has_any(doc: ref<editor.Document>, track: u64) -> bool effects {alloc} {
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == 0 and editor_io.track_key_param(str.view(editor.name_text(doc,key.param))) != 0 and
+        editor_io.track_key_track(str.view(editor.name_text(doc,key.param))) == track {return true}
+    i=i+1}
+  false
+}
+pub fn exact(doc: ref<editor.Document>, track: u64, param: str, frame: i64) -> option<editor.Key> effects {alloc} {
+  filter_keys.exact(doc,0,str.view(name(track,param)),frame)
+}
+pub fn neighbor(doc: ref<editor.Document>, track: u64, param: str, frame: i64, length: i64,
+                forward: bool) -> option<i64> effects {alloc} {
+  filter_keys.neighbor(doc,0,str.view(name(track,param)),frame,length,forward)
+}
+pub fn count(doc: ref<editor.Document>, track: u64, param: str) -> u64 effects {alloc} {
+  if not has(doc,track,param) {return 0}
+  editor.key_count(doc,0,str.view(name(track,param)))
+}
+// The curve at a timeline frame, or `fallback` when the parameter is unkeyed.
+pub fn reading(doc: ref<editor.Document>, track: u64, param: str, frame: i64,
+               fallback: f64) -> f64 effects {alloc} {
+  if not has(doc,track,param) {return fallback}
+  clamp(param,editor.value_at(doc,str.view(name(track,param)),frame,fallback))
+}
+
+// Validation shared by every writer. None means the key may be written.
+pub fn problem(doc: ref<editor.Document>, track: u64, param: str, frame: i64, value: f64,
+               interp: u32) -> option<string> effects {alloc} {
+  let slot: u64 = match editor.track_slot(doc,track) {
+    none=>{return option.some(string.copy("[GA_KEY_TARGET] No such track"))},some(found)=>found,
+  }
+  if struct.get(array.borrow(struct.borrow(doc,field=tracks),slot),field=owner) != doc.active {
+    return option.some(string.copy("[GA_KEY_TARGET] Track is outside the active sequence"))
+  }
+  if not supported(param) {
+    return option.some(string.copy("[GA_KEY_UNSUPPORTED] That track parameter cannot be automated"))
+  }
+  if not value_ok(param,value) {
+    return option.some(if str.eq(param,"gain") {
+      string.copy("[GA_AUDIO_TRACK_GAIN_KEYS] Track gain must be finite and nonnegative")
+    }else{
+      string.copy("[GA_AUDIO_TRACK_PAN_KEYS] Track pan must be finite and within -1..1")
+    })
+  }
+  if interp >= curve.interp_count() {
+    return option.some(string.copy("[GA_KEY_INTERPOLATION] Unknown interpolation mode"))
+  }
+  if frame < -max_frame() or frame > max_frame() {
+    return option.some(string.copy("[GA_KEY_RANGE] Key frame is out of range"))
+  }
+  option.none()
+}
+
+// Write (or replace) one key. The document is left untouched when this refuses.
+pub fn set(doc: ref<editor.Document>, track: u64, param: str, frame: i64, value: f64,
+           interp: u32) -> option<string> effects {alloc} {
+  match problem(doc,track,param,frame,value,interp) {none=>{},some(text)=>{return option.some(text)},}
+  if not editor.set_key(doc,0,str.view(name(track,param)),frame,value,interp) {
+    return option.some(string.copy("[GA_KEY_WRITE] The track key could not be written"))
+  }
+  option.none()
+}
+pub fn remove(doc: ref<editor.Document>, track: u64, param: str, frame: i64) -> bool effects {alloc} {
+  match exact(doc,track,param,frame) {none=>{return false},some(_)=>{},}
+  editor.remove_key(doc,0,str.view(name(track,param)),frame)
+}
+
+// Matching (name, frame) pairs are copied first because writes re-sort the store.
+fn collect(doc: ref<editor.Document>, track: u64, any_sequence: bool, sequence: u64,
+           names: ref<array<string>>, frames: ref<array<i64>>) -> unit effects {alloc} {
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    i=i+1
+    if key.clip != 0 {continue}
+    let named: string = editor.name_text(doc,key.param)
+    if editor_io.track_key_param(str.view(named)) == 0 {continue}
+    let id: u64 = editor_io.track_key_track(str.view(named))
+    if any_sequence {
+      let slot: u64 = match editor.track_slot(doc,id) {none=>{continue},some(found)=>found,}
+      if struct.get(array.borrow(struct.borrow(doc,field=tracks),slot),field=owner) != sequence {continue}
+    }
+    if not any_sequence and id != track {continue}
+    array.push(names,named)
+    array.push(frames,key.frame)
+  }
+  ()
+}
+fn drop_collected(doc: ref<editor.Document>, names: ref<array<string>>, frames: ref<array<i64>>) -> u64 effects {alloc} {
+  var removed: u64 = 0
+  var i: u64 = 0
+  loop {if i >= array.len(names) {break}
+    if editor.remove_key(doc,0,str.view(array.borrow(names,i)),array.get(frames,i)) {removed=removed+1}
+    i=i+1}
+  removed
+}
+// Remove all automation of one track (remove_track). Returns the number of keys removed.
+pub fn drop_track(doc: ref<editor.Document>, track: u64) -> u64 effects {alloc} {
+  var names: array<string> = array.new()
+  var frames: array<i64> = array.new()
+  collect(doc,track,false,0,names,frames)
+  drop_collected(doc,names,frames)
+}
+// Remove the automation of every track owned by a sequence (waveform reference copy,
+// sequence deletion). Keys whose track no longer exists are left to decode validation.
+pub fn drop_sequence(doc: ref<editor.Document>, sequence: u64) -> u64 effects {alloc} {
+  var names: array<string> = array.new()
+  var frames: array<i64> = array.new()
+  collect(doc,0,true,sequence,names,frames)
+  drop_collected(doc,names,frames)
+}
+// Give `to` the same automation as `from` (linked audio lane creation). Both tracks must
+// belong to the same sequence. Keys keep the source owner, so the active sequence is
+// switched for the duration of the write only.
+pub fn copy_track(doc: ref<editor.Document>, from: u64, to: u64) -> bool effects {alloc} {
+  let source: u64 = match editor.track_slot(doc,from) {none=>{return false},some(found)=>found,}
+  let target: u64 = match editor.track_slot(doc,to) {none=>{return false},some(found)=>found,}
+  let owner: u64 = struct.get(array.borrow(struct.borrow(doc,field=tracks),source),field=owner)
+  if struct.get(array.borrow(struct.borrow(doc,field=tracks),target),field=owner) != owner {return false}
+  var copied: array<editor.Key> = array.new()
+  var params: array<string> = array.new()
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    i=i+1
+    if key.clip != 0 {continue}
+    let named: string = editor.name_text(doc,key.param)
+    if editor_io.track_key_param(str.view(named)) == 0 or editor_io.track_key_track(str.view(named)) != from {continue}
+    array.push(copied,key)
+    array.push(params,if editor_io.track_key_param(str.view(named)) == 1 {string.copy("gain")}else{string.copy("pan")})
+  }
+  if array.len(copied) == 0 {return true}
+  let active: u64 = doc.active
+  struct.set(doc,owner,field=active)
+  var ok: bool = true
+  i=0
+  loop {if i >= array.len(copied) {break}
+    let key: editor.Key = array.get(copied,i)
+    if not editor.set_key(doc,0,str.view(name(to,str.view(array.borrow(params,i)))),key.frame,key.value,key.interp) {ok=false}
+    i=i+1}
+  struct.set(doc,active,field=active)
+  ok
+}

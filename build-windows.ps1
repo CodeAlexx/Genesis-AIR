@@ -10,7 +10,12 @@ param(
   [switch]$Launch,
   [switch]$SkipSmoke,
   [switch]$SkipTestRun,
-  [switch]$RunTests
+  [switch]$RunTests,
+  # Native Windows AIR compiler (airc.exe). The default toolchain; WSL is only used with -UseWsl.
+  [string]$Compiler = '',
+  [switch]$UseWsl,
+  # The SDK already carries the Genesis overlays as commits (see build-windows/patches-main).
+  [switch]$PreparedSdk
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -21,6 +26,9 @@ if (-not $AirSdk) {
 }
 if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
 $sdk = (Resolve-Path -LiteralPath $AirSdk).Path
+$buildRoot = Join-Path $here 'build-windows'
+if (-not $PreparedSdk -and (Select-String -LiteralPath (Join-Path $here 'air-sdk.conf') -Pattern '^AIR_SDK_PREPARED=1' -Quiet)) { $PreparedSdk = $true }
+if (-not $PreparedSdk) {
 $publishPatch = Join-Path $here 'patches/air-file-publish.patch'
 if (-not (Test-Path -LiteralPath $publishPatch)) { throw '[GA_SDK_PUBLISH_PATCH_MISSING] The portable file publication overlay is missing.' }
 $publishNativePreference = $PSNativeCommandUseErrorActionPreference
@@ -139,7 +147,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CAPTURE_PATCH_APPLY] Could not apply the Windows capture overlay.' }
   }
 } finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
-$buildRoot = Join-Path $here 'build-windows'
 $presentPatch = Join-Path $here 'patches/air-ui-present-immediate-windows.patch'
 if (-not (Test-Path -LiteralPath $presentPatch)) { throw '[GA_SDK_PRESENT_PATCH_MISSING] The Windows presenter overlay is missing.' }
 try {
@@ -152,16 +159,27 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_PRESENT_PATCH_APPLY] Could not apply the Windows presenter overlay.' }
   }
 } finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
+}
 $generated = if ($GeneratedDirectory) { [IO.Path]::GetFullPath($GeneratedDirectory) } else { Join-Path $buildRoot 'generated' }
 New-Item -ItemType Directory -Force -Path $generated, $Destination | Out-Null
+if (-not $UseWsl -and -not $Compiler) {
+  $Compiler = @((Join-Path $sdk '..\native-compiler-main\bin\airc.exe'), (Join-Path $sdk 'build-windows-compiler\bin\airc.exe')) |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $Compiler) { throw '[GA_TOOLCHAIN] Pass -Compiler C:\path\to\airc.exe (native Windows AIR compiler), or -UseWsl for the legacy WSL compiler.' }
+}
 function WslPath([string]$Value) {
   $mapped = (& wsl.exe -d $Distro -u root -- wslpath -a ($Value -replace '\\', '/')).Trim()
   if ($LASTEXITCODE -ne 0) { throw "Cannot map $Value into WSL." }
   $mapped
 }
-$sdkLinux = WslPath $sdk
-& wsl.exe -d $Distro -u root --exec test -x $LinuxCompiler
-if ($LASTEXITCODE -ne 0) { throw '[GA_TOOLCHAIN] Build the matching AIR compiler first with .\build-compiler-wsl.ps1.' }
+if ($UseWsl) {
+  $sdkLinux = WslPath $sdk
+  & wsl.exe -d $Distro -u root --exec test -x $LinuxCompiler
+  if ($LASTEXITCODE -ne 0) { throw '[GA_TOOLCHAIN] Build the matching AIR compiler first with .\build-compiler-wsl.ps1.' }
+} else {
+  $Compiler = (Resolve-Path -LiteralPath $Compiler).Path
+  Write-Output "AIR compiler: $Compiler (native Windows)"
+}
 $sources = ,@('main', 'src/main.ai')
 if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai'), @('audio-device', 'tests/audio_device.ai'), @('audio-playback', 'tests/audio_playback.ai'), @('audio-cancel', 'tests/audio_cancel.ai'), @('preview-async', 'tests/preview_async.ai'), @('preview-stream', 'tests/preview_stream.ai'), @('preview-input', 'tests/preview_input.ai'), @('inspector', 'tests/inspector.ai'), @('live-paint', 'tests/live_paint.ai'), @('project-safety', 'tests/project_safety.ai'), @('picture-queue', 'tests/picture_queue.ai')) }
 if ($RunTests) { $sources += @(@('keyed-video', 'tests/keyed_video.ai'), @('window-cache', 'tests/window_cache.ai'), @('editor-trim', 'tests/editor_trim.ai'), @('trim-history', 'tests/trim_history.ai'), @('recovery-ownership', 'tests/recovery_ownership.ai'), @('media-session', 'tests/media_session.ai'), @('spatial-canvas', 'tests/spatial_canvas.ai')) }
@@ -193,6 +211,7 @@ if ($RunTests) { $sources += ,@('standalone-endpoint-actor', 'tests/standalone_e
 if ($RunTests) { $sources += ,@('standalone-endpoint-cancel', 'tests/standalone_endpoint_cancel.ai') }
 if ($RunTests) { $sources += ,@('standalone-endpoint-timing', 'tests/standalone_endpoint_timing.ai') }
 if ($RunTests) { $sources += ,@('endpoint-park', 'tests/endpoint_park.ai') }
+if ($RunTests) { $sources += ,@('source-scrub', 'tests/source_scrub.ai') }
 if ($RunTests) { $sources += ,@('program-picture-persistent', 'tests/program_picture_persistent.ai') }
 if ($RunTests) { $sources += ,@('program-picture-protocol', 'tests/program_picture_protocol.ai') }
 if ($RunTests) { $sources += ,@('program-picture-control', 'tests/program_picture_control.ai') }
@@ -201,6 +220,8 @@ if ($RunTests) { $sources += ,@('program-picture-profile', 'tests/program_pictur
 if ($RunTests) { $sources += ,@('audio-edit-context', 'tests/audio_edit_context.ai') }
 if ($RunTests) { $sources += ,@('audio-nested-edit-context', 'tests/audio_nested_edit_context.ai') }
 if ($RunTests) { $sources += ,@('keyframe-controls', 'tests/keyframe_controls.ai') }
+if ($RunTests) { $sources += ,@('track-automation', 'tests/track_automation.ai') }
+if ($RunTests) { $sources += ,@('audio-track-plan', 'tests/audio_track_plan.ai') }
 if ($RunTests) { $sources += ,@('snap-controls', 'tests/snap_controls.ai') }
 if ($RunTests) { $sources += ,@('bidi-layout', 'tests/bidi_layout.ai') }
 if ($RunTests) { $sources += ,@('long-project-cycles', 'tests/long_project_cycles.ai') }
@@ -210,10 +231,20 @@ if ($RunTests) { $sources += ,@('filter-transactions', 'tests/filter_transaction
 if ($RunTests) { $sources += ,@('channel-deadlines', 'tests/channel_deadlines.ai') }
 if ($RunTests) { $sources += ,@('channel-read-first', 'tests/channel_read_first.ai') }
 foreach ($entry in $sources) {
-  $inputLinux = WslPath (Join-Path $here $entry[1])
-  $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
-  & wsl.exe -d $Distro -u root -- env "AIR_STDLIB=$sdkLinux/stdlib" $LinuxCompiler build $inputLinux `
-    -o "$outputLinux.bootstrap" --mode release --provider hash.sha256=portable --keep-c $outputLinux
+  if ($UseWsl) {
+    $inputLinux = WslPath (Join-Path $here $entry[1])
+    $outputLinux = WslPath (Join-Path $generated ($entry[0] + '.c'))
+    & wsl.exe -d $Distro -u root -- env "AIR_STDLIB=$sdkLinux/stdlib" $LinuxCompiler build $inputLinux `
+      -o "$outputLinux.bootstrap" --mode release --provider hash.sha256=portable --keep-c $outputLinux
+  } else {
+    $airInput = Join-Path $here $entry[1]
+    $airOutput = Join-Path $generated ($entry[0] + '.c')
+    $previousStdlib = $env:AIR_STDLIB
+    $env:AIR_STDLIB = Join-Path $sdk 'stdlib'
+    try {
+      & $Compiler build $airInput -o "$airOutput.bootstrap.exe" --mode release --provider hash.sha256=portable --keep-c $airOutput
+    } finally { $env:AIR_STDLIB = $previousStdlib }
+  }
   if ($LASTEXITCODE -ne 0) { throw "AIR compilation failed: $($entry[1])" }
 }
 $cmake = (Get-Command cmake.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
@@ -256,7 +287,9 @@ if ($RunTests) { $targets += @('genesis-audio-plan-preflight') }
 if ($RunTests) { $targets += @('genesis-linked-media') }
 if ($RunTests) { $targets += @('genesis-channel-deadlines') }
 if ($RunTests) { $targets += @('genesis-channel-read-first') }
-if ($RunTests) { $targets += @('genesis-net-loopback-classifier', 'genesis-net-loopback-policy', 'genesis-net-loopback-resource') }
+# The loopback overlay fixtures exist only when the SDK still uses the Genesis loopback classifier.
+$loopbackOverlay = Select-String -LiteralPath (Join-Path $sdk 'runtime/windows/air_net_win32.c') -Pattern 'classify_loopback_peer' -Quiet
+if ($RunTests -and $loopbackOverlay) { $targets += @('genesis-net-loopback-classifier', 'genesis-net-loopback-policy', 'genesis-net-loopback-resource') }
 if ($RunTests) { $targets += @('genesis-lazy-gpu-fault') }
 if ($RunTests) { $targets += @('genesis-native-hdr-runtime') }
 if ($RunTests) { $targets += @('genesis-native-u16-upload') }
@@ -264,11 +297,13 @@ if ($RunTests) { $targets += @('genesis-export-ownership-worker') }
 if ($RunTests) { $targets += @('genesis-audio-context') }
 if ($RunTests) { $targets += @('genesis-audio-context-retime') }
 if ($RunTests) { $targets += @('genesis-audio-tail-context', 'genesis-audio-tail-history') }
-if ($RunTests) { $targets += @('genesis-standalone-endpoint-controller', 'genesis-standalone-endpoint-preview', 'genesis-standalone-endpoint-media', 'genesis-standalone-endpoint-actor', 'genesis-standalone-endpoint-cancel', 'genesis-standalone-endpoint-timing', 'genesis-endpoint-park') }
+if ($RunTests) { $targets += @('genesis-standalone-endpoint-controller', 'genesis-standalone-endpoint-preview', 'genesis-standalone-endpoint-media', 'genesis-standalone-endpoint-actor', 'genesis-standalone-endpoint-cancel', 'genesis-standalone-endpoint-timing', 'genesis-endpoint-park', 'genesis-source-scrub') }
 if ($RunTests) { $targets += @('genesis-program-picture-persistent', 'genesis-program-picture-protocol', 'genesis-program-picture-control', 'genesis-program-picture-epoch', 'genesis-program-picture-profile', 'genesis-program-picture-mock') }
 if ($RunTests) { $targets += @('genesis-audio-edit-context') }
 if ($RunTests) { $targets += @('genesis-audio-nested-edit-context') }
 if ($RunTests) { $targets += @('genesis-keyframe-controls') }
+if ($RunTests) { $targets += @('genesis-track-automation') }
+if ($RunTests) { $targets += @('genesis-audio-track-plan') }
 if ($RunTests) { $targets += @('genesis-snap-controls') }
 if ($RunTests) { $targets += @('genesis-bidi-layout') }
 if ($RunTests) { $targets += @('genesis-long-project-cycles') }

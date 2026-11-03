@@ -1,0 +1,523 @@
+// Track-level automation, phase 1: data model, project format and commands (no sound, no UI).
+// Track keys are sequence-wide keys (clip 0) named track.<id>.gain / track.<id>.pan.
+module genesis.tests.track_automation
+import std.editor as editor
+import std.editor_io as store
+import std.codec as codec
+import std.curve as curve
+import std.files as files
+import std.math as math
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/app.ai" as app
+import "../src/commands.ai" as commands
+import "../src/linked_media.ai" as linked
+import "../src/preview.ai" as preview
+import "../src/provider.ai" as provider
+import "../src/track_keys.ai" as track_keys
+
+fn encoded(doc: ref<editor.Document>) -> string effects {alloc} {
+  match store.encode(doc) {ok(value)=>value,err(_)=>string.copy("encode failed"),}
+}
+fn digest(value: str) -> string effects {alloc} {
+  var sum: bytes = hash.sha256(str.bytes(value))
+  bytes.hex(bytes.view(sum))
+}
+// "ok" when the text decodes, otherwise the refusal's JSON pointer.
+fn decode_path(value: str) -> string effects {alloc} {
+  match store.decode(value) {ok(_)=>string.copy("ok"),err(problem)=>string.copy(str.view(problem.path)),}
+}
+fn transaction(state: ref<app.App>) -> string effects {alloc} {
+  var out: string = encoded(struct.borrow(state,field=document))
+  string.append(out,string.from_int(state.document_revision))
+  string.append(out,if app.dirty(state) {"dirty"}else{"clean"})
+  let history: ref<editor.History> = struct.borrow(state,field=history)
+  var i: u64 = 0
+  loop {if i >= editor.undo_depth(history) {break}
+    string.append(out,"undo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=undo),i)))
+    i=i+1}
+  i=0
+  loop {if i >= editor.redo_depth(history) {break}
+    string.append(out,"redo")
+    string.append(out,encoded(array.borrow(struct.borrow(history,field=redo),i)))
+    i=i+1}
+  out
+}
+fn track_key_total(doc: ref<editor.Document>) -> u64 effects {alloc} {
+  var total: u64 = 0
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == 0 and store.track_key_param(str.view(editor.name_text(doc,key.param))) != 0 {total=total+1}
+    i=i+1}
+  total
+}
+fn revision_marker(value: str, revision: u64) -> bool effects {alloc} {
+  text.contains(value,text.concat("\"revision\":",string.from_int(revision)))
+}
+
+// ---------------------------------------------------------------------------
+// Static (legacy) fixtures. Their encoded bytes must not change with this feature.
+
+fn static_rev2() -> editor.Document effects {alloc} {
+  var doc: editor.Document = editor.document(30.0,64,36)
+  let src: u64 = editor.add_source(doc,"a.mov","A",300,30.0)
+  let _=editor.describe_source(doc,src,64,36,true,true,48000,2)
+  let video: u64 = editor.add_track(doc,doc.active,editor.track_video(),"V1")
+  let audio: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let _=editor.set_track_gain(doc,audio,0.5)
+  let _=editor.set_track_pan(doc,audio,-0.25)
+  let clip: u64 = option.unwrap(editor.place(doc,video,src,0,90,4))
+  let _=editor.set_key(doc,clip,"opacity",0,1.0,curve.linear())
+  let _=editor.set_key(doc,clip,"opacity",30,0.5,curve.smooth())
+  let _=editor.set_key(doc,0,"sequence.future",10,2.0,curve.hold())
+  doc
+}
+fn static_rev3() -> editor.Document effects {alloc} {
+  var doc: editor.Document = editor.document(59.94,64,36)
+  let src: u64 = editor.add_source(doc,"sample.wav","Sample",100000,59.94)
+  let tr: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id: u64 = option.unwrap(editor.place(doc,tr,src,300,180,7))
+  let _=editor.split(doc,id,67)
+  doc
+}
+fn static_rev4() -> editor.Document effects {alloc} {
+  var doc: editor.Document = editor.document(30.0,64,36)
+  let src: u64 = editor.add_source(doc,"sample.wav","Sample",2100,30.0)
+  let tr: u64 = editor.add_track(doc,doc.active,editor.track_audio(),"A1")
+  let id: u64 = option.unwrap(editor.place(doc,tr,src,2000,60,10))
+  var kinds: array<string> = ["delay","reverb"]
+  var at: u64 = 0
+  loop {if at >= array.len(kinds) {break}
+    let filter: u64 = option.unwrap(editor.add_filter(doc,id,str.view(array.borrow(kinds,at))))
+    let _=editor.set_filter_enabled(doc,filter,false)
+    at=at+1}
+  let _=editor.trim_end(doc,id,30)
+  let _=editor.set_clip_speed(doc,id,2.0)
+  doc
+}
+
+// Frozen from the pre-feature encoder (the revision 2/3/4 writers of the unmodified codec
+// overlay produced exactly these SHA-256 digests for the fixtures above).
+fn golden_rev2() -> str effects {} { "fff33be60e66627b27f1fa770a3364d8e1c2c25379a22ff34deeca1cfdebf989" }
+fn golden_rev3() -> str effects {} { "1d9a72be5b8f4a1a81dcad5428be5205396f17cd28190e9e7f3cd2b1ce6672bb" }
+fn golden_rev4() -> str effects {} { "1c795804e530835341cdd3f9d43f04c29a09aeb7f531720a75030807cd94030a" }
+
+fn absent(doc: ref<editor.Document>, track: u64, param: str, frame: i64) -> bool effects {alloc} {
+  match track_keys.exact(doc,track,param,frame) {none=>true,some(_)=>false,}
+}
+
+// Track 4 is V1 (video, owner 2) and track 5 is A1 (audio, owner 2) in `static_rev2`.
+fn keyed() -> editor.Document effects {alloc} {
+  var doc: editor.Document = static_rev2()
+  let _=track_keys.set(doc,5,"gain",0,1.0,curve.linear())
+  let _=track_keys.set(doc,5,"gain",30,0.25,curve.smooth())
+  let _=track_keys.set(doc,5,"gain",-10,0.5,curve.hold())
+  let _=track_keys.set(doc,5,"gain",200,2.0,curve.linear())
+  let _=track_keys.set(doc,5,"pan",10,-1.0,curve.linear())
+  let _=track_keys.set(doc,5,"pan",20,0.5,curve.smooth_natural())
+  let _=track_keys.set(doc,4,"gain",5,0.75,curve.linear())
+  doc
+}
+fn key_json(owner: u64, doc: ref<editor.Document>, name: str, frame: i64, value: str, interp: u32) -> string effects {alloc} {
+  let param: u64 = editor.name_id(doc,name)
+  var out: string = text.concat("{\"clip\":0,\"owner\":",string.from_int(owner))
+  string.append(out,",\"param\":")
+  string.append(out,string.from_int(param))
+  string.append(out,",\"frame\":")
+  string.append(out,string.from_int(frame))
+  string.append(out,",\"value\":")
+  string.append(out,value)
+  string.append(out,",\"interp\":")
+  string.append(out,string.from_int(interp))
+  string.append(out,"}")
+  out
+}
+fn mutated(saved: str, from: str, to: str, suite: ref<test.Suite>) -> string effects {alloc} {
+  let changed: string = text.replace(saved,from,to)
+  let _=test.check(suite,not str.eq(str.view(changed),saved),"Fixture mutation changes exactly the authored field")
+  changed
+}
+fn key_ledger(doc: ref<editor.Document>) -> string effects {alloc} {
+  var out: string = string.new()
+  var i: u64 = 0
+  loop {if i >= array.len(struct.borrow(doc,field=keys)) {break}
+    let key: editor.Key = array.get(struct.borrow(doc,field=keys),i)
+    if key.clip == 0 {
+      string.append(out,editor.name_text(doc,key.param))
+      string.append(out,"@")
+      string.append(out,string.from_int(key.frame))
+      string.append(out,"=")
+      string.append(out,string.from_float(key.value))
+      string.append(out,"/")
+      string.append(out,string.from_int(key.interp))
+      string.append(out,"/")
+      string.append(out,string.from_int(key.owner))
+      string.append(out,";")
+    }
+    i=i+1}
+  out
+}
+
+fn format_suite(suite: ref<test.Suite>) -> unit effects {alloc,time,fs.meta,fs.write} {
+  let _=test.start(suite,"Projects without track automation keep their revision 2/3/4 bytes exactly")
+  var legacy2: editor.Document = static_rev2()
+  var legacy3: editor.Document = static_rev3()
+  var legacy4: editor.Document = static_rev4()
+  let text2: string = encoded(legacy2)
+  let text3: string = encoded(legacy3)
+  let text4: string = encoded(legacy4)
+  let _=test.check(suite,revision_marker(str.view(text2),2) and revision_marker(str.view(text3),3) and revision_marker(str.view(text4),4),"Static projects write revision 2, 3 and 4 as before")
+  let _=test.eq_str(suite,digest(str.view(text2)),golden_rev2(),"Revision 2 bytes match the pre-feature encoder")
+  let _=test.eq_str(suite,digest(str.view(text3)),golden_rev3(),"Revision 3 bytes match the pre-feature encoder")
+  let _=test.eq_str(suite,digest(str.view(text4)),golden_rev4(),"Revision 4 bytes match the pre-feature encoder")
+  let _=test.eq_u64(suite,store.schema_revision(),5,"This build writes revision 5 at most")
+  var back2: editor.Document = match store.decode(str.view(text2)) {err(_)=>{return ()},ok(value)=>value,}
+  var back3: editor.Document = match store.decode(str.view(text3)) {err(_)=>{return ()},ok(value)=>value,}
+  var back4: editor.Document = match store.decode(str.view(text4)) {err(_)=>{return ()},ok(value)=>value,}
+  let _=test.check(suite,str.eq(str.view(encoded(back2)),str.view(text2)) and str.eq(str.view(encoded(back3)),str.view(text3)) and str.eq(str.view(encoded(back4)),str.view(text4)),"Revisions 2-4 still decode and re-encode byte-for-byte")
+  var plain_named: editor.Document = static_rev2()
+  let _=editor.set_key(plain_named,0,"track.04.gain",12,0.5,curve.linear())
+  let _=editor.set_key(plain_named,0,"track.x.gain",12,0.5,curve.linear())
+  let _=editor.set_key(plain_named,0,"track.4",12,0.5,curve.linear())
+  let _=test.check(suite,revision_marker(str.view(encoded(plain_named)),2),"Other sequence-wide names (non-canonical track ids included) never raise the revision")
+  let _=test.eq_u64(suite,track_key_total(plain_named),0,"Those names are not track keys")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"A project with track keys writes revision 5 and round-trips exactly")
+  var doc: editor.Document = keyed()
+  let _=test.eq_u64(suite,track_key_total(doc),7,"Seven track keys authored")
+  let saved: string = encoded(doc)
+  let _=test.check(suite,revision_marker(str.view(saved),5),"Track automation writes revision 5")
+  var loaded: editor.Document = match store.decode(str.view(saved)) {
+    err(problem)=>{let _=test.check(suite,false,str.view(problem.path))
+      return ()},ok(value)=>value,
+  }
+  let _=test.eq_str(suite,encoded(loaded),str.view(saved),"Decode then encode reproduces revision 5 byte-for-byte")
+  let _=test.eq_str(suite,key_ledger(loaded),str.view(key_ledger(doc)),"Every key field survives, including negative and past-the-end frames")
+  let _=test.near_f64(suite,track_keys.reading(loaded,5,"gain",15,1.0),track_keys.reading(doc,5,"gain",15,1.0),0.0,"Evaluation is identical after reopening")
+  let _=test.check(suite,track_keys.has(loaded,5,"gain") and track_keys.has(loaded,5,"pan") and track_keys.has(loaded,4,"gain") and not track_keys.has(loaded,4,"pan"),"Keyed parameters are discovered after reopening")
+  let _=test.check(suite,track_keys.has_any(loaded,4) and track_keys.has_any(loaded,5) and not track_keys.has_any(loaded,99),"Per-track discovery")
+  var mode: u32 = 0
+  loop {if mode >= curve.interp_count() {break}
+    var one: editor.Document = static_rev2()
+    let _=track_keys.set(one,5,"pan",7,0.5,mode)
+    let _=track_keys.set(one,5,"pan",9,-0.5,mode)
+    var again: editor.Document = match store.decode(str.view(encoded(one))) {err(_)=>{return ()},ok(value)=>value,}
+    let kept: editor.Key = option.unwrap(track_keys.exact(again,5,"pan",9))
+    let _=test.eq_u64(suite,cast.wrap(kept.interp),cast.wrap(mode),"Interpolation mode survives a round trip")
+    mode=mode+1}
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Track keys are refused below revision 5 and when invalid")
+  let _=test.eq_str(suite,decode_path(str.view(saved)),"ok","Baseline revision 5 decodes")
+  var revision: u64 = 2
+  loop {if revision >= 5 {break}
+    let old: string = mutated(str.view(saved),"\"revision\":5",str.view(text.concat("\"revision\":",string.from_int(revision))),suite)
+    let _=test.eq_str(suite,decode_path(str.view(old)),"/revision","Older revisions cannot carry track automation")
+    revision=revision+1}
+  let _=test.eq_str(suite,decode_path(str.view(mutated(str.view(saved),"\"revision\":5","\"revision\":6",suite))),"/revision","Future revisions are still refused")
+  let _=test.eq_str(suite,decode_path(str.view(mutated(str.view(saved),"track.5.gain","track.9.gain",suite))),"/keys/1","A key for a missing track is refused with its path")
+  let _=test.check(suite,decode_path(str.view(mutated(str.view(saved),"track.5.pan","track.5.mute",suite))) != "ok","An unknown track parameter is refused strictly")
+  let gain0: string = key_json(2,doc,"track.5.gain",0,"1",curve.linear())
+  let _=test.check(suite,text.contains(str.view(saved),str.view(gain0)),"Fixture key text is as expected")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(gain0),str.view(key_json(3,doc,"track.5.gain",0,"1",curve.linear()))))),"/keys/2","A key owned by another sequence than its track is refused")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(gain0),str.view(key_json(2,doc,"track.5.gain",0,"1",38))))),"/keys/2","Interpolation 38 is refused")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(gain0),str.view(key_json(2,doc,"track.5.gain",0,"-0.5",curve.linear()))))),"/keys/2","Negative gain is refused")
+  let pan20: string = key_json(2,doc,"track.5.pan",20,"0.5",curve.smooth_natural())
+  let _=test.check(suite,text.contains(str.view(saved),str.view(pan20)),"Pan fixture key text is as expected")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(pan20),str.view(key_json(2,doc,"track.5.pan",20,"1.5",curve.linear()))))),"/keys/6","Pan above 1 is refused")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(pan20),str.view(key_json(2,doc,"track.5.pan",20,"-1.5",curve.linear()))))),"/keys/6","Pan below -1 is refused")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(pan20),str.view(key_json(2,doc,"track.5.pan",20,"1",curve.linear()))))),"ok","Pan exactly 1 is valid")
+  let _=test.eq_str(suite,decode_path(str.view(text.replace(str.view(saved),str.view(pan20),str.view(key_json(2,doc,"track.5.pan",9007199254740992,"0",curve.linear()))))),"/keys/6","A frame beyond the exact integer range is refused")
+  // The encoder applies the same rules, so a save can never write a file that cannot reopen.
+  var bad: editor.Document = static_rev2()
+  let _=editor.set_key(bad,0,"track.99.gain",3,1.0,curve.linear())
+  let _=test.check(suite,match store.encode(bad) {err(problem)=>str.eq(str.view(problem.path),"/keys/1"),ok(_)=>false,},"Encoding a key for a missing track is refused with its path")
+  var nan: editor.Document = static_rev2()
+  let _=editor.set_key(nan,0,"track.5.gain",3,math.nan(),curve.linear())
+  let _=test.check(suite,match store.encode(nan) {err(_)=>true,ok(_)=>false,},"Encoding a non-finite gain key is refused")
+  var inf: editor.Document = static_rev2()
+  let _=editor.set_key(inf,0,"track.5.gain",3,math.infinity(),curve.linear())
+  let _=test.check(suite,match store.encode(inf) {err(_)=>true,ok(_)=>false,},"Encoding an infinite gain key is refused")
+  var pan: editor.Document = static_rev2()
+  let _=editor.set_key(pan,0,"track.5.pan",3,1.5,curve.linear())
+  let _=test.check(suite,match store.encode(pan) {err(_)=>true,ok(_)=>false,},"Encoding pan 1.5 is refused")
+  var mix: editor.Document = static_rev2()
+  let second: u64 = editor.add_sequence(mix,"Other",30.0,64,36)
+  let _=editor.set_active(mix,second)
+  let _=editor.set_key(mix,0,"track.5.gain",3,1.0,curve.linear())
+  let _=test.check(suite,match store.encode(mix) {err(_)=>true,ok(_)=>false,},"Encoding a key stamped by a foreign active sequence is refused")
+  var future: editor.Document = static_rev2()
+  let _=editor.set_key(future,0,"track.5.mute",3,1.0,curve.hold())
+  let _=test.check(suite,match store.encode(future) {err(_)=>true,ok(_)=>false,},"Encoding an unknown track parameter is refused")
+  let _=test.done(suite)
+  ()
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+
+fn fixture(root: str) -> app.App effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var state: app.App = app.app(provider.fake(root))
+  let video: u64 = app.default_video_track(state)
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let source: u64 = editor.add_source(doc,"auto.mov","Auto",240,30.0)
+  let _=editor.describe_source(doc,source,64,36,true,true,48000,2)
+  let _=editor.place(doc,video,source,0,60,0)
+  let _=commands.seek(state,10)
+  app.mark_dirty(state,false)
+  state
+}
+fn depth_of(state: ref<app.App>) -> u64 effects {} { editor.undo_depth(struct.borrow(state,field=history)) }
+
+fn commands_suite(suite: ref<test.Suite>, root: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write,process} {
+  var state: app.App = fixture(root)
+  let audio: u64 = app.default_audio_track(state)
+  let video: u64 = app.default_video_track(state)
+
+  let _=test.start(suite,"K on a track parameter writes one timeline-frame key and one Undo removes it")
+  let before: string = encoded(struct.borrow(state,field=document))
+  let names_before: u64 = array.len(struct.borrow(struct.borrow(state,field=document),field=names))
+  let _=test.near_f64(suite,track_keys.reading(struct.borrow(state,field=document),audio,"gain",10,1.0),1.0,0.0,"Unkeyed reading is the static fallback")
+  let _=test.eq_u64(suite,array.len(struct.borrow(struct.borrow(state,field=document),field=names)),names_before,"Reading an unkeyed track never interns names")
+  let _=test.check(suite,not track_keys.has_any(struct.borrow(state,field=document),audio),"No automation yet")
+  let first: commands.Result = commands.keyframe_parameter(state,3,audio,"","gain",0.5)
+  let _=test.check(suite,first.ok,"keyframe_parameter dispatches domain 3")
+  let _=test.eq_u64(suite,depth_of(state),1,"Exactly one history entry")
+  let _=test.check(suite,track_keys.has(struct.borrow(state,field=document),audio,"gain") and not track_keys.has(struct.borrow(state,field=document),audio,"pan"),"Only the gain curve exists")
+  let written: editor.Key = option.unwrap(track_keys.exact(struct.borrow(state,field=document),audio,"gain",10))
+  let _=test.check(suite,written.clip == 0 and written.owner == struct.borrow(state,field=document).active and written.value == 0.5 and written.interp == curve.linear(),"Key is sequence-wide, owner-stamped, at the playhead's TIMELINE frame")
+  let _=test.check(suite,revision_marker(str.view(encoded(struct.borrow(state,field=document))),5),"The document now saves as revision 5")
+  let _=test.check(suite,state.document_revision > 0 and app.dirty(state),"The document is dirty and its revision advanced")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),str.view(before),"Undo restores every authored byte")
+  let _=commands.redo(state)
+  let _=test.check(suite,track_keys.has(struct.borrow(state,field=document),audio,"gain"),"Redo restores the key")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Reading follows the curve; the static value is only the fallback")
+  let _=commands.seek(state,40)
+  let _=commands.keyframe_parameter(state,3,audio,"","gain",1.5)
+  let _=test.near_f64(suite,track_keys.reading(struct.borrow(state,field=document),audio,"gain",25,0.0),1.0,1.0e-12,"Linear midpoint between 0.5@10 and 1.5@40")
+  let _=test.near_f64(suite,track_keys.reading(struct.borrow(state,field=document),audio,"gain",0,0.0),0.5,0.0,"Held before the first key")
+  let _=test.near_f64(suite,track_keys.reading(struct.borrow(state,field=document),audio,"gain",90,0.0),1.5,0.0,"Held after the last key")
+  let _=test.near_f64(suite,track_keys.reading(struct.borrow(state,field=document),audio,"pan",25,0.3),0.3,0.0,"A pan with no keys still reads its fallback")
+  let _=test.eq_u64(suite,track_keys.count(struct.borrow(state,field=document),audio,"gain"),2,"Two gain keys")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"All 38 interpolation modes through manage_key, saved and reloaded")
+  let _=commands.seek(state,10)
+  var mode: u32 = 0
+  loop {if mode >= curve.interp_count() {break}
+    let changed: commands.Result = commands.manage_key(state,3,audio,"","gain",3,mode)
+    let _=test.check(suite,changed.ok,"Every SDK interpolation mode is accepted")
+    var reloaded: editor.Document = match store.decode(str.view(encoded(struct.borrow(state,field=document)))) {err(_)=>{return ()},ok(value)=>value,}
+    let _=test.eq_u64(suite,cast.wrap(option.unwrap(track_keys.exact(reloaded,audio,"gain",10)).interp),cast.wrap(mode),"Mode survives a fresh decode")
+    mode=mode+1}
+  let depth: u64 = depth_of(state)
+  let same: commands.Result = commands.manage_key(state,3,audio,"","gain",3,curve.interp_count()-1)
+  let _=test.check(suite,same.ok and depth_of(state) == depth,"Re-selecting the current mode records nothing")
+  let _=test.check(suite,not commands.manage_key(state,3,audio,"","gain",3,curve.interp_count()).ok,"Mode 38 is refused")
+  let _=commands.manage_key(state,3,audio,"","gain",3,curve.smooth())
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Previous, next and delete at the playhead; deleting the last key restores the static value")
+  let _=commands.seek(state,25)
+  let _=test.check(suite,commands.manage_key(state,3,audio,"","gain",1,0).ok and editor.playhead(struct.borrow(state,field=document)) == 40,"Next key seeks the timeline frame")
+  let _=test.check(suite,commands.manage_key(state,3,audio,"","gain",0,0).ok and editor.playhead(struct.borrow(state,field=document)) == 10,"Previous key seeks the timeline frame")
+  let _=test.check(suite,not commands.manage_key(state,3,audio,"","gain",0,0).ok,"No key before the first")
+  let _=test.check(suite,commands.manage_key(state,3,audio,"","gain",2,0).ok,"Delete at a key succeeds")
+  let _=test.eq_u64(suite,track_keys.count(struct.borrow(state,field=document),audio,"gain"),1,"One key left")
+  let _=test.check(suite,not commands.manage_key(state,3,audio,"","gain",2,0).ok,"Delete away from a key is refused")
+  let _=commands.seek(state,40)
+  let _=test.check(suite,commands.manage_key(state,3,audio,"","gain",2,0).ok,"Deleting the final key succeeds")
+  let _=test.check(suite,not track_keys.has(struct.borrow(state,field=document),audio,"gain"),"The curve is gone")
+  let static_gain: f64 = editor.track_gain(struct.borrow(state,field=document),audio)
+  let _=test.near_f64(suite,track_keys.reading(struct.borrow(state,field=document),audio,"gain",40,static_gain),1.0,0.0,"The static value reads again")
+  let _=test.check(suite,revision_marker(str.view(encoded(struct.borrow(state,field=document))),2),"With no track keys the project is written as revision 2 again")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Explicit add, move and delete are single undoable edits")
+  let base: u64 = depth_of(state)
+  let _=test.check(suite,commands.set_track_key(state,audio,"pan",20,-0.5,curve.smooth()).ok,"Add a pan key at an explicit frame")
+  let _=test.check(suite,commands.set_track_key(state,audio,"pan",50,0.5,curve.hold()).ok,"Add a second pan key")
+  let _=test.eq_u64(suite,depth_of(state),base+2,"One history entry each")
+  let _=test.check(suite,commands.move_track_key(state,audio,"pan",20,35,-0.25).ok,"Move frame and value")
+  let moved: editor.Key = option.unwrap(track_keys.exact(struct.borrow(state,field=document),audio,"pan",35))
+  let _=test.check(suite,moved.value == -0.25 and moved.interp == curve.smooth(),"Moving keeps the interpolation")
+  let _=test.check(suite,absent(struct.borrow(state,field=document),audio,"pan",20),"The old frame is gone")
+  let _=test.eq_u64(suite,depth_of(state),base+3,"The move is one entry")
+  let ledger: string = key_ledger(struct.borrow(state,field=document))
+  let _=test.check(suite,commands.move_track_key(state,audio,"pan",35,35,0.0).ok,"Moving in place only changes the value")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,key_ledger(struct.borrow(state,field=document)),str.view(ledger),"Undo of a move restores key bytes")
+  let before_refusals: string = transaction(state)
+  let _=test.check(suite,not commands.move_track_key(state,audio,"pan",35,50,0.0).ok,"Moving onto an existing key is refused")
+  let _=test.check(suite,not commands.move_track_key(state,audio,"pan",36,40,0.0).ok,"Moving a missing key is refused")
+  let _=test.check(suite,not commands.move_track_key(state,audio,"pan",35,-1,0.0).ok,"Moving before the timeline start is refused")
+  let _=test.check(suite,not commands.delete_track_key(state,audio,"pan",36).ok,"Deleting a missing key is refused")
+  let _=test.eq_str(suite,transaction(state),str.view(before_refusals),"Refusals preserve document, history, redo and dirty state")
+  let _=test.check(suite,commands.delete_track_key(state,audio,"pan",35).ok and commands.delete_track_key(state,audio,"pan",50).ok,"Delete both pan keys")
+  let _=test.check(suite,not track_keys.has_any(struct.borrow(state,field=document),audio),"No automation remains")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Refusals leave document, history, redo and revision untouched")
+  let _=commands.set_track_key(state,audio,"gain",5,1.0,curve.linear())
+  let _=commands.undo(state)
+  let _=test.eq_u64(suite,editor.redo_depth(struct.borrow(state,field=history)),1,"A redo entry exists")
+  let frozen: string = transaction(state)
+  let _=test.check(suite,not commands.set_track_key(state,audio,"gain",5,math.nan(),curve.linear()).ok,"NaN gain refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"gain",5,-0.1,curve.linear()).ok,"Negative gain refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"gain",5,math.infinity(),curve.linear()).ok,"Infinite gain refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"pan",5,1.5,curve.linear()).ok,"Pan above 1 refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"pan",5,-1.5,curve.linear()).ok,"Pan below -1 refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"gain",5,1.0,38).ok,"Unknown interpolation refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"gain",-1,1.0,curve.linear()).ok,"Negative frame refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"mute",5,1.0,curve.hold()).ok,"Unknown parameter refused")
+  let _=test.check(suite,not commands.set_track_key(state,9999,"gain",5,1.0,curve.linear()).ok,"Missing track refused")
+  let _=test.check(suite,not commands.keyframe_parameter(state,3,9999,"","gain",1.0).ok,"K on a missing track refused")
+  let _=test.check(suite,not commands.keyframe_parameter(state,3,audio,"audio","gain",1.0).ok,"K with an effect family on a track refused")
+  let _=test.check(suite,not commands.keyframe_parameter(state,3,audio,"","gain",math.nan()).ok,"K with NaN refused")
+  let _=test.check(suite,not commands.manage_key(state,3,audio,"","gain",2,0).ok,"Delete with no key refused")
+  let _=test.check(suite,not commands.manage_key(state,3,audio,"","gain",4,0).ok,"Unknown action refused")
+  let _=test.check(suite,not commands.manage_key(state,3,9999,"","gain",1,0).ok,"Stale track target refused")
+  let _=test.check(suite,not commands.manage_key(state,3,audio,"","volume",1,0).ok,"Unsupported parameter refused")
+  let _=test.eq_str(suite,transaction(state),str.view(frozen),"Refusals changed nothing: document, history, redo, revision, dirty")
+  let _=test.check(suite,editor.set_track_lock(struct.borrow(state,field=document),audio,true),"Lock the audio track")
+  let locked: string = transaction(state)
+  let _=test.check(suite,not commands.keyframe_parameter(state,3,audio,"","gain",1.0).ok,"K on a locked track refused")
+  let _=test.check(suite,not commands.set_track_key(state,audio,"gain",5,1.0,curve.linear()).ok,"Add on a locked track refused")
+  let _=test.eq_str(suite,transaction(state),str.view(locked),"Locked-track refusals preserve everything")
+  let _=editor.set_track_lock(struct.borrow(state,field=document),audio,false)
+  // Another sequence's track cannot be automated while this one is active.
+  let child: u64 = editor.add_sequence(struct.borrow(state,field=document),"Child",30.0,64,36)
+  let foreign: u64 = editor.add_track(struct.borrow(state,field=document),child,editor.track_audio(),"CA1")
+  let foreign_state: string = transaction(state)
+  let _=test.check(suite,not commands.keyframe_parameter(state,3,foreign,"","gain",1.0).ok and not commands.set_track_key(state,foreign,"gain",3,1.0,curve.linear()).ok,"A track of another sequence is refused")
+  let _=test.eq_str(suite,transaction(state),str.view(foreign_state),"Foreign-track refusals preserve everything")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Slider writes edit the curve when keyed and the static value otherwise")
+  let _=commands.seek(state,10)
+  let slider: u64 = depth_of(state)
+  let _=test.check(suite,commands.set_parameter(state,3,video,"","gain",0.6).ok,"Unkeyed track slider sets the static gain")
+  let _=test.near_f64(suite,editor.track_gain(struct.borrow(state,field=document),video),0.6,0.0,"Static gain written")
+  let _=test.check(suite,not track_keys.has_any(struct.borrow(state,field=document),video),"No key was created")
+  let _=commands.keyframe_parameter(state,3,video,"","gain",0.6)
+  let after_key: u64 = depth_of(state)
+  let _=test.check(suite,commands.set_parameter(state,3,video,"","gain",0.9).ok,"Keyed slider write is accepted")
+  let _=test.near_f64(suite,editor.track_gain(struct.borrow(state,field=document),video),0.6,0.0,"Static gain untouched while keyed")
+  let _=test.near_f64(suite,option.unwrap(track_keys.exact(struct.borrow(state,field=document),video,"gain",10)).value,0.9,0.0,"The key at the playhead took the value")
+  let _=test.check(suite,commands.update_parameter(state,3,video,"gain",1.1).ok,"Live drag continues without a new snapshot")
+  let _=test.eq_u64(suite,depth_of(state),after_key+1,"Slider set plus drag is one Undo")
+  let _=test.near_f64(suite,option.unwrap(track_keys.exact(struct.borrow(state,field=document),video,"gain",10)).value,1.1,0.0,"Drag updated the key")
+  let _=test.eq_u64(suite,depth_of(state),slider+3,"History count is as authored")
+  let _=test.check(suite,not commands.set_parameter(state,3,video,"","gain",math.nan()).ok,"Keyed NaN write refused")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Clip edits never touch track keys")
+  let ledger_before: string = key_ledger(struct.borrow(state,field=document))
+  let clip: u64 = option.unwrap(editor.clip_at(struct.borrow(state,field=document),0)).id
+  var scratch: editor.Document = editor.copy_document(struct.borrow(state,field=document))
+  let tail: u64 = option.unwrap(editor.split(scratch,clip,30))
+  let _=test.eq_str(suite,key_ledger(scratch),str.view(ledger_before),"Split keeps track keys")
+  let _=editor.trim_start(scratch,tail,40)
+  let _=editor.trim_end(scratch,clip,10)
+  let _=editor.move_clip(scratch,clip,video,100)
+  let _=test.eq_str(suite,key_ledger(scratch),str.view(ledger_before),"Trim and move keep track keys at their timeline frames")
+  let _=editor.ripple_delete(scratch,clip)
+  let _=test.eq_str(suite,key_ledger(scratch),str.view(ledger_before),"Ripple delete leaves them in place (phase 1 contract)")
+  var snap: editor.ClipSnapshot = option.unwrap(editor.clip_snapshot(struct.borrow(state,field=document),clip))
+  let _=test.check(suite,array.len(struct.borrow(snap,field=keys)) == 0,"Clip snapshots carry no track keys")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"remove_track drops its automation and one Undo restores track and keys")
+  let _=commands.keyframe_parameter(state,3,audio,"","pan",0.25)
+  let _=commands.set_track_key(state,audio,"gain",33,0.4,curve.smooth())
+  let other_ledger: string = key_ledger(struct.borrow(state,field=document))
+  let pre_encoded: string = encoded(struct.borrow(state,field=document))
+  let removed: commands.Result = commands.remove_track(state,audio)
+  let _=test.check(suite,removed.ok,"Track removed")
+  let _=test.check(suite,not track_keys.has_any(struct.borrow(state,field=document),audio),"Its automation is gone")
+  let _=test.check(suite,track_keys.has(struct.borrow(state,field=document),video,"gain"),"Other tracks keep theirs")
+  let _=test.eq_str(suite,decode_path(str.view(encoded(struct.borrow(state,field=document)))),"ok","The project still encodes and decodes (no orphan keys)")
+  let _=commands.undo(state)
+  let _=test.eq_str(suite,encoded(struct.borrow(state,field=document)),str.view(pre_encoded),"Undo restores the track and its keys")
+  let _=test.eq_str(suite,key_ledger(struct.borrow(state,field=document)),str.view(other_ledger),"Every key field restored")
+  let _=commands.redo(state)
+  let _=test.check(suite,not track_keys.has_any(struct.borrow(state,field=document),audio),"Redo removes them again")
+  let _=commands.undo(state)
+  let _=test.done(suite)
+
+  let _=test.start(suite,"A freshly linked audio lane copies the video lane's automation")
+  var linked_state: app.App = fixture(root)
+  let lvideo: u64 = app.default_video_track(linked_state)
+  let ldoc: ref<editor.Document> = struct.borrow(linked_state,field=document)
+  let _=track_keys.set(ldoc,lvideo,"gain",3,0.5,curve.smooth())
+  let _=track_keys.set(ldoc,lvideo,"gain",33,1.5,curve.linear())
+  let _=track_keys.set(ldoc,lvideo,"pan",3,-0.5,curve.hold())
+  // Static mixers already match the existing audio lanes; only the automation makes them unsuitable.
+  var at: u64 = 0
+  let lanes_before: u64 = editor.track_count(ldoc)
+  var migrated: bool = false
+  match linked.migrate_legacy(ldoc) {ok(count)=>{migrated=count == 1},err(_)=>{},}
+  let _=test.check(suite,migrated,"One legacy clip is separated")
+  let _=test.eq_u64(suite,editor.track_count(ldoc),lanes_before+1,"An automated video lane gets a new audio lane instead of a statically equal one")
+  var lane_id: u64 = 0
+  at=0
+  loop {if at >= editor.track_count(ldoc) {break}
+    let candidate: u64 = struct.get(array.borrow(struct.borrow(ldoc,field=tracks),at),field=id)
+    if str.eq(str.view(editor.track_name(ldoc,candidate)),"Linked audio") {lane_id=candidate}
+    at=at+1}
+  let _=test.check(suite,lane_id != 0,"The new lane is identifiable")
+  let _=test.eq_u64(suite,track_keys.count(ldoc,lane_id,"gain"),2,"Both gain keys were copied")
+  let _=test.eq_u64(suite,track_keys.count(ldoc,lane_id,"pan"),1,"The pan key was copied")
+  let copied: editor.Key = option.unwrap(track_keys.exact(ldoc,lane_id,"gain",33))
+  let _=test.check(suite,copied.value == 1.5 and copied.interp == curve.linear() and copied.owner == ldoc.active,"Copied key keeps value, interpolation and owner")
+  let _=test.eq_u64(suite,track_keys.count(ldoc,lvideo,"gain"),2,"The video lane keeps its own automation")
+  let _=test.eq_str(suite,decode_path(str.view(encoded(ldoc))),"ok","The linked project round-trips")
+  var plain_state: app.App = fixture(root)
+  let pdoc: ref<editor.Document> = struct.borrow(plain_state,field=document)
+  let plain_lanes: u64 = editor.track_count(pdoc)
+  var plain_ok: bool = false
+  match linked.migrate_legacy(pdoc) {ok(count)=>{plain_ok=count == 1},err(_)=>{},}
+  let _=test.check(suite,plain_ok and editor.track_count(pdoc) == plain_lanes,"Without automation the matching existing audio lane is still reused")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Waveform reference copies ignore the owning mixer's automation")
+  var wave: app.App = fixture(root)
+  let wvideo: u64 = app.default_video_track(wave)
+  let wdoc: ref<editor.Document> = struct.borrow(wave,field=document)
+  let child_sequence: u64 = editor.add_sequence(wdoc,"Child",30.0,64,36)
+  let child_track: u64 = editor.add_track(wdoc,child_sequence,editor.track_audio(),"CA1")
+  let parent: u64 = wdoc.active
+  let _=track_keys.set(wdoc,wvideo,"gain",3,0.5,curve.linear())
+  let _=editor.set_active(wdoc,child_sequence)
+  let _=test.check(suite,not option.is_some(track_keys.set(wdoc,child_track,"gain",4,0.25,curve.linear())),"Child sequence track keyed while it is active")
+  let _=editor.set_active(wdoc,parent)
+  let wclip: editor.Clip = option.unwrap(editor.clip_at(wdoc,0))
+  let _=test.check(suite,match preview.visual_reference_key(wdoc,wclip,64) {err(_)=>true,ok(_)=>false,},"A clip whose track is automated has no neutral reference")
+  var neutral: editor.Document = preview.visual_reference_document(wdoc)
+  let _=test.check(suite,not track_keys.has_any(neutral,wvideo),"The copy drops the active sequence's track automation")
+  let _=test.check(suite,track_keys.has(neutral,child_track,"gain"),"Child sequence automation stays (it is part of the nested mix)")
+  let _=test.check(suite,track_keys.has(wdoc,wvideo,"gain"),"The authored document is untouched")
+  let _=test.check(suite,match preview.visual_reference_key(neutral,option.unwrap(editor.clip_at(neutral,0)),64) {err(_)=>false,ok(_)=>true,},"The neutral copy yields a reference key")
+  let dropped: u64 = track_keys.drop_sequence(wdoc,parent)
+  let _=test.eq_u64(suite,dropped,1,"drop_sequence removes only the active sequence's keys")
+  let _=test.check(suite,track_keys.has(wdoc,child_track,"gain"),"Other sequences are untouched")
+  let _=test.done(suite)
+  ()
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,time} {
+  if view.len(args) < 2 {return 2}
+  let root: str = view.get(args,1)
+  let _=files.mkdirs(root)
+  var suite: test.Suite = test.suite("Track automation",false)
+  format_suite(suite)
+  commands_suite(suite,root)
+  test.conclude(suite,path.join(root,"track-automation-tests.json"),24)
+}

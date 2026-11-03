@@ -35,6 +35,8 @@ if [ "$have" != "$AIR_SDK_COMMIT" ] &&
   echo "genesis-air: warning — AIR SDK is at $have, this project pins $AIR_SDK_COMMIT" >&2
 fi
 
+# A prepared SDK (air-sdk.conf AIR_SDK_PREPARED=1) already carries these overlays.
+if [ "${AIR_SDK_PREPARED:-0}" != 1 ]; then
 # One shared editor implementation supplies exact Split semantics on both OS.
 editor_patch="$here/patches/air-editor.patch"
 if [ ! -f "$editor_patch" ]; then
@@ -106,6 +108,7 @@ elif git -C "$AIR_HOME" apply --check "$publish_patch" >/dev/null 2>&1; then
 else
   echo 'genesis-air: [GA_SDK_PUBLISH_PATCH_BASE] file publication overlay does not match SDK' >&2
   exit 1
+fi
 fi
 
 mkdir -p "$here/build"

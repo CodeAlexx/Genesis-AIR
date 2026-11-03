@@ -16,6 +16,7 @@ import "preview_link.ai" as link
 import "app.ai" as app
 import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
+import "track_keys.ai" as track_keys
 
 fn program_signature(document: ref<editor.Document>) -> string effects {alloc} {
   var copy: editor.Document = editor.copy_document(document)
@@ -304,11 +305,13 @@ pub fn visual_reference_document(document:ref<editor.Document>)->editor.Document
     let _=editor.set_track_pan(copy,id,0.0)
     let _=editor.set_track_muted(copy,id,false)
     let _=editor.set_track_solo(copy,id,false)}
+  // Track automation is part of the owning output mixer too.
+  let _=track_keys.drop_sequence(copy,copy.active)
   copy
 }
 pub fn visual_reference_key(document:ref<editor.Document>,clip:editor.Clip,buckets:u64)
     ->result<string,string> effects {alloc} {
-  if not editor.clip_has_audio(clip) or editor.track_gain(document,clip.track)!=1.0 or
+  if not editor.clip_has_audio(clip) or track_keys.has_any(document,clip.track) or editor.track_gain(document,clip.track)!=1.0 or
       editor.track_pan(document,clip.track)!=0.0 or not editor.track_audible(document,clip.track) {
     return result.err("[GA_WAVEFORM_REFERENCE] Display descriptor must use the neutral owning output mixer")}
   var plan:array<string> =if timeline_media.effective_speed(document,clip)==0.0 {

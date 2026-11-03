@@ -22,6 +22,7 @@ import "provider.ai" as provider
 import "recovery.ai" as recovery
 import "timeline_media.ai" as timeline_media
 import "filter_keys.ai" as filter_keys
+import "track_keys.ai" as track_keys
 import "linked_media.ai" as linked_media
 
 pub type Result = struct { ok: bool, message: string, value: u64 }
@@ -328,6 +329,8 @@ pub fn remove_track(state: ref<app.App>, track: u64) -> Result effects {alloc} {
   if editor.track_locked(doc,track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
   var candidate:editor.Document=editor.copy_document(doc)
   if not editor.remove_track(candidate,track) {return refused("[GA_EDIT_CONTEXT] Track could not be removed")}
+  // Track automation belongs to the track; one Undo restores both.
+  let _=track_keys.drop_track(candidate,track)
   if not linked_document_geometry(struct.borrow(state,field=document),candidate) {return refused("[GA_LINKED_RANGE] This edit cannot preserve every linked audio/video range")}
   editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
   let _=struct.replace(state,candidate,field=document)
@@ -1563,6 +1566,14 @@ fn update_parameter_document(doc: ref<editor.Document>, domain: u32, target: u64
       return done("parameter keyframe set", target)
     }
   }
+  if domain == 3 and track_keys.has(doc,target,name) {
+    let frame: i64 = editor.playhead(doc)
+    if frame < 0 {return refused("[GA_KEY_RANGE] Playhead is before the timeline start")}
+    if editor.track_locked(doc,target) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+    let interp: u32 = parameter_key_interp(doc,0,str.view(track_keys.name(target,name)),frame)
+    match track_keys.set(doc,target,name,frame,value,interp) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+    return done("track keyframe set",target)
+  }
   let changed: bool = if domain == 2 { editor.set_filter_param(doc, target, name, value) }
     else if domain == 3 and str.eq(name, "gain") { editor.set_track_gain(doc, target, value) }
     else if domain == 3 and str.eq(name, "pan") { editor.set_track_pan(doc, target, value) }
@@ -1590,6 +1601,10 @@ fn parameter_key_interp(doc: ref<editor.Document>, clip: u64, param: str, frame:
 }
 
 pub fn keyframe_parameter(state:ref<app.App>,domain:u32,target:u64,kind:str,name:str,value:f64) -> Result effects {alloc} {
+  if domain==3 {
+    if str.len(kind)!=0 {return refused("[GA_KEY_UNSUPPORTED] That track parameter cannot be automated")}
+    return keyframe_track(state,target,name,value)
+  }
   if domain==1 and str.len(kind)==0 and fade_field(name) {
     match fade_problem(state,target,name,value,true) {none=>{},some(problem)=>{return refused(problem)},}
   }
@@ -1665,10 +1680,129 @@ fn keyframe_document(doc:ref<editor.Document>,clip:u64,domain:u32,target:u64,kin
   done("keyframe set", clip)
 }
 
+// ---------------------------------------------------------------------------
+// Track automation (gain and pan). Keys live in the sequence-wide store (clip 0), their
+// frames are TIMELINE frames, and every command is one candidate-copy transaction with a
+// single capture, so a refusal leaves document, history and revision untouched.
+
+fn track_edit_problem(doc: ref<editor.Document>, track: u64, param: str) -> option<string> effects {alloc} {
+  match editor.track_slot(doc,track) {
+    none=>{return option.some(string.copy("[GA_KEY_TARGET] No such track"))},some(_)=>{},
+  }
+  if not track_keys.supported(param) {
+    return option.some(string.copy("[GA_KEY_UNSUPPORTED] That track parameter cannot be automated"))
+  }
+  if editor.track_locked(doc,track) {return option.some(string.copy("[GA_EDIT_LOCKED] Track is locked"))}
+  option.none()
+}
+fn commit_track_edit(state: ref<app.App>, candidate: editor.Document own, message: str, track: u64) -> Result effects {alloc} {
+  editor.capture(struct.borrow(state,field=history),struct.borrow(state,field=document))
+  let _=struct.replace(state,candidate,field=document)
+  app.document_changed(state)
+  done(message,track)
+}
+
+// K on a track parameter row: a key at the playhead holding `value`.
+pub fn keyframe_track(state: ref<app.App>, track: u64, param: str, value: f64) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  match track_edit_problem(doc,track,param) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  let frame: i64 = editor.playhead(doc)
+  if frame < 0 {return refused("[GA_KEY_RANGE] Playhead is before the timeline start")}
+  var candidate: editor.Document = editor.copy_document(doc)
+  let interp: u32 = parameter_key_interp(candidate,0,str.view(track_keys.name(track,param)),frame)
+  match track_keys.set(candidate,track,param,frame,value,interp) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  commit_track_edit(state,candidate,"track keyframe set",track)
+}
+// Add or replace a key at an explicit timeline frame (lane editing).
+pub fn set_track_key(state: ref<app.App>, track: u64, param: str, frame: i64, value: f64,
+                     interp: u32) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  match track_edit_problem(doc,track,param) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  if frame < 0 {return refused("[GA_KEY_RANGE] Track keys cannot be created before the timeline start")}
+  var candidate: editor.Document = editor.copy_document(doc)
+  match track_keys.set(candidate,track,param,frame,value,interp) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  commit_track_edit(state,candidate,"track keyframe set",track)
+}
+// Move a key to another frame and value, keeping its interpolation. A destination that
+// already holds a key is refused rather than silently overwritten.
+pub fn move_track_key(state: ref<app.App>, track: u64, param: str, from: i64, to: i64,
+                      value: f64) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  match track_edit_problem(doc,track,param) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  if to < 0 {return refused("[GA_KEY_RANGE] Track keys cannot be moved before the timeline start")}
+  let point: editor.Key = match track_keys.exact(doc,track,param,from) {
+    none=>{return refused("[GA_KEY_MISSING] There is no key at that frame")},some(found)=>found,
+  }
+  if to != from {
+    match track_keys.exact(doc,track,param,to) {
+      none=>{},some(_)=>{return refused("[GA_KEY_COLLISION] A key already exists at the destination")},
+    }
+  }
+  var candidate: editor.Document = editor.copy_document(doc)
+  match track_keys.set(candidate,track,param,to,value,point.interp) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  if to != from and not track_keys.remove(candidate,track,param,from) {return refused("[GA_KEY_WRITE] The key could not be moved")}
+  commit_track_edit(state,candidate,"track keyframe moved",track)
+}
+pub fn delete_track_key(state: ref<app.App>, track: u64, param: str, frame: i64) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  match track_edit_problem(doc,track,param) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  match track_keys.exact(doc,track,param,frame) {
+    none=>{return refused("[GA_KEY_MISSING] There is no key at that frame")},some(_)=>{},
+  }
+  var candidate: editor.Document = editor.copy_document(doc)
+  if not track_keys.remove(candidate,track,param,frame) {return refused("[GA_KEY_WRITE] The key could not be removed")}
+  commit_track_edit(state,candidate,"track keyframe deleted",track)
+}
+// Prev/Next/Delete/Ease on the track parameter row, at the playhead.
+// operation: 0 previous, 1 next, 2 delete, 3 interpolation.
+fn manage_track_key(state: ref<app.App>, track: u64, param: str, operation: u32, mode: u32) -> Result effects {alloc} {
+  let doc: ref<editor.Document> = struct.borrow(state,field=document)
+  let slot: u64 = match editor.track_slot(doc,track) {
+    none=>{return refused("[GA_KEY_TARGET] No such track")},some(found)=>found,
+  }
+  if struct.get(array.borrow(struct.borrow(doc,field=tracks),slot),field=owner) != doc.active {
+    return refused("[GA_KEY_TARGET] Key target is outside the active sequence")
+  }
+  if not track_keys.supported(param) {return refused("[GA_KEY_UNSUPPORTED] That track parameter cannot be automated")}
+  if operation > 3 {return refused("[GA_KEY_ACTION] Unknown keyframe action")}
+  let frame: i64 = editor.playhead(doc)
+  if operation < 2 {
+    let at: i64 = match track_keys.neighbor(doc,track,param,frame,editor.duration(doc),operation == 1) {
+      none=>{return refused("[GA_KEY_MISSING] No key in that direction")},some(value)=>value,
+    }
+    let _=editor.program_action(doc,editor.pause())
+    let _=editor.monitor_action(doc,editor.pause())
+    let _=editor.seek(doc,at)
+    return done("sought keyframe",track)
+  }
+  if editor.track_locked(doc,track) {return refused("[GA_EDIT_LOCKED] Track is locked")}
+  let point: editor.Key = match track_keys.exact(doc,track,param,frame) {
+    none=>{return refused("[GA_KEY_MISSING] There is no key at the playhead")},some(value)=>value,
+  }
+  if not track_keys.value_ok(param,point.value) or point.interp >= curve.interp_count() {
+    return refused("[GA_KEY_VALUE] Existing key is invalid")
+  }
+  if operation == 3 and mode >= curve.interp_count() {
+    return refused("[GA_KEY_INTERPOLATION] This interpolation is not supported by the parameter")
+  }
+  if operation == 3 and mode == point.interp {return done("keyframe unchanged",track)}
+  var candidate: editor.Document = editor.copy_document(doc)
+  if operation == 2 {
+    if not track_keys.remove(candidate,track,param,frame) {return refused("[GA_KEY_WRITE] The key could not be changed")}
+  } else {
+    match track_keys.set(candidate,track,param,frame,point.value,mode) {none=>{},some(problem)=>{return refused(str.view(problem))},}
+  }
+  commit_track_edit(state,candidate,if operation == 2 {"keyframe deleted"}else{"keyframe interpolation set"},track)
+}
+
 // Existing-key management shares target validation with the inspector writer.
 // operation: 0 previous, 1 next, 2 delete, 3 interpolation.
 pub fn manage_key(state: ref<app.App>, domain: u32, target: u64, kind: str,
                   name: str, operation: u32, mode: u32) -> Result effects {alloc} {
+  if domain == 3 {
+    if str.len(kind) != 0 {return refused("[GA_KEY_UNSUPPORTED] That track parameter cannot be automated")}
+    return manage_track_key(state,target,name,operation,mode)
+  }
   if operation >= 2 and domain == 1 and fade_field(name) {
     match fade_problem(state,target,name,0.0,true) {none=>{},some(problem)=>{return refused(problem)},}
   }

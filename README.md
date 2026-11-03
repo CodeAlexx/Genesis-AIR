@@ -217,15 +217,14 @@ export GENESIS_GCOMPOSE="$PWD/target/release/gcompose"
 cd ../Genesis-AIR
 ```
 
-On Windows, use PowerShell 7, Visual Studio 2022 C++ Build Tools (including CMake),
-Git, and WSL Ubuntu with CMake 3.24+, Ninja and a C++20 compiler. Build AIR from the
-pinned SDK with the script below. AIR emits C in WSL;
-MSVC builds the Windows application. The installed editor runs directly as a Windows GUI
+On Windows, use PowerShell 7, Visual Studio 2022 C++ Build Tools (including CMake)
+and Git. No WSL is needed: setup builds the native Windows AIR compiler (airc.exe)
+from the pinned SDK, airc.exe emits C and MSVC builds the Windows application.
+The legacy WSL compiler path remains available with `build-windows.ps1 -UseWsl`. The installed editor runs directly as a Windows GUI
 executable, and its redirected media subprocesses do not open console windows.
 
 ```powershell
 .\setup-windows.ps1
-.\build-compiler-wsl.ps1
 .\build-windows.ps1 -RunTests
 .\Genesis-AIR.exe open .\project.air
 ```
@@ -449,8 +448,16 @@ anchored to the first decoded frame timestamp after codec skip/edit handling. Po
 source origins insert silence and negative origins skip pre-zero samples; coarse
 Matroska packet timestamps no longer select trim edges. This keeps reverse source
 buffering independent of clip duration while preserving delay and speed history.
-Origin-based fresh selection may decode from the beginning, so distant audio seeks
-remain O(seek). Later timestamp discontinuities are not repaired.
+A fresh selection at least six seconds into a clip seeks the demuxer two seconds before
+the target, decodes and discards that preroll, and counts native samples from the first
+frame it keeps (its index is its timestamp minus the same first-frame origin), so a
+distant Source start or reverse window costs the same at 20 minutes as at one. Only
+index-addressed containers whose timestamp tick resolves one native sample (MP4/MOV, WAV)
+take this path; anything else, an unreachable target or a silence prefix still decodes
+from the origin and stays O(seek). Compressed decoders with noise substitution (AAC PNS)
+carry a random state from the stream start, so a seeked decode can differ from a full
+decode by up to 3 PCM units inside a few isolated frames; alignment is sample-exact.
+Later timestamp discontinuities are not repaired.
 Pause, Stop and seek immediately reset output; gain, pan, mute, solo and audio-effect
 edits invalidate queued sound. Picture-only edits preserve it. The meters read the PCM
 at the device cursor after mixing. Preview decoding runs on a separate thread; rapid
@@ -467,8 +474,11 @@ the definitions, or Source playback, closes it as before; stale pulls are still 
 While paused, dragging the timeline ruler or the Program monitor bar plays 75 ms of the exact
 Program mix at each new playhead frame (scrub sound). The first move prepares the endpoint (warm
 after a Pause), each step pulls one short window (about 6 ms) and restarts the device so pieces
-never queue behind each other. Release or Play stops it. Source monitor scrubbing stays silent:
-source audio still decodes from the clip start, which is too slow for scrubbing.
+never queue behind each other. Release or Play stops it. Dragging the Source monitor bar does
+the same with the selected source's own audio (`timeline_media.source_audio_range`, a 75 ms
+window per new frame, one request in flight, the same pending-work guards); the compositor
+seeks source audio in constant time, so any position in a long clip answers in tens of
+milliseconds. `tests/source_scrub.ai` measures that per step against a real clip.
 
 Clip gain keys are evaluated per 48 kHz stereo sample after the audio effects, then
 multiplied by track gain and the clip fades. Playback and export share rounded absolute
@@ -476,6 +486,19 @@ key boundaries and all 38 interpolation modes from the pinned `std.curve` contra
 Automation changes do not rebuild the retained effect graph between chunks; a seek or
 actual key edit invalidates queued sound. Negative curve overshoot clamps to zero.
 Malformed gain envelopes report `GA_AUDIO_GAIN_KEYS` and the next request can recover.
+
+Track gain keys (sequence-wide keys named `track.<id>.gain`, saved as project revision 5)
+sound through the same evaluator: each clip line carries a `TRKGAIN:<origin>:<sample>,<frame>,
+<value>,<interp>/...` token holding only the keys that cover that clip's span plus one key
+before and two after (the neighbours Catmull tangents read), so playback chunks, endpoint
+pulls and export agree sample for sample and descriptors stay bounded. A keyed track gain
+replaces the static fader value, multiplies after the clip gain and its keys, and applies
+before the clip fades. Because the lines are the park key, an edit inside a clip window
+prepares fresh while an edit outside every window keeps the parked endpoint. Track pan
+automation is not part of this stage. Malformed curves report `GA_AUDIO_TRACK_GAIN_KEYS`.
+`tests/audio_track_plan.ai` pins tokens, windows and stability, `tests/audio_track_keys.py`
+checks 44 variants (all 38 modes, overlap, windowing, fades, nested) against an SDK-curve
+oracle, and `tests/audio_track_project.py` renders independently authored revision 5 projects.
 
 Fade-length keys follow the same destination sample clock. Each curve retains raw
 sequence-frame coordinates and values through interpolation, then converts the length

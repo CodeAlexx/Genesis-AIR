@@ -1,7 +1,7 @@
 if(NOT GENESIS_GENERATED_DIR)
   set(GENESIS_GENERATED_DIR "${GENESIS_ROOT}/build-windows/generated")
 endif()
-foreach(name IN ITEMS headless controls native audio-device audio-playback audio-cancel preview-async preview-stream preview-input inspector live-paint project-safety picture-queue keyed-video window-cache editor-trim trim-history recovery-ownership media-session spatial-canvas fade-controls audio-fade-keys audio-nested audio-nested-cancel nested-audio-controls nested-picture-plan picture-memory clip-clipboard clip-clipboard-media editing-safety picture-clock preview-batch preview-fifo audio-plan-preflight linked-media audio-context audio-context-retime audio-tail-context audio-tail-history audio-edit-context audio-nested-edit-context keyframe-controls snap-controls bidi-layout long-project-cycles transition-controls transition-controls-media filter-transactions standalone-endpoint-controller standalone-endpoint-preview standalone-endpoint-media standalone-endpoint-actor standalone-endpoint-cancel standalone-endpoint-timing endpoint-park program-picture-persistent program-picture-protocol program-picture-control program-picture-epoch program-picture-profile waveform-visual waveform-visual-media)
+foreach(name IN ITEMS headless controls native audio-device audio-playback audio-cancel preview-async preview-stream preview-input inspector live-paint project-safety picture-queue keyed-video window-cache editor-trim trim-history recovery-ownership media-session spatial-canvas fade-controls audio-fade-keys audio-nested audio-nested-cancel nested-audio-controls nested-picture-plan picture-memory clip-clipboard clip-clipboard-media editing-safety picture-clock preview-batch preview-fifo audio-plan-preflight linked-media audio-context audio-context-retime audio-tail-context audio-tail-history audio-edit-context audio-nested-edit-context keyframe-controls track-automation audio-track-plan snap-controls bidi-layout long-project-cycles transition-controls transition-controls-media filter-transactions standalone-endpoint-controller standalone-endpoint-preview standalone-endpoint-media standalone-endpoint-actor standalone-endpoint-cancel standalone-endpoint-timing endpoint-park source-scrub program-picture-persistent program-picture-protocol program-picture-control program-picture-epoch program-picture-profile waveform-visual waveform-visual-media)
   add_executable(genesis-${name} "${GENESIS_GENERATED_DIR}/${name}.c")
   target_include_directories(genesis-${name} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
   target_link_libraries(genesis-${name} PRIVATE air_rt)
@@ -129,7 +129,17 @@ set_target_properties(genesis-native-u16-upload PROPERTIES RUNTIME_OUTPUT_DIRECT
 
 # Exercise the exact Windows transport adapter. Fault hooks are confined to
 # component fixtures; the production runtime retains its real Winsock calls.
-foreach(genesis_net_fixture IN ITEMS classifier policy resource)
+# These fixtures test the Genesis loopback overlay's classifier. An SDK whose own
+# runtime already owns the loopback policy (AIR main) has no such classifier.
+file(READ "${CMAKE_SOURCE_DIR}/runtime/windows/air_net_win32.c" genesis_net_source)
+string(FIND "${genesis_net_source}" "classify_loopback_peer" genesis_loopback_overlay)
+if(genesis_loopback_overlay EQUAL -1)
+  set(genesis_net_fixtures)
+  message(STATUS "Genesis: SDK owns the loopback policy; overlay loopback fixtures are not built")
+else()
+  set(genesis_net_fixtures classifier policy resource)
+endif()
+foreach(genesis_net_fixture IN LISTS genesis_net_fixtures)
   add_executable(genesis-net-loopback-${genesis_net_fixture}
     "${GENESIS_ROOT}/tests/net_loopback_${genesis_net_fixture}_windows.c")
   target_include_directories(genesis-net-loopback-${genesis_net_fixture} PRIVATE "${CMAKE_SOURCE_DIR}/runtime")

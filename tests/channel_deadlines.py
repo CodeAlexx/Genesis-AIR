@@ -60,7 +60,7 @@ def exact_wire(mode: str, frames: list[dict]) -> bool:
         return False
     if mode == "credit":
         expected = [(11, 1, b"first"), (12, 2, b"second"), (99, 3, b"done")]
-    elif mode == "long":
+    elif mode in ("long", "legacy"):
         expected = [(20, 1, PAYLOAD), (99, 2, b"done")]
     else:
         header = b"A1 20 1 0 262144\n"
@@ -97,7 +97,7 @@ def run(binary: Path, root: Path, mode: str) -> dict:
                     time.sleep(.2)  # Actual peer withholds credit, not a send hook.
                     sock.sendall(b"C")
                 result["frames"].append(frame(sock))
-                if mode in ("long", "credit"):
+                if mode in ("long", "legacy", "credit"):
                     result["frames"].append(frame(sock))
                 try:
                     extra = sock.recv(1)
