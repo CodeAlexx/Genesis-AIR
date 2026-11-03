@@ -1,0 +1,1031 @@
+// Genesis Clip: a small, one-window tool that cuts a video into segments for a LoRA dataset.
+//
+//   Genesis-Clip.exe [VIDEO]                          the window
+//   Genesis-Clip.exe --paint OUT.png VIDEO [--frame N] [--list JSON]   headless paint of the window
+//   Genesis-Clip.exe --export OUTDIR VIDEO LIST.json [--mp4] [--png N] [--captions]  headless export, same code path
+//
+// It reuses Genesis's media seam (provider.ai: probe, frames, thumbnails, waveform through the
+// gcompose worker or FFmpeg), the Win32/Direct2D canvas host through std.gui, the native file
+// dialogs, the native audio queue, and the MM-AIR FFmpeg that genesis-media-runtime.txt names.
+module genesis.clip_main
+
+import std.draw as draw
+import std.files as files
+import std.gui as gui
+import std.image as image
+import std.math as math
+import std.path as path
+import std.png_tools as png_tools
+import std.system as system
+import std.tasks as tasks
+import std.text as text
+import std.time as clock
+import std.widgets as widgets
+import "clip_model.ai" as model
+import "clip_state.ai" as st
+import "clip_ui.ai" as ui_
+import "clip_export.ai" as export
+import "ffmpeg.ai" as ffmpeg
+import "layout.ai" as layout
+import "media_runtime.ai" as media_runtime
+import "native_audio.ai" as native_audio
+import "native_dialogs.ai" as dialogs
+import "provider.ai" as provider
+import "typeface.ai" as typeface
+import "ui_text.ai" as ui_text
+
+fn say(line: str) -> unit effects {io.write} {
+  io.write(line)
+  io.write("\n")
+  ()
+}
+
+// ---- Startup ------------------------------------------------------------------------------
+
+fn program_folder() -> string effects {alloc, fs.read} {
+  match system.executable_path() {
+    ok(executable) => path.dirname(str.view(executable)),
+    err(_) => string.new(),
+  }
+}
+
+// The gcompose worker beside this executable (or GENESIS_GCOMPOSE). Its folder also holds
+// genesis-media-runtime.txt, which names the MM-AIR FFmpeg and FFprobe.
+fn worker_path() -> string effects {alloc, env, fs.read} {
+  match env.get("GENESIS_GCOMPOSE") { some(value) => { return value }, none => {}, }
+  path.join(str.view(program_folder()), "genesis-gcompose.exe")
+}
+
+fn scratch_root() -> string effects {alloc, env} {
+  match env.get("GENESIS_CLIP_SCRATCH") { some(value) => { return value }, none => {}, }
+  match env.get("LOCALAPPDATA") { some(value) => { return path.join(value, "GenesisClip") }, none => {}, }
+  string.copy("genesis-clip-state")
+}
+
+fn make_engine(worker: str, scratch: str) -> provider.Provider effects {alloc, env, fs.meta, fs.read} {
+  let forced: bool = match env.get("GENESIS_CLIP_NATIVE") { some(value) => value == "1", none => false, }
+  let fake: bool = match env.get("GENESIS_FAKE_PROVIDER") { some(value) => value == "1", none => false, }
+  if fake { return provider.fake(scratch) }
+  if not forced {
+    var real: provider.Provider = provider.gcompose(worker, scratch)
+    if provider.available(real) { return real }
+  }
+  // CPU-only: one FFmpeg process per picture. Slower, but it needs no GPU worker.
+  provider.native(str.view(media_runtime.tool(worker, "ffmpeg")), str.view(media_runtime.tool(worker, "ffprobe")), scratch)
+}
+
+// ---- Opening and showing ------------------------------------------------------------------
+
+type Size = struct { width: u32, height: u32 }
+
+fn even(value: f64) -> u32 effects {} {
+  let whole: u32 = cast.sat(math.floor(value / 2.0))
+  let two: u32 = whole * 2
+  if two < 16 { 16 } else { two }
+}
+
+// The largest picture of the video's own shape that fits the box, never above its own size.
+fn fit_size(state: ref<st.Clip>, box_width: f64, box_height: f64) -> Size effects {} {
+  let vw: f64 = st.fl(state.width)
+  let vh: f64 = st.fl(state.height)
+  if vw < 1.0 or vh < 1.0 { return Size {width: 16, height: 16} }
+  let scale: f64 = math.min(1.0, math.min(box_width / vw, box_height / vh))
+  Size {width: even(vw * scale), height: even(vh * scale)}
+}
+
+fn show_frame(state: ref<st.Clip>, frame: i64, box_width: f64, box_height: f64) -> bool
+    effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let size: Size = fit_size(state, box_width, box_height)
+  var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=engine),
+    str.view(struct.borrow(state, field=path)), frame, size.width, size.height)
+  if not provider.frame_ok(shot) {
+    st.say(state, str.view(provider.frame_detail(shot)))
+    struct.set(state, true, field=image_wanted)
+    return false
+  }
+  let pixels: draw.Surface = provider.take_pixels(shot)
+  let _ = struct.replace(state, pixels, field=image)
+  struct.set(state, frame, field=image_frame)
+  struct.set(state, false, field=image_wanted)
+  true
+}
+
+fn reset_filmstrip(state: ref<st.Clip>) -> unit effects {alloc} {
+  let _ = struct.replace(state, array.new(), field=thumbs)
+  let _ = struct.replace(state, array.new(), field=wave)
+  struct.set(state, 0, field=thumb_tiles)
+  struct.set(state, false, field=wave_ready)
+  ()
+}
+
+// One more filmstrip tile, sampled at the middle of its share of the video.
+fn fill_thumb(state: ref<st.Clip>) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  let done: u64 = array.len(struct.borrow(state, field=thumbs))
+  if done >= state.thumb_tiles { return false }
+  let two: i64 = 2
+  let at: i64 = (two * cast.wrap(done) + 1) * state.frames / (two * cast.wrap(state.thumb_tiles))
+  let height: u32 = 72
+  let vw: f64 = st.fl(state.width)
+  let vh: f64 = st.fl(state.height)
+  let at_clamped: i64 = st.clamp(state, at)
+  let across: u32 = even(72.0 * vw / (if vh < 1.0 { 1.0 } else { vh }))
+  var shot: provider.Frame = provider.source_frame(struct.borrow(state, field=engine),
+    str.view(struct.borrow(state, field=path)), at_clamped, across, height)
+  if provider.frame_ok(shot) {
+    array.push(struct.borrow(state, field=thumbs), provider.take_pixels(shot))
+  } else {
+    array.push(struct.borrow(state, field=thumbs), draw.empty_surface())
+  }
+  true
+}
+
+fn fill_wave(state: ref<st.Clip>) -> unit effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  struct.set(state, true, field=wave_ready)
+  if not state.has_audio { return () }
+  let peaks: array<f64> = provider.envelope(struct.borrow(state, field=engine),
+    str.view(struct.borrow(state, field=path)), 1024)
+  let _ = struct.replace(state, peaks, field=wave)
+  ()
+}
+
+fn open_video(state: ref<st.Clip>, file: str) -> bool effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  if not st.exists(file) {
+    st.say(state, "[CLIP_OPEN] That file does not exist.")
+    return false
+  }
+  var info: provider.Probe = provider.probe(struct.borrow(state, field=engine), file)
+  if not info.ok or not info.has_video {
+    var why: string = string.copy("[CLIP_OPEN] The file has no video stream.")
+    if not info.ok { why = string.copy(str.view(struct.borrow(info, field=detail))) }
+    st.say(state, str.view(why))
+    return false
+  }
+  if info.frames <= 0 {
+    st.say(state, "[CLIP_OPEN] The video length is unknown.")
+    return false
+  }
+  // The worker counts frames from container timing and can run a few past the last picture;
+  // the video stream's own duration is the tighter bound, so an export never asks for a frame
+  // that is not there.
+  var total: i64 = info.frames
+  let probe_tool: string = media_runtime.tool(str.view(struct.borrow(state, field=worker)), "ffprobe")
+  match ffmpeg.probe(str.view(probe_tool), file) {
+    ok(streams) => { if streams.video and streams.frames > 0 and streams.frames < total { total = streams.frames } },
+    err(_) => {},
+  }
+  struct.set(state, false, field=playing)
+  struct.set(state, true, field=audio_stop)
+  let _ = struct.replace(state, string.copy(file), field=path)
+  let _ = struct.replace(state, path.stem(file), field=stem)
+  let _ = struct.replace(state, path.dirname(file), field=folder)
+  struct.set(state, total, field=frames)
+  struct.set(state, info.fps, field=fps)
+  struct.set(state, info.width, field=width)
+  struct.set(state, info.height, field=height)
+  struct.set(state, info.has_audio, field=has_audio)
+  struct.set(state, true, field=loaded)
+  let _ = struct.replace(state, model.model(total, info.fps), field=segs)
+  struct.set(state, 0, field=frame)
+  struct.set(state, -1, field=mark_in)
+  struct.set(state, -1, field=mark_out)
+  struct.set(state, 0, field=range_start)
+  struct.set(state, total, field=range_end)
+  let _ = struct.replace(state, draw.empty_surface(), field=image)
+  struct.set(state, -1, field=image_frame)
+  struct.set(state, true, field=image_wanted)
+  reset_filmstrip(state)
+  var note: string = string.copy("Opened ")
+  string.append(note, str.view(path.basename(file)))
+  let sidecar: string = st.sidecar_path(state)
+  if st.exists(str.view(sidecar)) {
+    match files.read_text(str.view(sidecar)) {
+      ok(body) => {
+        let why: string = model.from_json(struct.borrow(state, field=segs), str.view(body))
+        if str.len(why) == 0 {
+          string.append(note, "; loaded ")
+          string.append(note, str.view(string.from_int(model.segment_count(struct.borrow(state, field=segs)))))
+          string.append(note, " saved segments")
+        } else {
+          string.append(note, "; ignored the saved segment list: ")
+          string.append(note, str.view(why))
+        }
+      },
+      err(_) => {},
+    }
+  }
+  st.say(state, str.view(note))
+  true
+}
+
+// ---- Commands -----------------------------------------------------------------------------
+
+fn step_every(current: i64, up: bool) -> i64 effects {alloc} {
+  let ladder: array<i64> = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 24, 30, 48, 60, 120]
+  var i: u64 = 0
+  loop {
+    if i >= array.len(ladder) { break }
+    let here: i64 = array.get(ladder, i)
+    if up and here > current { return here }
+    if not up and here >= current { return if i == 0 { 1 } else { array.get(ladder, i - 1) } }
+    i = i + 1
+  }
+  if up { array.get(ladder, array.len(ladder) - 1) } else { current }
+}
+
+fn seek(state: ref<st.Clip>, frame: i64) -> unit effects {time} {
+  struct.set(state, st.clamp(state, frame), field=frame)
+  struct.set(state, true, field=image_wanted)
+  if state.playing {
+    struct.set(state, state.frame, field=play_frame0)
+    struct.set(state, clock.start(), field=play_ns)
+    struct.set(state, true, field=audio_restart)
+  }
+  ()
+}
+
+fn stop_playing(state: ref<st.Clip>) -> unit effects {} {
+  struct.set(state, false, field=playing)
+  struct.set(state, true, field=audio_stop)
+  ()
+}
+
+fn start_playing(state: ref<st.Clip>, from: i64, first: i64, end: i64) -> unit effects {time} {
+  struct.set(state, first, field=range_start)
+  struct.set(state, end, field=range_end)
+  struct.set(state, from, field=frame)
+  struct.set(state, from, field=play_frame0)
+  struct.set(state, clock.start(), field=play_ns)
+  struct.set(state, true, field=playing)
+  struct.set(state, true, field=audio_restart)
+  struct.set(state, true, field=image_wanted)
+  ()
+}
+
+fn toggle_play(state: ref<st.Clip>) -> unit effects {time} {
+  if not state.loaded { return () }
+  if state.playing {
+    stop_playing(state)
+    return ()
+  }
+  // Plain Play runs the whole video from the playhead (restarting at the end).
+  let from: i64 = if state.frame >= st.last_frame(state) { 0 } else { state.frame }
+  start_playing(state, from, 0, state.frames)
+  ()
+}
+
+fn play_segment(state: ref<st.Clip>) -> unit effects {alloc, time} {
+  let chosen: i64 = state.segs.selected
+  if not state.loaded or chosen < 0 { return () }
+  let s: model.Segment = model.segment_at(struct.borrow(state, field=segs), cast.wrap(chosen))
+  start_playing(state, s.start, s.start, s.end)
+  ()
+}
+
+fn step(state: ref<st.Clip>, delta: i64) -> unit effects {} {
+  if not state.loaded { return () }
+  if state.playing { stop_playing(state) }
+  struct.set(state, st.clamp(state, state.frame + delta), field=frame)
+  struct.set(state, true, field=image_wanted)
+  ()
+}
+
+fn save_list(state: ref<st.Clip>) -> unit effects {alloc, fs.meta, fs.write} {
+  let target: string = st.sidecar_path(state)
+  let body: string = model.to_json(struct.borrow(state, field=segs), str.view(path.basename(str.view(struct.borrow(state, field=path)))))
+  let existed: bool = st.exists(str.view(target))
+  match files.write_text(str.view(target), str.view(body)) {
+    ok(_) => {
+      var note: string = string.copy(if existed { "Replaced the saved segment list: " } else { "Saved the segment list: " })
+      string.append(note, str.view(target))
+      st.say(state, str.view(note))
+    },
+    err(_) => { st.say(state, "[CLIP_LIST] Could not write the segment list.") },
+  }
+  ()
+}
+
+fn load_list(state: ref<st.Clip>) -> unit effects {alloc, fs.meta, fs.read} {
+  let target: string = st.sidecar_path(state)
+  match files.read_text(str.view(target)) {
+    ok(body) => {
+      let why: string = model.from_json(struct.borrow(state, field=segs), str.view(body))
+      var note: string = string.copy("Loaded the saved segment list.")
+      if str.len(why) > 0 { note = why }
+      st.say(state, str.view(note))
+    },
+    err(_) => { st.say(state, "[CLIP_LIST] There is no saved segment list next to this video.") },
+  }
+  ()
+}
+
+fn choose_video() -> option<string> effects {alloc, ffi} {
+  match dialogs.open("", "Open video",
+      "Video\t*.mp4;*.mov;*.mkv;*.webm;*.avi;*.m4v;*.mpg;*.mpeg;*.wmv\nAll files\t*.*") {
+    err(_) => option.none(),
+    ok(value) => match value { none => option.none(), some(file) => option.some(file), },
+  }
+}
+
+fn choose_folder(state: ref<st.Clip>) -> bool effects {alloc, ffi} {
+  match dialogs.folder(str.view(struct.borrow(state, field=out_dir))) {
+    err(problem) => { st.say(state, str.view(dialogs.message(problem)))
+      false },
+    ok(value) => match value {
+      none => false,
+      some(folder) => {
+        let _ = struct.replace(state, folder, field=out_dir)
+        true
+      },
+    },
+  }
+}
+
+fn begin_export(state: ref<st.Clip>, plans: ref<array<export.Plan>>) -> unit effects {alloc, fs.meta, fs.write} {
+  if str.len(state.out_dir) == 0 {
+    st.say(state, "Choose an output folder first.")
+    return ()
+  }
+  let _ = files.mkdirs(str.view(struct.borrow(state, field=out_dir)))
+  let progress: string = provider.export_progress_path(struct.borrow(state, field=engine))
+  let cancel: string = provider.export_cancel_path(struct.borrow(state, field=engine))
+  let _ = files.remove(str.view(progress))
+  let _ = files.remove(str.view(cancel))
+  var planned: export.Plan = export.plan(struct.borrow(state, field=segs), str.view(struct.borrow(state, field=ffmpeg)),
+    str.view(struct.borrow(state, field=path)), str.view(struct.borrow(state, field=stem)),
+    str.view(struct.borrow(state, field=out_dir)), state.has_audio,
+    export.Options {mp4: state.out_mp4, png: state.out_png, every: state.every,
+      captions: state.out_captions, width: state.width, height: state.height}, str.view(progress), str.view(cancel))
+  var before: array<i64> = array.new()
+  var sum: i64 = 0
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(planned, field=outputs)) { break }
+    array.push(before, sum)
+    sum = sum + array.borrow(struct.borrow(planned, field=outputs), i).frames
+    i = i + 1
+  }
+  struct.set(state, array.len(struct.borrow(planned, field=outputs)), field=export_count)
+  let _ = struct.replace(state, before, field=export_before)
+  struct.set(state, sum, field=export_total)
+  struct.set(state, 0, field=export_done)
+  struct.set(state, 0, field=export_index)
+  struct.set(state, true, field=exporting)
+  array.push(plans, planned)
+  st.say(state, "Saving... (Cancel stops the current file and removes its partial output)")
+  ()
+}
+
+fn perform(state: ref<st.Clip>, action: u32, plans: ref<array<export.Plan>>, box_w: f64, box_h: f64)
+    -> unit effects {alloc, ffi, fs.meta, fs.read, fs.write, process, time} {
+  if action == ui_.act_open() {
+    match choose_video() {
+      some(file) => { let _ = open_video(state, str.view(file)) },
+      none => {},
+    }
+  } else if action == ui_.act_start() { step(state, 0 - state.frame)
+  } else if action == ui_.act_back() { step(state, -1)
+  } else if action == ui_.act_play() { toggle_play(state)
+  } else if action == ui_.act_stop() {
+    stop_playing(state)
+    struct.set(state, 0, field=frame)
+    struct.set(state, true, field=image_wanted)
+  } else if action == ui_.act_forward() { step(state, 1)
+  } else if action == ui_.act_end() { step(state, state.frames)
+  } else if action == ui_.act_loop() { struct.set(state, not state.loop_play, field=loop_play)
+  } else if action == ui_.act_play_segment() { play_segment(state)
+  } else if action == ui_.act_mark_in() {
+    if state.loaded {
+      struct.set(state, state.frame, field=mark_in)
+      if state.mark_out >= 0 and state.mark_out <= state.mark_in { struct.set(state, -1, field=mark_out) }
+    }
+  } else if action == ui_.act_mark_out() {
+    if state.loaded {
+      // Out is exclusive: marking at the playhead keeps the frame under it.
+      struct.set(state, state.frame + 1, field=mark_out)
+      if state.mark_in >= state.mark_out { struct.set(state, -1, field=mark_in) }
+    }
+  } else if action == ui_.act_clear() {
+    struct.set(state, -1, field=mark_in)
+    struct.set(state, -1, field=mark_out)
+  } else if action == ui_.act_add() {
+    let why: string = model.add_segment(struct.borrow(state, field=segs), state.mark_in, state.mark_out)
+    if str.len(why) == 0 {
+      var note: string = string.copy("Added segment ")
+      string.append(note, str.view(string.from_int(state.mark_in)))
+      string.append(note, "-")
+      string.append(note, str.view(string.from_int(state.mark_out)))
+      string.append(note, " (")
+      string.append(note, str.view(string.from_int(state.mark_out - state.mark_in)))
+      string.append(note, " frames)")
+      st.say(state, str.view(note))
+      struct.set(state, -1, field=mark_in)
+      struct.set(state, -1, field=mark_out)
+    } else { st.say(state, str.view(why)) }
+  } else if action == ui_.act_delete() {
+    let doomed: i64 = state.segs.selected
+    if model.remove_segment(struct.borrow(state, field=segs), doomed) { st.say(state, "Segment deleted.") }
+  } else if action == ui_.act_set_in() or action == ui_.act_set_out() {
+    let chosen: i64 = state.segs.selected
+    if chosen >= 0 {
+      let s: model.Segment = model.segment_at(struct.borrow(state, field=segs), cast.wrap(chosen))
+      let a: i64 = if action == ui_.act_set_in() { state.frame } else { s.start }
+      let b: i64 = if action == ui_.act_set_out() { state.frame + 1 } else { s.end }
+      let why: string = model.update_segment(struct.borrow(state, field=segs), chosen, a, b)
+      var note: string = string.copy("Segment updated.")
+      if str.len(why) > 0 { note = why }
+      st.say(state, str.view(note))
+    }
+  } else if action == ui_.act_mp4() { struct.set(state, not state.out_mp4, field=out_mp4)
+  } else if action == ui_.act_png() { struct.set(state, not state.out_png, field=out_png)
+  } else if action == ui_.act_captions() { struct.set(state, not state.out_captions, field=out_captions)
+  } else if action == ui_.act_every_less() { struct.set(state, step_every(state.every, false), field=every)
+  } else if action == ui_.act_every_more() { struct.set(state, step_every(state.every, true), field=every)
+  } else if action == ui_.act_folder() { let _ = choose_folder(state)
+  } else if action == ui_.act_export() {
+    if str.len(state.out_dir) == 0 {
+      if choose_folder(state) { begin_export(state, plans) }
+    } else { begin_export(state, plans) }
+  } else if action == ui_.act_cancel() {
+    if state.exporting {
+      let _ = files.write_text(str.view(provider.export_cancel_path(struct.borrow(state, field=engine))), "cancel")
+      st.say(state, "Cancelling...")
+    }
+  } else if action == ui_.act_save_list() { save_list(state)
+  } else if action == ui_.act_load_list() { load_list(state)
+  } else if action >= ui_.act_row() {
+    model.select_segment(struct.borrow(state, field=segs), cast.wrap(action - ui_.act_row()))
+    let s: model.Segment = model.segment_at(struct.borrow(state, field=segs), cast.wrap(action - ui_.act_row()))
+    if not state.playing { struct.set(state, s.start, field=frame)
+      struct.set(state, true, field=image_wanted) }
+  }
+  ()
+}
+
+// ---- Headless modes -----------------------------------------------------------------------
+
+fn write_png(surface: ref<draw.Surface>, target: str) -> bool effects {alloc, fs.read, fs.write} {
+  var metadata: array<png_tools.TextEntry> = [png_tools.text("Title", "Genesis Clip")]
+  var encoded: bytes = match png_tools.encode_rgba_with_text(surface, metadata) {
+    ok(value) => value, err(_) => { return false },
+  }
+  match image.write_file(target, bytes.view(encoded)) { ok(_) => true, err(_) => false, }
+}
+
+fn render_window(state: ref<st.Clip>, surface: draw.Surface own, width: u32, height: u32) -> draw.Surface effects {alloc} {
+  var canvas: draw.Canvas = draw.canvas(surface)
+  let scale: f64 = layout.ui_scale(st.fl(width), st.fl(height))
+  draw.set_transform(canvas, draw.scale(scale, scale))
+  ui_.paint(state, canvas, st.fl(width) / scale, st.fl(height) / scale)
+  draw.finish(canvas)
+}
+
+fn load_fonts(state: ref<st.Clip>) -> unit effects {alloc, env, fs.read, fs.meta} {
+  let _ = struct.replace(state, ui_text.load(typeface.search_paths()), field=fonts)
+  ()
+}
+
+fn paint_mode(state: ref<st.Clip>, args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 4 { say("--paint needs OUT.png and VIDEO")
+    return 2 }
+  let target: str = view.get(args, 2)
+  if not open_video(state, view.get(args, 3)) { say(str.view(struct.borrow(state, field=status)))
+    return 1 }
+  var at: u64 = 4
+  var wanted: i64 = state.frames / 3
+  loop {
+    if at >= view.len(args) { break }
+    if view.get(args, at) == "--frame" and at + 1 < view.len(args) {
+      wanted = match text.parse_i64(view.get(args, at + 1)) { some(v) => v, none => wanted, }
+    }
+    if view.get(args, at) == "--list" and at + 1 < view.len(args) {
+      match files.read_text(view.get(args, at + 1)) {
+        ok(body) => { let why: string = model.from_json(struct.borrow(state, field=segs), str.view(body))
+          if str.len(why) > 0 { say(str.view(why)) } },
+        err(_) => { say("[CLIP_LIST] cannot read the list") },
+      }
+    }
+    at = at + 1
+  }
+  load_fonts(state)
+  let width: u32 = 1280
+  let height: u32 = 800
+  let g: ui_.Geometry = ui_.geometry(1280.0, 800.0)
+  // Tiles: the same rule the window uses.
+  struct.set(state, tiles_for(state, ui_.width_of(g.strip)), field=thumb_tiles)
+  loop { if not fill_thumb(state) { break } }
+  fill_wave(state)
+  struct.set(state, st.clamp(state, wanted), field=frame)
+  let _ = show_frame(state, state.frame, ui_.width_of(g.monitor), ui_.height_of(g.monitor))
+  if model.segment_count(struct.borrow(state, field=segs)) > 0 {
+    struct.set(state, state.frame, field=mark_in)
+    struct.set(state, state.frame + 24, field=mark_out)
+  }
+  var surface: draw.Surface = match draw.surface(width, height) {
+    some(value) => value, none => { return 1 },
+  }
+  surface = render_window(state, surface, width, height)
+  if not write_png(surface, target) { say("[CLIP_PAINT] cannot write the PNG")
+    return 1 }
+  say("painted")
+  0
+}
+
+// How many filmstrip tiles fit the strip, at the video's own tile shape (72 pixels high).
+fn tiles_for(state: ref<st.Clip>, strip_width: f64) -> u64 effects {} {
+  let vw: f64 = st.fl(state.width)
+  let vh: f64 = st.fl(state.height)
+  if vh < 1.0 { return 1 }
+  let tile: f64 = 72.0 * vw / vh
+  let n: u64 = cast.sat(math.floor(strip_width / tile + 0.5))
+  if n < 1 { 1 } else if n > 64 { 64 } else { n }
+}
+
+fn export_mode(state: ref<st.Clip>, args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 5 { say("--export needs OUTDIR VIDEO LIST.json [--mp4] [--png N] [--captions]")
+    return 2 }
+  if not open_video(state, view.get(args, 3)) { say(str.view(struct.borrow(state, field=status)))
+    return 1 }
+  match files.read_text(view.get(args, 4)) {
+    ok(body) => {
+      let why: string = model.from_json(struct.borrow(state, field=segs), str.view(body))
+      if str.len(why) > 0 { say(str.view(why))
+        return 1 }
+    },
+    err(_) => { say("[CLIP_LIST] cannot read the list")
+      return 1 },
+  }
+  var at: u64 = 5
+  var mp4: bool = false
+  var png: bool = false
+  var captions: bool = false
+  var every: i64 = 1
+  loop {
+    if at >= view.len(args) { break }
+    if view.get(args, at) == "--mp4" { mp4 = true }
+    if view.get(args, at) == "--captions" { captions = true }
+    if view.get(args, at) == "--png" {
+      png = true
+      if at + 1 < view.len(args) {
+        every = match text.parse_i64(view.get(args, at + 1)) { some(v) => v, none => 1, }
+        at = at + 1
+      }
+    }
+    at = at + 1
+  }
+  let out: str = view.get(args, 2)
+  let _ = files.mkdirs(out)
+  let progress: string = path.join(out, ".progress")
+  let cancel: string = path.join(out, ".cancel")
+  var planned: export.Plan = export.plan(struct.borrow(state, field=segs), str.view(struct.borrow(state, field=ffmpeg)),
+    str.view(struct.borrow(state, field=path)), str.view(struct.borrow(state, field=stem)), out,
+    state.has_audio, export.Options {mp4: mp4, png: png, every: every, captions: captions,
+      width: state.width, height: state.height}, str.view(progress), str.view(cancel))
+  var n: u64 = 0
+  loop {
+    if n >= array.len(struct.borrow(planned, field=outputs)) { break }
+    say(str.view(export.command_text(struct.borrow(array.borrow(struct.borrow(planned, field=outputs), n), field=argv))))
+    n = n + 1
+  }
+  var outcome: export.Outcome = export.run(planned)
+  say(str.view(outcome.message))
+  let _ = files.remove(str.view(progress))
+  if outcome.state == export.state_done() { 0 } else { 1 }
+}
+
+// ---- The window ---------------------------------------------------------------------------
+
+type Sound = struct { lib: option<CAbiLibrary>, active: bool, seq: u64, next_second: f64,
+                      total_second: f64, origin: i64, chunk_source: f64 }
+
+fn sound_call(sound: ref<Sound>, operation: str, argument: str) -> string effects {alloc, ffi} {
+  match struct.replace(sound, option.none(), field=lib) {
+    none => string.new(),
+    some(opened) => {
+      var library: CAbiLibrary = opened
+      let reply: string = native_audio.request(library, operation, argument)
+      let _ = struct.replace(sound, option.some(library), field=lib)
+      reply
+    },
+  }
+}
+
+fn sound_queued(sound: ref<Sound>) -> u64 effects {alloc, ffi} {
+  match struct.replace(sound, option.none(), field=lib) {
+    none => 0,
+    some(opened) => {
+      var library: CAbiLibrary = opened
+      let measured: native_audio.Clock = native_audio.clock(library)
+      let _ = struct.replace(sound, option.some(library), field=lib)
+      if measured.ok { measured.queued } else { 99 }
+    },
+  }
+}
+
+// The audio device's sample clock (samples played since it started, blocks still queued).
+fn sound_clock(sound: ref<Sound>) -> native_audio.Clock effects {alloc, ffi} {
+  match struct.replace(sound, option.none(), field=lib) {
+    none => native_audio.Clock {ok: false, samples: 0, queued: 0, error: string.new()},
+    some(opened) => {
+      var library: CAbiLibrary = opened
+      let measured: native_audio.Clock = native_audio.clock(library)
+      let _ = struct.replace(sound, option.some(library), field=lib)
+      measured
+    },
+  }
+}
+
+pub type ChunkJob = struct { ffmpeg: string, input: string, start: f64, seconds: f64, output: string }
+
+// 48 kHz stereo 16-bit WAV, the one format the native audio queue plays.
+pub fn extract_chunk(job: ChunkJob own) -> bool effects {alloc, process, time} {
+  var spec: ChunkJob = job
+  let argv: array<string> = [string.copy(str.view(struct.borrow(spec, field=ffmpeg))), string.copy("-nostdin"), string.copy("-y"),
+    string.copy("-v"), string.copy("error"), string.copy("-ss"), export.fixed(spec.start), string.copy("-t"),
+    export.fixed(spec.seconds), string.copy("-i"), string.copy(str.view(struct.borrow(spec, field=input))),
+    string.copy("-vn"), string.copy("-map"), string.copy("0:a:0"), string.copy("-ac"), string.copy("2"),
+    string.copy("-ar"), string.copy("48000"), string.copy("-c:a"), string.copy("pcm_s16le"),
+    string.copy("-f"), string.copy("wav"), string.copy(str.view(struct.borrow(spec, field=output)))]
+  match ffmpeg.invoke(argv) { ok(_) => true, err(_) => false, }
+}
+
+fn chunk_job(state: ref<st.Clip>, sound: ref<Sound>, root: str) -> ChunkJob effects {alloc} {
+  let remaining: f64 = sound.total_second - sound.next_second
+  let seconds: f64 = if remaining < 3.0 { remaining } else { 3.0 }
+  var name: string = string.copy("clip-audio-")
+  string.append(name, str.view(string.from_int(sound.seq % 4)))
+  string.append(name, ".wav")
+  ChunkJob {ffmpeg: string.copy(str.view(struct.borrow(state, field=ffmpeg))),
+    input: string.copy(str.view(struct.borrow(state, field=path))),
+    start: sound.chunk_source + sound.next_second, seconds: seconds,
+    output: path.join(root, str.view(name))}
+}
+
+// Start sound at the playhead: first chunk synchronously, the rest topped up in the loop.
+fn sound_begin(state: ref<st.Clip>, sound: ref<Sound>, root: str) -> string effects {alloc, ffi, process, time, fs.meta} {
+  let _ = sound_call(sound, "stop", "")
+  struct.set(sound, false, field=active)
+  if not state.playing or not state.has_audio { return string.new() }
+  if not str.eq(str.view(sound_call(sound, "start", "")), "ok") { return string.copy("[CLIP_AUDIO] No audio device is available; playing without sound.") }
+  struct.set(sound, state.frame, field=origin)
+  struct.set(sound, cast.float(state.frame) / state.fps, field=chunk_source)
+  struct.set(sound, 0.0, field=next_second)
+  struct.set(sound, cast.float(state.range_end - state.frame) / state.fps, field=total_second)
+  struct.set(sound, 0, field=seq)
+  if sound.total_second <= 0.0 { return string.new() }
+  var job: ChunkJob = chunk_job(state, sound, root)
+  let target: string = string.copy(str.view(struct.borrow(job, field=output)))
+  let seconds: f64 = job.seconds
+  if extract_chunk(job) and str.eq(str.view(sound_call(sound, "queue", str.view(target))), "ok") {
+    struct.set(sound, seconds, field=next_second)
+    struct.set(sound, sound.seq + 1, field=seq)
+    struct.set(sound, true, field=active)
+    return string.new()
+  }
+  string.copy("[CLIP_AUDIO] The sound could not be prepared; playing without sound.")
+}
+
+fn run_window(state: ref<st.Clip>, first_file: str) -> i32
+    effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
+  var window: Window = match gui.open_canvas("Genesis Clip", 1280, 800) {
+    ok(value) => value,
+    err(_) => { say("Genesis Clip could not open a window; use --paint for a headless picture.")
+      return 1 },
+  }
+  load_fonts(state)
+  var sound: Sound = Sound {lib: match native_audio.open() { ok(value) => option.some(value), err(_) => option.none(), },
+    active: false, seq: 0, next_second: 0.0, total_second: 0.0, origin: 0, chunk_source: 0.0}
+  let audio_root: string = path.join(provider.media_root(struct.borrow(state, field=engine)), "audio")
+  let _ = files.mkdirs(str.view(audio_root))
+  var surface: draw.Surface = draw.empty_surface()
+  var dirty: bool = true
+  var pointer_x: f64 = 0.0
+  var pointer_y: f64 = 0.0
+  var progress_poll: u64 = 0
+  if str.len(first_file) > 0 { let _ = open_video(state, first_file) }
+  task.scope {
+  var export_jobs: array<task<export.Outcome>> = array.new()
+  var audio_jobs: array<task<bool>> = array.new()
+  var plans: array<export.Plan> = array.new()
+  loop {
+    if not state.running { break }
+    let box: gui.Rect = gui.window_size(window)
+    let width: u32 = if box.width < 900 { 900 } else { box.width }
+    let height: u32 = if box.height < 640 { 640 } else { box.height }
+    let scale: f64 = layout.ui_scale(st.fl(width), st.fl(height))
+    let logical_w: f64 = st.fl(width) / scale
+    let logical_h: f64 = st.fl(height) / scale
+    let g: ui_.Geometry = ui_.geometry(logical_w, logical_h)
+    let box_w: f64 = ui_.width_of(g.monitor) * scale
+    let box_h: f64 = ui_.height_of(g.monitor) * scale
+    // Filmstrip tile count follows the strip width.
+    if state.loaded {
+      let tiles: u64 = tiles_for(state, ui_.width_of(g.strip))
+      if tiles != state.thumb_tiles {
+        let _ = struct.replace(state, array.new(), field=thumbs)
+        struct.set(state, tiles, field=thumb_tiles)
+        dirty = true
+      }
+    }
+    // Export bookkeeping.
+    if array.len(plans) > 0 {
+      match array.pop(plans) {
+        some(planned) => { array.push(export_jobs, task.spawn(planned, fn=export.run)) },
+        none => {},
+      }
+      dirty = true
+    }
+    if state.exporting {
+      match tasks.join_next<export.Outcome>(export_jobs, tasks.now()) {
+        some(outcome) => {
+          struct.set(state, false, field=exporting)
+          var note: string = string.copy(str.view(outcome.message))
+          if outcome.state == export.state_done() {
+            note = string.copy("Saved ")
+            string.append(note, str.view(string.from_int(outcome.written)))
+            string.append(note, " output(s) to ")
+            string.append(note, str.view(struct.borrow(state, field=out_dir)))
+          }
+          st.say(state, str.view(note))
+          dirty = true
+        },
+        none => {
+          progress_poll = progress_poll + 1
+          if progress_poll % 6 == 0 {
+            match files.read_text(str.view(provider.export_progress_path(struct.borrow(state, field=engine)))) {
+              ok(body) => {
+                var fields: array<string> = text.split(str.view(body), " ")
+                if array.len(fields) == 2 {
+                  let index: u64 = match text.parse_u64(str.view(array.borrow(fields, 0))) { some(v) => v, none => 0, }
+                  let frames: i64 = match text.parse_i64(str.view(array.borrow(fields, 1))) { some(v) => v, none => 0, }
+                  let before: i64 = if index < array.len(struct.borrow(state, field=export_before)) {
+                    array.get(struct.borrow(state, field=export_before), index) } else { state.export_total }
+                  struct.set(state, before + frames, field=export_done)
+                  struct.set(state, index, field=export_index)
+                  dirty = true
+                }
+              },
+              err(_) => {},
+            }
+          }
+        },
+      }
+    }
+    // Sound.
+    if state.audio_stop {
+      struct.set(state, false, field=audio_stop)
+      let _ = sound_call(sound, "stop", "")
+      struct.set(sound, false, field=active)
+    }
+    if state.audio_restart {
+      struct.set(state, false, field=audio_restart)
+      // A chunk still extracting belongs to the old position.
+      let _ = tasks.join_next<bool>(audio_jobs, 5000)
+      let trouble: string = sound_begin(state, sound, str.view(audio_root))
+      if str.len(trouble) > 0 { st.say(state, str.view(trouble)) }
+      // Video time starts when the first sound is queued.
+      struct.set(state, clock.start(), field=play_ns)
+      struct.set(state, state.frame, field=play_frame0)
+    }
+    if sound.active and state.playing {
+      if array.len(audio_jobs) > 0 {
+        match tasks.join_next<bool>(audio_jobs, tasks.now()) {
+          some(ready) => {
+            if ready {
+              var done_name: string = string.copy("clip-audio-")
+              string.append(done_name, str.view(string.from_int((sound.seq) % 4)))
+              string.append(done_name, ".wav")
+              if str.eq(str.view(sound_call(sound, "queue", str.view(path.join(str.view(audio_root), str.view(done_name))))), "ok") {
+                struct.set(sound, sound.next_second + (if sound.total_second - sound.next_second < 3.0 { sound.total_second - sound.next_second } else { 3.0 }), field=next_second)
+              }
+              struct.set(sound, sound.seq + 1, field=seq)
+            }
+          },
+          none => {},
+        }
+      } else if sound.next_second + 0.01 < sound.total_second and sound_queued(sound) < 3 {
+        array.push(audio_jobs, task.spawn(chunk_job(state, sound, str.view(audio_root)), fn=extract_chunk))
+      }
+    }
+    // Transport. With sound the picture follows the audio device's sample clock (what is being
+    // heard), so it cannot drift; without sound, or once the audio track has run out, it follows
+    // the wall clock, skipping frames rather than slowing down.
+    if state.playing {
+      let last: i64 = state.range_end - 1
+      let now: u64 = clock.start()
+      var due: i64 = -1
+      if sound.active {
+        let measured: native_audio.Clock = sound_clock(sound)
+        let more_coming: bool = sound.next_second + 0.01 < sound.total_second
+        if model.sample_clock_drives(true, measured.ok, measured.queued, more_coming) {
+          due = model.heard_frame(sound.origin, measured.samples, state.fps, state.range_end)
+          // Keep the wall clock anchored here so a hand-over to it is seamless.
+          struct.set(state, due, field=play_frame0)
+          struct.set(state, now, field=play_ns)
+        }
+      }
+      if due < 0 {
+        let elapsed: u64 = now - state.play_ns
+        let passed: f64 = cast.float(elapsed) * state.fps / 1000000000.0
+        due = state.play_frame0 + cast.sat(passed)
+      }
+      if due > last {
+        if state.loop_play {
+          start_playing(state, state.range_start, state.range_start, state.range_end)
+        } else {
+          struct.set(state, last, field=frame)
+          stop_playing(state)
+          struct.set(state, true, field=image_wanted)
+        }
+        dirty = true
+      } else if due != state.frame {
+        struct.set(state, due, field=frame)
+        struct.set(state, true, field=image_wanted)
+        dirty = true
+      }
+    }
+    // Pictures: the monitor first, then filmstrip tiles and the waveform while idle.
+    var busy_decoding: bool = false
+    if state.loaded and (state.image_wanted or state.image_frame != state.frame) {
+      let _ = show_frame(state, state.frame, box_w, box_h)
+      busy_decoding = true
+      dirty = true
+    } else if state.loaded and not state.playing and not state.scrubbing and not state.exporting {
+      if fill_thumb(state) { dirty = true
+        busy_decoding = true }
+      else if not state.wave_ready { fill_wave(state)
+        dirty = true }
+    }
+    if dirty {
+      let wide: u64 = cast.wrap(width)
+      let tall: u64 = cast.wrap(height)
+      if draw.surface_width(surface) != width or draw.surface_height(surface) != height {
+        surface = match draw.surface(width, height) { some(value) => value, none => draw.empty_surface(), }
+      }
+      surface = render_window(state, surface, width, height)
+      match gui.present_surface(window, surface) {
+        ok(_) => {},
+        err(_) => { st.say(state, "[CLIP_PRESENT] The window could not be drawn.") },
+      }
+      dirty = false
+    }
+    // Events.
+    let wait: u64 = if state.playing { 2 } else if busy_decoding or state.exporting { 1 } else { 40 }
+    var drained: u64 = 0
+    loop {
+      let event: ui.event = gui.wait(window, if drained == 0 { wait } else { 0 })
+      if event.kind == 0 or event.kind == 14 { break }
+      if event.kind == 1 {
+        stop_playing(state)
+        struct.set(state, false, field=running)
+        break
+      }
+      let dropped: string = gui.dropped_files(window)
+      if str.len(dropped) > 0 {
+        var lines: array<string> = text.split(str.view(dropped), "\n")
+        if array.len(lines) > 0 { let _ = open_video(state, str.view(text.trim(str.view(array.borrow(lines, 0))))) }
+        dirty = true
+      }
+      match widgets.translate(event) {
+        none => {},
+        some(signal) => {
+          match signal {
+            PointerDown(point) => {
+              if not widgets.point_secondary(point) {
+                let at: widgets.Point = widgets.point_coordinates(point)
+                pointer_x = st.fl(at.x) / scale
+                pointer_y = st.fl(at.y) / scale
+                struct.set(state, 0, field=focus)
+                var list: array<ui_.Control> = ui_.controls(state, logical_w, logical_h)
+                let action: u32 = ui_.hit(list, pointer_x, pointer_y)
+                if action != 0 {
+                  perform(state, action, plans, box_w, box_h)
+                } else if state.loaded and ui_.over_strip(state, logical_w, logical_h, pointer_x, pointer_y) {
+                  struct.set(state, true, field=scrubbing)
+                  seek(state, ui_.x_frame(state, g.strip, pointer_x))
+                  select_at_playhead(state)
+                }
+                dirty = true
+              }
+            },
+            PointerMove(point) => {
+              let at: widgets.Point = widgets.point_coordinates(point)
+              pointer_x = st.fl(at.x) / scale
+              pointer_y = st.fl(at.y) / scale
+              // Hover: the enabled control under the pointer (the painter lights it).
+              var under: array<ui_.Control> = ui_.controls(state, logical_w, logical_h)
+              let over: u32 = if state.scrubbing { 0 } else { ui_.hit(under, pointer_x, pointer_y) }
+              if over != state.hover {
+                struct.set(state, over, field=hover)
+                dirty = true
+              }
+              if state.scrubbing {
+                seek(state, ui_.x_frame(state, g.strip, pointer_x))
+                dirty = true
+              }
+            },
+            PointerUp(point) => {
+              if state.scrubbing {
+                struct.set(state, false, field=scrubbing)
+                select_at_playhead(state)
+                dirty = true
+              }
+            },
+            Key(press) => {
+              let code: u32 = widgets.letter(press.code)
+              var live: array<ui_.Control> = ui_.controls(state, logical_w, logical_h)
+              let focused: bool = state.focus != 0 and ui_.is_enabled(live, state.focus)
+              if code == widgets.key_tab() {
+                var order: array<u32> = ui_.focus_order(live)
+                struct.set(state, model.focus_step(order, state.focus, press.shift), field=focus)
+              } else if code == widgets.key_return() or (code == widgets.key_space() and focused) {
+                if focused { perform(state, state.focus, plans, box_w, box_h) }
+              } else if code == widgets.key_space() { toggle_play(state)
+              } else if code == widgets.key_left() { step(state, if press.shift { -10 } else { -1 })
+              } else if code == widgets.key_right() { step(state, if press.shift { 10 } else { 1 })
+              } else if code == widgets.key_home() { step(state, 0 - state.frame)
+              } else if code == widgets.key_end() { step(state, state.frames)
+              } else if code == widgets.key_delete() { perform(state, ui_.act_delete(), plans, box_w, box_h)
+              } else if code == widgets.key_escape() {
+                if state.focus != 0 { struct.set(state, 0, field=focus) }
+                else { perform(state, ui_.act_cancel(), plans, box_w, box_h) }
+              } else if press.control and code == 111 { perform(state, ui_.act_open(), plans, box_w, box_h)
+              } else if press.control and code == 115 { perform(state, ui_.act_save_list(), plans, box_w, box_h)
+              } else if press.control and code == 101 { perform(state, ui_.act_export(), plans, box_w, box_h)
+              } else if not press.control and code == 105 { perform(state, ui_.act_mark_in(), plans, box_w, box_h)
+              } else if not press.control and code == 111 { perform(state, ui_.act_mark_out(), plans, box_w, box_h)
+              } else if not press.control and code == 97 { perform(state, ui_.act_add(), plans, box_w, box_h)
+              } else if not press.control and code == 112 { perform(state, ui_.act_play_segment(), plans, box_w, box_h)
+              } else if not press.control and code == 108 { perform(state, ui_.act_loop(), plans, box_w, box_h)
+              } else if not press.control and code == 120 { perform(state, ui_.act_clear(), plans, box_w, box_h)
+              } else if code == widgets.key_up() or code == widgets.key_down() {
+                let at: i64 = state.segs.selected + (if code == widgets.key_down() { 1 } else { -1 })
+                model.select_segment(struct.borrow(state, field=segs), at)
+                if state.segs.selected >= 0 and not state.playing {
+                  let s: model.Segment = selected_segment(state)
+                  struct.set(state, s.start, field=frame)
+                  struct.set(state, true, field=image_wanted)
+                }
+              }
+              dirty = true
+            },
+            Resize(extent) => { dirty = true },
+            Scroll(wheel) => {},
+            Text(entry) => {},
+            Progress(step_) => {},
+            MenuAccess(code) => {},
+            Tick => {},
+          }
+        },
+      }
+      drained = drained + 1
+      if drained > 64 { break }
+    }
+  }
+  // Leaving the scope joins the tasks: stop an export at its next poll.
+  if state.exporting { let _ = files.write_text(str.view(provider.export_cancel_path(struct.borrow(state, field=engine))), "cancel") }
+  let _ = tasks.join_next<bool>(audio_jobs, 10000)
+  }
+  let _ = sound_call(sound, "stop", "")
+  match struct.replace(sound, option.none(), field=lib) {
+    none => {},
+    some(opened) => { var library: CAbiLibrary = opened
+      native_audio.close(library) },
+  }
+  provider.shutdown(struct.borrow(state, field=engine))
+  gui.close(window)
+  0
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, io.write, process, thread, time, ui, net} {
+  let worker: string = worker_path()
+  var scratch: string = match provider.resolve_scratch(str.view(scratch_root())) {
+    ok(value) => value,
+    err(problem) => { say(str.view(problem))
+      return 1 },
+  }
+  var engine: provider.Provider = make_engine(str.view(worker), str.view(scratch))
+  match provider.isolate_media(engine) {
+    ok(_) => {},
+    err(problem) => { say(str.view(problem))
+      return 1 },
+  }
+  var state: st.Clip = st.clip(engine, str.view(media_runtime.tool(str.view(worker), "ffmpeg")), str.view(worker))
+  let verb: string = if view.len(args) > 1 { string.copy(view.get(args, 1)) } else { string.new() }
+  if verb == "--paint" { return paint_mode(state, args) }
+  if verb == "--export" { return export_mode(state, args) }
+  let first: string = if str.len(verb) > 0 and not str.starts_with(str.view(verb), "--") { verb } else { string.new() }
+  run_window(state, str.view(first))
+}
+
+// Select the segment under the playhead (nothing when the playhead is in a gap).
+fn select_at_playhead(state: ref<st.Clip>) -> unit effects {alloc} {
+  let frame: i64 = state.frame
+  let at: i64 = model.index_at(struct.borrow(state, field=segs), frame)
+  model.select_segment(struct.borrow(state, field=segs), at)
+  ()
+}
+
+fn selected_segment(state: ref<st.Clip>) -> model.Segment effects {alloc} {
+  let chosen: i64 = state.segs.selected
+  model.segment_at(struct.borrow(state, field=segs), cast.wrap(chosen))
+}

@@ -1,0 +1,283 @@
+// Genesis Clip: the segment list. Pure logic with no window, media or file access, so the
+// headless test exercises exactly what the window edits.
+//
+// A segment is the half-open frame range [start, end): `start` is the first frame kept and
+// `end` is the first frame NOT kept (the Out mark). Segments never overlap; two segments may
+// touch (one's end equals the next one's start). The list is always sorted by start.
+module genesis.clip_model
+
+import std.decode as decode
+import std.json as json
+import std.math as math
+import std.text as text
+
+pub type Segment = struct { start: i64, end: i64 }
+pub type Model = struct { segments: array<Segment>, selected: i64, total: i64, fps: f64 }
+
+pub fn model(total: i64, fps: f64) -> Model effects {alloc} {
+  Model {segments: array.new(), selected: -1, total: total, fps: fps}
+}
+
+pub fn segment_count(m: ref<Model>) -> u64 effects {} { array.len(struct.borrow(m, field=segments)) }
+
+pub fn segment_at(m: ref<Model>, index: u64) -> Segment effects {} {
+  array.get(struct.borrow(m, field=segments), index)
+}
+
+pub fn span(s: Segment) -> i64 effects {} { s.end - s.start }
+
+// Why [start, end) cannot be stored, or an empty string when it can. `skip` names a segment
+// to ignore (the one being edited), or -1.
+pub fn refusal(m: ref<Model>, start: i64, end: i64, skip: i64) -> string effects {alloc} {
+  if start < 0 or end > m.total {
+    return string.copy("[CLIP_RANGE] The marks must lie inside the video.")
+  }
+  if end <= start { return string.copy("[CLIP_EMPTY] Out must come after In.") }
+  var i: u64 = 0
+  loop {
+    if i >= segment_count(m) { break }
+    let here: i64 = cast.wrap(i)
+    if here != skip {
+      let other: Segment = segment_at(m, i)
+      if other.start < end and start < other.end {
+        return string.copy("[CLIP_OVERLAP] The range overlaps an existing segment.")
+      }
+    }
+    i = i + 1
+  }
+  string.new()
+}
+
+fn rebuilt(m: ref<Model>, skip: i64, extra: option<Segment>) -> array<Segment> effects {alloc} {
+  var out: array<Segment> = array.new()
+  var placed: bool = false
+  var i: u64 = 0
+  loop {
+    if i >= segment_count(m) { break }
+    let here: i64 = cast.wrap(i)
+    if here != skip {
+      let s: Segment = segment_at(m, i)
+      match extra {
+        some(added) => {
+          if not placed and added.start < s.start {
+            array.push(out, added)
+            placed = true
+          }
+        },
+        none => {},
+      }
+      array.push(out, s)
+    }
+    i = i + 1
+  }
+  match extra {
+    some(added) => { if not placed { array.push(out, added) } },
+    none => {},
+  }
+  out
+}
+
+fn index_of(list: ref<array<Segment>>, start: i64) -> i64 effects {} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    if array.get(list, i).start == start { return cast.wrap(i) }
+    i = i + 1
+  }
+  -1
+}
+
+// Store a new segment. Returns "" on success (and selects it) or the refusal text.
+pub fn add_segment(m: ref<Model>, start: i64, end: i64) -> string effects {alloc} {
+  let why: string = refusal(m, start, end, -1)
+  if str.len(why) > 0 { return why }
+  var next: array<Segment> = rebuilt(m, -1, option.some(Segment {start: start, end: end}))
+  let chosen: i64 = index_of(next, start)
+  let _ = struct.replace(m, next, field=segments)
+  struct.set(m, chosen, field=selected)
+  string.new()
+}
+
+// Change one segment's range (the selected segment's In/Out edit).
+pub fn update_segment(m: ref<Model>, index: i64, start: i64, end: i64) -> string effects {alloc} {
+  if index < 0 or index >= cast.wrap(segment_count(m)) { return string.copy("[CLIP_SELECT] No segment is selected.") }
+  let why: string = refusal(m, start, end, index)
+  if str.len(why) > 0 { return why }
+  var next: array<Segment> = rebuilt(m, index, option.some(Segment {start: start, end: end}))
+  let chosen: i64 = index_of(next, start)
+  let _ = struct.replace(m, next, field=segments)
+  struct.set(m, chosen, field=selected)
+  string.new()
+}
+
+pub fn remove_segment(m: ref<Model>, index: i64) -> bool effects {alloc} {
+  if index < 0 or index >= cast.wrap(segment_count(m)) { return false }
+  var next: array<Segment> = rebuilt(m, index, option.none())
+  let _ = struct.replace(m, next, field=segments)
+  let left: i64 = cast.wrap(segment_count(m))
+  struct.set(m, if left == 0 { -1 } else if index >= left { left - 1 } else { index }, field=selected)
+  true
+}
+
+pub fn select_segment(m: ref<Model>, index: i64) -> unit effects {} {
+  if index >= 0 and index < cast.wrap(segment_count(m)) { struct.set(m, index, field=selected) }
+  ()
+}
+
+// The segment holding `frame`, or -1.
+pub fn index_at(m: ref<Model>, frame: i64) -> i64 effects {} {
+  var i: u64 = 0
+  loop {
+    if i >= segment_count(m) { break }
+    let s: Segment = segment_at(m, i)
+    if frame >= s.start and frame < s.end { return cast.wrap(i) }
+    i = i + 1
+  }
+  -1
+}
+
+// ---- Text -------------------------------------------------------------------------------
+
+pub fn pad(value: i64, width: u64) -> string effects {alloc} {
+  var out: string = string.from_int(value)
+  loop {
+    if str.len(out) >= width { break }
+    out = text.concat("0", out)
+  }
+  out
+}
+
+pub fn nominal_fps(fps: f64) -> i64 effects {} {
+  let n: i64 = cast.sat(math.floor(fps + 0.5))
+  if n < 1 { 1 } else { n }
+}
+
+// Timecode HH:MM:SS:FF using the nominal (rounded) rate for the frame field.
+pub fn timecode(frame: i64, fps: f64) -> string effects {alloc} {
+  let n: i64 = nominal_fps(fps)
+  let f: i64 = if frame < 0 { 0 } else { frame }
+  let seconds: i64 = f / n
+  var out: string = pad(seconds / 3600, 2)
+  string.append(out, ":")
+  string.append(out, str.view(pad(seconds / 60 % 60, 2)))
+  string.append(out, ":")
+  string.append(out, str.view(pad(seconds % 60, 2)))
+  string.append(out, ":")
+  string.append(out, str.view(pad(f % n, 2)))
+  out
+}
+
+// Seconds with millisecond digits, from an exact frame count.
+pub fn seconds_text(frames: i64, fps: f64) -> string effects {alloc} {
+  let ms: i64 = cast.sat(math.floor(cast.float(frames) * 1000.0 / fps + 0.5))
+  var out: string = string.from_int(ms / 1000)
+  string.append(out, ".")
+  string.append(out, str.view(pad(ms % 1000, 3)))
+  string.append(out, " s")
+  out
+}
+
+// <stem>_<in>-<out>: In and Out are the marked frame numbers, Out exclusive.
+pub fn clip_name(stem: str, s: Segment) -> string effects {alloc} {
+  var out: string = string.copy(stem)
+  string.append(out, "_")
+  string.append(out, str.view(string.from_int(s.start)))
+  string.append(out, "-")
+  string.append(out, str.view(string.from_int(s.end)))
+  out
+}
+
+// ---- Persistence ------------------------------------------------------------------------
+
+pub fn to_json(m: ref<Model>, video: str) -> string effects {alloc} {
+  var out: string = string.copy("{\"version\":1,\"video\":")
+  string.append(out, str.view(json.quote(video)))
+  string.append(out, ",\"fps\":")
+  string.append(out, str.view(string.from_float(m.fps)))
+  string.append(out, ",\"frames\":")
+  string.append(out, str.view(string.from_int(m.total)))
+  string.append(out, ",\"segments\":[")
+  var i: u64 = 0
+  loop {
+    if i >= segment_count(m) { break }
+    let s: Segment = segment_at(m, i)
+    if i > 0 { string.append(out, ",") }
+    string.append(out, "{\"in\":")
+    string.append(out, str.view(string.from_int(s.start)))
+    string.append(out, ",\"out\":")
+    string.append(out, str.view(string.from_int(s.end)))
+    string.append(out, "}")
+    i = i + 1
+  }
+  string.append(out, "]}\n")
+  out
+}
+
+// Replace the list from JSON. Returns "" on success; on any problem the list is unchanged.
+pub fn from_json(m: ref<Model>, source: str) -> string effects {alloc} {
+  var document: json.Document = match json.parse(source) {
+    ok(value) => value,
+    err(_) => { return string.copy("[CLIP_JSON] The segment file is not valid JSON.") },
+  }
+  var root: decode.Node = decode.root()
+  var list: decode.Node = match decode.field(document, root, "segments") {
+    ok(value) => value,
+    err(_) => { return string.copy("[CLIP_JSON] The segment file has no segments list.") },
+  }
+  let wanted: u64 = match decode.array_len(document, list) { ok(value) => value, err(_) => 0, }
+  var staged: Model = model(m.total, m.fps)
+  var i: u64 = 0
+  loop {
+    if i >= wanted { break }
+    match decode.at(document, list, i) {
+      ok(value) => {
+        var entry: decode.Node = value
+        let a: i64 = match decode.i64_or(document, entry, "in", -1) { ok(v) => v, err(_) => -1, }
+        let b: i64 = match decode.i64_or(document, entry, "out", -1) { ok(v) => v, err(_) => -1, }
+        let why: string = add_segment(staged, a, b)
+        if str.len(why) > 0 { return why }
+      },
+      err(_) => { return string.copy("[CLIP_JSON] A segment entry is unreadable.") },
+    }
+    i = i + 1
+  }
+  let _ = struct.replace(m, struct.replace(staged, array.new(), field=segments), field=segments)
+  struct.set(m, if segment_count(m) > 0 { 0 } else { -1 }, field=selected)
+  string.new()
+}
+
+// ---- Playback sync and keyboard focus (pure; the window supplies the numbers) -------------
+
+// The frame the listener is hearing: the device counts 48 kHz sample frames since its start,
+// so the picture follows the sound instead of a wall clock. Never past `end`.
+pub fn heard_frame(origin: i64, samples: u64, fps: f64, end: i64) -> i64 effects {} {
+  let played: f64 = cast.float(samples)
+  let heard: i64 = origin + cast.sat(played * fps / 48000.0)
+  if heard > end { end } else { heard }
+}
+
+// The sample clock drives the picture only while the device is playing real audio: it must
+// answer, and either hold queued audio or still have chunks to come. Otherwise (the audio
+// track ends before the picture) the wall clock carries on from the last heard frame.
+pub fn sample_clock_drives(active: bool, clock_ok: bool, queued: u64, more_coming: bool) -> bool effects {} {
+  active and clock_ok and (queued > 0 or more_coming)
+}
+
+// Tab order: the action after (or before) `current` in `order`, wrapping; the first (or last)
+// when `current` is not in the list or is 0 (no focus); 0 for an empty list.
+pub fn focus_step(order: ref<array<u32>>, current: u32, backwards: bool) -> u32 effects {} {
+  let count: u64 = array.len(order)
+  if count == 0 { return 0 }
+  var at: u64 = 0
+  var found: bool = false
+  var i: u64 = 0
+  loop {
+    if i >= count { break }
+    if array.get(order, i) == current { at = i
+      found = true }
+    i = i + 1
+  }
+  if not found { return if backwards { array.get(order, count - 1) } else { array.get(order, 0) } }
+  if backwards { array.get(order, if at == 0 { count - 1 } else { at - 1 }) }
+  else { array.get(order, if at + 1 >= count { 0 } else { at + 1 }) }
+}

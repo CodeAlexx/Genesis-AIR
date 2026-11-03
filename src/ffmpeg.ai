@@ -56,6 +56,7 @@ pub fn probe(binary: str, source: str) -> result<Info, string> effects {alloc, p
   let count: u64 = match decode.array_len(document, streams) { ok(value) => value, err(_) => 0, }
   var info: Info = Info {frames: 0, width: 0, height: 0, fps: 30.0, video: false, audio: false}
   var duration: f64 = 0.0
+  var video_seconds: f64 = 0.0
   match decode.field(document, root, "format") {
     ok(value) => { var format: decode.Node = value
       duration = decimal(field_text(document, format, "duration")) },
@@ -81,6 +82,8 @@ pub fn probe(binary: str, source: str) -> result<Info, string> effects {alloc, p
         if kind == "audio" { struct.set(info, true, field=audio) }
         let stream_duration: f64 = decimal(field_text(document, stream, "duration"))
         if stream_duration > duration { duration = stream_duration }
+        // A longer audio track must not stretch the picture count.
+        if kind == "video" and video_seconds == 0.0 { video_seconds = stream_duration }
       }, err(_) => {},
     }
     index = index + 1
@@ -88,7 +91,10 @@ pub fn probe(binary: str, source: str) -> result<Info, string> effects {alloc, p
   if not info.video and not info.audio { return result.err("[GA_MEDIA_STREAMS] The file has no audio or video") }
   if info.frames == 0 and duration > 0.0 and duration < 1000000000.0 {
     // The editor needs a positive integral bound, including fractional container durations.
-    struct.set(info, cast.sat(math.ceil(duration * info.fps)), field=frames)
+    // A video stream's own duration is a whole number of frames (rounded); a container-only
+    // duration keeps the original ceiling.
+    let wanted: f64 = if info.video and video_seconds > 0.0 { math.floor(video_seconds * info.fps + 0.5) } else { math.ceil(duration * info.fps) }
+    struct.set(info, cast.sat(wanted), field=frames)
   }
   result.ok(info)
 }

@@ -1,0 +1,241 @@
+// Genesis Clip headless checks: the segment model and the export command construction.
+// No window, no media, no FFmpeg process. Run: genesis-clip-logic.exe SCRATCH_DIR
+module genesis.tests.clip_logic
+
+import std.files as files
+import std.path as path
+import std.testing as test
+import std.text as text
+import "../src/clip_model.ai" as model
+import "../src/clip_export.ai" as export
+
+fn model_rules(suite: ref<test.Suite>) -> unit effects {alloc, fs.meta, fs.write, time} {
+  let _ = test.start(suite, "Segments: add, order, touch, overlap, range")
+  var m: model.Model = model.model(300, 30.0)
+  let _ = test.eq_str(suite, str.view(model.add_segment(m, 100, 160)), "", "A valid segment is stored")
+  let _ = test.eq_str(suite, str.view(model.add_segment(m, 0, 40)), "", "An earlier segment is stored")
+  let _ = test.eq_u64(suite, model.segment_count(m), 2, "Two segments")
+  let _ = test.eq_i64(suite, model.segment_at(m, 0).start, 0, "The list is sorted by start")
+  let _ = test.eq_i64(suite, m.selected, 0, "The newest segment is selected (it sorted first)")
+  let _ = test.eq_str(suite, str.view(model.add_segment(m, 40, 100)), "", "Touching segments are allowed ([0,40) [40,100) [100,160))")
+  let _ = test.eq_u64(suite, model.segment_count(m), 3, "Three touching segments")
+  let _ = test.contains(suite, str.view(model.add_segment(m, 150, 200)), "CLIP_OVERLAP", "Overlap with the tail is refused")
+  let _ = test.contains(suite, str.view(model.add_segment(m, 10, 20)), "CLIP_OVERLAP", "Overlap inside a segment is refused")
+  let _ = test.contains(suite, str.view(model.add_segment(m, 0, 300)), "CLIP_OVERLAP", "Enclosing an existing segment is refused")
+  let _ = test.contains(suite, str.view(model.add_segment(m, 200, 200)), "CLIP_EMPTY", "An empty range is refused")
+  let _ = test.contains(suite, str.view(model.add_segment(m, 220, 210)), "CLIP_EMPTY", "Out before In is refused")
+  let _ = test.contains(suite, str.view(model.add_segment(m, -1, 5)), "CLIP_RANGE", "A negative start is refused")
+  let _ = test.contains(suite, str.view(model.add_segment(m, 290, 301)), "CLIP_RANGE", "An end past the last frame is refused")
+  let _ = test.eq_str(suite, str.view(model.add_segment(m, 290, 300)), "", "A segment ending exactly at the frame count is allowed")
+  let _ = test.eq_u64(suite, model.segment_count(m), 4, "Refusals stored nothing")
+  let _ = test.eq_i64(suite, model.index_at(m, 99), 1, "index_at finds the containing segment")
+  let _ = test.eq_i64(suite, model.index_at(m, 100), 2, "index_at: start is inclusive, end exclusive")
+  let _ = test.eq_i64(suite, model.index_at(m, 200), -1, "index_at: a gap holds no segment")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Segments: edit and delete")
+  let _ = test.eq_str(suite, str.view(model.update_segment(m, 2, 100, 170)), "", "Extending a segment into free space works")
+  let _ = test.eq_i64(suite, model.segment_at(m, 2).end, 170, "The edit is stored")
+  let _ = test.contains(suite, str.view(model.update_segment(m, 2, 90, 170)), "CLIP_OVERLAP", "An edit into a neighbour is refused")
+  let _ = test.eq_i64(suite, model.segment_at(m, 2).start, 100, "A refused edit leaves the segment alone")
+  let _ = test.check(suite, model.remove_segment(m, 1), "Delete works")
+  let _ = test.eq_u64(suite, model.segment_count(m), 3, "One fewer segment")
+  let _ = test.check(suite, not model.remove_segment(m, 9), "Deleting a missing index is a no-op")
+  let _ = test.eq_i64(suite, m.selected, 1, "Selection stays on a valid neighbour")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Naming and time text")
+  let named: model.Segment = model.Segment {start: 60, end: 108}
+  let _ = test.eq_str(suite, str.view(model.clip_name("holiday", named)), "holiday_60-108", "Clip name is <stem>_<in>-<out>")
+  let _ = test.eq_str(suite, str.view(model.timecode(0, 30.0)), "00:00:00:00", "Timecode of frame 0")
+  let _ = test.eq_str(suite, str.view(model.timecode(3723, 30.0)), "00:02:04:03", "Timecode HH:MM:SS:FF")
+  let _ = test.eq_str(suite, str.view(model.seconds_text(48, 24.0)), "2.000 s", "Duration text")
+  let _ = test.eq_str(suite, str.view(model.seconds_text(1, 30.0)), "0.033 s", "Single frame duration")
+  let _ = test.done(suite)
+}
+
+fn json_round_trip(suite: ref<test.Suite>) -> unit effects {alloc, fs.meta, fs.write, time} {
+  let _ = test.start(suite, "Segment JSON round trip")
+  var m: model.Model = model.model(300, 29.97)
+  let _ = model.add_segment(m, 0, 40)
+  let _ = model.add_segment(m, 100, 170)
+  let _ = model.add_segment(m, 290, 300)
+  let written: string = model.to_json(m, "my \"clip\".mp4")
+  let _ = test.contains(suite, str.view(written), "\"in\":100,\"out\":170", "JSON carries In/Out frames")
+  var loaded: model.Model = model.model(300, 29.97)
+  let _ = model.add_segment(loaded, 5, 6)
+  let _ = test.eq_str(suite, str.view(model.from_json(loaded, str.view(written))), "", "Valid JSON loads")
+  let _ = test.eq_u64(suite, model.segment_count(loaded), 3, "Three segments after load (previous list replaced)")
+  let _ = test.eq_str(suite, str.view(model.to_json(loaded, "my \"clip\".mp4")), str.view(written), "Round trip is byte identical")
+  let _ = test.contains(suite, str.view(model.from_json(loaded, "{not json")), "CLIP_JSON", "Garbage is refused")
+  let _ = test.contains(suite, str.view(model.from_json(loaded, "{\"segments\":[{\"in\":0,\"out\":50},{\"in\":40,\"out\":60}]}")), "CLIP_OVERLAP", "Overlapping JSON is refused")
+  let _ = test.contains(suite, str.view(model.from_json(loaded, "{\"segments\":[{\"in\":0,\"out\":9999}]}")), "CLIP_RANGE", "Out-of-range JSON is refused")
+  let _ = test.eq_u64(suite, model.segment_count(loaded), 3, "A refused load leaves the list unchanged")
+  let _ = test.done(suite)
+}
+
+fn commands(suite: ref<test.Suite>, root: str) -> unit effects {alloc, fs.meta, fs.write, time} {
+  let _ = test.start(suite, "Export command construction")
+  var mp4: array<string> = export.mp4_argv("ffmpeg.exe", "in.mp4", "out/a_60-108.mp4", 60, 108, 30.0, true, 1920, 1080)
+  let mp4_text: string = export.command_text(mp4)
+  let _ = test.contains(suite, str.view(mp4_text), "-ss 1.983333 -i in.mp4", "Seek is half a frame before the In frame, before -i")
+  let _ = test.contains(suite, str.view(mp4_text), "-frames:v 48", "Exactly Out-In frames are encoded")
+  let _ = test.contains(suite, str.view(mp4_text), "atrim=start=0.016667:end=1.616667", "Audio is cut from the half-frame lead for Out-In frames")
+  let _ = test.contains(suite, str.view(mp4_text), "-c:v libx264", "H.264 video")
+  let _ = test.contains(suite, str.view(mp4_text), "-c:a aac", "AAC audio")
+  let _ = test.contains(suite, str.view(mp4_text), "-fps_mode passthrough", "Original frame timing is kept")
+  let _ = test.contains(suite, str.view(mp4_text), " -n ", "FFmpeg itself refuses to overwrite")
+  let _ = test.check(suite, text.ends_with(str.view(mp4_text), "out/a_60-108.mp4"), "The output path is last")
+  var silent: array<string> = export.mp4_argv("ffmpeg.exe", "in.mp4", "o.mp4", 0, 10, 24.0, false, 1920, 1080)
+  let silent_text: string = export.command_text(silent)
+  let _ = test.contains(suite, str.view(silent_text), "-ss 0.000000 -i", "Segment at frame 0 seeks to 0")
+  let _ = test.contains(suite, str.view(silent_text), "-an", "No audio stream: no audio output")
+  let _ = test.check(suite, not text_has(str.view(silent_text), "atrim"), "No audio stream: no audio filter")
+  var png: array<string> = export.png_argv("ffmpeg.exe", "in.mp4", "d/s_%06d.png", 60, 108, 30.0, 5)
+  let png_text: string = export.command_text(png)
+  let _ = test.contains(suite, str.view(png_text), "-frames:v 10", "Every 5th of 48 frames is 10 pictures")
+  let _ = test.contains(suite, str.view(png_text), "select='not(mod(n,5))'", "The every-N selection")
+  let _ = test.contains(suite, str.view(png_text), "-start_number 60 d/s_%06d.png", "Numbering starts at the In frame")
+  var all: array<string> = export.png_argv("ffmpeg.exe", "in.mp4", "d/s_%06d.png", 0, 7, 30.0, 1)
+  let all_text: string = export.command_text(all)
+  let _ = test.contains(suite, str.view(all_text), "-frames:v 7", "All frames: exactly Out-In pictures")
+  let _ = test.check(suite, not text_has(str.view(all_text), "select="), "All frames: no selection filter")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Export plan never overwrites")
+  let folder: string = path.join(root, "plan")
+  let _ = files.mkdirs(str.view(folder))
+  let _ = files.write_text(str.view(path.join(str.view(folder), "v_0-48.mp4")), "x")
+  let _ = files.write_text(str.view(path.join(str.view(folder), "v_0-48_2.txt")), "x")
+  let _ = files.mkdirs(str.view(path.join(str.view(folder), "v_0-48")))
+  var m: model.Model = model.model(300, 24.0)
+  let _ = model.add_segment(m, 0, 48)
+  let _ = model.add_segment(m, 100, 124)
+  var planned: export.Plan = export.plan(m, "ffmpeg.exe", "v.mp4", "v", str.view(folder), true,
+    export.Options {mp4: true, png: true, every: 4, captions: false, width: 640, height: 360}, "p.txt", "c.flag")
+  let _ = test.eq_u64(suite, array.len(struct.borrow(planned, field=outputs)), 4, "Two segments x (MP4 + PNG) = four outputs")
+  let first: ref<export.Output> = array.borrow(struct.borrow(planned, field=outputs), 0)
+  let _ = test.contains(suite, str.view(struct.borrow(first, field=target)), "v_0-48_3.mp4", "Existing file and a sidecar-only collision both advance the name")
+  let _ = test.contains(suite, str.view(struct.borrow(first, field=sidecar)), "v_0-48_3.txt", "The caption sidecar shares the clip name")
+  let second: ref<export.Output> = array.borrow(struct.borrow(planned, field=outputs), 1)
+  let _ = test.contains(suite, str.view(struct.borrow(second, field=target)), "v_0-48_2", "An existing frame folder is not reused")
+  let third: ref<export.Output> = array.borrow(struct.borrow(planned, field=outputs), 2)
+  let _ = test.contains(suite, str.view(struct.borrow(third, field=target)), "v_100-124.mp4", "A free name is used unchanged")
+  let _ = test.eq_i64(suite, export.total_frames(planned), 48 + 12 + 24 + 6, "Progress total: clip frames plus every-4th pictures")
+  let _ = test.done(suite)
+  let _ = test.start(suite, "Every-Nth pictures are renamed to absolute frame numbers")
+  let shots: string = path.join(root, "shots")
+  let _ = files.mkdirs(str.view(shots))
+  var small: model.Model = model.model(300, 24.0)
+  let _ = model.add_segment(small, 10, 22)
+  var pngs: export.Plan = export.plan(small, "ffmpeg.exe", "v.mp4", "s", str.view(shots), false,
+    export.Options {mp4: false, png: true, every: 4, captions: false, width: 640, height: 360}, "p.txt", "c.flag")
+  let only: ref<export.Output> = array.borrow(struct.borrow(pngs, field=outputs), 0)
+  let _ = files.mkdirs(str.view(struct.borrow(only, field=target)))
+  var k: i64 = 0
+  loop {
+    if k >= 3 { break }
+    let _ = files.write_text(str.view(text.concat(str.view(struct.borrow(only, field=prefix)), str.view(text.concat(str.view(model.pad(10 + k, 6)), ".png")))), "x")
+    k = k + 1
+  }
+  let _ = test.check(suite, export.renumber(only), "Renumbering succeeds")
+  let base: string = string.copy(str.view(struct.borrow(only, field=prefix)))
+  let _ = test.check(suite, exists_file(str.view(text.concat(str.view(base), "000010.png"))), "Frame 10 keeps its number")
+  let _ = test.check(suite, exists_file(str.view(text.concat(str.view(base), "000014.png"))), "Second picture is frame 14")
+  let _ = test.check(suite, exists_file(str.view(text.concat(str.view(base), "000018.png"))), "Third picture is frame 18")
+  let _ = test.check(suite, not exists_file(str.view(text.concat(str.view(base), "000011.png"))), "The sequential name is gone")
+  let _ = test.done(suite)
+}
+
+fn polish(suite: ref<test.Suite>, root: str) -> unit effects {alloc, fs.meta, fs.read, fs.write, time} {
+  let _ = test.start(suite, "Odd dimensions are padded to even for yuv420p")
+  let _ = eq32(suite, export.padded(1279), 1280, "Odd width rounds up by one")
+  let _ = eq32(suite, export.padded(720), 720, "Even side is unchanged")
+  let _ = test.check(suite, not export.needs_pad(1920, 1080), "Even source needs no pad")
+  let _ = test.check(suite, export.needs_pad(1279, 720), "Odd width needs pad")
+  let _ = test.check(suite, export.needs_pad(1280, 719), "Odd height needs pad")
+  let _ = test.eq_str(suite, str.view(export.video_filter(1920, 1080)), "setpts=PTS-STARTPTS", "Even source: no pad filter at all")
+  let _ = test.eq_str(suite, str.view(export.video_filter(1279, 719)), "setpts=PTS-STARTPTS,pad=1280:720:0:0:color=black", "Odd both: one black column and row at right/bottom, no crop or scale")
+  let _ = test.eq_str(suite, str.view(export.video_filter(1280, 719)), "setpts=PTS-STARTPTS,pad=1280:720:0:0:color=black", "Odd height only keeps the even width")
+  let odd: string = export.command_text(export.mp4_argv("f.exe", "in.mp4", "o.mp4", 10, 20, 30.0, false, 1279, 719))
+  let _ = test.contains(suite, str.view(odd), "-vf setpts=PTS-STARTPTS,pad=1280:720:0:0:color=black", "The MP4 command carries the pad")
+  let even: string = export.command_text(export.mp4_argv("f.exe", "in.mp4", "o.mp4", 10, 20, 30.0, false, 1280, 720))
+  let _ = test.check(suite, not text_has(str.view(even), "pad="), "An even MP4 command has no pad")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Caption per frame sidecars")
+  let shots: string = path.join(root, "captions")
+  let _ = files.mkdirs(str.view(shots))
+  var m: model.Model = model.model(100, 24.0)
+  let _ = model.add_segment(m, 10, 22)
+  var off: export.Plan = export.plan(m, "f.exe", "v.mp4", "s", str.view(shots), false,
+    export.Options {mp4: false, png: true, every: 4, captions: false, width: 640, height: 360}, "p.txt", "c.flag")
+  var on: export.Plan = export.plan(m, "f.exe", "v.mp4", "s", str.view(shots), false,
+    export.Options {mp4: false, png: true, every: 4, captions: true, width: 640, height: 360}, "p.txt", "c.flag")
+  let _ = test.check(suite, not array.borrow(struct.borrow(off, field=outputs), 0).captions, "Off by default in the plan when not asked")
+  let output: ref<export.Output> = array.borrow(struct.borrow(on, field=outputs), 0)
+  let _ = test.check(suite, output.captions, "The plan carries the option")
+  let _ = files.mkdirs(str.view(struct.borrow(output, field=target)))
+  let base: string = string.copy(str.view(struct.borrow(output, field=prefix)))
+  let _ = files.write_text(str.view(text.concat(str.view(base), "000014.txt")), "kept")
+  let _ = test.check(suite, export.write_captions(output), "Writing sidecars succeeds")
+  let _ = test.check(suite, exists_file(str.view(text.concat(str.view(base), "000010.txt"))), "Frame 10 has a sidecar")
+  let _ = test.check(suite, exists_file(str.view(text.concat(str.view(base), "000018.txt"))), "Frame 18 has a sidecar")
+  let _ = test.check(suite, not exists_file(str.view(text.concat(str.view(base), "000011.txt"))), "Skipped frames get none")
+  let _ = test.eq_str(suite, str.view(slurp(str.view(text.concat(str.view(base), "000010.txt")))), "", "Sidecars are empty")
+  let _ = test.eq_str(suite, str.view(slurp(str.view(text.concat(str.view(base), "000014.txt")))), "kept", "An existing caption is never overwritten")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Audio sample clock and keyboard focus")
+  let _ = test.eq_i64(suite, model.heard_frame(100, 0, 30.0, 500), 100, "Nothing heard yet: origin")
+  let _ = test.eq_i64(suite, model.heard_frame(100, 48000, 30.0, 500), 130, "One second of samples is fps frames")
+  let _ = test.eq_i64(suite, model.heard_frame(0, 47999, 24.0, 500), 23, "A frame is not early")
+  let _ = test.eq_i64(suite, model.heard_frame(100, 48000 * 100, 30.0, 150), 150, "Clamped at the end")
+  let _ = test.eq_i64(suite, model.heard_frame(0, 1601, 30.0, 500), 1, "1/30 s is 1600 samples")
+  let _ = test.check(suite, model.sample_clock_drives(true, true, 2, false), "Queued audio: sample clock")
+  let _ = test.check(suite, model.sample_clock_drives(true, true, 0, true), "Chunk still coming: wait on the sample clock")
+  let _ = test.check(suite, not model.sample_clock_drives(true, true, 0, false), "Audio ran out: wall clock takes over")
+  let _ = test.check(suite, not model.sample_clock_drives(true, false, 3, true), "Dead clock: wall clock")
+  let _ = test.check(suite, not model.sample_clock_drives(false, true, 3, true), "No sound: wall clock")
+  var order: array<u32> = [2, 4, 9]
+  let _ = eq32(suite, model.focus_step(order, 0, false), 2, "Tab from no focus: first")
+  let _ = eq32(suite, model.focus_step(order, 2, false), 4, "Tab moves on")
+  let _ = eq32(suite, model.focus_step(order, 9, false), 2, "Tab wraps")
+  let _ = eq32(suite, model.focus_step(order, 0, true), 9, "Shift+Tab from no focus: last")
+  let _ = eq32(suite, model.focus_step(order, 2, true), 9, "Shift+Tab wraps")
+  let _ = eq32(suite, model.focus_step(order, 4, true), 2, "Shift+Tab moves back")
+  let _ = eq32(suite, model.focus_step(order, 77, false), 2, "A control that vanished restarts the order")
+  var none: array<u32> = array.new()
+  let _ = eq32(suite, model.focus_step(none, 3, false), 0, "Nothing to focus")
+  let _ = test.done(suite)
+}
+
+fn exists_file(file: str) -> bool effects {fs.meta} {
+  match files.exists(file) { ok(found) => found, err(_) => false, }
+}
+
+fn text_has(haystack: str, needle: str) -> bool effects {} {
+  text.contains(haystack, needle)
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, time} {
+  if view.len(args) < 2 { return 2 }
+  let root: str = view.get(args, 1)
+  let _ = files.mkdirs(root)
+  var suite: test.Suite = test.suite("Genesis Clip logic", false)
+  model_rules(suite)
+  json_round_trip(suite)
+  commands(suite, root)
+  polish(suite, root)
+  test.conclude(suite, path.join(root, "clip-logic-tests.json"), 20)
+}
+
+fn eq32(suite: ref<test.Suite>, actual: u32, expected: u32, what: str) -> bool effects {alloc} {
+  let a: u64 = cast.wrap(actual)
+  let e: u64 = cast.wrap(expected)
+  test.eq_u64(suite, a, e, what)
+}
+
+fn slurp(file: str) -> string effects {alloc, fs.read} {
+  match files.read_text(file) { ok(v) => v, err(_) => string.copy("?"), }
+}

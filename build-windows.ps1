@@ -10,7 +10,8 @@ param(
   [switch]$Launch,
   [switch]$SkipSmoke,
   [switch]$SkipTestRun,
-  [switch]$RunTests
+  [switch]$RunTests,
+  [switch]$ClipTests
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -162,7 +163,8 @@ function WslPath([string]$Value) {
 $sdkLinux = WslPath $sdk
 & wsl.exe -d $Distro -u root --exec test -x $LinuxCompiler
 if ($LASTEXITCODE -ne 0) { throw '[GA_TOOLCHAIN] Build the matching AIR compiler first with .\build-compiler-wsl.ps1.' }
-$sources = ,@('main', 'src/main.ai')
+$sources = @(@('main', 'src/main.ai'), @('clip', 'src/clip_main.ai'))
+if ($ClipTests) { $sources += ,@('clip-logic', 'tests/clip_logic.ai') }
 if ($RunTests) { $sources += @(@('headless', 'tests/headless.ai'), @('controls', 'tests/controls.ai'), @('native', 'tests/native.ai'), @('audio-device', 'tests/audio_device.ai'), @('audio-playback', 'tests/audio_playback.ai'), @('audio-cancel', 'tests/audio_cancel.ai'), @('preview-async', 'tests/preview_async.ai'), @('preview-stream', 'tests/preview_stream.ai'), @('preview-input', 'tests/preview_input.ai'), @('inspector', 'tests/inspector.ai'), @('live-paint', 'tests/live_paint.ai'), @('project-safety', 'tests/project_safety.ai'), @('picture-queue', 'tests/picture_queue.ai')) }
 if ($RunTests) { $sources += @(@('keyed-video', 'tests/keyed_video.ai'), @('window-cache', 'tests/window_cache.ai'), @('editor-trim', 'tests/editor_trim.ai'), @('trim-history', 'tests/trim_history.ai'), @('recovery-ownership', 'tests/recovery_ownership.ai'), @('media-session', 'tests/media_session.ai'), @('spatial-canvas', 'tests/spatial_canvas.ai')) }
 if ($RunTests) { $sources += @(@('fade-controls', 'tests/fade_controls.ai'), @('audio-fade-keys', 'tests/audio_fade_keys.ai'), @('audio-nested', 'tests/audio_nested.ai'), @('audio-nested-cancel', 'tests/audio_nested_cancel.ai'), @('nested-audio-controls', 'tests/nested_audio_controls.ai')) }
@@ -231,9 +233,11 @@ $includeCmake = (Join-Path $here 'windows/configure.cmake') -replace '\\', '/'
   "-DGENESIS_COMPOSITOR_SOURCE=$compositorCmake" `
   "-DCMAKE_PROJECT_air_INCLUDE=$includeCmake" "-DGENESIS_TESTS=$($RunTests.IsPresent)" `
   "-DAIR_WINDOWS_APP_C=$generatedCmake/main.c" -DAIR_WINDOWS_APP_NAME=Genesis-AIR `
+  "-DGENESIS_CLIP_C=$generatedCmake/clip.c" "-DGENESIS_CLIP_TESTS=$($ClipTests.IsPresent)" `
   -DAIR_DESKTOP=OFF -DAIR_SAM3=OFF -DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE
 if ($LASTEXITCODE -ne 0) { throw 'Windows CMake configuration failed.' }
-$targets = @('air_windows_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio', 'air_file_publish')
+$targets = @('air_windows_app', 'genesis_clip_app', 'air_native_shell', 'air_native_dialogs', 'air_ui_host', 'genesis_native_audio', 'air_file_publish')
+if ($ClipTests) { $targets += 'genesis-clip-logic' }
 if ($RunTests) { $targets += @('genesis-headless', 'genesis-controls', 'genesis-native', 'genesis-worker-wrapper', 'genesis-audio-device', 'genesis-audio-clock', 'genesis-audio-playback', 'genesis-audio-cancel', 'genesis-preview-async', 'genesis-preview-stream', 'genesis-preview-input', 'genesis-inspector', 'genesis-ui-pixels', 'genesis-live-paint', 'genesis-project-safety', 'genesis-picture-queue') }
 if ($RunTests) { $targets += @('genesis-keyed-video', 'genesis-window-cache', 'genesis-editor-trim', 'genesis-trim-history', 'genesis-recovery-ownership', 'genesis-media-session', 'genesis-spatial-canvas') }
 if ($RunTests) { $targets += @('genesis-fade-controls', 'genesis-audio-fade-keys', 'genesis-audio-nested', 'genesis-audio-nested-cancel', 'genesis-nested-audio-controls') }
@@ -278,7 +282,7 @@ if ($RunTests) { $targets += @('genesis-filter-transactions') }
 & $cmake --build $build --config Release --target @targets -- /m
 if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed.' }
 $bin = Join-Path $build 'bin/Release'
-foreach ($name in @('Genesis-AIR.exe', 'air-native-shell.dll', 'air-native-dialogs.dll', 'air-ui-host.dll', 'genesis-native-audio.dll', 'air-file-publish.exe')) {
+foreach ($name in @('Genesis-AIR.exe', 'Genesis-Clip.exe', 'air-native-shell.dll', 'air-native-dialogs.dll', 'air-ui-host.dll', 'genesis-native-audio.dll', 'air-file-publish.exe')) {
   $sourceFile = Join-Path $bin $name
   $targetFile = Join-Path $Destination $name
   if ((Test-Path -LiteralPath $targetFile) -and

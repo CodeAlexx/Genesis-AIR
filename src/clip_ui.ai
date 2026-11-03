@@ -1,0 +1,490 @@
+// Genesis Clip: geometry, controls and painting. Like Genesis, the control list is built once
+// per frame carrying each control's own rectangle, and the painter and the pointer both use
+// that same list, so a click can never land on something the picture does not show.
+module genesis.clip_ui
+
+import std.draw as draw
+import std.geometry as geometry
+import std.math as math
+import "clip_model.ai" as model
+import "clip_state.ai" as state_
+import "ui_text.ai" as ui_text
+
+pub type Rect = struct { left: f64, top: f64, right: f64, bottom: f64 }
+pub type Control = struct { area: Rect, action: u32, label: string, enabled: bool, on: bool }
+pub type Geometry = struct { topbar: Rect, monitor: Rect, panel: Rect, transport: Rect, strip: Rect,
+                             wave: Rect, marks: Rect, save_row: Rect, folder_row: Rect, status: Rect }
+
+pub fn act_open() -> u32 effects {} { 1 }
+pub fn act_start() -> u32 effects {} { 2 }
+pub fn act_back() -> u32 effects {} { 3 }
+pub fn act_play() -> u32 effects {} { 4 }
+pub fn act_stop() -> u32 effects {} { 5 }
+pub fn act_forward() -> u32 effects {} { 6 }
+pub fn act_end() -> u32 effects {} { 7 }
+pub fn act_loop() -> u32 effects {} { 8 }
+pub fn act_play_segment() -> u32 effects {} { 9 }
+pub fn act_mark_in() -> u32 effects {} { 10 }
+pub fn act_mark_out() -> u32 effects {} { 11 }
+pub fn act_add() -> u32 effects {} { 12 }
+pub fn act_clear() -> u32 effects {} { 13 }
+pub fn act_mp4() -> u32 effects {} { 14 }
+pub fn act_png() -> u32 effects {} { 15 }
+pub fn act_every_less() -> u32 effects {} { 16 }
+pub fn act_every_more() -> u32 effects {} { 17 }
+pub fn act_folder() -> u32 effects {} { 18 }
+pub fn act_export() -> u32 effects {} { 19 }
+pub fn act_cancel() -> u32 effects {} { 20 }
+pub fn act_delete() -> u32 effects {} { 21 }
+pub fn act_set_in() -> u32 effects {} { 22 }
+pub fn act_set_out() -> u32 effects {} { 23 }
+pub fn act_save_list() -> u32 effects {} { 24 }
+pub fn act_load_list() -> u32 effects {} { 25 }
+pub fn act_captions() -> u32 effects {} { 26 }
+// Segment rows are act_row() + index.
+pub fn act_row() -> u32 effects {} { 100 }
+
+pub fn rect(left: f64, top: f64, right: f64, bottom: f64) -> Rect effects {} {
+  Rect {left: left, top: top, right: right, bottom: bottom}
+}
+pub fn width_of(r: Rect) -> f64 effects {} { r.right - r.left }
+pub fn height_of(r: Rect) -> f64 effects {} { r.bottom - r.top }
+fn inside(r: Rect, x: f64, y: f64) -> bool effects {} {
+  x >= r.left and x < r.right and y >= r.top and y < r.bottom
+}
+
+pub fn margin() -> f64 effects {} { 12.0 }
+pub fn panel_width() -> f64 effects {} { 300.0 }
+
+pub fn geometry(w: f64, h: f64) -> Geometry effects {} {
+  let m: f64 = margin()
+  Geometry {
+    topbar: rect(0.0, 0.0, w, 44.0),
+    monitor: rect(m, 52.0, w - m - panel_width() - 8.0, h - 294.0),
+    panel: rect(w - m - panel_width(), 52.0, w - m, h - 294.0),
+    transport: rect(m, h - 286.0, w - m, h - 254.0),
+    strip: rect(m, h - 246.0, w - m, h - 174.0),
+    wave: rect(m, h - 168.0, w - m, h - 142.0),
+    marks: rect(m, h - 134.0, w - m, h - 102.0),
+    save_row: rect(m, h - 98.0, w - m, h - 66.0),
+    folder_row: rect(m, h - 62.0, w - m, h - 30.0),
+    status: rect(0.0, h - 26.0, w, h)}
+}
+
+fn control(list: ref<array<Control>>, area: Rect, action: u32, label: str, enabled: bool, on: bool) -> unit effects {alloc} {
+  array.push(list, Control {area: area, action: action, label: string.copy(label), enabled: enabled, on: on})
+  ()
+}
+
+// A row of buttons from `left`, each `wide` pixels; returns the next free x.
+fn button(list: ref<array<Control>>, row: Rect, left: f64, wide: f64, action: u32, label: str,
+          enabled: bool, on: bool) -> f64 effects {alloc} {
+  control(list, rect(left, row.top, left + wide, row.bottom), action, label, enabled, on)
+  left + wide + 6.0
+}
+
+pub fn rows_visible(g: Geometry) -> u64 effects {} {
+  let usable: f64 = height_of(g.panel) - 36.0 - 112.0
+  if usable < 28.0 { 1 } else { cast.sat(math.floor(usable / 28.0)) }
+}
+
+pub fn first_row(state: ref<state_.Clip>, g: Geometry) -> u64 effects {} {
+  let rows: u64 = rows_visible(g)
+  let chosen: i64 = state.segs.selected
+  if chosen < 0 { return 0 }
+  let at: u64 = cast.wrap(chosen)
+  if at >= rows { at - rows + 1 } else { 0 }
+}
+
+pub fn controls(state: ref<state_.Clip>, w: f64, h: f64) -> array<Control> effects {alloc} {
+  let g: Geometry = geometry(w, h)
+  var list: array<Control> = array.new()
+  let loaded: bool = state.loaded
+  let busy: bool = state.exporting
+  let some_segments: bool = model.segment_count(struct.borrow(state, field=segs)) > 0
+  let chosen: i64 = state.segs.selected
+  let have_choice: bool = chosen >= 0
+  let _ = button(list, rect(margin(), 6.0, 0.0, 38.0), margin(), 110.0, act_open(), "Open video", not busy, false)
+  // Transport.
+  var x: f64 = margin()
+  x = button(list, g.transport, x, 40.0, act_start(), "|<", loaded, false)
+  x = button(list, g.transport, x, 40.0, act_back(), "<", loaded, false)
+  x = button(list, g.transport, x, 84.0, act_play(), if state.playing { "Pause" } else { "Play" }, loaded, state.playing)
+  x = button(list, g.transport, x, 60.0, act_stop(), "Stop", loaded, false)
+  x = button(list, g.transport, x, 40.0, act_forward(), ">", loaded, false)
+  x = button(list, g.transport, x, 40.0, act_end(), ">|", loaded, false)
+  x = button(list, g.transport, x + 14.0, 120.0, act_play_segment(), "Play segment", loaded and have_choice, false)
+  x = button(list, g.transport, x, 70.0, act_loop(), "Loop", loaded, state.loop_play)
+  // Marks.
+  x = margin()
+  x = button(list, g.marks, x, 110.0, act_mark_in(), "Mark In  (I)", loaded, false)
+  x = button(list, g.marks, x, 120.0, act_mark_out(), "Mark Out  (O)", loaded, false)
+  x = button(list, g.marks, x, 130.0, act_add(), "Add segment  (A)", loaded and state.mark_in >= 0 and state.mark_out >= 0, false)
+  x = button(list, g.marks, x, 100.0, act_clear(), "Clear marks", loaded and (state.mark_in >= 0 or state.mark_out >= 0), false)
+  // Save options.
+  x = margin()
+  x = button(list, g.save_row, x, 120.0, act_mp4(), "MP4 clips", not busy, state.out_mp4)
+  x = button(list, g.save_row, x, 120.0, act_png(), "PNG frames", not busy, state.out_png)
+  x = button(list, g.save_row, x + 14.0, 30.0, act_every_less(), "-", not busy and state.out_png, false)
+  x = x + 98.0
+  x = button(list, g.save_row, x, 30.0, act_every_more(), "+", not busy and state.out_png, false)
+  x = button(list, g.save_row, x + 190.0, 170.0, act_captions(), "Caption per frame", not busy and state.out_png, state.out_captions)
+  x = margin()
+  x = button(list, g.folder_row, x, 150.0, act_folder(), "Output folder...", not busy, false)
+  x = button(list, g.folder_row, w - margin() - 90.0 - 6.0 - 110.0, 110.0, act_export(), "Save segments", loaded and some_segments and not busy and (state.out_mp4 or state.out_png), false)
+  x = button(list, g.folder_row, w - margin() - 90.0, 90.0, act_cancel(), "Cancel", busy, false)
+  // Segment panel.
+  let footer: f64 = g.panel.bottom - 108.0
+  let half: f64 = (width_of(g.panel) - 6.0) * 0.5
+  var row: Rect = rect(g.panel.left, footer, g.panel.right, footer + 30.0)
+  let _ = button(list, row, g.panel.left, half, act_set_in(), "In = playhead", loaded and have_choice and not busy, false)
+  let _ = button(list, row, g.panel.left + half + 6.0, half, act_set_out(), "Out = playhead", loaded and have_choice and not busy, false)
+  row = rect(g.panel.left, footer + 36.0, g.panel.right, footer + 66.0)
+  let _ = button(list, row, g.panel.left, half, act_delete(), "Delete  (Del)", have_choice, false)
+  let _ = button(list, row, g.panel.left + half + 6.0, half, act_play_segment(), "Play segment", loaded and have_choice, false)
+  row = rect(g.panel.left, footer + 72.0, g.panel.right, footer + 102.0)
+  let _ = button(list, row, g.panel.left, half, act_save_list(), "Save list", loaded and some_segments, false)
+  let _ = button(list, row, g.panel.left + half + 6.0, half, act_load_list(), "Load list", loaded, false)
+  // One row per visible segment.
+  let rows: u64 = rows_visible(g)
+  let first: u64 = first_row(state, g)
+  var n: u64 = 0
+  loop {
+    if n >= rows { break }
+    let index: u64 = first + n
+    if index >= model.segment_count(struct.borrow(state, field=segs)) { break }
+    let top: f64 = g.panel.top + 34.0 + cast.float(n) * 28.0
+    control(list, rect(g.panel.left + 4.0, top, g.panel.right - 4.0, top + 26.0),
+      act_row() + cast.sat(index), "", true, chosen == cast.wrap(index))
+    n = n + 1
+  }
+  list
+}
+
+// The control under (x, y), or 0. Disabled controls do not answer.
+pub fn hit(list: ref<array<Control>>, x: f64, y: f64) -> u32 effects {} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    let entry: ref<Control> = array.borrow(list, i)
+    if entry.enabled and inside(entry.area, x, y) { return entry.action }
+    i = i + 1
+  }
+  0
+}
+
+pub fn over_strip(state: ref<state_.Clip>, w: f64, h: f64, x: f64, y: f64) -> bool effects {} {
+  let g: Geometry = geometry(w, h)
+  let zone: Rect = rect(g.strip.left - 6.0, g.strip.top, g.strip.right + 6.0, g.wave.bottom)
+  inside(zone, x, y)
+}
+
+pub fn frame_x(state: ref<state_.Clip>, strip: Rect, frame: i64) -> f64 effects {} {
+  if state.frames <= 0 { return strip.left }
+  strip.left + width_of(strip) * cast.float(frame) / cast.float(state.frames)
+}
+
+// Pointer x to a frame: the strip spans [0, frames).
+pub fn x_frame(state: ref<state_.Clip>, strip: Rect, x: f64) -> i64 effects {} {
+  if state.frames <= 0 { return 0 }
+  let unit: f64 = (x - strip.left) / width_of(strip)
+  let at: i64 = cast.sat(math.floor(unit * cast.float(state.frames)))
+  state_.clamp(state, at)
+}
+
+// ---- Painting ---------------------------------------------------------------------------
+
+fn box(r: Rect) -> option<geometry.Rect> effects {} {
+  geometry.rect(r.left, r.top, r.right, r.bottom)
+}
+fn fill(canvas: ref<draw.Canvas>, r: Rect, value: draw.Color) -> unit effects {alloc} {
+  match box(r) { some(b) => draw.fill_rect(canvas, b, value), none => (), }
+}
+fn frame_rect(canvas: ref<draw.Canvas>, r: Rect, value: draw.Color) -> unit effects {alloc} {
+  match box(r) { some(b) => draw.stroke_rect(canvas, b, value, 1.0), none => (), }
+}
+
+pub fn palette(index: u64) -> draw.Color effects {} {
+  let slot: u64 = index % 6
+  if slot == 0 { draw.rgb(231, 76, 60) }
+  else if slot == 1 { draw.rgb(46, 204, 113) }
+  else if slot == 2 { draw.rgb(52, 152, 219) }
+  else if slot == 3 { draw.rgb(241, 196, 15) }
+  else if slot == 4 { draw.rgb(155, 89, 182) }
+  else { draw.rgb(230, 126, 34) }
+}
+
+fn with_alpha(c: draw.Color, a: u8) -> draw.Color effects {} { draw.color(c.r, c.g, c.b, a) }
+
+fn label(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, x: f64, y: f64, line: str, size: f64,
+         value: draw.Color) -> unit effects {alloc} {
+  ui_text.paint(struct.borrow(state, field=fonts), canvas, x, y, line, size, value)
+}
+
+fn centered(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, r: Rect, line: str, value: draw.Color) -> unit effects {alloc} {
+  let wide: f64 = ui_text.width(struct.borrow(state, field=fonts), line, 12.0)
+  label(state, canvas, r.left + (width_of(r) - wide) * 0.5, r.top + (height_of(r) - 9.0) * 0.5, line, 12.0, value)
+}
+
+fn paint_button(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, c: ref<Control>) -> unit effects {alloc} {
+  if c.action >= act_row() { return () }
+  let over: bool = c.enabled and state.hover == c.action
+  let base: draw.Color = if not c.enabled { draw.rgb(32, 34, 38) }
+    else if c.on { if over { draw.rgb(66, 124, 210) } else { draw.rgb(46, 102, 186) } }
+    else if over { draw.rgb(72, 78, 90) } else { draw.rgb(52, 56, 64) }
+  fill(canvas, c.area, base)
+  frame_rect(canvas, c.area, if c.enabled { if over { draw.rgb(128, 136, 152) } else { draw.rgb(86, 92, 104) } } else { draw.rgb(44, 46, 52) })
+  if c.enabled and state.focus == c.action {
+    // Keyboard focus ring: two pixels, outside the button.
+    frame_rect(canvas, rect(c.area.left - 2.0, c.area.top - 2.0, c.area.right + 2.0, c.area.bottom + 2.0), draw.rgb(120, 190, 255))
+    frame_rect(canvas, rect(c.area.left - 1.0, c.area.top - 1.0, c.area.right + 1.0, c.area.bottom + 1.0), draw.rgb(120, 190, 255))
+  }
+  centered(state, canvas, c.area, str.view(struct.borrow(c, field=label)),
+    if c.enabled { draw.rgb(232, 235, 240) } else { draw.rgb(104, 108, 116) })
+}
+
+fn paint_monitor(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, area: Rect) -> unit effects {alloc} {
+  fill(canvas, area, draw.rgb(8, 9, 11))
+  let w: u32 = draw.surface_width(struct.borrow(state, field=image))
+  let h: u32 = draw.surface_height(struct.borrow(state, field=image))
+  if w == 0 or h == 0 {
+    label(state, canvas, area.left + 16.0, area.top + 16.0,
+      if state.loaded { "Decoding..." } else { "No video loaded" }, 14.0, draw.rgb(140, 146, 158))
+    return ()
+  }
+  let wide: u64 = cast.wrap(w)
+  let tall: u64 = cast.wrap(h)
+  let scale: f64 = math.min(width_of(area) / cast.float(wide), height_of(area) / cast.float(tall))
+  let dw: f64 = cast.float(wide) * scale
+  let dh: f64 = cast.float(tall) * scale
+  let left: f64 = area.left + (width_of(area) - dw) * 0.5
+  let top: f64 = area.top + (height_of(area) - dh) * 0.5
+  match geometry.rect(left, top, left + dw, top + dh) {
+    some(target) => draw.draw_image(canvas, struct.borrow(state, field=image), target),
+    none => (),
+  }
+}
+
+fn paint_panel(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, g: Geometry, list: ref<array<Control>>) -> unit effects {alloc} {
+  fill(canvas, g.panel, draw.rgb(26, 28, 33))
+  frame_rect(canvas, g.panel, draw.rgb(60, 64, 74))
+  var title: string = string.copy("Segments  (")
+  string.append(title, str.view(string.from_int(model.segment_count(struct.borrow(state, field=segs)))))
+  string.append(title, ")")
+  label(state, canvas, g.panel.left + 10.0, g.panel.top + 10.0, str.view(title), 12.0, draw.rgb(200, 205, 214))
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    let c: ref<Control> = array.borrow(list, i)
+    if c.action >= act_row() {
+      let index: u64 = cast.wrap(c.action - act_row())
+      let s: model.Segment = model.segment_at(struct.borrow(state, field=segs), index)
+      fill(canvas, c.area, if c.on { draw.rgb(48, 62, 92) } else if state.hover == c.action { draw.rgb(46, 50, 60) } else { draw.rgb(34, 37, 43) })
+      fill(canvas, rect(c.area.left, c.area.top, c.area.left + 5.0, c.area.bottom), palette(index))
+      var line: string = string.from_int(index + 1)
+      string.append(line, "   ")
+      string.append(line, str.view(model.timecode(s.start, state.fps)))
+      string.append(line, "  ")
+      string.append(line, str.view(model.timecode(s.end, state.fps)))
+      string.append(line, "  ")
+      string.append(line, str.view(model.seconds_text(model.span(s), state.fps)))
+      label(state, canvas, c.area.left + 12.0, c.area.top + 8.0, str.view(line), 10.0, draw.rgb(222, 226, 233))
+    } else {
+      paint_button(state, canvas, c)
+    }
+    i = i + 1
+  }
+  if model.segment_count(struct.borrow(state, field=segs)) == 0 {
+    label(state, canvas, g.panel.left + 12.0, g.panel.top + 44.0, "Mark In / Out, then Add segment.", 10.0, draw.rgb(130, 136, 148))
+  }
+  ()
+}
+
+fn paint_strip(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, g: Geometry) -> unit effects {alloc} {
+  let strip: Rect = g.strip
+  fill(canvas, strip, draw.rgb(10, 11, 14))
+  let tiles: u64 = state.thumb_tiles
+  if tiles > 0 {
+    let tile: f64 = width_of(strip) / cast.float(tiles)
+    var i: u64 = 0
+    loop {
+      if i >= tiles { break }
+      let left: f64 = strip.left + tile * cast.float(i)
+      let right: f64 = strip.left + tile * cast.float(i + 1)
+      if i < array.len(struct.borrow(state, field=thumbs)) {
+        let thumb: ref<draw.Surface> = array.borrow(struct.borrow(state, field=thumbs), i)
+        if draw.surface_width(thumb) > 0 {
+          let _ = match geometry.rect(left, strip.top, right, strip.bottom) {
+            some(target) => draw.draw_image(canvas, thumb, target),
+            none => (),
+          }
+        }
+      }
+      i = i + 1
+    }
+  }
+  // Saved segments: translucent colour over the pictures plus a solid band along the bottom.
+  var n: u64 = 0
+  loop {
+    if n >= model.segment_count(struct.borrow(state, field=segs)) { break }
+    let s: model.Segment = model.segment_at(struct.borrow(state, field=segs), n)
+    let left: f64 = frame_x(state, strip, s.start)
+    let right: f64 = frame_x(state, strip, s.end)
+    let colour: draw.Color = palette(n)
+    fill(canvas, rect(left, strip.top, right, strip.bottom), with_alpha(colour, 84))
+    fill(canvas, rect(left, strip.bottom - 8.0, right, strip.bottom), colour)
+    fill(canvas, rect(left, strip.top, left + 2.0, strip.bottom), colour)
+    fill(canvas, rect(right - 2.0, strip.top, right, strip.bottom), colour)
+    let here: i64 = cast.wrap(n)
+    if here == state.segs.selected {
+      frame_rect(canvas, rect(left, strip.top, right, strip.bottom), draw.rgb(255, 255, 255))
+      frame_rect(canvas, rect(left + 1.0, strip.top + 1.0, right - 1.0, strip.bottom - 1.0), draw.rgb(255, 255, 255))
+    }
+    n = n + 1
+  }
+  // The pending In/Out marks.
+  if state.mark_in >= 0 and state.mark_out > state.mark_in {
+    fill(canvas, rect(frame_x(state, strip, state.mark_in), strip.top, frame_x(state, strip, state.mark_out), strip.top + 6.0),
+      draw.rgb(255, 255, 255))
+  }
+  if state.mark_in >= 0 {
+    let x: f64 = frame_x(state, strip, state.mark_in)
+    fill(canvas, rect(x - 1.0, strip.top - 4.0, x + 1.0, strip.bottom + 2.0), draw.rgb(60, 235, 120))
+    fill(canvas, rect(x - 1.0, strip.top - 4.0, x + 9.0, strip.top + 3.0), draw.rgb(60, 235, 120))
+  }
+  if state.mark_out >= 0 {
+    let x: f64 = frame_x(state, strip, state.mark_out)
+    fill(canvas, rect(x - 1.0, strip.top - 4.0, x + 1.0, strip.bottom + 2.0), draw.rgb(255, 90, 90))
+    fill(canvas, rect(x - 9.0, strip.top - 4.0, x + 1.0, strip.top + 3.0), draw.rgb(255, 90, 90))
+  }
+  frame_rect(canvas, strip, draw.rgb(70, 76, 88))
+  // Playhead.
+  if state.loaded {
+    let x: f64 = frame_x(state, strip, state.frame)
+    fill(canvas, rect(x - 1.0, strip.top - 6.0, x + 1.0, strip.bottom + 6.0), draw.rgb(255, 255, 255))
+    fill(canvas, rect(x - 5.0, strip.top - 8.0, x + 5.0, strip.top - 2.0), draw.rgb(255, 255, 255))
+  }
+  ()
+}
+
+fn paint_wave(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, area: Rect) -> unit effects {alloc} {
+  fill(canvas, area, draw.rgb(16, 18, 22))
+  let buckets: u64 = array.len(struct.borrow(state, field=wave))
+  if buckets == 0 { return () }
+  let columns: u64 = cast.sat(math.floor(width_of(area)))
+  let middle: f64 = (area.top + area.bottom) * 0.5
+  let reach: f64 = height_of(area) * 0.5 - 1.0
+  var x: u64 = 0
+  loop {
+    if x >= columns { break }
+    let from: u64 = x * buckets / columns
+    let peak: f64 = array.get(struct.borrow(state, field=wave), from)
+    let half: f64 = 1.0 + math.min(1.0, peak) * reach
+    let px: f64 = area.left + cast.float(x)
+    fill(canvas, rect(px, middle - half, px + 1.0, middle + half), draw.rgb(86, 142, 196))
+    x = x + 1
+  }
+}
+
+pub fn paint(state: ref<state_.Clip>, canvas: ref<draw.Canvas>, w: f64, h: f64) -> unit effects {alloc} {
+  let g: Geometry = geometry(w, h)
+  var list: array<Control> = controls(state, w, h)
+  draw.clear(canvas, draw.rgb(19, 20, 24))
+  fill(canvas, g.topbar, draw.rgb(26, 28, 33))
+  var info: string = string.copy("Genesis Clip")
+  if state.loaded {
+    info = string.copy(str.view(struct.borrow(state, field=stem)))
+    string.append(info, "    ")
+    string.append(info, str.view(string.from_int(state.width)))
+    string.append(info, " x ")
+    string.append(info, str.view(string.from_int(state.height)))
+    string.append(info, "    ")
+    string.append(info, str.view(string.from_float(math.floor(state.fps * 100.0 + 0.5) / 100.0)))
+    string.append(info, " fps    ")
+    string.append(info, str.view(string.from_int(state.frames)))
+    string.append(info, " frames    ")
+    string.append(info, str.view(model.seconds_text(state.frames, state.fps)))
+    string.append(info, if state.has_audio { "    audio" } else { "    no audio" })
+  }
+  label(state, canvas, 140.0, 16.0, str.view(info), 12.0, draw.rgb(210, 215, 224))
+  paint_monitor(state, canvas, g.monitor)
+  paint_panel(state, canvas, g, list)
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    let c: ref<Control> = array.borrow(list, i)
+    paint_button(state, canvas, c)
+    i = i + 1
+  }
+  // Time and frame readout beside the transport buttons.
+  var time_line: string = string.copy(str.view(model.timecode(state.frame, state.fps)))
+  string.append(time_line, "    frame ")
+  string.append(time_line, str.view(string.from_int(state.frame)))
+  string.append(time_line, " / ")
+  string.append(time_line, str.view(string.from_int(state.frames)))
+  label(state, canvas, g.transport.right - 250.0, g.transport.top + 11.0, str.view(time_line), 12.0, draw.rgb(236, 240, 246))
+  paint_strip(state, canvas, g)
+  paint_wave(state, canvas, g.wave)
+  // Mark readout.
+  var marks: string = string.copy("In ")
+  string.append(marks, str.view(if state.mark_in >= 0 { model.timecode(state.mark_in, state.fps) } else { string.copy("--:--:--:--") }))
+  string.append(marks, "    Out ")
+  string.append(marks, str.view(if state.mark_out >= 0 { model.timecode(state.mark_out, state.fps) } else { string.copy("--:--:--:--") }))
+  if state.mark_in >= 0 and state.mark_out > state.mark_in {
+    string.append(marks, "    ")
+    string.append(marks, str.view(string.from_int(state.mark_out - state.mark_in)))
+    string.append(marks, " frames")
+  }
+  label(state, canvas, g.marks.left + 500.0, g.marks.top + 11.0, str.view(marks), 12.0, draw.rgb(210, 215, 224))
+  // Save options readout.
+  label(state, canvas, g.save_row.left + 310.0, g.save_row.top + 11.0,
+    str.view(string.from_int(state.every)), 12.0, if state.out_png { draw.rgb(236, 240, 246) } else { draw.rgb(104, 108, 116) })
+  label(state, canvas, g.save_row.left + 446.0, g.save_row.top + 11.0,
+    if state.every == 1 { "all frames" } else { "frames: keep every Nth" }, 12.0, if state.out_png { draw.rgb(170, 176, 188) } else { draw.rgb(104, 108, 116) })
+  // Output folder and progress.
+  var folder: string = string.copy("Output: ")
+  string.append(folder, str.view(if str.len(state.out_dir) > 0 { string.copy(str.view(struct.borrow(state, field=out_dir))) } else { string.copy("(choose a folder)") }))
+  label(state, canvas, g.folder_row.left + 160.0, g.folder_row.top + 11.0,
+    str.view(ui_text.fit(struct.borrow(state, field=fonts), str.view(folder), 12.0, width_of(g.folder_row) - 160.0 - 330.0)),
+    12.0, draw.rgb(190, 196, 208))
+  if state.exporting {
+    let bar: Rect = rect(g.folder_row.right - 330.0 - 120.0, g.folder_row.top + 8.0, g.folder_row.right - 330.0 - 8.0, g.folder_row.bottom - 8.0)
+    fill(canvas, bar, draw.rgb(40, 44, 52))
+    let share: f64 = if state.export_total > 0 { math.min(1.0, cast.float(state.export_done) / cast.float(state.export_total)) } else { 0.0 }
+    fill(canvas, rect(bar.left, bar.top, bar.left + width_of(bar) * share, bar.bottom), draw.rgb(46, 160, 100))
+    frame_rect(canvas, bar, draw.rgb(86, 92, 104))
+  }
+  fill(canvas, g.status, draw.rgb(26, 28, 33))
+  label(state, canvas, 12.0, g.status.top + 8.0,
+    str.view(ui_text.fit(struct.borrow(state, field=fonts), str.view(struct.borrow(state, field=status)), 12.0, w - 24.0)),
+    12.0, draw.rgb(200, 205, 214))
+  ()
+}
+
+// ---- Keyboard focus ---------------------------------------------------------------------
+
+// Tab order: every enabled button (not the segment rows, which the arrow keys walk), in the
+// order they are laid out.
+pub fn focus_order(list: ref<array<Control>>) -> array<u32> effects {alloc} {
+  var order: array<u32> = array.new()
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    let entry: ref<Control> = array.borrow(list, i)
+    if entry.enabled and entry.action < act_row() { array.push(order, entry.action) }
+    i = i + 1
+  }
+  order
+}
+
+// True when `action` is a live (enabled) control right now.
+pub fn is_enabled(list: ref<array<Control>>, action: u32) -> bool effects {} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    let entry: ref<Control> = array.borrow(list, i)
+    if entry.action == action and entry.enabled { return true }
+    i = i + 1
+  }
+  false
+}

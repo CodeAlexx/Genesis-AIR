@@ -4,6 +4,7 @@
 cmake_language(DEFER CALL target_compile_definitions air_rt PRIVATE AIR_WIN32_CANVAS_PRESENT_IMMEDIATE=1)
 cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/audio.cmake")
 cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/file_publish.cmake")
+cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/clip.cmake")
 if(GENESIS_TESTS)
   cmake_language(DEFER CALL include "${GENESIS_ROOT}/windows/targets.cmake")
 endif()

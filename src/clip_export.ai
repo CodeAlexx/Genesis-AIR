@@ -1,0 +1,420 @@
+// Genesis Clip: export. Command construction is pure (and tested headlessly); the runner owns
+// one FFmpeg child per output, reports progress through a small file the window polls, and
+// honours a cancel-signal file. FFmpeg is the MM-AIR runtime that Genesis already resolves
+// through genesis-media-runtime.txt (see media_runtime.ai); there is no bundled copy.
+//
+// Frame accuracy. Each segment is the half-open frame range [start, end). The input is
+// sought to the MIDDLE of the frame before the first kept one, ((start - 0.5) / fps), so FFmpeg's
+// accurate seek discards everything before `start` and keeps `start` itself whatever
+// rounding the container's timestamps carry; exactly end - start frames are then taken
+// (`-frames:v`). Audio is cut with atrim from the same half-frame lead, so it begins at the
+// first kept frame's time and lasts the same (end - start) / fps seconds.
+module genesis.clip_export
+
+import std.files as files
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.tasks as tasks
+import std.text as text
+import "clip_model.ai" as model
+
+pub type Output = struct { kind: u32, label: string, argv: array<string>, target: string, step: i64,
+                           first: i64, prefix: string,
+                           frames: i64, sidecar: string, captions: bool }
+pub type Plan = struct { outputs: array<Output>, progress: string, cancel: string }
+pub type Outcome = struct { state: u32, message: string, written: u64 }
+
+pub fn kind_mp4() -> u32 effects {} { 0 }
+pub fn kind_png() -> u32 effects {} { 1 }
+pub fn state_done() -> u32 effects {} { 0 }
+pub fn state_failed() -> u32 effects {} { 1 }
+pub fn state_cancelled() -> u32 effects {} { 2 }
+
+// Seconds with six decimals (non-negative inputs).
+pub fn fixed(value: f64) -> string effects {alloc} {
+  let micro: i64 = cast.sat(math.floor((if value < 0.0 { 0.0 } else { value }) * 1000000.0 + 0.5))
+  var out: string = string.from_int(micro / 1000000)
+  string.append(out, ".")
+  string.append(out, str.view(model.pad(micro % 1000000, 6)))
+  out
+}
+
+// The half-frame lead-in seek and the audio offset that follows from it, in seconds.
+pub fn seek_seconds(start: i64, fps: f64) -> f64 effects {} {
+  if start <= 0 { return 0.0 }
+  (cast.float(start) - 0.5) / fps
+}
+pub fn lead_seconds(start: i64, fps: f64) -> f64 effects {} {
+  cast.float(start) / fps - seek_seconds(start, fps)
+}
+
+// yuv420p stores chroma at half resolution, so H.264 needs even width and height and an odd
+// source fails the encode. When (and only when) a side is odd, one black pixel column / row
+// is added at the right / bottom edge. Nothing is cropped or scaled, so every source pixel
+// is kept exactly; even sources get no pad filter at all.
+pub fn padded(side: u32) -> u32 effects {} { if side % 2 == 1 { side + 1 } else { side } }
+pub fn needs_pad(width: u32, height: u32) -> bool effects {} {
+  width % 2 == 1 or height % 2 == 1
+}
+pub fn video_filter(width: u32, height: u32) -> string effects {alloc} {
+  var filter: string = string.copy("setpts=PTS-STARTPTS")
+  if needs_pad(width, height) {
+    string.append(filter, ",pad=")
+    string.append(filter, str.view(string.from_int(padded(width))))
+    string.append(filter, ":")
+    string.append(filter, str.view(string.from_int(padded(height))))
+    string.append(filter, ":0:0:color=black")
+  }
+  filter
+}
+
+fn push(list: ref<array<string>>, value: str) -> unit effects {alloc} {
+  array.push(list, string.copy(value))
+  ()
+}
+
+fn common(ffmpeg: str, input: str, start: i64, fps: f64) -> array<string> effects {alloc} {
+  var argv: array<string> = array.new()
+  push(argv, ffmpeg)
+  push(argv, "-nostdin")
+  push(argv, "-n")
+  push(argv, "-hide_banner")
+  push(argv, "-loglevel")
+  push(argv, "error")
+  push(argv, "-progress")
+  push(argv, "pipe:1")
+  push(argv, "-nostats")
+  push(argv, "-ss")
+  array.push(argv, fixed(seek_seconds(start, fps)))
+  push(argv, "-i")
+  push(argv, input)
+  push(argv, "-map")
+  push(argv, "0:v:0")
+  argv
+}
+
+// H.264 MP4 of [start, end): original resolution (odd sides padded by one pixel, see video_filter) and frame timing, AAC audio when present.
+pub fn mp4_argv(ffmpeg: str, input: str, output: str, start: i64, end: i64, fps: f64,
+                has_audio: bool, width: u32, height: u32) -> array<string> effects {alloc} {
+  var argv: array<string> = common(ffmpeg, input, start, fps)
+  let frames: i64 = end - start
+  if has_audio {
+    push(argv, "-map")
+    push(argv, "0:a:0")
+  }
+  push(argv, "-frames:v")
+  array.push(argv, string.from_int(frames))
+  push(argv, "-vf")
+  array.push(argv, video_filter(width, height))
+  if has_audio {
+    let lead: f64 = lead_seconds(start, fps)
+    var filter: string = string.copy("atrim=start=")
+    string.append(filter, str.view(fixed(lead)))
+    string.append(filter, ":end=")
+    string.append(filter, str.view(fixed(lead + cast.float(frames) / fps)))
+    string.append(filter, ",asetpts=PTS-STARTPTS")
+    push(argv, "-af")
+    array.push(argv, filter)
+  }
+  push(argv, "-fps_mode")
+  push(argv, "passthrough")
+  push(argv, "-c:v")
+  push(argv, "libx264")
+  push(argv, "-preset")
+  push(argv, "medium")
+  push(argv, "-crf")
+  push(argv, "18")
+  push(argv, "-pix_fmt")
+  push(argv, "yuv420p")
+  if has_audio {
+    push(argv, "-c:a")
+    push(argv, "aac")
+    push(argv, "-b:a")
+    push(argv, "192k")
+  } else {
+    push(argv, "-an")
+  }
+  push(argv, "-movflags")
+  push(argv, "+faststart")
+  push(argv, output)
+  argv
+}
+
+// PNG frames of [start, end), every `every`-th (1 = all). FFmpeg numbers the files start, start+1, ...; with every > 1 the runner then renames them to their absolute frame numbers (renumber below). The pattern holds one %06d.
+pub fn png_argv(ffmpeg: str, input: str, pattern: str, start: i64, end: i64, fps: f64,
+                every: i64) -> array<string> effects {alloc} {
+  var argv: array<string> = common(ffmpeg, input, start, fps)
+  let frames: i64 = end - start
+  let step: i64 = if every < 1 { 1 } else { every }
+  let taken: i64 = (frames + step - 1) / step
+  push(argv, "-an")
+  push(argv, "-frames:v")
+  array.push(argv, string.from_int(taken))
+  var filter: string = string.copy("setpts=PTS-STARTPTS")
+  if step > 1 {
+    string.append(filter, ",select='not(mod(n,")
+    string.append(filter, str.view(string.from_int(step)))
+    string.append(filter, "))'")
+  }
+  push(argv, "-vf")
+  array.push(argv, filter)
+  push(argv, "-fps_mode")
+  push(argv, "passthrough")
+  push(argv, "-start_number")
+  array.push(argv, string.from_int(start))
+  push(argv, pattern)
+  argv
+}
+
+fn exists(target: str) -> bool effects {fs.meta} {
+  match files.exists(target) { ok(found) => found, err(_) => true, }
+}
+
+// A name that does not exist yet (and whose caption sidecar does not either): the plain
+// name, else name_2, name_3, ...
+pub fn free_name(directory: str, name: str, extension: str) -> string effects {alloc, fs.meta} {
+  var n: u64 = 1
+  loop {
+    var candidate: string = string.copy(name)
+    if n > 1 {
+      string.append(candidate, "_")
+      string.append(candidate, str.view(string.from_int(n)))
+    }
+    let file: string = path.join(directory, str.view(text.concat(candidate, extension)))
+    let note: string = path.join(directory, str.view(text.concat(candidate, ".txt")))
+    if not exists(str.view(file)) and (str.len(extension) == 0 or not exists(str.view(note))) {
+      return candidate
+    }
+    n = n + 1
+    if n > 9999 { return candidate }
+  }
+  string.new()
+}
+
+// `captions`: also write an empty <frame>.txt beside every PNG. width/height: the source size.
+pub type Options = struct { mp4: bool, png: bool, every: i64, captions: bool, width: u32, height: u32 }
+
+// One output per segment and chosen kind. Names never collide with existing files.
+pub fn plan(m: ref<model.Model>, ffmpeg: str, input: str, stem: str, directory: str,
+            has_audio: bool, options: Options, progress: str, cancel: str) -> Plan
+            effects {alloc, fs.meta} {
+  var outputs: array<Output> = array.new()
+  var i: u64 = 0
+  loop {
+    if i >= model.segment_count(m) { break }
+    let s: model.Segment = model.segment_at(m, i)
+    let base: string = model.clip_name(stem, s)
+    let frames: i64 = model.span(s)
+    if options.mp4 {
+      let unique: string = free_name(directory, str.view(base), ".mp4")
+      let target: string = path.join(directory, str.view(text.concat(unique, ".mp4")))
+      let sidecar: string = path.join(directory, str.view(text.concat(unique, ".txt")))
+      array.push(outputs, Output {kind: kind_mp4(), label: string.copy(str.view(unique)),
+        argv: mp4_argv(ffmpeg, input, str.view(target), s.start, s.end, m.fps, has_audio, options.width, options.height),
+        target: target, frames: frames, sidecar: sidecar, step: 1, first: 0, prefix: string.new(),
+        captions: false})
+    }
+    if options.png {
+      let unique: string = free_name(directory, str.view(base), "")
+      let folder: string = path.join(directory, str.view(unique))
+      var pattern_name: string = string.copy(stem)
+      string.append(pattern_name, "_%06d.png")
+      let pattern: string = path.join(str.view(folder), str.view(pattern_name))
+      let step: i64 = if options.every < 1 { 1 } else { options.every }
+      array.push(outputs, Output {kind: kind_png(), label: string.copy(str.view(unique)),
+        argv: png_argv(ffmpeg, input, str.view(pattern), s.start, s.end, m.fps, step),
+        target: folder, frames: (frames + step - 1) / step, sidecar: string.new(),
+        step: step, first: s.start, prefix: path.join(str.view(folder), str.view(text.concat(stem, "_"))),
+        captions: options.captions})
+    }
+    i = i + 1
+  }
+  Plan {outputs: outputs, progress: string.copy(progress), cancel: string.copy(cancel)}
+}
+
+pub fn total_frames(p: ref<Plan>) -> i64 effects {} {
+  var total: i64 = 0
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(p, field=outputs)) { break }
+    total = total + array.borrow(struct.borrow(p, field=outputs), i).frames
+    i = i + 1
+  }
+  total
+}
+
+// The command line as text, for the test and for the diagnostic log.
+pub fn command_text(argv: ref<array<string>>) -> string effects {alloc} {
+  var out: string = string.new()
+  var i: u64 = 0
+  loop {
+    if i >= array.len(argv) { break }
+    if i > 0 { string.append(out, " ") }
+    string.append(out, str.view(array.borrow(argv, i)))
+    i = i + 1
+  }
+  out
+}
+
+fn outcome(state: u32, message: str, written: u64) -> Outcome effects {alloc} {
+  Outcome {state: state, message: string.copy(message), written: written}
+}
+
+fn discard(output: ref<Output>) -> unit effects {alloc, fs.meta, fs.write} {
+  let target: string = string.copy(str.view(struct.borrow(output, field=target)))
+  if output.kind == kind_png() {
+    match files.list_dir(str.view(target)) {
+      ok(found) => {
+        var names: array<string> = found
+        var i: u64 = 0
+        loop {
+          if i >= array.len(names) { break }
+          let leaf: str = array.borrow(names, i)
+          let _ = files.remove(str.view(path.join(str.view(target), leaf)))
+          i = i + 1
+        }
+      },
+      err(_) => {},
+    }
+  }
+  let _ = files.remove(str.view(target))
+  ()
+}
+
+fn progress_value(line: str) -> i64 effects {alloc} {
+  if not str.starts_with(line, "frame=") { return -1 }
+  match text.parse_i64(text.trim(str.slice(line, 6, str.len(line)))) {
+    some(value) => value,
+    none => -1,
+  }
+}
+
+fn note(progress: str, index: u64, frames: i64) -> unit effects {alloc, fs.write} {
+  var line: string = string.from_int(index)
+  string.append(line, " ")
+  string.append(line, str.view(string.from_int(frames)))
+  let _ = files.write_text(progress, str.view(line))
+  ()
+}
+
+// Run every output in order. Cancel (the signal file) stops the current FFmpeg, removes its
+// partial output and returns state_cancelled; finished outputs are kept.
+pub fn run(plan: Plan own) -> Outcome effects {alloc, fs.meta, fs.write, process, time} {
+  var owned: Plan = plan
+  let progress_path: string = string.copy(str.view(struct.borrow(owned, field=progress)))
+  let cancel_path: string = string.copy(str.view(struct.borrow(owned, field=cancel)))
+  var written: u64 = 0
+  var index: u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(owned, field=outputs)) { break }
+    if tasks.requested_at(str.view(cancel_path)) {
+      return outcome(state_cancelled(), "Export cancelled.", written)
+    }
+    let current: ref<Output> = array.borrow(struct.borrow(owned, field=outputs), index)
+    if current.kind == kind_png() {
+      match files.mkdirs(str.view(struct.borrow(current, field=target))) {
+        ok(_) => {},
+        err(_) => { return outcome(state_failed(), "[CLIP_FOLDER] Cannot create the frame folder.", written) },
+      }
+    }
+    note(str.view(progress_path), index, 0)
+    var child: Child = match proc.spawn_piped_merged(struct.borrow(current, field=argv)) {
+      ok(value) => value,
+      err(_) => { return outcome(state_failed(), "[CLIP_FFMPEG] Cannot start FFmpeg.", written) },
+    }
+    var reader: proc.LineReader = proc.line_reader(65536)
+    var trouble: string = string.new()
+    var cancelled: bool = false
+    var finished: bool = false
+    loop {
+      if finished { break }
+      if tasks.requested_at(str.view(cancel_path)) {
+        let _ = proc.terminate(child, 1500)
+        cancelled = true
+        break
+      }
+      match proc.read_line(child, reader, proc.deadline_in(200)) {
+        ok(value) => {
+          match value {
+            none => { finished = true },
+            some(line) => {
+              let frames: i64 = progress_value(str.view(line))
+              if frames >= 0 { note(str.view(progress_path), index, frames) }
+              else if not str.starts_with(str.view(line), "progress=") and
+                  str.len(trouble) < 600 and not text.contains(str.view(line), "=") {
+                string.append(trouble, str.view(line))
+                string.append(trouble, " ")
+              }
+            },
+          }
+        },
+        err(_) => {
+          match proc.poll(child) { some(_) => { finished = true }, none => {}, }
+        },
+      }
+    }
+    let status = proc.close(child)
+    if cancelled {
+      discard(current)
+      return outcome(state_cancelled(), "Export cancelled.", written)
+    }
+    let good: bool = match status { ok(value) => proc.success(value), err(_) => false, }
+    if not good {
+      discard(current)
+      var why: string = string.copy("[CLIP_FFMPEG] FFmpeg failed for ")
+      string.append(why, str.view(struct.borrow(current, field=label)))
+      string.append(why, ": ")
+      string.append(why, str.view(trouble))
+      return outcome(state_failed(), str.view(why), written)
+    }
+    if current.kind == kind_png() and not renumber(current) {
+      return outcome(state_failed(), "[CLIP_RENUMBER] The frame files could not be renamed to their frame numbers.", written)
+    }
+    if current.kind == kind_png() and current.captions and not write_captions(current) {
+      return outcome(state_failed(), "[CLIP_CAPTION] The caption files could not be written.", written)
+    }
+    if str.len(struct.borrow(current, field=sidecar)) > 0 {
+      let _ = files.write_new_text(str.view(struct.borrow(current, field=sidecar)), "")
+    }
+    written = written + 1
+    index = index + 1
+  }
+  note(str.view(progress_path), array.len(struct.borrow(owned, field=outputs)), 0)
+  outcome(state_done(), "Export finished.", written)
+}
+
+// Every-Nth pictures leave FFmpeg as start, start+1, ...; give them their absolute frame
+// numbers (start + k * step), highest first so no rename lands on a file not yet moved.
+pub fn renumber(output: ref<Output>) -> bool effects {alloc, fs.meta, fs.write} {
+  let step: i64 = output.step
+  if step <= 1 { return true }
+  let prefix: string = string.copy(str.view(struct.borrow(output, field=prefix)))
+  var k: i64 = output.frames - 1
+  loop {
+    if k < 0 { break }
+    let from: string = text.concat(str.view(prefix), str.view(text.concat(str.view(model.pad(output.first + k, 6)), ".png")))
+    let to: string = text.concat(str.view(prefix), str.view(text.concat(str.view(model.pad(output.first + k * step, 6)), ".png")))
+    if k > 0 {
+      match files.rename(str.view(from), str.view(to)) { ok(_) => {}, err(_) => { return false }, }
+    }
+    k = k - 1
+  }
+  true
+}
+
+// One empty <frame>.txt beside each exported PNG (same stem and the frame numbers renumber
+// leaves). Existing files are never overwritten.
+pub fn write_captions(output: ref<Output>) -> bool effects {alloc, fs.meta, fs.write} {
+  let prefix: string = string.copy(str.view(struct.borrow(output, field=prefix)))
+  var k: i64 = 0
+  loop {
+    if k >= output.frames { break }
+    let name: string = text.concat(str.view(prefix), str.view(text.concat(str.view(model.pad(output.first + k * output.step, 6)), ".txt")))
+    if not exists(str.view(name)) {
+      match files.write_new_text(str.view(name), "") { ok(_) => {}, err(_) => { return false }, }
+    }
+    k = k + 1
+  }
+  true
+}

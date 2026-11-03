@@ -1,0 +1,111 @@
+// Genesis Clip: application state. One record, edited by clip_main and painted by clip_ui.
+module genesis.clip_state
+
+import std.draw as draw
+import std.files as files
+import std.path as path
+import std.text as text
+import "clip_model.ai" as model
+import "provider.ai" as provider
+import "ui_text.ai" as ui_text
+
+pub type Clip = struct {
+  engine: provider.Provider,
+  ffmpeg: string,
+  worker: string,
+  fonts: ui_text.Typography,
+  // The opened video.
+  loaded: bool,
+  path: string,
+  stem: string,
+  folder: string,
+  frames: i64,
+  fps: f64,
+  width: u32,
+  height: u32,
+  has_audio: bool,
+  segs: model.Model,
+  // Playhead and marks (frame numbers; marks are -1 when unset).
+  frame: i64,
+  mark_in: i64,
+  mark_out: i64,
+  // Transport.
+  playing: bool,
+  loop_play: bool,
+  range_start: i64,
+  range_end: i64,
+  // The monitor picture and the filmstrip / waveform.
+  image: draw.Surface,
+  image_frame: i64,
+  image_wanted: bool,
+  thumbs: array<draw.Surface>,
+  thumb_tiles: u64,
+  wave: array<f64>,
+  wave_ready: bool,
+  // Save options.
+  out_mp4: bool,
+  out_png: bool,
+  out_captions: bool,
+  // Pointer hover and keyboard focus, each a control action (0 = none).
+  hover: u32,
+  focus: u32,
+  every: i64,
+  out_dir: string,
+  exporting: bool,
+  export_done: i64,
+  export_total: i64,
+  export_index: u64,
+  export_count: u64,
+  scrubbing: bool,
+  audio_restart: bool,
+  audio_stop: bool,
+  play_frame0: i64,
+  play_ns: u64,
+  export_before: array<i64>,
+  status: string,
+  running: bool
+}
+
+pub fn clip(engine: provider.Provider own, ffmpeg: str, worker: str) -> Clip effects {alloc} {
+  Clip {engine: engine, ffmpeg: string.copy(ffmpeg), worker: string.copy(worker),
+    fonts: ui_text.empty(), loaded: false, path: string.new(), stem: string.new(),
+    folder: string.new(), frames: 0, fps: 30.0, width: 0, height: 0, has_audio: false,
+    segs: model.model(0, 30.0), frame: 0, mark_in: -1, mark_out: -1, playing: false,
+    loop_play: false, range_start: 0, range_end: 0, image: draw.empty_surface(),
+    image_frame: -1, image_wanted: false, thumbs: array.new(), thumb_tiles: 0, wave: array.new(),
+    wave_ready: false, out_mp4: true, out_png: false, out_captions: false, hover: 0, focus: 0, every: 1, out_dir: string.new(),
+    exporting: false, export_done: 0, export_total: 0, export_index: 0, export_count: 0,
+    scrubbing: false, audio_restart: false, audio_stop: false, play_frame0: 0, play_ns: 0,
+    export_before: array.new(), status: string.copy("Open a video to begin (Ctrl+O)."), running: true}
+}
+
+pub fn say(state: ref<Clip>, message: str) -> unit effects {alloc} {
+  let _ = struct.replace(state, string.copy(message), field=status)
+  ()
+}
+
+pub fn last_frame(state: ref<Clip>) -> i64 effects {} {
+  if state.frames > 0 { state.frames - 1 } else { 0 }
+}
+
+pub fn clamp(state: ref<Clip>, frame: i64) -> i64 effects {} {
+  if frame < 0 { return 0 }
+  let last: i64 = last_frame(state)
+  if frame > last { last } else { frame }
+}
+
+// The sidecar next to the video that holds the segment list.
+pub fn sidecar_path(state: ref<Clip>) -> string effects {alloc} {
+  path.join(str.view(struct.borrow(state, field=folder)),
+    str.view(text.concat(str.view(struct.borrow(state, field=stem)), ".clip.json")))
+}
+
+pub fn exists(file: str) -> bool effects {fs.meta} {
+  match files.exists(file) { ok(found) => found, err(_) => false, }
+}
+
+// u32 to f64 (geometry arithmetic is in f64).
+pub fn fl(value: u32) -> f64 effects {} {
+  let wide: u64 = cast.wrap(value)
+  cast.float(wide)
+}
