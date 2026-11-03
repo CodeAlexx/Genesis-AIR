@@ -26,6 +26,7 @@ if (-not $AirSdk) {
 }
 if (-not $AirSdk) { throw 'Pass -AirSdk C:\path\to\AIR or set AIR_HOME.' }
 $sdk = (Resolve-Path -LiteralPath $AirSdk).Path
+$buildRoot = Join-Path $here 'build-windows'
 if (-not $PreparedSdk -and (Select-String -LiteralPath (Join-Path $here 'air-sdk.conf') -Pattern '^AIR_SDK_PREPARED=1' -Quiet)) { $PreparedSdk = $true }
 if (-not $PreparedSdk) {
 $publishPatch = Join-Path $here 'patches/air-file-publish.patch'
@@ -146,7 +147,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '[GA_SDK_CAPTURE_PATCH_APPLY] Could not apply the Windows capture overlay.' }
   }
 } finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
-$buildRoot = Join-Path $here 'build-windows'
 $presentPatch = Join-Path $here 'patches/air-ui-present-immediate-windows.patch'
 if (-not (Test-Path -LiteralPath $presentPatch)) { throw '[GA_SDK_PRESENT_PATCH_MISSING] The Windows presenter overlay is missing.' }
 try {
