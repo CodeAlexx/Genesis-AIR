@@ -468,6 +468,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $work 'keyframe-controls/keyframe-controls-tests.json') -Destination (Join-Path $reports 'keyframe-controls-tests.json') -Force
   Write-Host (Invoke-Native 'genesis-track-automation.exe' @((Join-Path $work 'track-automation'))).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $work 'track-automation/track-automation-tests.json') -Destination (Join-Path $reports 'track-automation-tests.json') -Force
+  Write-Host (Invoke-Native 'genesis-ui-size.exe' @((Join-Path $work 'ui-size'))).TrimEnd()
+  Copy-Item -LiteralPath (Join-Path $work 'ui-size/ui-size-tests.json') -Destination (Join-Path $reports 'ui-size-tests.json') -Force
   $fadeControls = Join-Path $work 'fade-controls'
   Write-Host (Invoke-Native 'genesis-fade-controls.exe' @($fadeControls)).TrimEnd()
   Copy-Item -LiteralPath (Join-Path $fadeControls 'fade-controls-tests.json') -Destination (Join-Path $reports 'fade-controls-tests.json') -Force

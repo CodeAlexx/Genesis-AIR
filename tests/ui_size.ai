@@ -1,0 +1,54 @@
+module genesis.ui_size_tests
+import std.files as files
+import std.path as path
+import std.testing as test
+import "../src/app.ai" as app
+import "../src/input.ai" as input
+import "../src/layout.ai" as layout
+import "../src/provider.ai" as provider
+
+// Ctrl +/=/-/0 UI-size shortcuts and the layout scale they drive. X keysyms: + 43, = 61, - 45, 0 48.
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if view.len(args) < 2 { return 2 }
+  let scratch: str = view.get(args, 1)
+  let _ = files.mkdirs(scratch)
+  var suite: test.Suite = test.suite("Genesis UI size shortcuts", false)
+  var state: app.App = app.app(provider.fake(scratch))
+
+  let _ = test.start(suite, "Automatic scale follows window size until a size is chosen")
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 0, "Default is automatic")
+  let _ = test.near_f64(suite, layout.ui_scale_for(0, 1600.0, 980.0), 1.0, 0.001, "Automatic 1x on ordinary windows")
+  let _ = test.near_f64(suite, layout.ui_scale_for(0, 2560.0, 1440.0), 1.5, 0.001, "Automatic 1.5x on dense desktops")
+  let _ = test.near_f64(suite, layout.ui_scale_for(0, 3840.0, 2160.0), 2.0, 0.001, "Automatic 2x on 4K")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Chosen percent overrides and is bounded")
+  let _ = test.near_f64(suite, layout.ui_scale_for(150, 1600.0, 980.0), 1.5, 0.001, "150 percent")
+  let _ = test.near_f64(suite, layout.ui_scale_for(125, 3840.0, 2160.0), 1.25, 0.001, "Override beats automatic")
+  let _ = test.near_f64(suite, layout.ui_scale_for(50, 1600.0, 980.0), 1.0, 0.001, "Lower bound 100")
+  let _ = test.near_f64(suite, layout.ui_scale_for(900, 1600.0, 980.0), 2.5, 0.001, "Upper bound 250")
+  let _ = test.done(suite)
+
+  let _ = test.start(suite, "Ctrl plus, minus and zero step the UI size")
+  let _ = input.key(state, 43, true, false)
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 125, "Ctrl + from automatic goes to 125")
+  let _ = input.key(state, 61, true, false)
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 150, "Ctrl = also enlarges")
+  let _ = input.key(state, 45, true, false)
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 125, "Ctrl - shrinks")
+  let _ = input.key(state, 48, true, false)
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 0, "Ctrl 0 returns to automatic")
+  let _ = input.key(state, 45, true, false)
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 100, "Ctrl - from automatic stays at 100")
+  let _ = input.key(state, 43, false, false)
+  let _ = test.eq_u64(suite, cast.wrap(app.ui_percent(state)), 100, "Plain + leaves the UI size alone")
+  var step: u32 = 0
+  loop {
+    if step >= 20 { break }
+    let _ = input.key(state, 43, true, false)
+    step = step + 1
+  }
+  let _ = test.check(suite, app.ui_percent(state) <= 250, "Repeated Ctrl + is bounded to 250")
+  let _ = test.done(suite)
+  test.conclude(suite, path.join(scratch, "ui-size-tests.json"), 15)
+}
