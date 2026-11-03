@@ -29,6 +29,8 @@ import "provider.ai" as provider
 import "timeline_media.ai" as timeline_media
 import "waveform_view.ai" as waveform_view
 import "preview.ai" as preview
+import "track_keys.ai" as track_keys
+import "track_lane.ai" as track_lane
 
 pub type Theme = struct {
   background: draw.Color,
@@ -376,8 +378,14 @@ fn paint_headers(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
       some(box) => { draw.stroke_rect(canvas, box, colors.edge, 1.0) },
       none => { },
     }
+    // The automation K button owns the right 40 px of the title row.
+    let title_saved: draw.State = draw.state(canvas)
+    match geometry.rect(area.left, top, area.right - 40.0, top + height) {
+      some(box) => { let _ = draw.clip_rect(canvas, box) }, none => { },
+    }
     label(canvas, struct.borrow(state, field=typography), area.left + 8.0, top + 4.0, str.view(editor.track_name(document, id)), type_title(),
       colors.text)
+    draw.restore(canvas, title_saved)
     lane = lane + 1
   }
   draw.restore(canvas,saved)
@@ -434,7 +442,7 @@ fn paint_waveforms(canvas: ref<draw.Canvas>, colours: editor_view.Palette, state
       if current {
         let audible:bool=editor.track_audible(struct.borrow(state,field=document),value.track)
         let gain:f64=editor.track_gain(struct.borrow(state,field=document),value.track)
-        let muted:bool=not value.enabled or not audible or gain==0.0
+        let muted:bool=not value.enabled or not audible or (gain==0.0 and not track_keys.has(struct.borrow(state,field=document),value.track,"gain"))
         let shown:ref<app.VisualWaveform> =array.borrow(struct.borrow(state,field=visual_waveforms),slot)
         waveform_view.paint_reference(canvas,if muted {draw.rgb(151,174,168)}else{draw.rgb(215,255,236)},
           if muted {draw.rgb(112,138,132)}else{draw.rgb(145,194,171)},model,lane,value.start,value.length,
@@ -539,6 +547,113 @@ fn paint_transition_badges(canvas:ref<draw.Canvas>,colors:Theme,state:ref<app.Ap
     i=i+1}
   ()
 }
+// ---------------------------------------------------------------------------
+// Track automation lane overlay (gain or pan curve over the lane body)
+
+// An overlay is shown for a track whose view is open, that exists in the active sequence and
+// is not hidden.
+pub fn automation_shown(state: ref<app.App>, track: u64) -> bool effects {alloc} {
+  if not app.automation_open(state, track) { return false }
+  automation_track_visible(struct.borrow(state, field=document), track)
+}
+fn automation_track_visible(doc: ref<editor.Document>, track: u64) -> bool effects {alloc} {
+  match editor.track_slot(doc, track) {
+    none => false,
+    some(slot) => {
+      let entry: ref<editor.Track> = array.borrow(struct.borrow(doc, field=tracks), slot)
+      not struct.get(entry, field=hidden) and struct.get(entry, field=owner) == doc.active
+    },
+  }
+}
+pub fn automation_lane(model: ref<timeline.Timeline>, track: u64) -> option<u64> effects {} {
+  var lane: u64 = 0
+  loop { if lane >= array.len(struct.borrow(model, field=tracks)) { break }
+    if struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=id) == track { return option.some(lane) }
+    lane = lane + 1 }
+  option.none()
+}
+pub fn automation_static(doc: ref<editor.Document>, track: u64, pan: bool) -> f64 effects {} {
+  if pan { editor.track_pan(doc, track) } else { editor.track_gain(doc, track) }
+}
+// The curve (or the static value when the parameter is unkeyed) at a timeline frame.
+pub fn automation_value(doc: ref<editor.Document>, track: u64, pan: bool, frame: i64) -> f64 effects {alloc} {
+  track_keys.reading(doc, track, if pan { "pan" } else { "gain" }, if frame < 0 { 0 } else { frame },
+    automation_static(doc, track, pan))
+}
+
+fn diamond(canvas: ref<draw.Canvas>, x: f64, y: f64, radius: f64, fill_color: draw.Color,
+           edge_color: draw.Color) -> unit effects {alloc} {
+  var points: array<geometry.Vec2> = [geometry.vec2(x, y - radius), geometry.vec2(x + radius, y),
+    geometry.vec2(x, y + radius), geometry.vec2(x - radius, y)]
+  draw.fill_polygon(canvas, points, fill_color)
+  var ring: array<geometry.Vec2> = [geometry.vec2(x, y - radius), geometry.vec2(x + radius, y),
+    geometry.vec2(x, y + radius), geometry.vec2(x - radius, y), geometry.vec2(x, y - radius)]
+  draw.polyline(canvas, ring, edge_color, 1.0)
+  ()
+}
+
+fn paint_track_automation(canvas: ref<draw.Canvas>, state: ref<app.App>, model: ref<timeline.Timeline>,
+                          area: layout.Rect) -> unit effects {alloc} {
+  if array.len(struct.borrow(state, field=automation)) == 0 { return () }
+  let views: array<app.AutomationView> = app.automation_views(state)
+  let picked: app.AutomationKey = app.automation_selected(state)
+  let drag: app.AutomationDrag = app.automation_drag_state(state)
+  let doc: ref<editor.Document> = struct.borrow(state, field=document)
+  var at: u64 = 0
+  loop { if at >= array.len(views) { break }
+    let view: app.AutomationView = array.get(views, at)
+    at = at + 1
+    if not automation_track_visible(doc, view.track) { continue }
+    let lane: u64 = match automation_lane(model, view.track) { none => { continue }, some(found) => found, }
+    let top: f64 = timeline.track_top(model, lane)
+    let height: f64 = struct.get(array.borrow(struct.borrow(model, field=tracks), lane), field=height)
+    if top >= area.bottom or top + height <= area.top { continue }
+    let param: str = if view.pan { "pan" } else { "gain" }
+    let ink: draw.Color = if view.pan { draw.rgb(96, 200, 255) } else { draw.rgb(255, 196, 64) }
+    let saved: draw.State = draw.state(canvas)
+    match geometry.rect(area.left, math.max(top, area.top), area.right, math.min(top + height, area.bottom)) {
+      none => { draw.restore(canvas, saved)
+        continue },
+      some(box) => { let _ = draw.clip_rect(canvas, box) },
+    }
+    fill_at(canvas, area.left, top, area.right, top + height, draw.color(0, 0, 0, 70))
+    // Reference line: 0 dB for gain, centre for pan.
+    let reference: f64 = track_lane.y_of(view.pan, if view.pan { 0.0 } else { 1.0 }, top, height)
+    draw.line(canvas, geometry.vec2(area.left, reference), geometry.vec2(area.right, reference), draw.color(255, 255, 255, 60), 1.0)
+    let fallback: f64 = automation_static(doc, view.track, view.pan)
+    let keyed: bool = track_keys.has(doc, view.track, param)
+    let curve_name: string = track_keys.name(view.track, param)
+    var line: array<geometry.Vec2> = array.new()
+    var x: f64 = area.left
+    loop { if x > area.right { break }
+      let frame: i64 = timeline.x_to_frame(model, x)
+      let value: f64 = if keyed { track_keys.clamp(param, editor.value_at(doc, str.view(curve_name), if frame < 0 { 0 } else { frame }, fallback)) }
+        else { fallback }
+      array.push(line, geometry.vec2(x, track_lane.y_of(view.pan, value, top, height)))
+      x = x + 2.0 }
+    if array.len(line) >= 2 { draw.polyline(canvas, line, if keyed { ink } else { draw.color(255, 255, 255, 110) }, 1.5) }
+    var keys: array<editor.Key> = track_keys.list(doc, view.track, param)
+    var i: u64 = 0
+    loop { if i >= array.len(keys) { break }
+      let key: editor.Key = array.get(keys, i)
+      i = i + 1
+      let kx: f64 = timeline.frame_to_x(model, key.frame)
+      if kx < area.left - 6.0 or kx > area.right + 6.0 { continue }
+      let chosen: bool = picked.track == view.track and picked.pan == view.pan and picked.frame == key.frame
+      let moving: bool = drag.active and drag.track == view.track and drag.pan == view.pan and drag.from == key.frame
+      diamond(canvas, kx, track_lane.y_of(view.pan, key.value, top, height), 4.0,
+        if moving { draw.color(255, 255, 255, 60) } else if chosen { draw.rgb(255, 255, 255) } else { ink },
+        draw.rgb(20, 20, 20))
+    }
+    if drag.active and drag.track == view.track and drag.pan == view.pan {
+      diamond(canvas, timeline.frame_to_x(model, drag.frame), track_lane.y_of(view.pan, drag.value, top, height), 5.0,
+        draw.rgb(255, 255, 255), ink)
+    }
+    draw.restore(canvas, saved)
+  }
+  ()
+}
+
 fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
                   area: layout.Rect, model: ref<timeline.Timeline>) -> unit effects {alloc} {
   fill(canvas, area, colors.timeline)
@@ -551,6 +666,7 @@ fn paint_timeline(canvas: ref<draw.Canvas>, colors: Theme, state: ref<app.App>,
   let colours: editor_view.Palette = editor_view.dark()
   paint_thumbnails(canvas, state, model, area)
   paint_waveforms(canvas, colours, state, model, area)
+  paint_track_automation(canvas, state, model, area)
   // Redraw the seek handle above thumbnail/waveform pixels.
   let head: f64 = timeline.frame_to_x(model, app.timeline_frame(state))
   if head >= area.left and head < area.right { fill_at(canvas, head - 1.0, area.top, head + 2.0, area.bottom, colors.focus) }

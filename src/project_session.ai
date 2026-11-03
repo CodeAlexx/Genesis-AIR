@@ -60,6 +60,7 @@ fn defer(state: ref<app.App>, action: app.ProjectAction, target: str, label: str
   app.end_prompt(state)
   app.end_parameter_drag(state)
   app.end_gesture(state)
+  app.automation_end_drag(state)
   app.end_dock_scroll_drag(state)
   struct.set(state, 0, field=fullscreen)
   let _ = struct.replace(state, app.PendingProject {action: action, stage: stage,

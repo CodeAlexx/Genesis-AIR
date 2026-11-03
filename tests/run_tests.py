@@ -459,6 +459,13 @@ def main():
         report = json.loads((Path(temporary) / "track-automation-tests.json").read_text())["payload"]
         assert report["status"] == "pass", report
         print(f"  track automation: {report['checks']} format/command checks")
+    with TemporaryDirectory(prefix="genesis-track-automation-ui-") as temporary:
+        env = dict(os.environ, AIR_STDLIB=str(stdlib), XDG_CACHE_HOME=str(Path(temporary) / "cache"))
+        done = run([airc, "run", HERE / "track_automation_ui.ai", "--mode", "release", "--provider", "hash.sha256=portable", "--", temporary], env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        report = json.loads((Path(temporary) / "track-automation-ui-tests.json").read_text())["payload"]
+        assert report["status"] == "pass", report
+        print(f"  track automation UI: {report['checks']} dock/lane/header checks")
     with TemporaryDirectory(prefix="genesis-audio-track-plan-") as temporary:
         import wave
         source = Path(temporary) / "track-gain-source.wav"
