@@ -49,17 +49,19 @@ fn automation_target(doc:ref<editor.Document>) -> option<editor.Clip> effects {a
   }
   option.none()
 }
-// Five track gain keys: at the clip start, at its end, then three 1000-frame steps. The window
-// of a clip is its span plus one key before and two after, so the key at +3000 is outside it.
-fn automate(doc:ref<editor.Document>,clip:editor.Clip,first:f64,last:f64) -> bool effects {alloc} {
+// Five track keys of one parameter: at the clip start, at its end, then three 1000-frame steps.
+// The window of a clip is its span plus one key before and two after, so the key at +3000 is
+// outside it. `step` scales the three middle values (gain 0.8/0.7/0.6, pan 0.4/0.3/0.2).
+fn automate(doc:ref<editor.Document>,clip:editor.Clip,param:str,first:f64,last:f64) -> bool effects {alloc} {
   let _=track_keys.drop_track(doc,clip.track)
   let end:i64=clip.start+clip.length
+  let top:f64=if str.eq(param,"pan") {0.4}else{0.8}
   var ok:bool=true
-  ok=not option.is_some(track_keys.set(doc,clip.track,"gain",clip.start,first,curve.linear())) and ok
-  ok=not option.is_some(track_keys.set(doc,clip.track,"gain",end,0.8,curve.linear())) and ok
-  ok=not option.is_some(track_keys.set(doc,clip.track,"gain",end+1000,0.7,curve.linear())) and ok
-  ok=not option.is_some(track_keys.set(doc,clip.track,"gain",end+2000,0.6,curve.linear())) and ok
-  ok=not option.is_some(track_keys.set(doc,clip.track,"gain",end+3000,last,curve.linear())) and ok
+  ok=not option.is_some(track_keys.set(doc,clip.track,param,clip.start,first,curve.linear())) and ok
+  ok=not option.is_some(track_keys.set(doc,clip.track,param,end,top,curve.linear())) and ok
+  ok=not option.is_some(track_keys.set(doc,clip.track,param,end+1000,top-0.1,curve.linear())) and ok
+  ok=not option.is_some(track_keys.set(doc,clip.track,param,end+2000,top-0.2,curve.linear())) and ok
+  ok=not option.is_some(track_keys.set(doc,clip.track,param,end+3000,last,curve.linear())) and ok
   ok
 }
 fn definition_key(doc:ref<editor.Document>) -> result<string,string> effects {alloc} {
@@ -73,48 +75,52 @@ fn definition_key(doc:ref<editor.Document>) -> result<string,string> effects {al
 // The park key is the definition lines: a track key edit reaching a clip window must prepare
 // fresh (and sound different); one outside every window must leave them byte-identical so the
 // parked mix is reused with identical PCM.
-fn automation(peer:ref<link.Link>,root:str,raw:string) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,time} {
+fn automation(peer:ref<link.Link>,root:str,raw:string,param:str,token:str,names:str,low:f64,mid:f64,high:f64,alt:f64,
+    base:u64,generation:u64,timing:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,time} {
   var keyed:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
   let clip:editor.Clip=match automation_target(keyed) {some(v)=>v,none=>{return result.err("no audible clip for track automation")},}
-  if not automate(keyed,clip,0.9,0.5) {return result.err("track keys were not written")}
+  if not automate(keyed,clip,param,high,mid) {return result.err("track keys were not written")}
   var outside:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
-  if not automate(outside,clip,0.9,0.05) {return result.err("track keys were not written")}
+  if not automate(outside,clip,param,high,low) {return result.err("track keys were not written")}
   var inside:editor.Document=match codec.decode(str.view(raw)) {ok(v)=>v,err(_)=>{return result.err("input decode")},}
-  if not automate(inside,clip,0.2,0.5) {return result.err("track keys were not written")}
+  if not automate(inside,clip,param,alt,mid) {return result.err("track keys were not written")}
   let base_key:string=try definition_key(keyed)
   let outside_key:string=try definition_key(outside)
   let inside_key:string=try definition_key(inside)
-  if not text.contains(str.view(base_key),"TRKGAIN:") {return result.err("automation was not planned")}
+  if not text.contains(str.view(base_key),token) {return result.err("automation was not planned")}
   if not str.eq(str.view(base_key),str.view(outside_key)) {return result.err("a key outside every clip window changed the definition lines")}
   if str.eq(str.view(base_key),str.view(inside_key)) {return result.err("a key inside the clip window did not change the definition lines")}
   let fps:f64=editor.sequence_fps(keyed,keyed.active)
   let origin:i64=media.audio_sample_frame(clip.start,fps)
-  // Fresh generations after the earlier phases (the last retirement used 133/6).
+  // Fresh request ids and generations after the earlier phases.
+  let keyed_wav:string=text.concat(names,"-keyed.wav")
+  let outside_wav:string=text.concat(names,"-outside.wav")
+  let inside_wav:string=text.concat(names,"-inside.wav")
   let t0:u64=time.monotonic_ns()
-  var first:endpoint.End=try prepare(peer,root,keyed,200,7)
+  var first:endpoint.End=try prepare(peer,root,keyed,base,generation)
   let t1:u64=time.monotonic_ns()
   let count:u64=endpoint.pull_count(first,origin,24000)
   if count==0 {return result.err("automated clip has no PCM window")}
-  let _=try pull(peer,root,201,7,200,"auto-keyed.wav",origin,count)
-  try retire(peer,root,202,8)
+  let _=try pull(peer,root,base+1,generation,base,str.view(keyed_wav),origin,count)
+  try retire(peer,root,base+2,generation+1)
   let t2:u64=time.monotonic_ns()
-  var parked:endpoint.End=try prepare(peer,root,outside,203,9)
+  var parked:endpoint.End=try prepare(peer,root,outside,base+3,generation+2)
   let t3:u64=time.monotonic_ns()
   if not str.eq(str.view(endpoint.encode(first)),str.view(endpoint.encode(parked))) {return result.err("outside-window edit changed endpoint metadata")}
-  let _=try pull(peer,root,204,9,203,"auto-outside.wav",origin,count)
-  try retire(peer,root,205,10)
+  let _=try pull(peer,root,base+4,generation+2,base+3,str.view(outside_wav),origin,count)
+  try retire(peer,root,base+5,generation+3)
   let t4:u64=time.monotonic_ns()
-  var fresh:endpoint.End=try prepare(peer,root,inside,206,11)
+  var fresh:endpoint.End=try prepare(peer,root,inside,base+6,generation+4)
   let t5:u64=time.monotonic_ns()
   let _=fresh
-  let _=try pull(peer,root,207,11,206,"auto-inside.wav",origin,count)
-  try retire(peer,root,208,12)
-  let a:string=try digest(root,"auto-keyed.wav")
-  let b:string=try digest(root,"auto-outside.wav")
-  let c:string=try digest(root,"auto-inside.wav")
+  let _=try pull(peer,root,base+7,generation+4,base+6,str.view(inside_wav),origin,count)
+  try retire(peer,root,base+8,generation+5)
+  let a:string=try digest(root,str.view(keyed_wav))
+  let b:string=try digest(root,str.view(outside_wav))
+  let c:string=try digest(root,str.view(inside_wav))
   if not str.eq(str.view(a),str.view(b)) {return result.err("outside-window edit changed the PCM")}
   if str.eq(str.view(a),str.view(c)) {return result.err("inside-window edit reused the parked PCM")}
-  let _=files.write_text(path.join(root,"track-park-ns.txt"),endpoint.fields([string.from_int(t1-t0),string.from_int(t3-t2),string.from_int(t5-t4)]))
+  let _=files.write_text(path.join(root,timing),endpoint.fields([string.from_int(t1-t0),string.from_int(t3-t2),string.from_int(t5-t4)]))
   result.ok(())
 }
 fn sequence(peer:ref<link.Link>,root:str,raw:string,doc:ref<editor.Document>,moved:ref<editor.Document>,edited:ref<editor.Document>) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,time} {
@@ -164,7 +170,8 @@ fn sequence(peer:ref<link.Link>,root:str,raw:string,doc:ref<editor.Document>,mov
   if str.eq(str.view(before),str.view(quieter)) {return result.err("edited mix reused the parked PCM")}
   let _=files.write_text(path.join(root,"park-ns.txt"),endpoint.fields([string.from_int(t1-t0),string.from_int(t3-t2),string.from_int(t5-t4),string.from_int(scrub_ns/scrubs)]))
   try retire(peer,root,133,6)
-  try automation(peer,root,raw)
+  try automation(peer,root,raw,"gain","TRKGAIN:","auto",0.05,0.5,0.9,0.2,200,7,"track-park-ns.txt")
+  try automation(peer,root,raw,"pan","TRKPAN:","autopan",-0.9,-0.3,0.9,-0.5,300,13,"track-pan-park-ns.txt")
   result.ok(())
 }
 fn run(worker:str,input:str,root:str) -> result<unit,string> effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time} {
@@ -202,7 +209,7 @@ fn run(worker:str,input:str,root:str) -> result<unit,string> effects {alloc,fs.r
 }
 pub fn main(args:view<str>) -> i32 effects {alloc,fs.read,fs.meta,fs.write,net,process,thread,time,io.write} {
   if view.len(args)!=4 {return 2}
-  match run(view.get(args,1),view.get(args,2),view.get(args,3)) {ok(_)=>{io.write("endpoint park: cold, warm-after-pause and edited preparation passed\ntrack gain window: edit inside re-prepared with new PCM, edit outside kept the parked mix and PCM\n")
+  match run(view.get(args,1),view.get(args,2),view.get(args,3)) {ok(_)=>{io.write("endpoint park: cold, warm-after-pause and edited preparation passed\ntrack gain window: edit inside re-prepared with new PCM, edit outside kept the parked mix and PCM\ntrack pan window: edit inside re-prepared with new PCM, edit outside kept the parked mix and PCM\n")
     0},err(p)=>{io.write(str.view(p))
     io.write("\n")
     3},}

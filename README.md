@@ -494,8 +494,21 @@ before and two after (the neighbours Catmull tangents read), so playback chunks,
 pulls and export agree sample for sample and descriptors stay bounded. A keyed track gain
 replaces the static fader value, multiplies after the clip gain and its keys, and applies
 before the clip fades. Because the lines are the park key, an edit inside a clip window
-prepares fresh while an edit outside every window keeps the parked endpoint. Track pan
-automation is not part of this stage. Malformed curves report `GA_AUDIO_TRACK_GAIN_KEYS`.
+prepares fresh while an edit outside every window keeps the parked endpoint. Malformed
+curves report `GA_AUDIO_TRACK_GAIN_KEYS`.
+
+Track pan keys (`track.<id>.pan`, values -1..1) use the identical window grammar as a
+`TRKPAN:` token. A keyed track pan is applied per 48 kHz sample AFTER the clip's audio
+filters (and after a keyed clip pan), with the clip pan balance law (left times
+1 - max(b,0), right times 1 + min(b,0)); overshooting eases clamp to -1..1. When a track
+pan is keyed its static value is ignored and the pre-filter static pan stage is skipped,
+so the two never stack; an unkeyed track keeps its static stage ahead of the filters
+exactly as before, and projects without track pan keys plan byte-identical lines. Mute,
+solo and disabled clips plan nothing, so their automation stays inert. A constant keyed
+pan equals the static pan on a filter-free chain. Malformed curves report
+`GA_AUDIO_TRACK_PAN_KEYS`. `tests/audio_track_pan.ai` and `tests/audio_track_pan.py` render
+43 variants (all 38 modes, static equivalence, clip pan before/with the track curve,
+windowing, nested) through the flat and endpoint paths against an SDK-curve oracle.
 `tests/audio_track_plan.ai` pins tokens, windows and stability, `tests/audio_track_keys.py`
 checks 44 variants (all 38 modes, overlap, windowing, fades, nested) against an SDK-curve
 oracle, and `tests/audio_track_project.py` renders independently authored revision 5 projects.

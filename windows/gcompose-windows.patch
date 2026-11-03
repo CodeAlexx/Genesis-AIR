@@ -3730,7 +3730,7 @@ index 7bc6fbe..f71561d 100644
 +    { true }
 +}
 diff --git a/gcompose/src/main.rs b/gcompose/src/main.rs
-index c987aa3..4ffac0a 100644
+index c987aa3..722b308 100644
 --- a/gcompose/src/main.rs
 +++ b/gcompose/src/main.rs
 @@ -17,11 +17,19 @@
@@ -3833,7 +3833,7 @@ index c987aa3..4ffac0a 100644
 -        eprintln!("FAIL: OpenCL self-check failed in --serve (init ok but compose round-trip broken)");
 -        std::process::exit(5);
 +        *gpu = Some(candidate);
-     }
++    }
 +    Ok(gpu.as_ref().unwrap())
 +}
 +// Private opt-in record transport. A poisoned epoch is never resumed.
@@ -3883,7 +3883,7 @@ index c987aa3..4ffac0a 100644
 +            self.poison();eprintln!("[GA_PROGRAM_PIPE] Persistent picture transfer failed");return false;
 +        }
 +        true
-+    }
+     }
 +}
 +
 +fn serve() -> i32 {
@@ -4413,7 +4413,7 @@ index c987aa3..4ffac0a 100644
  
  /// `AUDIO <path> <src_in_s> <dur_s> <dst_offset_s> <gain> <fade_in_s> <fade_out_s> <clip_len_s>
  /// <range_local_s> <fx_chain|->` — decode the SOURCE audio range [src_in_s, src_in_s+dur_s) of
-@@ -1546,19 +1740,1205 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
+@@ -1546,19 +1740,1219 @@ const AUDIO_CAP_MAX: usize = 180 * PROG_SR * PROG_CH + 8192;
  /// full length is `clip_len_s`. This is the timeline-sync fix plus per-clip volume/fades/FX: the clip
  /// is positioned at its timeline offset, not concatenated.
  ///
@@ -4532,6 +4532,14 @@ index c987aa3..4ffac0a 100644
 +            }
 +        }
 +        Some(Self { origin, keys })
++    }
++    // Track pan automation (TRKPAN): signed [-1,1] points on the same grammar, absolute
++    // timeline samples of the owning sequence, applied by the clip balance law.
++    fn parse_track_pan(token: &str) -> Option<Self> {
++        let (origin, points) = token.strip_prefix("TRKPAN:")?.split_once(':')?;
++        let origin = origin.parse::<i64>().ok()?;
++        let keys = Self::parse_points(origin, points, true)?;
++        keys.keys.iter().all(|key| (-1.0..=1.0).contains(&key.value)).then_some(keys)
 +    }
 +    fn parse_pan(token: &str) -> Option<Self> {
 +        let (origin, points) = token.strip_prefix("PANKEYS:")?.split_once(':')?;
@@ -4701,10 +4709,10 @@ index c987aa3..4ffac0a 100644
 +}
 +struct NestEnvelope { gain: f32, fade_in: f64, fade_out: f64, length: f64,
 +    gain_keys: Option<ClipGainKeys>, fade_keys: Option<ClipFadeKeys>, pan_keys: Option<ClipGainKeys>,
-+    track_gain_keys: Option<ClipGainKeys> }
++    track_gain_keys: Option<ClipGainKeys>, track_pan_keys: Option<ClipGainKeys> }
 +impl NestEnvelope {
 +    fn parse(fields: &[&str], start: i64, frames: usize) -> Result<Self, String> {
-+        if fields.len() < 4 || fields.len() > 8 { return Err(nest_protocol("Invalid envelope field count")); }
++        if fields.len() < 4 || fields.len() > 9 { return Err(nest_protocol("Invalid envelope field count")); }
 +        let gain = nest_number(fields[0])?;
 +        let fade_in = nest_number(fields[1])?;
 +        let fade_out = nest_number(fields[2])?;
@@ -4716,6 +4724,7 @@ index c987aa3..4ffac0a 100644
 +        let mut fade_keys = None;
 +        let mut pan_keys = None;
 +        let mut track_gain_keys = None;
++        let mut track_pan_keys = None;
 +        for token in &fields[4..] {
 +            if token.starts_with("GAINKEYS:") && gain_keys.is_none() {
 +                gain_keys = Some(ClipGainKeys::parse(token).ok_or_else(|| nest_protocol("Invalid nested gain curve"))?);
@@ -4725,15 +4734,18 @@ index c987aa3..4ffac0a 100644
 +                pan_keys = Some(ClipGainKeys::parse_pan(token).ok_or_else(|| nest_protocol("Invalid nested pan curve"))?);
 +            } else if token.starts_with("TRKGAIN:") && track_gain_keys.is_none() {
 +                track_gain_keys = Some(ClipGainKeys::parse_track_gain(token).ok_or_else(|| nest_protocol("Invalid nested track gain curve"))?);
++            } else if token.starts_with("TRKPAN:") && track_pan_keys.is_none() {
++                track_pan_keys = Some(ClipGainKeys::parse_track_pan(token).ok_or_else(|| nest_protocol("Invalid nested track pan curve"))?);
 +            } else { return Err(nest_protocol("Unknown or duplicate nested envelope")); }
 +        }
 +        if gain_keys.as_ref().is_some_and(|keys| keys.origin != start) ||
 +            pan_keys.as_ref().is_some_and(|keys| keys.origin != start) ||
 +            track_gain_keys.as_ref().is_some_and(|keys| keys.origin != start) ||
++            track_pan_keys.as_ref().is_some_and(|keys| keys.origin != start) ||
 +            fade_keys.as_ref().is_some_and(|keys| keys.origin != start || keys.clip_origin != start || !keys.accepts_frames(frames)) {
 +            return Err(nest_protocol("Nested envelope origin or sample bound mismatch"));
 +        }
-+        Ok(Self { gain: gain as f32, fade_in, fade_out, length, gain_keys, fade_keys, pan_keys, track_gain_keys })
++        Ok(Self { gain: gain as f32, fade_in, fade_out, length, gain_keys, fade_keys, pan_keys, track_gain_keys, track_pan_keys })
 +    }
 +    fn apply(&self, samples: &mut [f32], offset: usize) {
 +        // Same gain*animated*product order as flat AUDIO; only the parent root
@@ -4753,6 +4765,8 @@ index c987aa3..4ffac0a 100644
 +            if let Some(keys) = &self.track_gain_keys { clip_gain *= keys.at(at); }
 +            let gain = clip_gain * env as f32;
 +            if let Some(keys) = &self.pan_keys { apply_pan_balance(frame, keys.pan(at)); }
++            // Keyed track pan is the last balance, after the clip's own chain and pan.
++            if let Some(keys) = &self.track_pan_keys { apply_pan_balance(frame, keys.pan(at)); }
 +            for value in frame { *value *= gain; }
 +        }
 +    }
@@ -5216,7 +5230,7 @@ index c987aa3..4ffac0a 100644
 +                            node.envelope.fade_in != 0.0 || node.envelope.fade_out != 0.0 ||
 +                            node.envelope.length != (node.end-node.start) as f64 / PROG_SR as f64 ||
 +                            node.envelope.gain_keys.is_some() || node.envelope.fade_keys.is_some() || node.envelope.pan_keys.is_some() ||
-+                            node.envelope.track_gain_keys.is_some() {
++                            node.envelope.track_gain_keys.is_some() || node.envelope.track_pan_keys.is_some() {
 +                            return Err(nest_error("GA_AUDIO_CONTEXT_TAIL", "Retained-tail root must be the neutral direct wrapper"));
 +                        }
 +                    }
@@ -5453,7 +5467,7 @@ index c987aa3..4ffac0a 100644
 +            bus.chain != "-" || bus.envelope.gain != 1.0 || bus.envelope.fade_in != 0.0 || bus.envelope.fade_out != 0.0 ||
 +            bus.envelope.length != total as f64 / PROG_SR as f64 ||
 +            bus.envelope.gain_keys.is_some() || bus.envelope.fade_keys.is_some() || bus.envelope.pan_keys.is_some() ||
-+            bus.envelope.track_gain_keys.is_some() || bus.context.is_some() {
++            bus.envelope.track_gain_keys.is_some() || bus.envelope.track_pan_keys.is_some() || bus.context.is_some() {
 +            return Err(invalid("Streamed peak wrapper must preserve the exact direct leaf domain"));
 +        }
 +        // Validate all metadata, output ownership and optional trace path before
@@ -5628,7 +5642,7 @@ index c987aa3..4ffac0a 100644
      // No active accumulator: a stray AUDIO outside an OPEN/WAVE session. ERR (client skips).
      if !prog.active {
          eprintln!("[gcompose] AUDIO with no active accumulator (no OPEN/WAVE)");
-@@ -1572,10 +2952,92 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1572,10 +2966,108 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // the path is a pool media path like ENC/THUMB), so a fixed-arity split is safe. The trailing 4
      // numeric fields carry the per-clip AUDIO FADE envelope (applied per-sample below); the FINAL
      // token is the per-clip libavfilter chain ("-" when the AudioFx is neutral).
@@ -5641,13 +5655,14 @@ index c987aa3..4ffac0a 100644
          eprintln!("[gcompose] bad AUDIO ({} fields): {line}", f.len());
          return false;
      }
-+    if f.len() > base_fields + 5 {
++    if f.len() > base_fields + 6 {
 +        eprintln!("[GA_AUDIO_FADE_KEYS] Too many audio envelope tokens"); return false;
 +    }
 +    let mut clip_keys = None;
 +    let mut fade_keys = None;
 +    let mut pan_keys = None;
 +    let mut track_gain_keys = None;
++    let mut track_pan_keys = None;
 +    let mut audio_context=None;
 +    for token in &f[base_fields..] {
 +        if token.starts_with("GAINKEYS:") {
@@ -5681,6 +5696,14 @@ index c987aa3..4ffac0a 100644
 +            track_gain_keys = match ClipGainKeys::parse_track_gain(token) {
 +                Some(value) => Some(value),
 +                None => { eprintln!("[GA_AUDIO_TRACK_GAIN_KEYS] Invalid track gain envelope"); return false; }
++            };
++        } else if token.starts_with("TRKPAN:") {
++            if track_pan_keys.is_some() {
++                eprintln!("[GA_AUDIO_FADE_KEYS] Duplicate audio envelope"); return false;
++            }
++            track_pan_keys = match ClipGainKeys::parse_track_pan(token) {
++                Some(value) => Some(value),
++                None => { eprintln!("[GA_AUDIO_TRACK_PAN_KEYS] Invalid track pan envelope"); return false; }
 +            };
 +        } else if token.starts_with("AUDIOCTX:") || token.starts_with("AUDIOCTX2:") {
 +            if audio_context.is_some() {eprintln!("[GA_AUDIO_CONTEXT] Duplicate direct DSP context");return false;}
@@ -5719,10 +5742,17 @@ index c987aa3..4ffac0a 100644
 +            eprintln!("[GA_AUDIO_FADE_KEYS] Audio envelope origins disagree"); return false;
 +        }
 +    }
++    if let Some(track) = &track_pan_keys {
++        let origin = envelope_origin.or(pan_keys.as_ref().map(|k| k.origin))
++            .or(track_gain_keys.as_ref().map(|k| k.origin));
++        if origin.is_some_and(|value| value != track.origin) {
++            eprintln!("[GA_AUDIO_FADE_KEYS] Audio envelope origins disagree"); return false;
++        }
++    }
      // WHITESPACE-SAFE WIRE: the UI percent-encodes the media path token (enc_path); decode it here
      // (dec_path) BEFORE opening the decoder. A space-free path decodes to itself (identity).
      let path = dec_path(f[1]);
-@@ -1628,50 +3090,102 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1628,50 +3120,102 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
          return false;
      }
  
@@ -5796,7 +5826,7 @@ index c987aa3..4ffac0a 100644
 +                streams.read_context(id,&path,fx_chain,&context,context.crop+at,block)
 +            }else {context_body_read(fresh.as_mut().unwrap(),context.processing,context.crop+at,block)};
 +            let mut values=match values {Some(v)=>v,None=>{eprintln!("[GA_AUDIO_CONTEXT] Cannot read original graph sample body");return false;}};
-+            audio_mix_samples(prog,&mut values,at,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys,&pan_keys,&track_gain_keys);
++            audio_mix_samples(prog,&mut values,at,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys,&pan_keys,&track_gain_keys,&track_pan_keys);
 +            at+=block;
 +        }
 +        if tail {
@@ -5811,7 +5841,7 @@ index c987aa3..4ffac0a 100644
 +                Some(v) if v.iter().all(|n|n.is_finite())=>v,
 +                _=>{eprintln!("[GA_AUDIO_CONTEXT_TAIL] Native tail failed or exceeds five-second total budget");return false;},
 +            };
-+            audio_mix_samples(prog,&mut values,count,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys,&pan_keys,&track_gain_keys);
++            audio_mix_samples(prog,&mut values,count,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys,&pan_keys,&track_gain_keys,&track_pan_keys);
 +        }
 +        return true;
 +    }
@@ -5844,23 +5874,23 @@ index c987aa3..4ffac0a 100644
 -    }
 +    };
 +
-+    audio_mix_samples(prog,&mut samples,0,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys,&pan_keys,&track_gain_keys);
++    audio_mix_samples(prog,&mut samples,0,gain,fade_in_s,fade_out_s,clip_len_s,range_local_s,dst_off_s,&clip_keys,&fade_keys,&pan_keys,&track_gain_keys,&track_pan_keys);
 +    true
 +}
  
 +fn audio_mix_samples(prog:&mut ProgAudio,samples:&mut [f32],offset:usize,
 +    gain:f32,fade_in_s:f64,fade_out_s:f64,clip_len_s:f64,range_local_s:f64,dst_off_s:f64,
 +    clip_keys:&Option<ClipGainKeys>,fade_keys:&Option<ClipFadeKeys>,pan_keys:&Option<ClipGainKeys>,
-+    track_gain_keys:&Option<ClipGainKeys>) {
++    track_gain_keys:&Option<ClipGainKeys>,track_pan_keys:&Option<ClipGainKeys>) {
      // Apply per-clip GAIN + FADE envelope in place (Triad-B P1). The gain is a flat linear multiplier;
      // the fades ramp the gain 0→1 over [0, fade_in_s) and 1→0 over [clip_len_s − fade_out_s,
      // clip_len_s) in CLIP-LOCAL time. Sample k (per channel) of this decoded range is at clip-local
-@@ -1685,13 +3199,16 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1685,13 +3229,16 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // Run the per-sample loop when the per-clip gain isn't unity, OR there's a fade, OR a master
      // envelope is present (the last clause is the GATE case: a flat-gain, fade-less clip still needs
      // the master envelope applied). When all three are absent the loop is skipped — identical to today.
 -    if gain != 1.0 || has_fade || !menv.is_empty() {
-+    if gain != 1.0 || has_fade || !menv.is_empty() || clip_keys.is_some() || fade_keys.is_some() || pan_keys.is_some() || track_gain_keys.is_some() {
++    if gain != 1.0 || has_fade || !menv.is_empty() || clip_keys.is_some() || fade_keys.is_some() || pan_keys.is_some() || track_gain_keys.is_some() || track_pan_keys.is_some() {
          let sr_f = PROG_SR as f64;
 -        let fade_out_start = clip_len_s - fade_out_s; // clip-local time where fade-out begins
          let frames = samples.len() / PROG_CH;
@@ -5875,7 +5905,7 @@ index c987aa3..4ffac0a 100644
              let mut env = 1.0f64;
              if fade_in_s > 0.0 && tl < fade_in_s {
                  let r = tl / fade_in_s;
-@@ -1704,9 +3221,14 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1704,9 +3251,16 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
              // P27: multiply by the MASTER gain envelope at this frame's ABSOLUTE timeline time
              // (dst_off_s = the clip's destination offset in the program; fr/sr = frames into the
              // range). Empty menv → eval_gain_env == 1.0 → unchanged.
@@ -5889,10 +5919,12 @@ index c987aa3..4ffac0a 100644
 +            let g = (clip_gain * env as f32) * eval_gain_env(&menv, abs_t);
              let base = fr * PROG_CH;
 +            if let Some(keys) = pan_keys { apply_pan_balance(&mut samples[base..base + PROG_CH], keys.pan(offset+fr)); }
++            // Keyed track pan: per sample, after the clip chain and clip pan (design 4.3 option a).
++            if let Some(keys) = track_pan_keys { apply_pan_balance(&mut samples[base..base + PROG_CH], keys.pan(offset+fr)); }
              for ch in 0..PROG_CH {
                  samples[base + ch] *= g;
              }
-@@ -1717,8 +3239,7 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
+@@ -1717,8 +3271,7 @@ fn audio_mix(prog: &mut ProgAudio, line: &str) -> bool {
      // anything past the end so an offset at/after the timeline end is a harmless no-op.
      let dst_frame = (dst_off_s * PROG_SR as f64).round();
      let dst_frame = if dst_frame.is_finite() && dst_frame >= 0.0 { dst_frame as usize } else { 0 };
@@ -5902,7 +5934,7 @@ index c987aa3..4ffac0a 100644
  }
  
  /// `WAVE <out_wav> <total_s>` — begin a PLAYBACK-ONLY accumulator session (no encoder). Allocates
-@@ -1739,8 +3260,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1739,8 +3292,7 @@ fn wave_open(line: &str, prog: &mut ProgAudio) -> bool {
      if !total_s.is_finite() || total_s < 0.0 {
          return false;
      }
@@ -5912,7 +5944,7 @@ index c987aa3..4ffac0a 100644
  }
  
  /// `WAVECLOSE <out_wav>` — write the playback accumulator to `<out_wav>` as a 16-bit PCM stereo @
-@@ -1753,12 +3273,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
+@@ -1753,12 +3305,12 @@ fn wave_close(line: &str, prog: &mut ProgAudio) -> Option<String> {
          eprintln!("[gcompose] bad WAVECLOSE ({} fields): {line}", f.len());
          return None;
      }
@@ -5927,7 +5959,7 @@ index c987aa3..4ffac0a 100644
      prog.clear();
      if ok {
          Some(out.to_string())
-@@ -1788,8 +3308,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
+@@ -1788,8 +3340,7 @@ fn meas_open(line: &str, prog: &mut ProgAudio) -> bool {
      if !window_s.is_finite() || window_s < 0.0 {
          return false;
      }
@@ -5937,7 +5969,7 @@ index c987aa3..4ffac0a 100644
  }
  
  /// `LEVELS <out>` — measure the active accumulator's per-channel PEAK + RMS (dBFS), write the 4
-@@ -1940,8 +3459,8 @@ fn write_wav_pcm16(path: &str, samples: &[f32], sr: u32, ch: u16) -> bool {
+@@ -1940,8 +3491,8 @@ fn write_wav_pcm16(path: &str, samples: &[f32], sr: u32, ch: u16) -> bool {
      out.extend_from_slice(b"data");
      out.extend_from_slice(&data_bytes.to_le_bytes());
      for &s in samples {
@@ -5948,7 +5980,7 @@ index c987aa3..4ffac0a 100644
          out.extend_from_slice(&(v as i16).to_le_bytes());
      }
      std::fs::write(path, &out).is_ok()
-@@ -1974,7 +3493,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
+@@ -1974,7 +3525,8 @@ fn thumb(decoders: &mut HashMap<String, ffi::Decoder>, line: &str) -> Option<Str
          decoders.insert(path.clone(), d);
      }
      let dec = decoders.get_mut(&path)?;
@@ -5958,7 +5990,7 @@ index c987aa3..4ffac0a 100644
      if std::fs::write(&out, &buf).is_err() {
          eprintln!("[gcompose] THUMB write failed: {out}");
          return None;
-@@ -2209,9 +3729,28 @@ fn handle_request(
+@@ -2209,9 +3761,28 @@ fn handle_request(
      lut_cache: &mut HashMap<String, Option<ffi::Lut>>,
      last_uploaded_lut: &mut Option<String>,
      last_final_is_look: &mut bool,
@@ -5987,7 +6019,7 @@ index c987aa3..4ffac0a 100644
      // Accept both the new explicit form (`PREVIEW` + the positional fields) and the legacy
      // keyword-less form. Strip a leading PREVIEW keyword so the positional indices below are
      // identical for both (finding #3). The fields are the 12 composite fields + the 1 P31 BLEND field
-@@ -2243,10 +3782,11 @@ fn handle_request(
+@@ -2243,10 +3814,11 @@ fn handle_request(
      // fields sol_thr/temp (pinned order `sol_thr temp`) BETWEEN sel_sat and the out path (the out path
      // index shifts +2) → 102. The out path stays LAST, now f[101]; ck_spill is f[92]; the P38 fields are
      // f[93..=95]; the P39 fields are f[96..=98]; the P41 fields are f[99..=100].)
@@ -6001,7 +6033,7 @@ index c987aa3..4ffac0a 100644
          eprintln!("[gcompose] bad request ({} fields): {line}", f.len());
          return None;
      }
-@@ -2277,7 +3817,8 @@ fn handle_request(
+@@ -2277,7 +3849,8 @@ fn handle_request(
      let trans_kind: i32 = f[16].parse().ok()?;
      let trans_prog: f32 = f[17].parse().ok()?;
      let trans_param: f32 = f[18].parse().ok()?;
@@ -6011,7 +6043,7 @@ index c987aa3..4ffac0a 100644
      let trans_frame: i32 = f[20].parse().ok()?;
      // Triad-B P1 PER-CLIP GRADE fields.
      let cbright: f32 = f[21].parse().ok()?;
-@@ -2460,24 +4001,31 @@ fn handle_request(
+@@ -2460,24 +4033,31 @@ fn handle_request(
      let vig_softness: f32 = if f.len() >= 108 {
          f[106].parse().unwrap_or(0.5)
      } else { 0.5 };
@@ -6046,7 +6078,7 @@ index c987aa3..4ffac0a 100644
      }
  
      // Decode over @ over_frame (if any), upload to slot 1. A `RAW:<path>` overlay is a P5 rasterized
-@@ -2486,6 +4034,7 @@ fn handle_request(
+@@ -2486,6 +4066,7 @@ fn handle_request(
      let mut eff_op = op;
      if over_path != "-" && op > 0.0 {
          if !upload_slot(gpu, decoders, 1, &over_path, over_frame) {
@@ -6054,7 +6086,7 @@ index c987aa3..4ffac0a 100644
              eff_op = 0.0;
          }
      } else {
-@@ -2496,6 +4045,7 @@ fn handle_request(
+@@ -2496,6 +4077,7 @@ fn handle_request(
      // active (kind 0..7 + a real path), else -1 (track1 copies the base). Same side-effecting helper
      // the ENC path uses, so the preview and the export animate the transition identically.
      let eff_tt = resolve_trans(gpu, decoders, trans_kind, &trans_path, trans_frame);
@@ -6062,7 +6094,7 @@ index c987aa3..4ffac0a 100644
  
      // Resolve the per-clip LOOK (load + upload the .cube for LUT3D, cached; VHS needs no LUT; a
      // missing/failed LUT degrades to no look). Then run the OpenCL pipeline (transition or base-copy
-@@ -2506,7 +4056,8 @@ fn handle_request(
+@@ -2506,7 +4088,8 @@ fn handle_request(
      // the overlay was disabled (no over clip / failed decode → eff_op==0), force ck_on=0 so we never
      // key a stale/irrelevant slot-1 buffer — identical output either way (pip ignores over at op=0).
      let eff_ck_on = if eff_op > 0.0 { ck_on } else { 0 };
@@ -6072,7 +6104,7 @@ index c987aa3..4ffac0a 100644
          eff_tt, trans_prog, trans_param, eff_op, over_blend, px, py, pw, ph, cbright, ccontrast, csat, bright,
          contrast, sat, lk, la, ln, lift_r, lift_g, lift_b, gamma_r, gamma_g, gamma_b, gain_r,
          gain_g, gain_b, rot, scale, blur, eff_ck_on, ck_r, ck_g, ck_b, ck_sim, ck_smooth, ck_spill, curve,
-@@ -2526,9 +4077,51 @@ fn handle_request(
+@@ -2526,9 +4109,51 @@ fn handle_request(
      // Record the final buffer so a following SCOPE reads the POST-LOOK frame the UI is showing.
      *last_final_is_look = fin;
  
@@ -6127,7 +6159,7 @@ index c987aa3..4ffac0a 100644
      }
      Some(out_path)
  }
-@@ -2539,60 +4132,117 @@ fn decode_cached(
+@@ -2539,60 +4164,117 @@ fn decode_cached(
      decoders: &mut HashMap<String, ffi::Decoder>,
      path: &str,
      frame: i32,
@@ -6282,7 +6314,7 @@ index c987aa3..4ffac0a 100644
  }
  
  fn stabilized_frame(
-@@ -2600,7 +4250,7 @@ fn stabilized_frame(
+@@ -2600,7 +4282,7 @@ fn stabilized_frame(
      path: &str,
      frame: i32,
      strength: f32,
@@ -6291,7 +6323,7 @@ index c987aa3..4ffac0a 100644
      let current = decode_cached(decoders, path, frame)?;
      if strength <= 0.0 { return Some(current); }
      let mut sum_x = 0i32;
-@@ -2629,9 +4279,9 @@ fn stabilized_frame(
+@@ -2629,9 +4311,9 @@ fn stabilized_frame(
      let shift_x = (strength * sum_x as f32 / divisor).round() as i32;
      let shift_y = (strength * sum_y as f32 / divisor).round() as i32;
      if shift_x == 0 && shift_y == 0 { return Some(current); }
@@ -6304,7 +6336,7 @@ index c987aa3..4ffac0a 100644
      for y in 0..h {
          let sy = y - shift_y;
          if sy < 0 || sy >= h { continue; }
-@@ -2662,6 +4312,71 @@ fn stabilized_frame(
+@@ -2662,6 +4344,71 @@ fn stabilized_frame(
  ///
  /// IDENTITY: a project with no titles never sends a `RAW:` path, so this routes every frame through
  /// `decode_cached` exactly as before — byte-identical to the pre-P5 engine.
@@ -6376,7 +6408,7 @@ index c987aa3..4ffac0a 100644
  fn upload_slot(
      gpu: &ffi::Gpu,
      decoders: &mut HashMap<String, ffi::Decoder>,
-@@ -2669,28 +4384,61 @@ fn upload_slot(
+@@ -2669,28 +4416,61 @@ fn upload_slot(
      path: &str,
      frame: i32,
  ) -> bool {
@@ -6446,7 +6478,7 @@ index c987aa3..4ffac0a 100644
          let decoded = if let Some(spec) = path.strip_prefix("STAB:") {
              match spec.split_once(':') {
                  Some((amount, source)) => match amount.parse::<f32>() {
-@@ -2703,11 +4451,11 @@ fn upload_slot(
+@@ -2703,11 +4483,11 @@ fn upload_slot(
          } else { decode_cached(decoders, path, frame) };
          match decoded {
              Some(rgba) => {
@@ -6460,7 +6492,7 @@ index c987aa3..4ffac0a 100644
                  false
              }
          }
-@@ -2718,13 +4466,13 @@ fn upload_slot(
+@@ -2718,13 +4498,13 @@ fn upload_slot(
  fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
      let gpu = ffi::Gpu::init()?;
      let mut b = ffi::Decoder::open(base)?;
@@ -6476,7 +6508,7 @@ index c987aa3..4ffac0a 100644
                  gpu.upload(1, &ov);
                  has_over = true;
              }
-@@ -2740,5 +4488,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
+@@ -2740,5 +4520,5 @@ fn compose(base: &str, over: &str) -> Option<Vec<u8>> {
  /// CPU/FFmpeg-only fallback: just the decoded base frame.
  fn decode_only(base: &str) -> Option<Vec<u8>> {
      let mut b = ffi::Decoder::open(base)?;

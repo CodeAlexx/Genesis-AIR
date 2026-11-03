@@ -314,6 +314,9 @@ try {
     & python (Join-Path $PSScriptRoot 'audio_track_keys.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-track-plan.exe') `
       --report (Join-Path $reports 'audio-track-keys.json')
     if ($LASTEXITCODE -ne 0) { throw 'Track gain automation planner/worker/endpoint PCM acceptance failed.' }
+    & python (Join-Path $PSScriptRoot 'audio_track_pan.py') --worker $worker --client (Join-Path $Bin 'genesis-audio-track-pan.exe') `
+      --report (Join-Path $reports 'audio-track-pan.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Track pan automation planner/worker/endpoint PCM acceptance failed.' }
     & python (Join-Path $PSScriptRoot 'audio_track_project.py') --binary (Join-Path $Bin 'Genesis-AIR.exe') --worker $worker `
       --park-client (Join-Path $Bin 'genesis-endpoint-park.exe') --report (Join-Path $reports 'audio-track-project.json')
     if ($LASTEXITCODE -ne 0) { throw 'Saved-project track gain audition/export and endpoint park acceptance failed.' }

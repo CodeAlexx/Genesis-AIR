@@ -525,6 +525,201 @@ fn nested_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time
 }
 
 // ---------------------------------------------------------------------------
+// Track pan automation (TRKPAN): same window rules as TRKGAIN, signed values, and the static
+// track pan stage is replaced (not stacked) by the keyed curve applied after the clip chain.
+
+fn pkey(doc: ref<editor.Document>, track: u64, frame: i64, value: f64, mode: u32) -> bool effects {alloc} {
+  match track_keys.set(doc,track,"pan",frame,value,mode) {none=>true,some(_)=>false,}
+}
+fn pan_value(k: u64) -> f64 effects {} { -0.8+0.08*cast.float(k) }
+fn pan_ramp_keys(doc: ref<editor.Document>, track: u64, count: u64) -> bool effects {alloc} {
+  var good: bool = true
+  var k: u64 = 0
+  loop {if k >= count {break}
+    good=pkey(doc,track,30*cast.sat(k),pan_value(k),curve.linear()) and good
+    k=k+1}
+  good
+}
+fn pan_token(origin_frame: i64, first: u64, last: u64) -> string effects {alloc} {
+  var points: array<string> = array.new()
+  var k: u64 = first
+  loop {if k > last {break}
+    array.push(points,point_text(30*cast.sat(k),30.0,pan_value(k),curve.linear()))
+    k=k+1}
+  var out: string = text.concat("TRKPAN:",string.from_int(sample_of(origin_frame,30.0)))
+  string.append(out,":")
+  string.append(out,str.view(text.join(points,"/")))
+  out
+}
+fn stage_text(value: f64) -> string effects {alloc} { text.concat("stereotools=balance_out=",str.view(string.from_float(value))) }
+
+fn pan_suite(suite: ref<test.Suite>, source: str) -> unit effects {alloc,time,fs.meta,fs.read,fs.write} {
+  var doc: editor.Document = new_doc(source,30.0,100000)
+  let fx: Fixture = fixture(doc)
+  let _=editor.set_track_pan(doc,fx.a1,0.4)
+  let _=editor.set_clip_gain(doc,fx.first,0.8)
+  let _=test.start(suite,"Static track pan stays a pre-filter stage and plans no TRKPAN")
+  var plain: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let _=test.check(suite,array.len(plain) > 0 and not text.contains(str.view(joined(plain)),"TRKPAN"),"No automation, no token")
+  let _=test.check(suite,text.contains(str.view(leaf_line(plain,fx.first)),str.view(stage_text(0.4))),"Static stage is in the clip chain")
+  let _=test.check(suite,not text.contains(str.view(leaf_line(plain,fx.other)),"stereotools"),"An unpanned track has no stage")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Keyed track pan skips the static stage and windows like track gain")
+  let _=test.check(suite,pan_ramp_keys(doc,fx.a1,20),"20 track pan keys written")
+  var lines: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let token_a: string = field_with(str.view(leaf_line(lines,fx.first)),"TRKPAN:")
+  let token_b: string = field_with(str.view(leaf_line(lines,fx.second)),"TRKPAN:")
+  let _=test.eq_str(suite,str.view(token_a),str.view(pan_token(0,0,3)),"Clip at frame 0 covers keys 0..30 plus two after")
+  let _=test.eq_str(suite,str.view(token_b),str.view(pan_token(300,9,13)),"Clip at frame 300 covers one key before and two after its end key")
+  let _=test.check(suite,not text.contains(str.view(leaf_line(lines,fx.first)),"stereotools"),"The static track pan stage is skipped, not stacked")
+  let _=test.check(suite,not text.contains(str.view(leaf_line(lines,fx.first)),"TRKGAIN:"),"Pan keys do not create gain tokens")
+  let _=test.near_f64(suite,scalar_of(str.view(leaf_line(lines,fx.first))),0.8,0.0000001,"Gain scalar is untouched by pan automation")
+  let _=test.check(suite,str.len(str.view(field_with(str.view(leaf_line(lines,fx.other)),"TRKPAN:"))) == 0,"A track without keys gets no token")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Clip pan stays pre-chain and a keyed clip pan coexists with a keyed track pan")
+  let _=editor.set_clip_pan(doc,fx.first,-0.3)
+  var with_clip: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let clip_line: string = leaf_line(with_clip,fx.first)
+  let _=test.check(suite,text.contains(str.view(clip_line),str.view(stage_text(-0.3))) and text.contains(str.view(clip_line),"TRKPAN:"),"Static clip pan stage plus track curve")
+  let _=editor.set_key(doc,fx.first,"pan",0,0.5,curve.linear())
+  let _=editor.set_key(doc,fx.first,"pan",20,-0.5,curve.linear())
+  var both: array<string> = match lines_of(doc) {ok(v)=>v,err(_)=>array.new(),}
+  let both_line: string = leaf_line(both,fx.first)
+  let _=test.check(suite,text.contains(str.view(both_line),"PANKEYS:") and text.contains(str.view(both_line),"TRKPAN:") and not text.contains(str.view(both_line),"stereotools"),"PANKEYS and TRKPAN together, no static stages")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Flat chunk lines carry the clip window anchored at the chunk origin")
+  var flat: array<string> = match flat_of(doc,10,330) {ok(v)=>v,err(_)=>array.new(),}
+  var count_tokens: u64 = 0
+  var at: u64 = 0
+  loop {if at >= array.len(flat) {break}
+    if text.contains(str.view(array.borrow(flat,at)),"TRKPAN:") {count_tokens=count_tokens+1}
+    at=at+1}
+  let _=test.eq_u64(suite,count_tokens,2,"Both keyed clips plan a flat TRKPAN token")
+  match parse_points(str.view(field_with(str.view(line_with(flat,"TRKPAN:")),"TRKPAN:"))) {
+    none=>{let _=test.check(suite,false,"Flat token parses")},
+    some(value)=>{var p: Points = value
+      let _=test.eq_i64(suite,p.origin,sample_of(10,30.0),"Origin is the chunk start sample")
+      let _=test.eq_u64(suite,array.len(struct.borrow(p,field=samples)),4,"Window is the whole clip span, not the chunk")},
+  }
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Edits inside a window change the lines; edits outside every window do not")
+  var plain_doc: editor.Document = new_doc(source,30.0,100000)
+  let pfx: Fixture = fixture(plain_doc)
+  let _=pan_ramp_keys(plain_doc,pfx.a1,20)
+  let base: string = planned(plain_doc)
+  let signature: string = media.audio_signature(plain_doc)
+  let _=pkey(plain_doc,pfx.a1,570,0.9,curve.linear())
+  let _=test.eq_str(suite,str.view(planned(plain_doc)),str.view(base),"Far key edit: byte-identical definition lines")
+  let _=test.eq_str(suite,str.view(media.audio_signature(plain_doc)),str.view(signature),"Far key edit: signature unchanged")
+  let _=pkey(plain_doc,pfx.a1,120,0.77,curve.linear())
+  let _=test.eq_str(suite,str.view(planned(plain_doc)),str.view(base),"Key just past the neighbour window: identical")
+  let _=editor.set_track_pan(plain_doc,pfx.a1,-0.9)
+  let _=test.eq_str(suite,str.view(planned(plain_doc)),str.view(base),"Static track pan under a keyed curve is ignored: identical")
+  let _=pkey(plain_doc,pfx.a1,90,0.66,curve.linear())
+  let _=test.check(suite,not str.eq(str.view(planned(plain_doc)),str.view(base)),"Neighbour key inside the window changes the lines")
+  let _=test.check(suite,not str.eq(str.view(media.audio_signature(plain_doc)),str.view(signature)),"...and the audio signature")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Pan and gain automation on one track are independent tokens")
+  var mix: editor.Document = new_doc(source,30.0,100000)
+  let mfx: Fixture = fixture(mix)
+  let _=editor.set_track_gain(mix,mfx.a1,0.5)
+  let _=editor.set_track_pan(mix,mfx.a1,0.4)
+  let _=pan_ramp_keys(mix,mfx.a1,5)
+  var pan_only: array<string> = match lines_of(mix) {ok(v)=>v,err(_)=>array.new(),}
+  let pan_line: string = leaf_line(pan_only,mfx.first)
+  let _=test.near_f64(suite,scalar_of(str.view(pan_line)),0.5,0.0000001,"Keyed pan leaves the static gain scalar")
+  let _=test.check(suite,text.contains(str.view(pan_line),"TRKPAN:") and not text.contains(str.view(pan_line),"TRKGAIN:"),"Only TRKPAN present")
+  let _=key(mix,mfx.a1,0,0.5,curve.linear())
+  let _=key(mix,mfx.a1,30,1.0,curve.linear())
+  var all: array<string> = match lines_of(mix) {ok(v)=>v,err(_)=>array.new(),}
+  let all_line: string = leaf_line(all,mfx.first)
+  let _=test.check(suite,text.contains(str.view(all_line),"TRKPAN:") and text.contains(str.view(all_line),"TRKGAIN:"),"Both tokens present")
+  let _=test.near_f64(suite,scalar_of(str.view(all_line)),1.0,0.0,"Keyed gain folds its scalar to 1.0")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Muted, soloed-out and disabled clips plan nothing, so their pan automation is inert")
+  var ex: editor.Document = new_doc(source,30.0,100000)
+  let efx: Fixture = fixture(ex)
+  let _=pan_ramp_keys(ex,efx.a1,20)
+  let live: string = planned(ex)
+  let _=test.check(suite,text.contains(str.view(live),"TRKPAN:"),"Planned while audible")
+  let _=editor.set_track_muted(ex,efx.a1,true)
+  let muted_keyed: string = planned(ex)
+  let _=test.check(suite,not text.contains(str.view(muted_keyed),"TRKPAN:"),"A muted track emits no TRKPAN")
+  let _=track_keys.drop_track(ex,efx.a1)
+  let _=test.eq_str(suite,str.view(muted_keyed),str.view(planned(ex)),"Muted: keyed and unkeyed plans are byte-identical")
+  let _=editor.set_track_muted(ex,efx.a1,false)
+  let _=pan_ramp_keys(ex,efx.a1,20)
+  let _=test.eq_str(suite,str.view(planned(ex)),str.view(live),"Unmuting restores the very same lines")
+  let _=editor.set_track_solo(ex,efx.a2,true)
+  let _=test.check(suite,not text.contains(str.view(planned(ex)),"TRKPAN:"),"Solo on another track silences the keyed track")
+  let _=editor.set_track_solo(ex,efx.a2,false)
+  let _=editor.set_clip_enabled(ex,efx.first,false)
+  var off: array<string> = match lines_of(ex) {ok(v)=>v,err(_)=>array.new(),}
+  let _=test.check(suite,str.len(str.view(leaf_line(off,efx.first))) == 0 and str.len(str.view(field_with(str.view(leaf_line(off,efx.second)),"TRKPAN:"))) > 0,"A disabled clip is skipped; its neighbour keeps its window")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Adding then removing pan automation restores the static plan byte for byte")
+  var rt: editor.Document = new_doc(source,30.0,100000)
+  let rfx: Fixture = fixture(rt)
+  let _=editor.set_track_pan(rt,rfx.a1,0.4)
+  let before: string = planned(rt)
+  let _=pan_ramp_keys(rt,rfx.a1,5)
+  let _=test.check(suite,not str.eq(str.view(planned(rt)),str.view(before)),"Keys change the plan")
+  let _=track_keys.drop_track(rt,rfx.a1)
+  let _=test.eq_str(suite,str.view(planned(rt)),str.view(before),"Dropping them restores the exact static plan, stage included")
+  let _=test.done(suite)
+
+  let _=test.start(suite,"Child tracks window their pan in child time; a parent track keys its compound clip; wrappers stay neutral")
+  var nest: editor.Document = new_doc(source,30.0,100000)
+  let src: u64 = first_source(nest)
+  let parent: u64 = nest.active
+  let child: u64 = editor.add_sequence(nest,"Child",24.0,640,360)
+  let child_track: u64 = editor.add_track(nest,child,editor.track_audio(),"CA1")
+  let child_clip: u64 = option.unwrap(editor.place(nest,child_track,src,0,48,0))
+  let _=editor.set_track_pan(nest,child_track,0.25)
+  let _=editor.set_active(nest,child)
+  let _=pkey(nest,child_track,0,-0.2,curve.linear())
+  let _=pkey(nest,child_track,24,0.8,curve.linear())
+  let _=pkey(nest,child_track,300,1.0,curve.linear())
+  let _=editor.set_active(nest,parent)
+  let lane: u64 = editor.add_track(nest,parent,editor.track_audio(),"A1")
+  let compound: u64 = option.unwrap(editor.place_nested(nest,lane,child,0,48,15))
+  let _=pkey(nest,lane,0,-0.5,curve.linear())
+  let _=pkey(nest,lane,60,1.0,curve.linear())
+  var nl: array<string> = match lines_of(nest) {ok(v)=>v,err(_)=>array.new(),}
+  let leaf: string = line_with(nl,str.view(text.concat("NESTLEAF n",text.concat(str.view(string.from_int(compound)),text.concat(".l",text.concat(str.view(string.from_int(child_clip))," "))))))
+  let _=test.check(suite,str.len(str.view(leaf)) > 0 and not text.contains(str.view(leaf),"stereotools"),"Child leaf planned without the static track pan stage")
+  match parse_points(str.view(field_with(str.view(leaf),"TRKPAN:"))) {
+    none=>{let _=test.check(suite,false,"Child TRKPAN parses")},
+    some(value)=>{var p: Points = value
+      let _=test.eq_i64(suite,p.origin,0,"Child origin is the child clip start sample")
+      let _=test.eq_u64(suite,array.len(struct.borrow(p,field=samples)),3,"Child window holds the three keys")
+      let _=test.eq_i64(suite,array.get(struct.borrow(p,field=samples),1),48000,"Child key 24 at 24 fps is sample 48000")},
+  }
+  let bus: string = line_with(nl,str.view(text.concat("NESTBUS n",text.concat(str.view(string.from_int(compound))," - "))))
+  match parse_points(str.view(field_with(str.view(bus),"TRKPAN:"))) {
+    none=>{let _=test.check(suite,false,"Compound TRKPAN parses")},
+    some(value)=>{var p: Points = value
+      let _=test.eq_i64(suite,p.origin,sample_of(15,30.0),"Compound origin is its parent-timeline start")
+      let _=test.eq_i64(suite,array.get(struct.borrow(p,field=samples),1),sample_of(60,30.0),"Parent key sample uses the parent rate")},
+  }
+  var neutral: u64 = 0
+  var row_at: u64 = 0
+  loop {if row_at >= array.len(nl) {break}
+    let row: string = string.copy(str.view(array.borrow(nl,row_at)))
+    if text.contains(str.view(row),"NESTBUS ") and text.contains(str.view(row)," - 1 0 0 ") and text.contains(str.view(row),"TRKPAN:") {neutral=neutral+1}
+    row_at=row_at+1}
+  let _=test.eq_u64(suite,neutral,0,"No neutral direct wrapper carries TRKPAN")
+  let _=test.done(suite)
+}
+
+// ---------------------------------------------------------------------------
 // Part 2: rendering. Variants 0..37 = one keyed track gain per interpolation mode, 38 = fractional
 // rate, 39 = overlapping clips on one automated track, 40/41 = two clips 20 s apart sharing a dense
 // Catmull/linear curve (windowing), 42 = clip gain keys x scalar fades x track keys, 43 = child
@@ -863,6 +1058,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,
   equivalence_suite(suite,source)
   capacity_suite(suite,source)
   nested_suite(suite,source)
+  pan_suite(suite,source)
   let status: i32 = test.conclude(suite,path.join(root,"audio-track-plan-tests.json"),64)
   if status != 0 {return status}
   if str.len(worker) == 0 {return 0}

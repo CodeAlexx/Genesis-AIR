@@ -159,7 +159,7 @@ def protocol(worker, root):
            ("TRKGAIN:-1:0,0,1,2", "GA_AUDIO_TRACK_GAIN_KEYS"),
            (good + " " + good, "GA_AUDIO_FADE_KEYS"),
            (clip + " TRKGAIN:5:0,0,1,2", "GA_AUDIO_FADE_KEYS"),
-           ("TRKPAN:0:0,0,0.5,2", "GA_AUDIO_FADE_KEYS"),
+           ("TRKWIDTH:0:0,0,0.5,2", "GA_AUDIO_FADE_KEYS"),
            ("TRKGAIN:0:0,0,1,2 UNKNOWN:0", "GA_AUDIO_FADE_KEYS")]
     ok = root / "ok.wav"
     only = root / "only.wav"

@@ -1,0 +1,397 @@
+// Track pan automation (TRKPAN) sound: every interpolation mode, nesting, windowing and the static
+// equivalence, rendered through the flat and endpoint paths and compared sample by sample by
+// tests/audio_track_pan.py. Usage: genesis-audio-track-pan WORKER SOURCE.wav ROOT
+//
+// Variants 0..37: one keyed track pan per interpolation mode (a static track pan is authored under
+// the keys and must be ignored). 38: keyed constant pan, rendered next to a static twin of the same
+// pan (memoryless equivalence). 39: static clip pan (pre-chain) plus keyed track pan. 40: keyed clip
+// pan plus keyed track pan. 41: two clips 20 s apart sharing a dense Catmull curve (windowing).
+// 42: a 24 fps child sequence panned inside a compound clip that is itself panned.
+module genesis.tests.audio_track_pan
+import std.curve as curve
+import std.editor as editor
+import std.editor_io as editor_io
+import std.files as files
+import std.math as math
+import std.path as path
+import std.tasks as tasks
+import std.text as text
+import "../src/audio_playback.ai" as playback
+import "../src/audio_endpoint.ai" as endpoint
+import "../src/preview_link.ai" as link
+import "../src/timeline_media.ai" as media
+import "../src/track_keys.ai" as track_keys
+
+fn sample_of(frame: i64, fps: f64) -> i64 effects {} { media.audio_sample_frame(frame,fps) }
+fn first_source(doc: ref<editor.Document>) -> u64 effects {} {
+  array.borrow(struct.borrow(doc,field=sources),0).id
+}
+fn new_doc(source: str, fps: f64, frames: i64) -> editor.Document effects {alloc} {
+  var doc: editor.Document = editor.document(fps,640,360)
+  let id: u64 = editor.add_source(doc,source,"Track pan source",frames,fps)
+  let _=editor.describe_source(doc,id,0,0,false,true,48000,2)
+  doc
+}
+fn pkey(doc: ref<editor.Document>, track: u64, frame: i64, value: f64, mode: u32) -> bool effects {alloc} {
+  match track_keys.set(doc,track,"pan",frame,value,mode) {none=>true,some(_)=>false,}
+}
+
+// std.curve value of one segment list at an absolute sample, using the points exactly as the
+// worker adapter sees them (sample position selects the segment, frames feed Catmull metrics).
+fn curve_at(samples: ref<array<i64>>, frames: ref<array<i64>>, values: ref<array<f64>>, mode: u32,
+            position: i64) -> f64 effects {} {
+  let last: u64 = array.len(samples)-1
+  if position < array.get(samples,0) {return array.get(values,0)}
+  var at: u64 = 0
+  loop {
+    if at == last {return array.get(values,last)}
+    let a: i64 = array.get(samples,at)
+    let b: i64 = array.get(samples,at+1)
+    if position >= b {at=at+1
+      continue}
+    let av: f64 = array.get(values,at)
+    let bv: f64 = array.get(values,at+1)
+    if mode == curve.hold() {return av}
+    let progress: f64 = cast.float(position-a)/cast.float(b-a)
+    match curve.catmull_alpha(mode) {
+      some(alpha)=>{
+        let before: u64 = if at > 0 {at-1}else{at}
+        let after: u64 = if at+2 <= last {at+2}else{at+1}
+        return curve.catmull_rom(cast.float(array.get(frames,before)),array.get(values,before),
+          cast.float(array.get(frames,at)),av,cast.float(array.get(frames,at+1)),bv,
+          cast.float(array.get(frames,after)),array.get(values,after),progress,alpha,curve.catmull_tension(mode))
+      },
+      none=>{let blend: f64 = if mode == curve.smooth() {progress*progress*(3.0-2.0*progress)}
+          else {match curve.ease_factor(mode,progress) {some(value)=>value,none=>progress,}}
+        return av+(bv-av)*blend},
+    }
+  }
+  0.0
+}
+fn clamp_pan(value: f64) -> f64 effects {} {
+  if value < -1.0 {return -1.0}
+  if value > 1.0 {return 1.0}
+  value
+}
+type Seq = struct {request: u64, generation: u64, prepared: u64}
+
+fn variant_count() -> u64 effects {} { 43 }
+type Spec = struct {mode: u32, fps: f64, end: i64, seek: i64, clip_start: i64}
+fn spec_of(v: u64) -> Spec effects {} {
+  if v == 38 {return Spec {mode:curve.linear(),fps:60.0,end:33,seek:12,clip_start:3}}
+  if v == 39 {return Spec {mode:curve.smooth(),fps:60.0,end:33,seek:12,clip_start:3}}
+  if v == 40 {return Spec {mode:curve.smooth(),fps:60.0,end:33,seek:12,clip_start:3}}
+  if v == 41 {return Spec {mode:5,fps:30.0,end:630,seek:609,clip_start:600}}
+  if v == 42 {return Spec {mode:curve.smooth(),fps:30.0,end:75,seek:24,clip_start:15}}
+  Spec {mode:cast.wrap(v),fps:60.0,end:33,seek:12,clip_start:3}
+}
+fn track_frames(v: u64) -> array<i64> effects {alloc} {
+  if v == 41 {
+    var out: array<i64> = array.new()
+    var k: i64 = 0
+    loop {if k >= 37 {break}
+      array.push(out,k*20-20)
+      k=k+1}
+    return out
+  }
+  if v == 38 {return [-6,0,7,14,22,31,45]}
+  if v == 42 {return [0,30,60,90]}
+  [-6,0,7,14,22,31,45]
+}
+fn track_values(v: u64) -> array<f64> effects {alloc} {
+  if v == 41 {
+    var out: array<f64> = array.new()
+    var k: i64 = 0
+    loop {if k >= 37 {break}
+      array.push(out,-1.0+2.0*cast.float((k*37)%100)/100.0)
+      k=k+1}
+    return out
+  }
+  if v == 38 {return [0.5,0.5,0.5,0.5,0.5,0.5,0.5]}
+  if v == 42 {return [-0.6,1.0,-0.25,0.7]}
+  [-0.9,1.0,-0.4,0.8,-1.0,0.3,-0.2]
+}
+fn track_mode(v: u64) -> u32 effects {} { if v == 38 {curve.linear()}else{spec_of(v).mode} }
+fn child_frames() -> array<i64> effects {alloc} { [0,12,30,48] }
+fn child_values() -> array<f64> effects {alloc} { [-0.3,0.9,-0.8,0.2] }
+
+// kind 0 = baseline (everything except the track pan), 1 = keyed track pan, 2 = static twin
+// (variant 38 only: the same pan as a plain track value, no keys).
+fn build(source: str, v: u64, kind: u64) -> editor.Document effects {alloc} {
+  let spec: Spec = spec_of(v)
+  var doc: editor.Document = new_doc(source,spec.fps,cast.sat(11.0*spec.fps))
+  let src: u64 = first_source(doc)
+  let parent: u64 = doc.active
+  var track: u64 = editor.add_track(doc,parent,editor.track_audio(),"A1")
+  if v == 42 {
+    let child: u64 = editor.add_sequence(doc,"Child",24.0,640,360)
+    let child_track: u64 = editor.add_track(doc,child,editor.track_audio(),"CA1")
+    let _=editor.place(doc,child_track,src,0,48,0)
+    if kind == 1 {
+      let _=editor.set_active(doc,child)
+      var cf: array<i64> = child_frames()
+      var cv: array<f64> = child_values()
+      var i: u64 = 0
+      loop {if i >= array.len(cf) {break}
+        let _=pkey(doc,child_track,array.get(cf,i),array.get(cv,i),curve.smooth())
+        i=i+1}
+      let _=editor.set_active(doc,parent)
+    }
+    let _=editor.place_nested(doc,track,child,0,60,15)
+  } else if v == 41 {
+    let _=editor.place(doc,track,src,0,30,0)
+    let _=editor.place(doc,track,src,0,30,600)
+  } else {
+    let clip: u64 = option.unwrap(editor.place(doc,track,src,3,30,spec.clip_start))
+    if v == 39 {let _=editor.set_clip_pan(doc,clip,-0.3)}
+    if v == 40 {
+      let _=editor.set_key(doc,clip,"pan",0,0.5,curve.linear())
+      let _=editor.set_key(doc,clip,"pan",30,-0.5,curve.linear())
+    }
+  }
+  if kind == 2 {let _=editor.set_track_pan(doc,track,0.5)}
+  if kind == 1 {
+    // A static pan under the keys must be ignored (the curve replaces it).
+    let _=editor.set_track_pan(doc,track,0.6)
+    var frames: array<i64> = track_frames(v)
+    var values: array<f64> = track_values(v)
+    var i: u64 = 0
+    loop {if i >= array.len(frames) {break}
+      let _=pkey(doc,track,array.get(frames,i),array.get(values,i),track_mode(v))
+      i=i+1}
+  }
+  doc
+}
+fn packed(out: ref<array<byte>>, value: f64) -> unit effects {alloc} {
+  let bits: u64 = cast.bits(value)
+  var shift: u64 = 0
+  loop {if shift == 64 {break}
+    let octet: u8 = cast.wrap(shr(bits,shift))
+    array.push(out,cast.bits(octet))
+    shift=shift+8}
+  ()
+}
+fn samples_of(frames: ref<array<i64>>, fps: f64) -> array<i64> effects {alloc} {
+  var out: array<i64> = array.new()
+  var i: u64 = 0
+  loop {if i >= array.len(frames) {break}
+    array.push(out,sample_of(array.get(frames,i),fps))
+    i=i+1}
+  out
+}
+
+// Independent SDK-curve oracle: per output sample the pre-chain pan (clip side) and the keyed
+// track pan, both as balance values; 0.0 is the identity balance.
+fn write_oracle(root: str, v: u64) -> bool effects {alloc,fs.write} {
+  let spec: Spec = spec_of(v)
+  let total: i64 = sample_of(spec.end,spec.fps)
+  var tf: array<i64> = track_frames(v)
+  var tv: array<f64> = track_values(v)
+  var ts: array<i64> = samples_of(tf,spec.fps)
+  var cf: array<i64> = child_frames()
+  var cv: array<f64> = child_values()
+  var cs: array<i64> = samples_of(cf,24.0)
+  var out: array<byte> = array.new()
+  var s: i64 = 0
+  loop {if s >= total {break}
+    var pre: f64 = 0.0
+    // Variants 39/40 author the clip pan in the baseline too, so only the track curve is the oracle.
+    if v == 42 {pre=clamp_pan(curve_at(cs,cf,cv,curve.smooth(),s-sample_of(15,30.0)))}
+    packed(out,pre)
+    packed(out,clamp_pan(curve_at(ts,tf,tv,track_mode(v),s)))
+    s=s+1}
+  match files.write_bytes(path.join(root,text.concat("tp-",text.concat(str.view(string.from_int(v)),"-oracle.f64"))),array.view(out)) {ok(_)=>true,err(_)=>false,}
+}
+
+fn name_of(root: str, v: u64, suffix: str) -> string effects {alloc} {
+  path.join(root,text.concat("tp-",text.concat(str.view(string.from_int(v)),suffix)))
+}
+fn chunk_name(root: str, v: u64, kind: str, index: u64) -> string effects {alloc} {
+  name_of(root,v,text.concat(kind,text.concat(str.view(string.from_int(index)),".wav")))
+}
+fn pull(peer: ref<link.Link>, root: str, request: u64, generation: u64, plan: ref<media.AudioPlan>)
+    -> bool effects {alloc,fs.write,io.write,net,time} {
+  if not playback.request(root,request,generation,plan) {return false}
+  if not match link.wake(peer,false) {ok(_)=>true,err(_)=>false,} {return false}
+  match link.await_ready(peer,request,time.monotonic_ns()+30000000000) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+    false},}
+}
+
+// Flat (AUDIO/AUDIOSTREAM and whole-range) rendering of one variant.
+fn flat_variant(worker: str, source: str, root: str, peer: ref<link.Link>, v: u64, seq: ref<Seq>) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,time} {
+  let spec: Spec = spec_of(v)
+  var good: bool = true
+  var base_doc: editor.Document = build(source,v,0)
+  var doc: editor.Document = build(source,v,1)
+  var base_plan: media.AudioPlan = match media.audio_plan_range(base_doc,worker,0,spec.end,name_of(root,v,"-base.wav")) {
+    ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+      return false},}
+  good=match media.execute_audio_plan(base_plan) {ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+    false},} and good
+  var seek_base: media.AudioPlan = match media.audio_plan_range(base_doc,worker,spec.seek,spec.end,name_of(root,v,"-seek-base.wav")) {
+    ok(value)=>value,err(_)=>{return false},}
+  good=match media.execute_audio_plan(seek_base) {ok(value)=>value,err(_)=>false,} and good
+  // The saved project is what playback actually decodes: round-trip through the codec.
+  let original_signature: string = media.audio_signature(doc)
+  let encoded: string = match editor_io.encode(doc) {ok(value)=>value,err(_)=>{return false},}
+  let _=files.write_text(name_of(root,v,".air"),encoded)
+  good=text.contains(str.view(encoded),"\"revision\":5") and good
+  doc=match editor_io.decode(encoded) {ok(value)=>value,err(_)=>{return false},}
+  good=str.eq(str.view(original_signature),str.view(media.audio_signature(doc))) and good
+  good=not str.eq(str.view(original_signature),str.view(media.audio_signature(base_doc))) and good
+  good=match media.prepare_audio(doc,worker,0,name_of(root,v,"-whole.wav")) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+    false},} and good
+  var at: i64 = 0
+  var chunk: u64 = 0
+  loop {if at >= spec.end or not good {break}
+    let size: i64 = if chunk == 0 {5}else if chunk == 1 {7}else{9}
+    let finish: i64 = if at+size > spec.end {spec.end}else{at+size}
+    var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,finish,chunk_name(root,v,"-chunk",chunk)) {
+      ok(value)=>value,err(problem)=>{io.write(str.view(problem))
+        return false},}
+    struct.set(seq,seq.request+1,field=request)
+    good=pull(peer,root,seq.request,v+1,plan) and good
+    chunk=chunk+1
+    at=finish}
+  at=spec.seek
+  chunk=0
+  loop {if at >= spec.end or not good {break}
+    let finish: i64 = if at+7 > spec.end {spec.end}else{at+7}
+    var plan: media.AudioPlan = match media.audio_plan_range(doc,worker,at,finish,chunk_name(root,v,"-seek",chunk)) {
+      ok(value)=>value,err(_)=>{return false},}
+    struct.set(seq,seq.request+1,field=request)
+    good=pull(peer,root,seq.request,100+v,plan) and good
+    chunk=chunk+1
+    at=finish}
+  if v == 38 {
+    // Memoryless equivalence: keyed constant pan equals the static track pan on a filter-free chain.
+    var twin: editor.Document = build(source,v,2)
+    good=match media.prepare_audio(twin,worker,0,name_of(root,v,"-static.wav")) {ok(_)=>true,err(problem)=>{io.write(str.view(problem))
+      false},} and good
+  }
+  good=write_oracle(root,v) and good
+  good
+}
+
+fn ready(peer: ref<link.Link>, id: u64) -> result<unit,string> effects {alloc,net,time} {
+  try link.wake(peer,false)
+  link.await_ready(peer,id,time.monotonic_ns()+60000000000)
+}
+fn ep_prepare(peer: ref<link.Link>, root: str, doc: ref<editor.Document>, seq: ref<Seq>) -> result<endpoint.End,string> effects {alloc,fs.read,fs.write,net,time} {
+  struct.set(seq,seq.request+1,field=request)
+  struct.set(seq,seq.generation+1,field=generation)
+  struct.set(seq,seq.request,field=prepared)
+  if not playback.request_prepare_document(root,seq.request,seq.generation,doc,path.join(root,"unused.wav")) {return result.err("prepare publication")}
+  try ready(peer,seq.request)
+  playback.read_endpoint(root)
+}
+fn ep_pull(peer: ref<link.Link>, root: str, seq: ref<Seq>, output: str, start: i64, count: u64) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  struct.set(seq,seq.request+1,field=request)
+  if not playback.request_pull(root,seq.request,seq.generation,seq.prepared,output,start,count) {return result.err("pull publication")}
+  ready(peer,seq.request)
+}
+fn ep_retire(peer: ref<link.Link>, root: str, seq: ref<Seq>) -> result<unit,string> effects {alloc,fs.write,net,time} {
+  struct.set(seq,seq.request+1,field=request)
+  struct.set(seq,seq.generation+1,field=generation)
+  if not playback.discard(root,seq.request,seq.generation) {return result.err("discard publication")}
+  ready(peer,seq.request)
+}
+fn ep_variant(source: str, root: str, peer: ref<link.Link>, v: u64, seq: ref<Seq>) -> result<unit,string> effects {alloc,fs.read,fs.write,net,time} {
+  let spec: Spec = spec_of(v)
+  var base_doc: editor.Document = build(source,v,0)
+  var base_end: endpoint.End = try ep_prepare(peer,root,base_doc,seq)
+  let base_count: u64 = endpoint.pull_count(base_end,0,1440000)
+  if base_count == 0 {return result.err("empty endpoint")}
+  let _=try ep_pull(peer,root,seq,name_of(root,v,"-ep-base.wav"),0,base_count)
+  try ep_retire(peer,root,seq)
+  // The keyed project is exactly what the worker plans after a save/open round trip.
+  var built: editor.Document = build(source,v,1)
+  let encoded: string = match editor_io.encode(built) {ok(value)=>value,err(_)=>{return result.err("encode")},}
+  var doc: editor.Document = match editor_io.decode(encoded) {ok(value)=>value,err(_)=>{return result.err("decode")},}
+  var end: endpoint.End = try ep_prepare(peer,root,doc,seq)
+  let count: u64 = endpoint.pull_count(end,0,1440000)
+  if count != base_count {return result.err("keyed endpoint length differs from the baseline")}
+  let _=try ep_pull(peer,root,seq,name_of(root,v,"-ep-whole.wav"),0,count)
+  // Uneven pulls across the whole program, then a fresh seek into the clip.
+  var sizes: array<u64> = [4801,7777,1234,20011,333,9001]
+  var at: u64 = 0
+  var index: u64 = 0
+  loop {if at >= count {break}
+    let want: u64 = array.get(sizes,index % array.len(sizes))
+    let size: u64 = if at+want > count {count-at}else{want}
+    let _=try ep_pull(peer,root,seq,chunk_name(root,v,"-ep-chunk",index),cast.sat(at),size)
+    at=at+size
+    index=index+1}
+  let seek: i64 = sample_of(spec.seek,spec.fps)
+  let seek_count: u64 = endpoint.pull_count(end,seek,1440000)
+  if seek_count == 0 {return result.err("seek outside endpoint")}
+  let _=try ep_pull(peer,root,seq,name_of(root,v,"-ep-seek.wav"),seek,seek_count)
+  try ep_retire(peer,root,seq)
+  result.ok(())
+}
+
+fn run_flat(worker: str, source: str, root: str, cases: ref<string>) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var good: bool = true
+  var seq: Seq = Seq {request:0,generation:0,prepared:0}
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    good=match link.connect(peer) {ok(_)=>true,err(_)=>false,}
+    var v: u64 = 0
+    loop {if v >= variant_count() or not good {break}
+      let spec: Spec = spec_of(v)
+      good=flat_variant(worker,source,root,peer,v,seq) and good
+      var fields: array<string> = [string.from_int(v),string.from_int(spec.mode),string.from_float(spec.fps),string.from_int(spec.end),
+        string.from_int(spec.seek)]
+      string.append(cases,str.view(text.join(fields,"\t")))
+      string.append(cases,"\n")
+      v=v+1}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    good=match tasks.join_next<bool>(jobs,10000) {some(value)=>value,none=>false,} and good
+    link.close_commands(peer)
+  }
+  good
+}
+fn run_endpoint(worker: str, source: str, root: str) -> bool effects {alloc,fs.meta,fs.read,fs.write,io.write,net,process,thread,time} {
+  let _=files.mkdirs(root)
+  playback.reset(root)
+  var peer: link.Link = match link.open() {ok(value)=>value,err(_)=>{return false},}
+  let config: playback.Config = playback.Config {root:string.copy(root),worker:string.copy(worker),events:link.ticket(peer)}
+  var good: bool = true
+  var seq: Seq = Seq {request:0,generation:0,prepared:0}
+  task.scope {
+    var jobs: array<task<bool>> = [task.spawn(config,fn=playback.run)]
+    good=match link.connect(peer) {ok(_)=>true,err(_)=>false,}
+    var v: u64 = 0
+    loop {if v >= variant_count() or not good {break}
+      match ep_variant(source,root,peer,v,seq) {ok(_)=>{},err(problem)=>{io.write(str.view(problem))
+        io.write("\n")
+        good=false},}
+      v=v+1}
+    playback.stop(root)
+    let _=link.wake(peer,true)
+    good=match tasks.join_next<bool>(jobs,10000) {some(value)=>value,none=>false,} and good
+    link.close_commands(peer)
+  }
+  good
+}
+
+
+pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,net,thread,time} {
+  if view.len(args) != 4 {return 2}
+  let worker: str = view.get(args,1)
+  let source: str = view.get(args,2)
+  let root: str = view.get(args,3)
+  let _=files.mkdirs(root)
+  var cases: string = string.copy("variant\tmode\tfps\tend\tseek\n")
+  var good: bool = run_flat(worker,source,path.join(root,"flat"),cases)
+  let _=files.write_text(path.join(root,"pan-cases.tsv"),cases)
+  good=run_endpoint(worker,source,path.join(root,"endpoint")) and good
+  if good {io.write("Track pan: 43 variants rendered through flat and endpoint paths\n")
+    0}else{io.write("[GA_TEST_AUDIO_TRACK_PAN] Rendering failed\n")
+    1}
+}
